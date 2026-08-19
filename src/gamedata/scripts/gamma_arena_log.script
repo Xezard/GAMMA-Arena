@@ -1,0 +1,79 @@
+local function safe_tostring(value)
+    local ok, text = pcall(tostring, value)
+    if ok then
+        return text
+    end
+    return "<unserializable>"
+end
+
+local function serialize(value, seen)
+    local value_type = type(value)
+    if value_type == "nil" or value_type == "number" or value_type == "boolean" then
+        return safe_tostring(value)
+    end
+    if value_type == "string" then
+        return string.format("%q", value)
+    end
+    if value_type ~= "table" then
+        return "<" .. value_type .. ":" .. safe_tostring(value) .. ">"
+    end
+
+    if seen[value] then
+        return "<cycle>"
+    end
+    seen[value] = true
+
+    local entries = {}
+    local collected, collect_error = pcall(function()
+        for key, item in pairs(value) do
+            entries[#entries + 1] = {
+                key = safe_tostring(key),
+                value = item
+            }
+        end
+    end)
+    if not collected then
+        seen[value] = nil
+        return "<unserializable:" .. safe_tostring(collect_error) .. ">"
+    end
+
+    table.sort(entries, function(left, right)
+        return left.key < right.key
+    end)
+
+    local values = {}
+    for index = 1, #entries do
+        local entry = entries[index]
+        values[#values + 1] = entry.key .. "=" .. serialize(entry.value, seen)
+    end
+    seen[value] = nil
+    return "{" .. table.concat(values, ",") .. "}"
+end
+
+local function format_context(context)
+    if context == nil then
+        return ""
+    end
+
+    local ok, text = pcall(serialize, context, {})
+    if ok then
+        return " context=" .. text
+    end
+    return " context=<unserializable>"
+end
+
+local function write(code, message, context)
+    printf("[GammaArena][%s] %s%s", safe_tostring(code), safe_tostring(message), format_context(context))
+end
+
+function info(code, message, context)
+    write(code, message, context)
+end
+
+function warn(code, message, context)
+    write(code, message, context)
+end
+
+function error(code, message, context)
+    write(code, message, context)
+end

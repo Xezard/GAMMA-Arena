@@ -1,0 +1,110 @@
+local function result_shapes()
+    local success = gamma_arena_result.ok("value")
+    gamma_arena_test_assert.is_true(success.ok, "Result.ok must set ok=true")
+    gamma_arena_test_assert.equals(success.value, "value", "Result.ok must preserve value")
+
+    local failure = gamma_arena_result.err("GA_TEST", "expected failure", { source = "domain" })
+    gamma_arena_test_assert.is_false(failure.ok, "Result.err must set ok=false")
+    gamma_arena_test_assert.equals(failure.error.code, "GA_TEST", "Result.err must preserve code")
+    gamma_arena_test_assert.equals(failure.error.message, "expected failure", "Result.err must preserve message")
+    gamma_arena_test_assert.equals(failure.error.context.source, "domain", "Result.err must preserve context")
+    gamma_arena_test_assert.is_true(gamma_arena_result.is_ok(success), "Result.is_ok must accept success")
+    gamma_arena_test_assert.is_false(gamma_arena_result.is_ok(failure), "Result.is_ok must reject failure")
+end
+
+local function log_context_is_safe()
+    local hostile_value = setmetatable({}, {
+        __tostring = function()
+            error("hostile tostring")
+        end
+    })
+    local logged = pcall(gamma_arena_log.info, "GA_TEST_LOG", "context serialization", {
+        zeta = hostile_value,
+        alpha = "first"
+    })
+    gamma_arena_test_assert.is_true(logged, "logging must not throw for an unserializable value")
+end
+
+local function rng_seed_normalization()
+    gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(0), 1, "zero seed")
+    gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(1), 1, "one seed")
+    gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(2147483646), 2147483646, "maximum Park-Miller state")
+    gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(4294967295), 3, "maximum uint32 seed")
+end
+
+local function rng_known_sequence()
+    local rng = gamma_arena_rng.new(1)
+    gamma_arena_test_assert.equals(rng:next_raw(), 48271, "Park-Miller value 1")
+    gamma_arena_test_assert.equals(rng:next_raw(), 182605794, "Park-Miller value 2")
+    gamma_arena_test_assert.equals(rng:next_raw(), 1291394886, "Park-Miller value 3")
+end
+
+local function rng_selection_helpers()
+    local rng = gamma_arena_rng.new(1)
+    local value = rng:next_int(10, 12)
+    gamma_arena_test_assert.is_true(type(value) == "number", "next_int must return a number for a valid range")
+    gamma_arena_test_assert.is_true(value >= 10 and value <= 12, "next_int must stay within its range")
+
+    local selected = gamma_arena_rng.new(1):pick({ "a", "b", "c" })
+    gamma_arena_test_assert.equals(selected, "b", "pick must return the deterministic selected value")
+end
+
+local function rng_stream_isolation()
+    local base = { "skirmish", "stalker", 42, 0, 1, 1, 1 }
+    local first_seed = gamma_arena_rng.derive_seed({ base[1], base[2], base[3], base[4], base[5], base[6], base[7], "actor_loadout" })
+    local second_seed = gamma_arena_rng.derive_seed({ base[1], base[2], base[3], base[4], base[5], base[6], base[7], "actor_loadout" })
+    local other_seed = gamma_arena_rng.derive_seed({ base[1], base[2], base[3], base[4], base[5], base[6], base[7], "enemy_count" })
+
+    gamma_arena_test_assert.equals(gamma_arena_rng.new(first_seed):next_raw(), gamma_arena_rng.new(second_seed):next_raw(), "equal stream keys")
+    gamma_arena_test_assert.is_true(gamma_arena_rng.new(first_seed):next_raw() ~= gamma_arena_rng.new(other_seed):next_raw(), "different stream tags")
+end
+
+local function state_rejects_forbidden_transition()
+    local current = gamma_arena_state_machine.states.IDLE
+    local transition = gamma_arena_state_machine.transition(current, gamma_arena_state_machine.events.VICTORY)
+    gamma_arena_test_assert.is_false(transition.ok, "forbidden transition must fail")
+    gamma_arena_test_assert.equals(transition.error.code, "GA_STATE_TRANSITION_INVALID", "forbidden transition error")
+    gamma_arena_test_assert.equals(current, gamma_arena_state_machine.states.IDLE, "transition must not mutate current state")
+end
+
+local function state_happy_path()
+    local machine = gamma_arena_state_machine
+    local current = machine.states.IDLE
+    local events = {
+        machine.events.START,
+        machine.events.PREFLIGHT_SUCCEEDED,
+        machine.events.CHECKPOINT_SUCCEEDED,
+        machine.events.PREPARATION_SUCCEEDED,
+        machine.events.COUNTDOWN_FINISHED,
+        machine.events.VICTORY
+    }
+
+    for index = 1, #events do
+        local transition = machine.transition(current, events[index])
+        gamma_arena_test_assert.is_true(transition.ok, "happy-path transition " .. index)
+        current = transition.value
+    end
+    gamma_arena_test_assert.equals(current, machine.states.RESULT, "happy path must reach RESULT")
+end
+
+local cases = {
+    { name = "result_shapes", fn = result_shapes },
+    { name = "log_context_is_safe", fn = log_context_is_safe },
+    { name = "rng_seed_normalization", fn = rng_seed_normalization },
+    { name = "rng_known_sequence", fn = rng_known_sequence },
+    { name = "rng_selection_helpers", fn = rng_selection_helpers },
+    { name = "rng_stream_isolation", fn = rng_stream_isolation },
+    { name = "state_rejects_forbidden_transition", fn = state_rejects_forbidden_transition },
+    { name = "state_happy_path", fn = state_happy_path }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        local case = cases[index]
+        if not run_case_fn(case.name, case.fn) then
+            all_passed = false
+        end
+    end
+    return all_passed
+end

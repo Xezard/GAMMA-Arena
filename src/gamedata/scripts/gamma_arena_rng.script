@@ -1,0 +1,113 @@
+local MOD = 2147483647
+local MULT = 48271
+local Q = 44488
+local R = 3399
+local UINT32_MOD = 4294967296
+local STATE_MOD = MOD - 1
+
+local function next_raw(state)
+    local t = MULT * (state % Q) - R * math.floor(state / Q)
+    return t > 0 and t or t + MOD
+end
+
+local function part_text(value)
+    local value_type = type(value)
+    if value_type == "string" then
+        return "string:" .. value
+    end
+    if value_type == "number" or value_type == "boolean" or value_type == "nil" then
+        return value_type .. ":" .. tostring(value)
+    end
+    return value_type .. ":" .. tostring(value)
+end
+
+function normalize_uint32(seed)
+    local value = tonumber(seed) or 0
+    if value ~= value then
+        value = 0
+    end
+    value = math.floor(value) % UINT32_MOD
+
+    if value == 0 then
+        return 1
+    end
+
+    local normalized = value % STATE_MOD
+    if normalized == 0 then
+        return STATE_MOD
+    end
+    return normalized
+end
+
+function derive_seed(parts)
+    local state = 0
+    if type(parts) ~= "table" then
+        parts = { parts }
+    end
+
+    for index = 1, #parts do
+        local text = part_text(parts[index])
+        local encoded = tostring(#text) .. ":" .. text
+        for byte_index = 1, #encoded do
+            state = (state * 131 + string.byte(encoded, byte_index)) % STATE_MOD
+        end
+    end
+
+    return normalize_uint32(state)
+end
+
+function new(seed)
+    local rng = {
+        state = normalize_uint32(seed)
+    }
+
+    function rng:next_raw()
+        self.state = next_raw(self.state)
+        return self.state
+    end
+
+    function rng:next_int(minimum, maximum)
+        if type(minimum) ~= "number" or type(maximum) ~= "number" then
+            return gamma_arena_result.err("GA_RNG_RANGE_INVALID", "RNG bounds must be numbers", {
+                minimum = minimum,
+                maximum = maximum
+            })
+        end
+
+        minimum = math.floor(minimum)
+        maximum = math.floor(maximum)
+        if maximum < minimum then
+            return gamma_arena_result.err("GA_RNG_RANGE_INVALID", "RNG maximum must not be below minimum", {
+                minimum = minimum,
+                maximum = maximum
+            })
+        end
+
+        return minimum + (self:next_raw() % (maximum - minimum + 1))
+    end
+
+    function rng:pick(values)
+        if type(values) ~= "table" or #values == 0 then
+            return gamma_arena_result.err("GA_RNG_PICK_EMPTY", "RNG pick requires a non-empty array", {})
+        end
+
+        local index = self:next_int(1, #values)
+        if type(index) == "table" and not gamma_arena_result.is_ok(index) then
+            return index
+        end
+        return values[index]
+    end
+
+    return rng
+end
+
+function random_session_seed()
+    local entropy = 0
+    if type(time_global) == "function" then
+        local ok, value = pcall(time_global)
+        if ok then
+            entropy = value
+        end
+    end
+    return normalize_uint32(entropy)
+end
