@@ -251,37 +251,29 @@ end
 function write_character_creation() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_bootstrap.script' @'
-local function guarded(instance)
-    local ok = pcall(function()
-        if not instance:is_active() then return end
-    end)
-    return ok
+local callback_names = { "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death", "npc_on_death_callback", "save_state", "load_state", "on_before_save_input", "on_before_load_input", "actor_on_net_destroy", "on_before_level_changing" }
+local rollback = "GA_BOOTSTRAP_REGISTRATION_POISONED"
+local function invoke_callback(result, callback)
+    pcall(callback)
+    if result.ok == false then return callback() end
+end
+local function guarded(active)
+    if not active then return end
 end
 function make_callbacks() end
-function on_game_start()
-    RegisterScriptCallback("on_game_load", on_game_load)
-    RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
-    RegisterScriptCallback("actor_on_update", actor_on_update)
-    RegisterScriptCallback("actor_on_before_death", actor_on_before_death)
-    RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
-    RegisterScriptCallback("save_state", save_state)
-    RegisterScriptCallback("load_state", load_state)
-    RegisterScriptCallback("on_before_save_input", on_before_save_input)
-    RegisterScriptCallback("on_before_load_input", on_before_load_input)
-    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
-    RegisterScriptCallback("on_before_level_changing", on_before_level_changing)
-end
+function new_registrar() return { register_all = function() UnregisterScriptCallback("x", guarded) end } end
+function on_game_start() return new_registrar():register_all() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_compat.script' @'
-local markers = "RegisterScriptCallback ini_file system_ini alife alife_create alife_create_item alife_release_id getFS se_save_var level.patrol_path_exists patrol db.actor axr_main.config safe_release_manager.release l05_bar AI_STL_S bandit point level_vertex_id game_vertex_id 4294967295 GA_PREFLIGHT_PATROL_MISSING GA_PREFLIGHT_PATROL_INVALID GA_PREFLIGHT_SECTION_MISSING GA_PREFLIGHT_NPC_NOT_HUMAN"
+local markers = "RegisterScriptCallback UnregisterScriptCallback ini_file system_ini alife alife_create alife_create_item alife_release_id getFS se_save_var level.patrol_path_exists patrol db.actor axr_main.config safe_release_manager.release l05_bar AI_STL_S bandit point level_vertex_id game_vertex_id 4294967295 GA_PREFLIGHT_PATROL_MISSING GA_PREFLIGHT_PATROL_INVALID GA_PREFLIGHT_SECTION_MISSING GA_NPC_CLASS_API_MISSING GA_NPC_CLASS_MISSING GA_NPC_CLASS_READ_FAILED GA_NPC_CLASS_INVALID GA_NPC_COMMUNITY_API_MISSING GA_NPC_COMMUNITY_MISSING GA_NPC_COMMUNITY_READ_FAILED GA_NPC_COMMUNITY_INVALID"
 function preflight() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_orchestrator.script' @'
-local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation"
+local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation on_callback_result_error GA_DISCONNECT_FAILED main_menu_executed"
 function new() return markers end
 '@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_runtime.script' @'
-local markers = "runtime_preflight_aggregates_in_stable_order runtime_wrong_level_skips_patrol_resolution runtime_launch_consumes_before_preflight_once runtime_activation_requires_game_load_boundary runtime_invalid_or_expired_launch_never_reaches_preflight runtime_ordinary_loaded_save_rejects_stray_launch runtime_ordinary_loaded_save_rejects_stray_resume runtime_new_game_does_not_reuse_prior_load_state_latch runtime_game_load_boundary_drops_prior_runtime_generation runtime_config_quarantine_propagates_to_fatal runtime_save_payload_is_plain_deep_copy runtime_manual_save_and_load_flags_are_blocked runtime_callback_boundary_contains_exceptions runtime_net_destroy_teardown_honors_checkpoint_latch runtime_unexpected_net_destroy_clears_external_route"
+local markers = "runtime_preflight_aggregates_in_stable_order runtime_preflight_requires_community_for_every_custom_profile runtime_preflight_requires_human_class_for_every_custom_profile runtime_preflight_rejects_missing_profile_value_apis runtime_preflight_normalizes_effective_bandit_community runtime_wrong_level_skips_patrol_resolution runtime_launch_consumes_before_preflight_once runtime_activation_requires_game_load_boundary runtime_invalid_or_expired_launch_never_reaches_preflight runtime_ordinary_loaded_save_rejects_stray_launch runtime_ordinary_loaded_save_rejects_stray_resume runtime_new_game_does_not_reuse_prior_load_state_latch runtime_game_load_boundary_drops_prior_runtime_generation runtime_config_quarantine_propagates_to_fatal runtime_save_payload_is_plain_deep_copy runtime_manual_save_and_load_flags_are_blocked runtime_callback_boundary_routes_exceptions_once runtime_callback_boundary_routes_false_results_once runtime_inactive_callback_results_remain_benign runtime_active_save_failure_enters_fatal_once runtime_fatal_main_menu_retries_throw_then_becomes_idempotent runtime_fatal_main_menu_retries_explicit_false runtime_fatal_ui_helper_propagates_callback_results runtime_bootstrap_registration_rolls_back_every_position runtime_bootstrap_registration_poison_blocks_retry runtime_bootstrap_requires_unregister_before_composition runtime_net_destroy_teardown_honors_checkpoint_latch runtime_unexpected_net_destroy_clears_external_route"
 function run() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
@@ -328,6 +320,8 @@ function UIStart:RetryStale()
     if first.error.code == "GA_LAUNCH_STALE_CLEARED" then gamma_arena_session_store.issue_launch() end
 end
 function UIStart:ShowFatal() self.fatal_main_menu = true end
+function invoke_fatal_main_menu(callback) return callback() end
+function UIStart:OnFatalMainMenu() return invoke_fatal_main_menu(self.callback) end
 function create() end
 function show_fatal() end
 '@

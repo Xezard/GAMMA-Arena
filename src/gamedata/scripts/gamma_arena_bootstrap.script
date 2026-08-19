@@ -1,7 +1,36 @@
 local runtime_orchestrator = nil
 local runtime_callbacks = nil
-local callbacks_registered = false
+local runtime_registrar = nil
 local identity_counter = 0
+local unpack_values = unpack
+
+local callback_names = {
+    "on_game_load",
+    "actor_on_first_update",
+    "actor_on_update",
+    "actor_on_before_death",
+    "npc_on_death_callback",
+    "save_state",
+    "load_state",
+    "on_before_save_input",
+    "on_before_load_input",
+    "actor_on_net_destroy",
+    "on_before_level_changing"
+}
+
+local guarded_callbacks = {
+    actor_on_before_death = true,
+    npc_on_death_callback = true,
+    save_state = true,
+    on_before_save_input = true,
+    on_before_load_input = true,
+    actor_on_net_destroy = true,
+    on_before_level_changing = true
+}
+
+local function pack_values(...)
+    return { n = select("#", ...), ... }
+end
 
 local function module_store_port()
     return {
@@ -20,6 +49,7 @@ end
 local function runtime_probes(catalogs)
     return {
         RegisterScriptCallback = RegisterScriptCallback,
+        UnregisterScriptCallback = UnregisterScriptCallback,
         ini_file = ini_file,
         system_ini = system_ini,
         alife = alife,
@@ -76,13 +106,13 @@ end
 local function default_fatal_ui()
     return {
         show_fatal = function(errors, callback)
-            return gamma_arena_ui_start.show_fatal(nil, errors, function() callback() end, nil)
+            return gamma_arena_ui_start.show_fatal(nil, errors, function() return callback() end, nil)
         end
     }
 end
 
 local function default_disconnect()
-    exec_console_cmd("disconnect")
+    return exec_console_cmd("disconnect")
 end
 
 local function neutral_teardown()
@@ -106,125 +136,179 @@ function compose(overrides)
 end
 
 local function callback_failure(instance, name, reason)
-    pcall(instance.on_callback_error, instance, name, reason)
+    local failure = gamma_arena_result.err("GA_CALLBACK_FAILED", "Arena callback failed safely", {
+        callback = name,
+        reason = tostring(reason)
+    })
+    local lookup_ok, handler = pcall(function() return instance and instance.on_callback_error end)
+    if lookup_ok and type(handler) == "function" then
+        local handled_ok, handled = pcall(handler, instance, name, tostring(reason))
+        if handled_ok and type(handled) == "table" and type(handled.ok) == "boolean" then return handled end
+        if not handled_ok then
+            failure = gamma_arena_result.err("GA_CALLBACK_ROUTING_FAILED", "Arena callback exception routing failed safely", {
+                callback = name,
+                reason = tostring(handled)
+            })
+        end
+    end
+    pcall(gamma_arena_log.error, failure.error.code, failure.error.message, failure.error.context)
+    return failure
 end
 
-local function invoke(instance, name, ...)
-    local ok_method, method = pcall(function() return instance[name] end)
-    if not ok_method or type(method) ~= "function" then
-        callback_failure(instance, name, "callback method is unavailable")
-        return nil
+local function active_state(instance, name)
+    local lookup_ok, method = pcall(function() return instance and instance.is_active end)
+    if not lookup_ok or type(method) ~= "function" then
+        return false, callback_failure(instance, name, "is_active method is unavailable")
     end
-    local ok, result = pcall(method, instance, ...)
-    if not ok then
-        callback_failure(instance, name, result)
-        return nil
+    local call_ok, active = pcall(method, instance)
+    if not call_ok then return false, callback_failure(instance, name, active) end
+    return active == true, nil
+end
+
+local function call_instance(instance, name, ...)
+    local method = instance[name]
+    if type(method) ~= "function" then error("callback method is unavailable: " .. tostring(name)) end
+    return method(instance, ...)
+end
+
+local function invoke_callback(instance, name, fn, ...)
+    local was_active, active_error = active_state(instance, name)
+    if active_error ~= nil then return active_error end
+    local values = pack_values(pcall(fn, ...))
+    if not values[1] then return callback_failure(instance, name, values[2]) end
+    local result = values[2]
+    if type(result) == "table" and result.ok == false then
+        local lookup_ok, handler = pcall(function() return instance and instance.on_callback_result_error end)
+        if not lookup_ok or type(handler) ~= "function" then
+            return callback_failure(instance, name, "structured Result failure router is unavailable")
+        end
+        local routed_ok, routed_reason = pcall(handler, instance, name, result, was_active)
+        if not routed_ok then return callback_failure(instance, name, routed_reason) end
     end
-    return result
+    return unpack_values(values, 2, values.n)
+end
+
+local function invoke_runtime_effect(instance, name, ...)
+    local arguments = pack_values(...)
+    return invoke_callback(instance, name, function()
+        local active = instance:is_active()
+        if not active then return end
+        return call_instance(instance, name, unpack_values(arguments, 1, arguments.n))
+    end)
 end
 
 function make_callbacks(instance)
     local callbacks = {}
-
-    callbacks.on_game_load = function(...)
-        local ok, result = pcall(invoke, instance, "on_game_load", ...)
-        if not ok then callback_failure(instance, "on_game_load", result) end
-        return ok and result or nil
-    end
-    callbacks.actor_on_first_update = function(...)
-        local ok, result = pcall(invoke, instance, "actor_on_first_update", ...)
-        if not ok then callback_failure(instance, "actor_on_first_update", result) end
-        return ok and result or nil
-    end
-    callbacks.actor_on_update = function(...)
-        local ok, result = pcall(invoke, instance, "actor_on_update", ...)
-        if not ok then callback_failure(instance, "actor_on_update", result) end
-        return ok and result or nil
-    end
-    callbacks.actor_on_before_death = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "actor_on_before_death", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "actor_on_before_death", result) end
-        return ok and result or nil
-    end
-    callbacks.npc_on_death_callback = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "npc_on_death_callback", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "npc_on_death_callback", result) end
-        return ok and result or nil
-    end
-    callbacks.save_state = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "save_state", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "save_state", result) end
-        return ok and result or nil
-    end
-    callbacks.load_state = function(...)
-        local ok, result = pcall(invoke, instance, "load_state", ...)
-        if not ok then callback_failure(instance, "load_state", result) end
-        return ok and result or nil
-    end
-    callbacks.on_before_save_input = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "on_before_save_input", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "on_before_save_input", result) end
-        return ok and result or nil
-    end
-    callbacks.on_before_load_input = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "on_before_load_input", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "on_before_load_input", result) end
-        return ok and result or nil
-    end
-    callbacks.actor_on_net_destroy = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "actor_on_net_destroy", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "actor_on_net_destroy", result) end
-        return ok and result or nil
-    end
-    callbacks.on_before_level_changing = function(...)
-        local ok, result = pcall(function(...)
-            if not instance:is_active() then return end
-            return invoke(instance, "on_before_level_changing", ...)
-        end, ...)
-        if not ok then callback_failure(instance, "on_before_level_changing", result) end
-        return ok and result or nil
+    for _, callback_name in ipairs(callback_names) do
+        local name = callback_name
+        if guarded_callbacks[name] then
+            callbacks[name] = function(...) return invoke_runtime_effect(instance, name, ...) end
+        else
+            callbacks[name] = function(...) return invoke_callback(instance, name, function(...) return call_instance(instance, name, ...) end, ...) end
+        end
     end
     return callbacks
 end
 
-function on_game_start()
-    if callbacks_registered then return end
-    local ok, reason = pcall(function()
-        runtime_orchestrator = compose()
-        if runtime_orchestrator == nil then error("orchestrator composition failed") end
-        runtime_callbacks = make_callbacks(runtime_orchestrator)
-        RegisterScriptCallback("on_game_load", runtime_callbacks.on_game_load)
-        RegisterScriptCallback("actor_on_first_update", runtime_callbacks.actor_on_first_update)
-        RegisterScriptCallback("actor_on_update", runtime_callbacks.actor_on_update)
-        RegisterScriptCallback("actor_on_before_death", runtime_callbacks.actor_on_before_death)
-        RegisterScriptCallback("npc_on_death_callback", runtime_callbacks.npc_on_death_callback)
-        RegisterScriptCallback("save_state", runtime_callbacks.save_state)
-        RegisterScriptCallback("load_state", runtime_callbacks.load_state)
-        RegisterScriptCallback("on_before_save_input", runtime_callbacks.on_before_save_input)
-        RegisterScriptCallback("on_before_load_input", runtime_callbacks.on_before_load_input)
-        RegisterScriptCallback("actor_on_net_destroy", runtime_callbacks.actor_on_net_destroy)
-        RegisterScriptCallback("on_before_level_changing", runtime_callbacks.on_before_level_changing)
-        callbacks_registered = true
-    end)
-    if not ok then
-        pcall(gamma_arena_log.error, "GA_BOOTSTRAP_FAILED", "Arena callback registration failed safely", { reason = tostring(reason) })
+local Registrar = {}
+Registrar.__index = Registrar
+
+function Registrar:status()
+    return self.registration_state
+end
+
+local function operation_failed(called, value)
+    return not called or value == false or (type(value) == "table" and value.ok == false)
+end
+
+function Registrar:register_all()
+    if self.registration_state == "registered" then return gamma_arena_result.ok(false) end
+    if self.registration_state == "poisoned" then
+        return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_POISONED", "Arena callback registration is poisoned after rollback failure")
     end
+    if type(self.deps.register) ~= "function" or type(self.deps.unregister) ~= "function" then
+        self.registration_state = "poisoned"
+        return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_POISONED", "Register/unregister callback APIs are required before composition")
+    end
+    if type(self.deps.compose) ~= "function" then
+        return gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "Arena orchestrator composition dependency is unavailable")
+    end
+
+    local composed_ok, instance = pcall(self.deps.compose)
+    if not composed_ok or instance == nil then
+        return gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "Arena orchestrator composition failed safely", { reason = tostring(instance) })
+    end
+    local callbacks_ok, callbacks = pcall(self.deps.make_callbacks or make_callbacks, instance)
+    if not callbacks_ok or type(callbacks) ~= "table" then
+        return gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "Arena callback router composition failed safely", { reason = tostring(callbacks) })
+    end
+
+    self.instance = instance
+    self.callbacks = callbacks
+    self.registered = {}
+    local registration_failure = nil
+    for index, name in ipairs(callback_names) do
+        local callback = callbacks[name]
+        if type(callback) ~= "function" then
+            registration_failure = { index = index, name = name, reason = "callback reference is unavailable" }
+            break
+        end
+        local called, value = pcall(self.deps.register, name, callback)
+        if operation_failed(called, value) then
+            registration_failure = { index = index, name = name, reason = tostring(value) }
+            break
+        end
+        self.registered[#self.registered + 1] = { name = name, callback = callback }
+    end
+
+    if registration_failure == nil then
+        self.registration_state = "registered"
+        return gamma_arena_result.ok(true)
+    end
+
+    local rollback_errors = {}
+    for index = #self.registered, 1, -1 do
+        local entry = self.registered[index]
+        local called, value = pcall(self.deps.unregister, entry.name, entry.callback)
+        if operation_failed(called, value) then
+            rollback_errors[#rollback_errors + 1] = { name = entry.name, reason = tostring(value) }
+        end
+    end
+    if #rollback_errors > 0 then
+        self.registration_state = "poisoned"
+        return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_POISONED", "Arena callback rollback failed; registration is poisoned", {
+            registration = registration_failure,
+            rollback = rollback_errors
+        })
+    end
+
+    self.registration_state = "idle"
+    self.instance = nil
+    self.callbacks = nil
+    self.registered = {}
+    return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_FAILED", "Arena callback registration failed and was rolled back", registration_failure)
+end
+
+function new_registrar(deps)
+    if type(deps) ~= "table" then return nil end
+    return setmetatable({ deps = deps, registration_state = "idle", instance = nil, callbacks = nil, registered = {} }, Registrar)
+end
+
+function on_game_start()
+    if runtime_registrar == nil then
+        runtime_registrar = new_registrar({
+            compose = compose,
+            make_callbacks = make_callbacks,
+            register = RegisterScriptCallback,
+            unregister = UnregisterScriptCallback
+        })
+    end
+    local result = runtime_registrar:register_all()
+    if result.ok then
+        runtime_orchestrator = runtime_registrar.instance
+        runtime_callbacks = runtime_registrar.callbacks
+    else
+        pcall(gamma_arena_log.error, result.error.code, result.error.message, result.error.context)
+    end
+    return result
 end

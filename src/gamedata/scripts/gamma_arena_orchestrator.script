@@ -53,7 +53,7 @@ end
 local function find_flags(...)
     local args = { ... }
     for index = 1, #args do
-        if type(args[index]) == "table" then
+        if type(args[index]) == "table" and type(rawget(args[index], "ret")) == "boolean" then
             local writable = pcall(function()
                 local old = args[index].ret
                 args[index].ret = old
@@ -116,9 +116,28 @@ function Orchestrator:teardown_once(reason, preserve_session)
 end
 
 function Orchestrator:main_menu_action()
-    if self.main_menu_executed then return end
+    if self.main_menu_executed then return gamma_arena_result.ok(false) end
+    if type(self.deps.disconnect) ~= "function" then
+        local unavailable = fail("GA_DISCONNECT_FAILED", "Main-menu disconnect dependency is unavailable")
+        pcall(gamma_arena_log.error, unavailable.error.code, unavailable.error.message, unavailable.error.context)
+        return unavailable
+    end
+    local called, value = pcall(self.deps.disconnect)
+    local failure = nil
+    if not called then
+        failure = fail("GA_DISCONNECT_FAILED", "Main-menu disconnect raised an exception", { reason = tostring(value) })
+    elseif value == false then
+        failure = fail("GA_DISCONNECT_FAILED", "Main-menu disconnect reported failure")
+    elseif type(value) == "table" and value.ok == false then
+        failure = value
+    end
+    if failure ~= nil then
+        local detail = failure.error or {}
+        pcall(gamma_arena_log.error, detail.code or "GA_DISCONNECT_FAILED", detail.message or "Main-menu disconnect failed", detail.context)
+        return failure
+    end
     self.main_menu_executed = true
-    if type(self.deps.disconnect) == "function" then pcall(self.deps.disconnect) end
+    return gamma_arena_result.ok(true)
 end
 
 function Orchestrator:enter_fatal(result, intent_finalized)
@@ -145,7 +164,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         self.fatal_shown = true
         local ui = self.deps.ui
         local show = type(ui) == "table" and ui.show_fatal or nil
-        local ok, dialog = pcall(show, errors, function() self:main_menu_action() end)
+        local ok, dialog = pcall(show, errors, function() return self:main_menu_action() end)
         if ok then
             self.fatal_dialog = dialog
         else
@@ -161,6 +180,13 @@ function Orchestrator:on_callback_error(callback_name, reason)
         callback = callback_name,
         reason = tostring(reason)
     }))
+end
+
+function Orchestrator:on_callback_result_error(callback_name, result, was_active)
+    if self.fatal_shown or self.machine_state == gamma_arena_state_machine.states.ERROR then return result end
+    local cleanup_callback = callback_name == "actor_on_net_destroy" or callback_name == "on_before_level_changing"
+    if was_active == true or cleanup_callback then return self:enter_fatal(result, cleanup_callback) end
+    return result
 end
 
 function Orchestrator:on_game_load()
@@ -347,8 +373,8 @@ function Orchestrator:block_manual_input(...)
     return gamma_arena_result.ok(true)
 end
 
-function Orchestrator:on_before_save_input(flags, save_type, text)
-    return self:block_manual_input(flags, save_type, text)
+function Orchestrator:on_before_save_input(...)
+    return self:block_manual_input(...)
 end
 
 function Orchestrator:on_before_load_input(...)

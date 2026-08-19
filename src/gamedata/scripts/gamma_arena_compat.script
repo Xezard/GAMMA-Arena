@@ -1,5 +1,6 @@
 local required_capabilities = {
     { name = "RegisterScriptCallback", present = function(p) return type(p.RegisterScriptCallback) == "function" end },
+    { name = "UnregisterScriptCallback", present = function(p) return type(p.UnregisterScriptCallback) == "function" end },
     { name = "ini_file", present = function(p) return type(p.ini_file) == "function" end },
     { name = "system_ini", present = function(p) return type(p.system_ini) == "function" end },
     { name = "alife", present = function(p) return type(p.alife) == "function" end },
@@ -97,14 +98,89 @@ local function ordered_sections(catalogs)
     return result
 end
 
+local function normalized_community(value)
+    if type(value) ~= "string" then return nil end
+    return string.lower((string.gsub(value, "^%s*(.-)%s*$", "%1")))
+end
+
+local profile_error_codes = {
+    class = {
+        api = "GA_NPC_CLASS_API_MISSING",
+        missing = "GA_NPC_CLASS_MISSING",
+        read = "GA_NPC_CLASS_READ_FAILED",
+        invalid = "GA_NPC_CLASS_INVALID"
+    },
+    community = {
+        api = "GA_NPC_COMMUNITY_API_MISSING",
+        missing = "GA_NPC_COMMUNITY_MISSING",
+        read = "GA_NPC_COMMUNITY_READ_FAILED",
+        invalid = "GA_NPC_COMMUNITY_INVALID"
+    }
+}
+
+local function validate_profile_value(system, section, key, expected, codes, normalize, accessors, errors)
+    if type(accessors.line_exist) ~= "function" then
+        add_error(errors, codes.api, "Effective NPC profile line lookup is unavailable", {
+            section = section,
+            key = key,
+            capability = "system_ini.line_exist"
+        })
+        return
+    end
+    if type(accessors.r_string_ex) ~= "function" then
+        add_error(errors, codes.api, "Effective NPC profile value reader is unavailable", {
+            section = section,
+            key = key,
+            capability = "system_ini.r_string_ex"
+        })
+        return
+    end
+    local present_ok, present = safe_call(accessors.line_exist, system, section, key)
+    if not present_ok then
+        add_error(errors, codes.read, "Effective NPC profile line lookup failed", {
+            section = section,
+            key = key,
+            stage = "line_exist",
+            reason = tostring(present)
+        })
+        return
+    end
+    if present ~= true then
+        add_error(errors, codes.missing, "Effective NPC profile value is missing", { section = section, key = key })
+        return
+    end
+    local read_ok, value = safe_call(accessors.r_string_ex, system, section, key)
+    if not read_ok then
+        add_error(errors, codes.read, "Effective NPC profile value read failed", {
+            section = section,
+            key = key,
+            stage = "r_string_ex",
+            reason = tostring(value)
+        })
+        return
+    end
+    local effective = normalize and normalize(value) or value
+    if effective == nil or effective == "" then
+        add_error(errors, codes.missing, "Effective NPC profile value is missing", { section = section, key = key })
+    elseif effective ~= expected then
+        add_error(errors, codes.invalid, "Effective NPC profile value is incompatible", {
+            section = section,
+            key = key,
+            value = value,
+            expected = expected
+        })
+    end
+end
+
 local function validate_sections(system, catalogs, errors)
     local methods_ok, section_exist, r_string_ex, line_exist = pcall(function()
         return system.section_exist, system.r_string_ex, system.line_exist
     end)
-    if not methods_ok or type(section_exist) ~= "function" or type(r_string_ex) ~= "function" then
-        add_error(errors, "GA_PREFLIGHT_SYSTEM_INI_INVALID", "Effective system_ini lacks section/value accessors")
+    if not methods_ok or type(section_exist) ~= "function" then
+        add_error(errors, "GA_PREFLIGHT_SYSTEM_INI_INVALID", "Effective system_ini lacks a section accessor")
         return
     end
+    local accessors = { r_string_ex = r_string_ex, line_exist = line_exist }
     for _, entry in ipairs(ordered_sections(catalogs)) do
         local exists_ok, exists = safe_call(section_exist, system, entry.section)
         if not exists_ok or exists ~= true then
@@ -113,28 +189,8 @@ local function validate_sections(system, catalogs, errors)
                 kind = entry.kind
             })
         elseif entry.kind == "profile" then
-            local class_ok, class_id = safe_call(r_string_ex, system, entry.section, "class")
-            if not class_ok or class_id ~= "AI_STL_S" then
-                add_error(errors, "GA_PREFLIGHT_NPC_NOT_HUMAN", "Arena NPC profile is not an effective human stalker section", {
-                    section = entry.section,
-                    class = class_id
-                })
-            else
-                local community_present = false
-                if type(line_exist) == "function" then
-                    local present_ok, present = safe_call(line_exist, system, entry.section, "community")
-                    community_present = present_ok and present == true
-                end
-                if community_present then
-                    local community_ok, community = safe_call(r_string_ex, system, entry.section, "community")
-                    if not community_ok or community ~= "bandit" then
-                        add_error(errors, "GA_PREFLIGHT_NPC_COMMUNITY_INVALID", "Arena NPC profile has an incompatible effective community", {
-                            section = entry.section,
-                            community = community
-                        })
-                    end
-                end
-            end
+            validate_profile_value(system, entry.section, "class", "AI_STL_S", profile_error_codes.class, nil, accessors, errors)
+            validate_profile_value(system, entry.section, "community", "bandit", profile_error_codes.community, normalized_community, accessors, errors)
         end
     end
 end

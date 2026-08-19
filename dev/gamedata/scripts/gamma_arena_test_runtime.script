@@ -67,6 +67,7 @@ local function valid_preflight_probes()
 
     local probes = {
         RegisterScriptCallback = function() end,
+        UnregisterScriptCallback = function() end,
         ini_file = function() return {} end,
         system_ini = function() return system end,
         alife = function() return {} end,
@@ -111,15 +112,17 @@ end
 local function preflight_aggregates_in_stable_order()
     local probes = valid_preflight_probes()
     probes.RegisterScriptCallback = nil
+    probes.UnregisterScriptCallback = nil
     probes.ini_file = nil
     probes.safe_release_manager = nil
     local result = gamma_arena_compat.preflight(probes)
     gamma_arena_test_assert.is_false(result.ok, "missing independent APIs must fail")
-    gamma_arena_test_assert.equals(error_codes(result), "GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING", "API failures must be stably ordered")
+    gamma_arena_test_assert.equals(error_codes(result), "GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING", "API failures must be stably ordered")
     local errors = result.error.context.errors
     gamma_arena_test_assert.equals(errors[1].context.capability, "RegisterScriptCallback", "first required API")
-    gamma_arena_test_assert.equals(errors[2].context.capability, "ini_file", "second required API")
-    gamma_arena_test_assert.equals(errors[3].context.capability, "safe_release_manager.release", "safe release API order")
+    gamma_arena_test_assert.equals(errors[2].context.capability, "UnregisterScriptCallback", "rollback API order")
+    gamma_arena_test_assert.equals(errors[3].context.capability, "ini_file", "third required API")
+    gamma_arena_test_assert.equals(errors[4].context.capability, "safe_release_manager.release", "safe release API order")
 end
 
 local function wrong_level_skips_patrol_resolution()
@@ -174,7 +177,97 @@ local function preflight_rejects_effective_mutant_class()
     probes._sections.gamma_arena_bandit_novice.class = "SM_POLTER"
     local result = gamma_arena_compat.preflight(probes)
     gamma_arena_test_assert.is_false(result.ok, "effective mutant class must fail")
-    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_NPC_NOT_HUMAN", 1, true) ~= nil, "human-only error")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_CLASS_INVALID", 1, true) ~= nil, "human-only error")
+end
+
+local function has_profile_error(result, code, section)
+    local errors = result.error and result.error.context and result.error.context.errors or {}
+    for index = 1, #errors do
+        local item = errors[index]
+        if item.code == code and item.context and item.context.section == section then return true end
+    end
+    return false
+end
+
+local function preflight_requires_community_for_every_custom_profile()
+    for _, profile in ipairs(catalogs().profile_list) do
+        local section = profile.section
+
+        local missing = valid_preflight_probes()
+        missing._sections[section].community = nil
+        local missing_result = gamma_arena_compat.preflight(missing)
+        gamma_arena_test_assert.is_false(missing_result.ok, "missing effective community must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(missing_result, "GA_NPC_COMMUNITY_MISSING", section), "missing community code for " .. section)
+
+        local wrong = valid_preflight_probes()
+        wrong._sections[section].community = "dolg"
+        local wrong_result = gamma_arena_compat.preflight(wrong)
+        gamma_arena_test_assert.is_false(wrong_result.ok, "wrong effective community must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(wrong_result, "GA_NPC_COMMUNITY_INVALID", section), "wrong community code for " .. section)
+
+        local throwing = valid_preflight_probes()
+        local throwing_system = throwing.system_ini()
+        local base_read = throwing_system.r_string_ex
+        function throwing_system:r_string_ex(candidate, key)
+            if candidate == section and key == "community" then error("injected community read failure") end
+            return base_read(self, candidate, key)
+        end
+        local throw_result = gamma_arena_compat.preflight(throwing)
+        gamma_arena_test_assert.is_false(throw_result.ok, "throwing effective community read must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(throw_result, "GA_NPC_COMMUNITY_READ_FAILED", section), "community read failure code for " .. section)
+    end
+end
+
+local function preflight_requires_human_class_for_every_custom_profile()
+    for _, profile in ipairs(catalogs().profile_list) do
+        local section = profile.section
+
+        local missing = valid_preflight_probes()
+        missing._sections[section].class = nil
+        local missing_result = gamma_arena_compat.preflight(missing)
+        gamma_arena_test_assert.is_true(has_profile_error(missing_result, "GA_NPC_CLASS_MISSING", section), "missing class code for " .. section)
+
+        local wrong = valid_preflight_probes()
+        wrong._sections[section].class = "SM_POLTER"
+        local wrong_result = gamma_arena_compat.preflight(wrong)
+        gamma_arena_test_assert.is_true(has_profile_error(wrong_result, "GA_NPC_CLASS_INVALID", section), "invalid class code for " .. section)
+
+        local throwing = valid_preflight_probes()
+        local throwing_system = throwing.system_ini()
+        local base_read = throwing_system.r_string_ex
+        function throwing_system:r_string_ex(candidate, key)
+            if candidate == section and key == "class" then error("injected class read failure") end
+            return base_read(self, candidate, key)
+        end
+        local throw_result = gamma_arena_compat.preflight(throwing)
+        gamma_arena_test_assert.is_true(has_profile_error(throw_result, "GA_NPC_CLASS_READ_FAILED", section), "class read failure code for " .. section)
+    end
+end
+
+local function preflight_rejects_missing_profile_value_apis()
+    local no_line_exist = valid_preflight_probes()
+    no_line_exist.system_ini().line_exist = nil
+    local line_result = gamma_arena_compat.preflight(no_line_exist)
+    gamma_arena_test_assert.is_false(line_result.ok, "missing effective line_exist must fail")
+    for _, profile in ipairs(no_line_exist.catalogs.profile_list) do
+        gamma_arena_test_assert.is_true(has_profile_error(line_result, "GA_NPC_CLASS_API_MISSING", profile.section), "class API error for " .. profile.section)
+        gamma_arena_test_assert.is_true(has_profile_error(line_result, "GA_NPC_COMMUNITY_API_MISSING", profile.section), "community API error for " .. profile.section)
+    end
+
+    local no_reader = valid_preflight_probes()
+    no_reader.system_ini().r_string_ex = nil
+    local reader_result = gamma_arena_compat.preflight(no_reader)
+    gamma_arena_test_assert.is_false(reader_result.ok, "missing effective r_string_ex must fail")
+    for _, profile in ipairs(no_reader.catalogs.profile_list) do
+        gamma_arena_test_assert.is_true(has_profile_error(reader_result, "GA_NPC_CLASS_API_MISSING", profile.section), "class reader error for " .. profile.section)
+        gamma_arena_test_assert.is_true(has_profile_error(reader_result, "GA_NPC_COMMUNITY_API_MISSING", profile.section), "community reader error for " .. profile.section)
+    end
+end
+
+local function preflight_normalizes_effective_bandit_community()
+    local probes = valid_preflight_probes()
+    for _, profile in ipairs(probes.catalogs.profile_list) do probes._sections[profile.section].community = "  BANDIT\t" end
+    gamma_arena_test_assert.is_true(gamma_arena_compat.preflight(probes).ok, "normalized effective bandit community must pass")
 end
 
 local function fake_store(intent_state)
@@ -413,42 +506,238 @@ local function manual_save_and_load_flags_are_blocked()
     local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
-    local save_flags = { ret = false }
-    local load_flags = { ret = false }
-    orchestrator:on_before_save_input(save_flags, 1, "Save")
-    orchestrator:on_before_load_input("unknown", 7, load_flags)
-    gamma_arena_test_assert.is_true(save_flags.ret, "manual Save must be blocked")
-    gamma_arena_test_assert.is_true(load_flags.ret, "load callback must scan varargs for flags")
-    gamma_arena_test_assert.equals(notifications, 2, "both UI operations show the localized message")
+    local save_flags_last = { ret = false }
+    local load_flags_first = { ret = false }
+    local load_flags_last = { ret = false }
+    local unrelated = { marker = "must remain untouched" }
+    orchestrator:on_before_save_input(11, 22, save_flags_last)
+    orchestrator:on_before_load_input(load_flags_first, 11, 22)
+    orchestrator:on_before_load_input(11, 22, unrelated, load_flags_last)
+    gamma_arena_test_assert.is_true(save_flags_last.ret, "real flags-last manual Save signature must be blocked")
+    gamma_arena_test_assert.is_true(load_flags_first.ret, "flags-first compatibility signature must be blocked")
+    gamma_arena_test_assert.is_true(load_flags_last.ret, "flags-last manual Load signature must be blocked")
+    gamma_arena_test_assert.equals(unrelated.ret, nil, "manual input scanning must not mutate unrelated tables")
+    gamma_arena_test_assert.equals(unrelated.marker, "must remain untouched", "unrelated callback data must remain intact")
+    gamma_arena_test_assert.equals(notifications, 3, "every blocked UI operation shows the localized message")
 end
 
-local function fatal_ui_exposes_one_idempotent_action()
+local function fatal_main_menu_retries_throw_then_becomes_idempotent()
     local store = fake_store({ launch_pending = true, resume_pending = false })
-    local disconnects = 0
+    local disconnects, callback_results = 0, {}
     local action
     local deps = fake_orchestrator_deps(store)
     deps.preflight = function() return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "failed") end
     deps.ui.show_fatal = function(_, callback) action = callback; return {} end
-    deps.disconnect = function() disconnects = disconnects + 1 end
+    deps.disconnect = function()
+        disconnects = disconnects + 1
+        if disconnects == 1 then error("injected disconnect failure") end
+    end
     local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
     gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI must receive one main-menu action")
-    action()
-    action()
-    gamma_arena_test_assert.equals(disconnects, 1, "fatal main-menu action must be idempotent")
+    callback_results[1] = action()
+    callback_results[2] = action()
+    callback_results[3] = action()
+    gamma_arena_test_assert.is_false(callback_results[1].ok, "throwing disconnect must return an observable structured failure")
+    gamma_arena_test_assert.is_true(callback_results[2].ok, "the same UI action must retry after disconnect failure")
+    gamma_arena_test_assert.is_true(callback_results[3].ok, "successful disconnect makes later clicks benign")
+    gamma_arena_test_assert.equals(disconnects, 2, "disconnect must retry once then become idempotent")
 end
 
-local function callback_boundary_contains_exceptions()
-    local errors = 0
-    local throwing = {
-        is_active = function() return true end,
-        actor_on_before_death = function() error("injected callback failure") end,
-        on_callback_error = function(_, name) gamma_arena_test_assert.equals(name, "actor_on_before_death", "callback name"); errors = errors + 1 end
+local function fatal_main_menu_retries_explicit_false()
+    local attempts = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.disconnect = function()
+        attempts = attempts + 1
+        if attempts == 1 then return false end
+        return true
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    local first = orchestrator:main_menu_action()
+    local second = orchestrator:main_menu_action()
+    local third = orchestrator:main_menu_action()
+    gamma_arena_test_assert.is_false(first.ok, "explicit false disconnect must be an observable failure")
+    gamma_arena_test_assert.is_true(second.ok and third.ok, "explicit false disconnect must remain retryable then idempotent")
+    gamma_arena_test_assert.equals(attempts, 2, "explicit false must not latch main-menu completion")
+end
+
+local callback_names = {
+    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death",
+    "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
+    "on_before_load_input", "actor_on_net_destroy", "on_before_level_changing"
+}
+
+local function callback_boundary_routes_exceptions_once()
+    for _, callback_name in ipairs(callback_names) do
+        local errors = 0
+        local throwing = {
+            is_active = function() return true end,
+            on_callback_error = function(_, name, reason)
+                gamma_arena_test_assert.equals(name, callback_name, "exception callback name")
+                gamma_arena_test_assert.is_true(type(reason) == "string", "exception reason must be observable")
+                errors = errors + 1
+                return gamma_arena_result.err("GA_CALLBACK_FAILED", "routed exception")
+            end,
+            on_callback_result_error = function() error("exception path must not use false-Result routing") end
+        }
+        throwing[callback_name] = function() error("injected callback exception") end
+        local callback = gamma_arena_bootstrap.make_callbacks(throwing)[callback_name]
+        local call_ok, result = pcall(callback, 11, 22, { ret = false })
+        gamma_arena_test_assert.is_true(call_ok, callback_name .. " boundary must contain exceptions")
+        gamma_arena_test_assert.is_false(result.ok, callback_name .. " exception must return structured failure")
+        gamma_arena_test_assert.equals(errors, 1, callback_name .. " exception must route exactly once")
+    end
+end
+
+local function callback_boundary_routes_false_results_once()
+    for _, callback_name in ipairs(callback_names) do
+        local routes, callback_errors = 0, 0
+        local expected = gamma_arena_result.err("GA_TEST_CALLBACK_RESULT", "injected Result failure", { callback = callback_name })
+        local failing = {
+            is_active = function() return true end,
+            on_callback_error = function() callback_errors = callback_errors + 1 end,
+            on_callback_result_error = function(_, name, result, was_active)
+                gamma_arena_test_assert.equals(name, callback_name, "false-Result callback name")
+                gamma_arena_test_assert.is_true(result == expected, "false-Result identity must be preserved")
+                gamma_arena_test_assert.is_true(was_active, "critical callback must preserve prior active state")
+                routes = routes + 1
+                return result
+            end
+        }
+        failing[callback_name] = function() return expected, "secondary-return" end
+        local callback = gamma_arena_bootstrap.make_callbacks(failing)[callback_name]
+        local call_ok, result, secondary = pcall(callback, 11, 22, { ret = false })
+        gamma_arena_test_assert.is_true(call_ok, callback_name .. " false Result boundary must not throw")
+        gamma_arena_test_assert.is_true(result == expected, callback_name .. " must preserve the original Result")
+        gamma_arena_test_assert.equals(secondary, "secondary-return", callback_name .. " must preserve additional return values")
+        gamma_arena_test_assert.equals(routes, 1, callback_name .. " false Result must route exactly once")
+        gamma_arena_test_assert.equals(callback_errors, 0, callback_name .. " false Result must not use exception routing")
+    end
+end
+
+local function inactive_callback_results_remain_benign()
+    local calls, routes = 0, 0
+    local inactive = {
+        is_active = function() return false end,
+        save_state = function() calls = calls + 1; return gamma_arena_result.err("GA_MUST_NOT_RUN", "inactive") end,
+        on_callback_error = function() routes = routes + 1 end,
+        on_callback_result_error = function() routes = routes + 1 end
     }
-    local callbacks = gamma_arena_bootstrap.make_callbacks(throwing)
-    gamma_arena_test_assert.is_true(pcall(callbacks.actor_on_before_death, 1, 2), "callback boundary must never throw")
-    gamma_arena_test_assert.equals(errors, 1, "callback exception must be routed once")
+    local result = gamma_arena_bootstrap.make_callbacks(inactive).save_state({})
+    gamma_arena_test_assert.equals(result, nil, "inactive effect callback must remain a nil no-op")
+    gamma_arena_test_assert.equals(calls, 0, "inactive callback must not delegate")
+    gamma_arena_test_assert.equals(routes, 0, "inactive no-op must not enter error routing")
+end
+
+local function active_save_failure_enters_fatal_once()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local fatal_count = 0
+    deps.ui.show_fatal = function() fatal_count = fatal_count + 1; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    orchestrator.session.future_field = true
+    local result = gamma_arena_bootstrap.make_callbacks(orchestrator).save_state({})
+    gamma_arena_test_assert.is_false(result.ok, "invalid active ArenaSession save must remain observable")
+    gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "invalid checkpoint payload must poison runtime state")
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "invalid checkpoint payload cannot remain active")
+    gamma_arena_test_assert.equals(fatal_count, 1, "active save failure must enter fatal routing exactly once")
+end
+
+local function fatal_ui_helper_propagates_callback_results()
+    local attempts = 0
+    local failure = gamma_arena_result.err("GA_DISCONNECT_FAILED", "retry")
+    local function callback()
+        attempts = attempts + 1
+        if attempts == 1 then return failure end
+        return gamma_arena_result.ok(true)
+    end
+    local first = gamma_arena_ui_start.invoke_fatal_main_menu(callback, nil, {})
+    local second = gamma_arena_ui_start.invoke_fatal_main_menu(callback, nil, {})
+    gamma_arena_test_assert.is_true(first == failure, "Task 4 fatal UI must return disconnect failure unchanged")
+    gamma_arena_test_assert.is_true(second.ok, "Task 4 fatal UI must return retry success")
+end
+
+local function bootstrap_registration_rolls_back_every_position()
+    for failure_position = 1, #callback_names do
+        local active, rollback_order, compose_count, register_count = {}, {}, 0, 0
+        local fail_at = failure_position
+        local registrar = gamma_arena_bootstrap.new_registrar({
+            compose = function()
+                compose_count = compose_count + 1
+                local instance = { is_active = function() return false end }
+                for _, name in ipairs(callback_names) do instance[name] = function() return gamma_arena_result.ok(false) end end
+                return instance
+            end,
+            register = function(name, callback)
+                register_count = register_count + 1
+                if register_count == fail_at then error("injected registration failure") end
+                gamma_arena_test_assert.equals(active[name], nil, "callback must never be registered twice: " .. name)
+                active[name] = callback
+            end,
+            unregister = function(name, callback)
+                gamma_arena_test_assert.is_true(active[name] == callback, "rollback must use the exact registered callback reference")
+                active[name] = nil
+                rollback_order[#rollback_order + 1] = name
+            end
+        })
+        local failed = registrar:register_all()
+        gamma_arena_test_assert.is_false(failed.ok, "registration position " .. failure_position .. " must fail")
+        gamma_arena_test_assert.equals(registrar:status(), "idle", "clean rollback must permit a later retry")
+        for index = 1, failure_position - 1 do
+            gamma_arena_test_assert.equals(rollback_order[index], callback_names[failure_position - index], "rollback must be reverse ordered")
+        end
+        register_count = 0
+        fail_at = nil
+        local retried = registrar:register_all()
+        gamma_arena_test_assert.is_true(retried.ok, "clean rollback must allow a fresh registration attempt")
+        gamma_arena_test_assert.equals(compose_count, 2, "retry composes exactly one new orchestrator after clean rollback")
+        local active_count = 0
+        for _ in pairs(active) do active_count = active_count + 1 end
+        gamma_arena_test_assert.equals(active_count, #callback_names, "retry must leave exactly one copy of every callback")
+    end
+end
+
+local function bootstrap_registration_poison_blocks_retry()
+    local compose_count, register_count, unregister_count = 0, 0, 0
+    local registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function()
+            compose_count = compose_count + 1
+            local instance = { is_active = function() return false end }
+            for _, name in ipairs(callback_names) do instance[name] = function() return gamma_arena_result.ok(false) end end
+            return instance
+        end,
+        register = function()
+            register_count = register_count + 1
+            if register_count == 4 then error("injected registration failure") end
+        end,
+        unregister = function()
+            unregister_count = unregister_count + 1
+            if unregister_count == 2 then return false end
+        end
+    })
+    local first = registrar:register_all()
+    local second = registrar:register_all()
+    gamma_arena_test_assert.is_false(first.ok and second.ok, "rollback failure must remain failed closed")
+    gamma_arena_test_assert.equals(registrar:status(), "poisoned", "rollback failure must poison bootstrap registration")
+    gamma_arena_test_assert.equals(compose_count, 1, "poisoned registration cannot create a second orchestrator")
+    gamma_arena_test_assert.equals(register_count, 4, "poisoned registration cannot retry callbacks")
+    gamma_arena_test_assert.equals(unregister_count, 3, "rollback continues in reverse after one unregister failure")
+end
+
+local function bootstrap_requires_unregister_before_composition()
+    local compose_count = 0
+    local registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function() compose_count = compose_count + 1; return {} end,
+        register = function() end
+    })
+    local result = registrar:register_all()
+    gamma_arena_test_assert.is_false(result.ok, "missing UnregisterScriptCallback must fail closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_BOOTSTRAP_REGISTRATION_POISONED", "missing unregister code")
+    gamma_arena_test_assert.equals(registrar:status(), "poisoned", "missing unregister must poison process registration")
+    gamma_arena_test_assert.equals(compose_count, 0, "feature probe must run before orchestrator/router composition")
 end
 
 local function net_destroy_teardown_honors_checkpoint_latch()
@@ -483,6 +772,10 @@ local cases = {
     { name = "runtime_preflight_rejects_invalid_patrol_resolution", fn = preflight_rejects_invalid_patrol_resolution },
     { name = "runtime_preflight_rejects_missing_catalog_section", fn = preflight_rejects_missing_catalog_section },
     { name = "runtime_preflight_rejects_effective_mutant_class", fn = preflight_rejects_effective_mutant_class },
+    { name = "runtime_preflight_requires_community_for_every_custom_profile", fn = preflight_requires_community_for_every_custom_profile },
+    { name = "runtime_preflight_requires_human_class_for_every_custom_profile", fn = preflight_requires_human_class_for_every_custom_profile },
+    { name = "runtime_preflight_rejects_missing_profile_value_apis", fn = preflight_rejects_missing_profile_value_apis },
+    { name = "runtime_preflight_normalizes_effective_bandit_community", fn = preflight_normalizes_effective_bandit_community },
     { name = "runtime_launch_consumes_before_preflight_once", fn = launch_consumes_before_preflight_once },
     { name = "runtime_activation_requires_game_load_boundary", fn = activation_requires_game_load_boundary },
     { name = "runtime_invalid_or_expired_launch_never_reaches_preflight", fn = invalid_or_expired_launch_never_reaches_preflight },
@@ -498,8 +791,16 @@ local cases = {
     { name = "runtime_load_rejects_unknown_session_keys_and_userdata", fn = load_rejects_unknown_session_keys_and_userdata },
     { name = "runtime_resume_is_validated_but_override_is_not_applied_early", fn = resume_is_validated_but_override_is_not_applied_early },
     { name = "runtime_manual_save_and_load_flags_are_blocked", fn = manual_save_and_load_flags_are_blocked },
-    { name = "runtime_fatal_ui_exposes_one_idempotent_action", fn = fatal_ui_exposes_one_idempotent_action },
-    { name = "runtime_callback_boundary_contains_exceptions", fn = callback_boundary_contains_exceptions },
+    { name = "runtime_fatal_main_menu_retries_throw_then_becomes_idempotent", fn = fatal_main_menu_retries_throw_then_becomes_idempotent },
+    { name = "runtime_fatal_main_menu_retries_explicit_false", fn = fatal_main_menu_retries_explicit_false },
+    { name = "runtime_callback_boundary_routes_exceptions_once", fn = callback_boundary_routes_exceptions_once },
+    { name = "runtime_callback_boundary_routes_false_results_once", fn = callback_boundary_routes_false_results_once },
+    { name = "runtime_inactive_callback_results_remain_benign", fn = inactive_callback_results_remain_benign },
+    { name = "runtime_active_save_failure_enters_fatal_once", fn = active_save_failure_enters_fatal_once },
+    { name = "runtime_fatal_ui_helper_propagates_callback_results", fn = fatal_ui_helper_propagates_callback_results },
+    { name = "runtime_bootstrap_registration_rolls_back_every_position", fn = bootstrap_registration_rolls_back_every_position },
+    { name = "runtime_bootstrap_registration_poison_blocks_retry", fn = bootstrap_registration_poison_blocks_retry },
+    { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
     { name = "runtime_net_destroy_teardown_honors_checkpoint_latch", fn = net_destroy_teardown_honors_checkpoint_latch },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
 }

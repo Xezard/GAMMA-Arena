@@ -289,6 +289,8 @@ if (Test-Path -LiteralPath $UiScriptPath) {
     Assert-True ($UiContent -match 'fatal_main_menu') 'Fatal mode must expose exactly one main-menu action seam'
     Assert-True ($UiContent -match 'GA_LAUNCH_STALE_CLEARED') 'Start UI must retry once after an atomically cleared stale launch'
     Assert-True (([regex]::Matches($UiContent, 'issue_launch\s*\(')).Count -ge 2) 'Start UI stale recovery must perform a fresh launch issuance attempt'
+    Assert-True ($UiContent -match 'function\s+invoke_fatal_main_menu') 'Fatal UI must expose a total callback-result propagation seam'
+    Assert-True ($UiContent -match 'return\s+invoke_fatal_main_menu') 'Fatal UI action must propagate the disconnect Result to its caller'
 }
 
 $UiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
@@ -353,21 +355,26 @@ $Task5BootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_boot
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
     $Task5BootstrapContent = Get-Content -LiteralPath $Task5BootstrapPath -Raw
     foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
-        Assert-True ($Task5BootstrapContent -match ('RegisterScriptCallback\s*\(\s*"' + [regex]::Escape($Callback) + '"')) "Bootstrap must register $Callback"
+        Assert-True ($Task5BootstrapContent -match ('"' + [regex]::Escape($Callback) + '"')) "Bootstrap registration table must contain $Callback"
     }
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_quit') 'Bootstrap must not treat closing MCM/main menu as quitting Arena'
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_init') 'Task 5 bootstrap must not duplicate the Task 4 main-menu callback'
+    foreach ($Marker in @('invoke_callback','new_registrar','register_all','UnregisterScriptCallback','GA_BOOTSTRAP_REGISTRATION_POISONED','rollback')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Bootstrap hardening must cover $Marker"
+    }
     Assert-True ($Task5BootstrapContent -match 'pcall') 'Bootstrap callbacks must contain exceptions'
-    Assert-True ($Task5BootstrapContent -match 'if\s+not\s+instance:is_active\(\)\s+then\s+return\s+end') 'Inactive runtime-effect callbacks must return before delegation'
+    Assert-True ($Task5BootstrapContent -match 'if\s+not\s+active\s+then\s+return\s+end') 'Inactive runtime-effect callbacks must return before delegation'
+    Assert-True ($Task5BootstrapContent -match 'result\.ok\s*==\s*false') 'Bootstrap boundary must route structured Result failures'
+    Assert-True ($Task5BootstrapContent -match 'return\s+callback\(\)') 'Bootstrap fatal UI closure must propagate main-menu action results'
 }
 
 $Task5CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
 if (Test-Path -LiteralPath $Task5CompatPath) {
     $Task5CompatContent = Get-Content -LiteralPath $Task5CompatPath -Raw
-    foreach ($Capability in @('RegisterScriptCallback','ini_file','system_ini','alife','alife_create','alife_create_item','alife_release_id','getFS','se_save_var','level.patrol_path_exists','patrol','db.actor','axr_main.config','safe_release_manager.release')) {
+    foreach ($Capability in @('RegisterScriptCallback','UnregisterScriptCallback','ini_file','system_ini','alife','alife_create','alife_create_item','alife_release_id','getFS','se_save_var','level.patrol_path_exists','patrol','db.actor','axr_main.config','safe_release_manager.release')) {
         Assert-True ($Task5CompatContent -match [regex]::Escape($Capability)) "Preflight must probe $Capability"
     }
-    foreach ($Marker in @('l05_bar','AI_STL_S','bandit','point','level_vertex_id','game_vertex_id','4294967295','GA_PREFLIGHT_PATROL_MISSING','GA_PREFLIGHT_PATROL_INVALID','GA_PREFLIGHT_SECTION_MISSING','GA_PREFLIGHT_NPC_NOT_HUMAN')) {
+    foreach ($Marker in @('l05_bar','AI_STL_S','bandit','point','level_vertex_id','game_vertex_id','4294967295','GA_PREFLIGHT_PATROL_MISSING','GA_PREFLIGHT_PATROL_INVALID','GA_PREFLIGHT_SECTION_MISSING','GA_NPC_CLASS_API_MISSING','GA_NPC_CLASS_MISSING','GA_NPC_CLASS_READ_FAILED','GA_NPC_CLASS_INVALID','GA_NPC_COMMUNITY_API_MISSING','GA_NPC_COMMUNITY_MISSING','GA_NPC_COMMUNITY_READ_FAILED','GA_NPC_COMMUNITY_INVALID')) {
         Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "Preflight must enforce $Marker"
     }
 }
@@ -375,7 +382,7 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
 $Task5OrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
 if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     $Task5OrchestratorContent = Get-Content -LiteralPath $Task5OrchestratorPath -Raw
-    foreach ($Marker in @('inspect_intents','consume_launch','prepare_resume','gamma_arena_session','st_gamma_arena_manual_save_disabled','expect_checkpoint_reload','GA_INTENT_CONFLICT','GA_LAUNCH_REQUIRES_NEW_GAME','disconnect','pending_load_state','awaiting_activation')) {
+    foreach ($Marker in @('inspect_intents','consume_launch','prepare_resume','gamma_arena_session','st_gamma_arena_manual_save_disabled','expect_checkpoint_reload','GA_INTENT_CONFLICT','GA_LAUNCH_REQUIRES_NEW_GAME','disconnect','pending_load_state','awaiting_activation','on_callback_result_error','GA_DISCONNECT_FAILED','main_menu_executed')) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator must cover $Marker"
     }
     foreach ($Forbidden in @('FightSpec','FightRegistry','math.random','math.randomseed')) {
@@ -393,7 +400,7 @@ if (Test-Path -LiteralPath $Task5StorePath) {
 $Task5DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 if (Test-Path -LiteralPath $Task5DevTestPath) {
     $Task5DevTestContent = Get-Content -LiteralPath $Task5DevTestPath -Raw
-    foreach ($Marker in @('runtime_preflight_aggregates_in_stable_order','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_contains_exceptions','runtime_net_destroy_teardown_honors_checkpoint_latch','runtime_unexpected_net_destroy_clears_external_route')) {
+    foreach ($Marker in @('runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_bandit_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_net_destroy_teardown_honors_checkpoint_latch','runtime_unexpected_net_destroy_clears_external_route')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
     }
 }
