@@ -10,6 +10,18 @@ local v1_manifest = {
     outfits = { novice={section="novice_outfit",cost=1}, stalker={section="stalker_outfit",cost=3}, banditmerc={section="banditmerc_outfit",cost=4} },
     consumables = { bandage={section="bandage",cost=1}, medkit={section="medkit",cost=2} }
 }
+local v1_difficulty_manifest = {
+    rookie = { enemy_min=1,enemy_max=2,enemy_total_budget=12,player_loadout_budget=12 },
+    stalker = { enemy_min=2,enemy_max=3,enemy_total_budget=18,player_loadout_budget=15 },
+    veteran = { enemy_min=3,enemy_max=4,enemy_total_budget=26,player_loadout_budget=18 },
+    master = { enemy_min=4,enemy_max=6,enemy_total_budget=38,player_loadout_budget=22 }
+}
+local v1_layout_manifest = {
+    level = "l05_bar",
+    actor_spawn_path = "bar_arena_walk_1_1",
+    actor_look_path = "bar_arena_walk_attack",
+    opponent_spawn_paths = { "bar_arena_walk_3_1", "bar_arena_walk_3_2", "bar_arena_walk_6_1", "bar_arena_walk_6_3", "bar_arena_walk_6_6", "bar_arena_monstr_walk" }
+}
 
 local function split(text, sort_values)
     local values = {}
@@ -83,8 +95,8 @@ end
 
 local function integer(value, name, context)
     local parsed = tonumber(value)
-    if not parsed or parsed ~= math.floor(parsed) then
-        return nil, gamma_arena_result.err("GA_CATALOG_INVALID", name .. " must be an integer", context)
+    if not gamma_arena_number.is_integer(parsed) then
+        return nil, gamma_arena_result.err("GA_CATALOG_INVALID", name .. " must be a finite integer", context)
     end
     return parsed
 end
@@ -197,7 +209,8 @@ local function load_impl(ini_factory)
             if not game_section_exists then return gamma_arena_result.err("GA_CATALOG_SECTION_UNKNOWN", "Referenced game section does not exist", { section = item.section, group = group.name }) end
             if group.name == "profiles" and not human_profile_sections[item.section] then return gamma_arena_result.err("GA_CATALOG_PROFILE_NOT_HUMAN", "NPC profile is not in the human-only allowlist", { section = item.section }) end
             item.cost, section_error = integer(read(factory, catalogs, section, "cost"), "cost", { section = section })
-            if not item.cost or item.cost <= 0 then return gamma_arena_result.err("GA_CATALOG_COST_INVALID", "Catalog cost must be positive", { section = section }) end
+            if not item.cost then return section_error end
+            if item.cost <= 0 then return gamma_arena_result.err("GA_CATALOG_COST_INVALID", "Catalog cost must be positive", { section = section }) end
             if group.name == "weapons" then
                 item.ammo = read(factory, catalogs, section, "ammo")
                 item.ammo_box_min, section_error = integer(read(factory, catalogs, section, "ammo_box_min"), "ammo_box_min", { section = section }); if not item.ammo_box_min then return section_error end
@@ -218,8 +231,10 @@ local function load_impl(ini_factory)
     for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
         local section = "ga_difficulty_" .. difficulty_id
         local section_ok, section_error = require_section(factory, difficulties, section, { enemy_min = true, enemy_max = true, enemy_total_budget = true, player_loadout_budget = true }); if not section_ok then return section_error end
-        local item = { id = difficulty_id }; for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget" }) do item[key], section_error = integer(read(factory, difficulties, section, key), key, { section = section }); if not item[key] or item[key] <= 0 then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty values must be positive integers", { section = section, key = key }) end end
+        local item = { id = difficulty_id }; for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget" }) do item[key], section_error = integer(read(factory, difficulties, section, key), key, { section = section }); if not item[key] then return section_error end; if item[key] <= 0 then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty values must be positive integers", { section = section, key = key }) end end
         if item.enemy_max < item.enemy_min then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty maximum is below minimum", { section = section }) end
+        local expected = v1_difficulty_manifest[difficulty_id]
+        for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget" }) do if item[key] ~= expected[key] then return gamma_arena_result.err("GA_DIFFICULTY_MANIFEST_INVALID", "Difficulty entry differs from v1", { difficulty_id = difficulty_id, field = key }) end end
         snapshot.difficulties[difficulty_id] = item; snapshot.difficulty_ids[#snapshot.difficulty_ids + 1] = difficulty_id
     end
     local layout_meta_ok, layout_meta_error = require_section(factory, layouts, "meta", { schema_version = true, revision = true }); if not layout_meta_ok then return layout_meta_error end
@@ -227,9 +242,11 @@ local function load_impl(ini_factory)
     local layout_manifest_ok, layout_manifest_error = validate_section_manifest(factory, layouts, { meta = true, ga_layout_rostok_arena_v1 = true }, layout_path); if not layout_manifest_ok then return layout_manifest_error end
     local layout_ok, layout_error = require_section(factory, layouts, "ga_layout_rostok_arena_v1", { level = true, actor_spawn_path = true, actor_look_path = true, opponent_spawn_paths = true }); if not layout_ok then return layout_error end
     local layout = { id = "rostok_arena_v1", version = 1, level = read(factory, layouts, "ga_layout_rostok_arena_v1", "level"), actor_spawn_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_spawn_path"), actor_look_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_look_path"), opponent_spawn_paths = split(read(factory, layouts, "ga_layout_rostok_arena_v1", "opponent_spawn_paths"), false) }
-    if layout.level ~= "l05_bar" or type(layout.actor_spawn_path) ~= "string" or layout.actor_spawn_path == "" or type(layout.actor_look_path) ~= "string" or layout.actor_look_path == "" or layout.actor_spawn_path == layout.actor_look_path or #layout.opponent_spawn_paths ~= 6 then return gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout paths and level are invalid", {}) end
+    if type(layout.level) ~= "string" or layout.level == "" or type(layout.actor_spawn_path) ~= "string" or layout.actor_spawn_path == "" or type(layout.actor_look_path) ~= "string" or layout.actor_look_path == "" or layout.actor_spawn_path == layout.actor_look_path or #layout.opponent_spawn_paths ~= 6 then return gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout paths and level are invalid", {}) end
     local unique_paths = {}
     for _, path in ipairs(layout.opponent_spawn_paths) do if path == "" or path == layout.actor_spawn_path or path == layout.actor_look_path or unique_paths[path] then return gamma_arena_result.err("GA_LAYOUT_INVALID", "All actor and opponent paths must be non-empty and unique", { path = path }) end; unique_paths[path] = true end
+    if layout.level ~= v1_layout_manifest.level or layout.actor_spawn_path ~= v1_layout_manifest.actor_spawn_path or layout.actor_look_path ~= v1_layout_manifest.actor_look_path then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Layout routing differs from v1", {}) end
+    for index, expected_path in ipairs(v1_layout_manifest.opponent_spawn_paths) do if layout.opponent_spawn_paths[index] ~= expected_path then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Ordered opponent paths differ from v1", { index = index }) end end
     snapshot.layouts[layout.id] = layout; snapshot.layout_ids[1] = layout.id
     add_loadout_combinations(snapshot)
     local minimum_profile_cost = snapshot.profile_list[1].cost

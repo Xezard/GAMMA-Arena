@@ -115,6 +115,7 @@ $Task2ScriptContracts = @(
 )
 
 $Task3ScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_number.script'; Namespace = 'gamma_arena_number'; Required = @('(?m)^function\s+is_finite\s*\(', '(?m)^function\s+is_integer\s*\(', '(?m)^function\s+is_positive_integer\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog.script'; Namespace = 'gamma_arena_catalog'; Required = @('(?m)^function\s+load\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
@@ -188,6 +189,9 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v1 semantic manifest'
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
+    Assert-True ($Task3CatalogScriptContent -match 'v1_difficulty_manifest') 'Catalog loader must bind exact v1 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'v1_layout_manifest') 'Catalog loader must bind exact ordered v1 layout semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
 }
 $Task3ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
 if (Test-Path -LiteralPath $Task3ValidatorPath) {
@@ -196,6 +200,8 @@ if (Test-Path -LiteralPath $Task3ValidatorPath) {
         Assert-True ($Task3ValidatorContent -match $Code) "Validator must return structured $Code"
     }
     Assert-True ($Task3ValidatorContent -match 'expected_fight_id') 'Validator must recompute fight_id from session_seed and fight_index'
+    Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_COMBINATION_INVALID') 'Validator must reject non-v1 loadout combinations'
+    Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
 }
 $Task3GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 if (Test-Path -LiteralPath $Task3GeneratorPath) {
@@ -205,6 +211,9 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($Task3GeneratorContent -match 'fight_index\s*=\s*fight_index') 'FightSpec must retain fight_index'
     Assert-True ($Task3GeneratorContent -match '"session_seed="') 'Stable encoding must include session_seed'
     Assert-True ($Task3GeneratorContent -match '"fight_index="') 'Stable encoding must include fight_index'
+    Assert-True ($Task3GeneratorContent -match 'local\s+normalized_request') 'Generator must normalize the request before deriving RNG streams'
+    Assert-True ($Task3GeneratorContent -match 'stream\s*\(\s*normalized_request') 'Every generated RNG stream must use the normalized request'
+    Assert-True ($Task3GeneratorContent -match 'gamma_arena_number\.is_integer') 'Generator seed and index checks must use the finite integer contract'
 }
 if (Test-Path -LiteralPath $DifficultyPath) {
     $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw

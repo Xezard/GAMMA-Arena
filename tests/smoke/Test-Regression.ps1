@@ -105,11 +105,19 @@ states = {}
 events = {}
 function transition() end
 '@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_number.script' @'
+function is_finite() end
+function is_integer() end
+function is_positive_integer() end
+'@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_catalog.script' @'
+local v1_difficulty_manifest = {}
+local v1_layout_manifest = {}
 local function load_impl() end
 function load()
     local ok, result = pcall(load_impl)
     local markers = "GA_DIFFICULTY_BUDGET_INFEASIBLE GA_CATALOG_SECTION_CHECK_FAILED GA_CATALOG_UNKNOWN_SECTION GA_CATALOG_MANIFEST_INVALID section_for_each line_count r_line"
+    gamma_arena_number.is_integer(1)
     return markers
 end
 '@
@@ -123,6 +131,9 @@ function validate_session() end
 function generate()
     local fight_index = 0
     local normalized_seed = gamma_arena_rng.normalize_uint32(1)
+    local normalized_request = { session_seed = normalized_seed }
+    gamma_arena_number.is_integer(fight_index)
+    stream(normalized_request)
     return { session_seed = normalized_seed, fight_index = fight_index }
 end
 function stable_encode()
@@ -132,7 +143,8 @@ end
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' @'
 function validate()
     local expected_fight_id = "ga-1-0-g1-c1-l1"
-    return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID"
+    gamma_arena_number.is_integer(1)
+    return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID GA_LOADOUT_COMBINATION_INVALID"
 end
 '@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_generator.script' 'function run() end'

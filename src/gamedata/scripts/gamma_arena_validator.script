@@ -3,14 +3,14 @@ local function failure(code, message, context)
 end
 
 local function positive_integer(value)
-    return type(value) == "number" and value == math.floor(value) and value > 0
+    return gamma_arena_number.is_positive_integer(value)
 end
 
 local function array_length(value)
     if type(value) ~= "table" then return nil end
     local count, maximum = 0, 0
     for key in pairs(value) do
-        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then return nil end
+        if not gamma_arena_number.is_positive_integer(key) then return nil end
         count = count + 1; maximum = math.max(maximum, key)
     end
     if maximum ~= count then return nil end
@@ -22,12 +22,25 @@ local function item_exists(values, section)
     for _, value in pairs(values) do if type(value) == "table" and value.section == section then return value end end
 end
 
+local function loadout_combination_exists(loadout, combinations)
+    if type(combinations) ~= "table" then return false end
+    for _, combination in ipairs(combinations) do
+        if type(combination) == "table" and combination.weapon == loadout.weapon and combination.ammo == loadout.ammo and combination.ammo_boxes == loadout.ammo_boxes and combination.outfit == loadout.outfit and combination.cost == loadout.cost and type(combination.consumables) == "table" and #combination.consumables == #loadout.consumables then
+            local same = true
+            for index, section in ipairs(loadout.consumables) do if combination.consumables[index] ~= section then same = false; break end end
+            if same then return true end
+        end
+    end
+    return false
+end
+
 local function validate_loadout(loadout, catalogs, budget)
     if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.cost) then
         return failure("GA_LOADOUT_TYPE_INVALID", "Loadout fields have invalid types", {})
     end
     local consumable_count = array_length(loadout.consumables)
     if consumable_count == nil then return failure("GA_LOADOUT_TYPE_INVALID", "Loadout consumables must be an array", {}) end
+    if consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v1 catalog combination", {}) end
     local weapon = item_exists(catalogs.weapons, loadout.weapon); local ammo = item_exists(catalogs.ammo, loadout.ammo); local outfit = item_exists(catalogs.outfits, loadout.outfit)
     if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
     if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
@@ -40,6 +53,7 @@ local function validate_loadout(loadout, catalogs, budget)
         cost = cost + consumable.cost
     end
     if cost ~= loadout.cost or cost > budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout cost exceeds budget", { cost = cost, budget = budget }) end
+    if not loadout_combination_exists(loadout, catalogs.combinations) then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v1 catalog combination", {}) end
     return gamma_arena_result.ok(true)
 end
 
@@ -58,11 +72,11 @@ local function validate_impl(spec, catalogs)
     if type(spec.layout_id) ~= "string" or type(catalogs.layouts[spec.layout_id]) ~= "table" then return failure("GA_LAYOUT_UNKNOWN", "FightSpec layout is unknown", { layout_id = spec.layout_id }) end
     if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
-    if spec.schema_version ~= 1 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
-    if spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
+    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 1 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.layout_version) or not gamma_arena_number.is_integer(layout.version) or spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
     if spec.level ~= layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
-    if type(spec.session_seed) ~= "number" or spec.session_seed < 1 or spec.session_seed > 2147483646 or spec.session_seed ~= math.floor(spec.session_seed) or type(spec.fight_index) ~= "number" or spec.fight_index < 0 or spec.fight_index ~= math.floor(spec.fight_index) then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec seed and index are invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.session_seed) or spec.session_seed < 1 or spec.session_seed > 2147483646 or not gamma_arena_number.is_integer(spec.fight_index) or spec.fight_index < 0 then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec seed and index are invalid", {}) end
     local expected_fight_id = "ga-" .. spec.session_seed .. "-" .. spec.fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version
     if spec.fight_id ~= expected_fight_id then return failure("GA_FIGHT_ID_INVALID", "Fight id does not match FightSpec generation inputs", { expected = expected_fight_id, actual = spec.fight_id }) end
     if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
@@ -75,8 +89,8 @@ local function validate_impl(spec, catalogs)
     local seen, spent = {}, 0
     for index = 1, opponent_count do
         local opponent = spec.opponents[index]
-        if type(opponent) ~= "table" or opponent.slot ~= index or type(opponent.spawn_path) ~= "string" or opponent.spawn_path == "" or type(opponent.profile) ~= "string" or not positive_integer(opponent.profile_cost) or not positive_integer(opponent.total_cost) or type(opponent.loadout) ~= "table" then
-            if type(opponent) == "table" and opponent.slot ~= index then return failure("GA_OPPONENT_SLOT_INVALID", "Opponent slot must equal array index", { index = index, slot = opponent.slot }) end
+        if type(opponent) ~= "table" or not positive_integer(opponent.slot) or opponent.slot ~= index or type(opponent.spawn_path) ~= "string" or opponent.spawn_path == "" or type(opponent.profile) ~= "string" or not positive_integer(opponent.profile_cost) or not positive_integer(opponent.total_cost) or type(opponent.loadout) ~= "table" then
+            if type(opponent) == "table" and (not positive_integer(opponent.slot) or opponent.slot ~= index) then return failure("GA_OPPONENT_SLOT_INVALID", "Opponent slot must equal array index", { index = index, slot = opponent.slot }) end
             return failure("GA_FIGHTSPEC_TYPE_INVALID", "Opponent fields have invalid types", { index = index })
         end
         local profile = item_exists(catalogs.profiles, opponent.profile)

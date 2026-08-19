@@ -39,6 +39,27 @@ foreach ($metadata in @($catalogSections.meta, $difficultySections.meta, $layout
 }
 if ([int]$catalogSections.meta.generator_version -ne 1) { throw 'Reference oracle supports only generator v1.' }
 
+$difficultyManifest = @{
+    rookie = @(1,2,12,12)
+    stalker = @(2,3,18,15)
+    veteran = @(3,4,26,18)
+    master = @(4,6,38,22)
+}
+if ($difficultySections.Count -ne 5 -or $difficultySections.meta.Count -ne 2) { throw 'Difficulty catalog must match the exact v1 section/key manifest.' }
+foreach ($difficultyId in @('rookie','stalker','veteran','master')) {
+    $entry = $difficultySections["ga_difficulty_$difficultyId"]
+    if ($null -eq $entry -or $entry.Count -ne 4) { throw "Difficulty $difficultyId must match the exact v1 key manifest." }
+    $actual = @([int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_loadout_budget)
+    if (@(Compare-Object -ReferenceObject $difficultyManifest[$difficultyId] -DifferenceObject $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $difficultyId differs from the v1 semantic manifest." }
+}
+$expectedLayoutPaths = @('bar_arena_walk_3_1','bar_arena_walk_3_2','bar_arena_walk_6_1','bar_arena_walk_6_3','bar_arena_walk_6_6','bar_arena_monstr_walk')
+$layoutManifestEntry = $layoutSections.ga_layout_rostok_arena_v1
+if ($layoutSections.Count -ne 2 -or $layoutSections.meta.Count -ne 2 -or $null -eq $layoutManifestEntry -or $layoutManifestEntry.Count -ne 4 -or
+    $layoutManifestEntry.level -cne 'l05_bar' -or $layoutManifestEntry.actor_spawn_path -cne 'bar_arena_walk_1_1' -or
+    $layoutManifestEntry.actor_look_path -cne 'bar_arena_walk_attack') { throw 'Layout catalog differs from the exact v1 semantic manifest.' }
+$actualLayoutPaths = @($layoutManifestEntry.opponent_spawn_paths.Split(',') | ForEach-Object { $_.Trim() })
+if (@(Compare-Object -ReferenceObject $expectedLayoutPaths -DifferenceObject $actualLayoutPaths -SyncWindow 0).Count -ne 0) { throw 'Layout opponent paths differ from the ordered v1 semantic manifest.' }
+
 $parkMillerModulus = [int64]2147483647
 $parkMillerStateModulus = [int64]2147483646
 
@@ -131,7 +152,8 @@ function New-GaEncodedLoadout {
 
 function New-GaEncodedFight {
     param([int64]$SessionSeed, [string]$DifficultyId, [int]$FightIndex)
-    $request = [pscustomobject]@{SessionSeed=$SessionSeed;ModeId='skirmish';DifficultyId=$DifficultyId;LayoutId='rostok_arena_v1'}
+    $normalizedSeed = ConvertTo-GaNormalizedSeed -Seed $SessionSeed
+    $request = [pscustomobject]@{SessionSeed=$normalizedSeed;ModeId='skirmish';DifficultyId=$DifficultyId;LayoutId='rostok_arena_v1'}
     $difficulty = $difficultyCatalog[$DifficultyId]
     $enemyCountRng = New-GaStream -Request $request -FightIndex $FightIndex -Tag 'enemy_count'
     $enemyCount = Get-GaNextInt -Rng $enemyCountRng -Minimum $difficulty.EnemyMin -Maximum $difficulty.EnemyMax
@@ -156,7 +178,6 @@ function New-GaEncodedFight {
         $totalCost = $selectedProfile.Cost + $loadoutCost
         $encodedOpponents += "${opponentIndex}:$opponentIndex,$($spawnPaths[$opponentIndex-1]),$($selectedProfile.Section),$($selectedProfile.Cost),$encodedLoadout,$totalCost"
     }
-    $normalizedSeed = ConvertTo-GaNormalizedSeed -Seed $SessionSeed
     $fields = @(
         'schema_version=1','generator_version=1','catalog_revision=1','layout_version=1',
         "session_seed=$normalizedSeed","fight_index=$FightIndex","fight_id=ga-$normalizedSeed-$FightIndex-g1-c1-l1",'mode_id=skirmish',"difficulty_id=$DifficultyId",
@@ -176,6 +197,10 @@ $expectedLines = @($goldenRequests | ForEach-Object {
     "seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$encoding"
 })
 if ($expectedLines.Count -ne 4) { throw 'Reference oracle must produce exactly four golden records.' }
+
+$zeroAlias = New-GaEncodedFight -SessionSeed 0 -DifficultyId veteran -FightIndex 7
+$oneAlias = New-GaEncodedFight -SessionSeed 1 -DifficultyId veteran -FightIndex 7
+if ($zeroAlias -cne $oneAlias) { throw 'Normalized seed aliases 0 and 1 must produce the same canonical FightSpec.' }
 
 if ($Verify) {
     $actualLines = @(Get-Content -LiteralPath $fixturePath | Where-Object { $_ -and -not $_.StartsWith('#') })
