@@ -196,11 +196,17 @@ seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|sessio
 function snapshot()
     return "line_exist r_string_ex"
 end
+local function synchronize_cache() end
 function run()
-    local markers = "commit_write_keys commit_remove_keys fail_closed_keys recover"
+    local markers = "commit_write_keys commit_remove_keys fail_closed_keys recover GA_CONFIG_QUARANTINED GA_CONFIG_RECOVERY_FAILED boolean_returns"
+    local raw = config.ini
+    local cache = config.cache
     local remove = config.remove_line
+    synchronize_cache()
     return markers
 end
+function recover() synchronize_cache() end
+function is_quarantined() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_migrations.script' @'
 function migrate()
@@ -208,15 +214,19 @@ function migrate()
     return { ok = true, value = { events = {} } }
 end
 function read_settings()
+    local gamma_arena_boolean_returns = true
+    gamma_arena_config_tx.is_quarantined()
     return "GA_SETTINGS_SCHEMA_NEWER settings_schema_version events"
 end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_session_store.script' @'
 local LAUNCH_TOKEN_TTL = 600
 local volatile_launch_permits = {}
+local gamma_arena_boolean_returns = true
 local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID"
 local function remove(config, section, key) config:remove_line(section, key) end
 local function validate_expected_session() end
+local function validate_persisted_launch_request() end
 gamma_arena_config_tx.run()
 function new_store() end
 function parse_manual_seed() end
@@ -227,12 +237,15 @@ function issue_launch() end
 function parse_launch_token() end
 function consume_launch() end
 function issue_resume() end
-function consume_resume() end
+function consume_resume(intent, session)
+    if intent.value.next_fight_index < session.value.fight_index then return "GA_RESUME_FIGHT_INDEX_MISMATCH" end
+end
 function write_character_creation() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
 local function on_read(xml_file_name, xml_obj)
-    if xml_file_name ~= "ui_mm_main.xml" then return end
+    local normalized = string.lower(string.gsub(xml_file_name, "/", "\\"))
+    if normalized ~= "ui\\ui_mm_main.xml" then return end
     local existing = xml_obj:query("menu_main btn[name=btn_gamma_arena]")
     if existing and #existing > 0 then return end
     local menu = xml_obj:query("menu_main")
@@ -268,15 +281,27 @@ function UIStart:InitControls()
     self:AddCallback("x", ui_events.BUTTON_CLICKED, self.StartGame, self)
 end
 function UIStart:StartGame() self.owner:StartGame() end
+function UIStart:RetryStale()
+    local first = gamma_arena_session_store.issue_launch()
+    if first.error.code == "GA_LAUNCH_STALE_CLEARED" then gamma_arena_session_store.issue_launch() end
+end
 function UIStart:ShowFatal() self.fatal_main_menu = true end
 function create() end
 function show_fatal() end
 '@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_migrations.script' @'
 local function stale_launch_is_recovered_by_new_store() end
+local function same_store_corrupt_launch_is_replaced() end
 local function resume_rejects_tampered_expected_session() end
 local function mutation_failure_matrix_is_crash_safe() end
+local function recovery_failure_quarantines_transaction() end
+local function read_and_false_return_faults_are_safe() end
+local function stale_cleanup_and_conflict_faults_are_safe() end
+local function dxml_accepts_canonical_callback_path() end
 local function arm_fault() end
+local function arm_read_fault() end
+local function arm_recovery_fault() end
+local persisted = {}
 function run() end
 '@
     $DomainPath = Join-Path $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script'

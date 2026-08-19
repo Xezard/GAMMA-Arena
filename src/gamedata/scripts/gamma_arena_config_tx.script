@@ -1,5 +1,27 @@
+local quarantine_by_config = setmetatable({}, { __mode = "k" })
+
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
+end
+
+local function adapter_boolean_returns(target)
+    local ok, declared = pcall(function() return target.gamma_arena_boolean_returns end)
+    return ok and declared == true
+end
+
+local function call_adapter(target, method_name, ...)
+    local ok_method, method = pcall(function() return target[method_name] end)
+    if not ok_method or type(method) ~= "function" then
+        return false, { kind = "missing_method", detail = method_name }
+    end
+    local ok, value = pcall(method, target, ...)
+    if not ok then
+        return false, { kind = "throw", detail = tostring(value) }
+    end
+    if value == false and adapter_boolean_returns(target) then
+        return false, { kind = "false_return", detail = method_name }
+    end
+    return true, value
 end
 
 local function key_set(keys)
@@ -43,13 +65,19 @@ local function snapshot_impl(config, section, keys)
     local entries = {}
     for _, key in ipairs(keys) do
         local ok_presence, present = pcall(line_exist, config, section, key)
-        if not ok_presence then
-            return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key presence could not be read", { section = section, key = key })
+        if not ok_presence or type(present) ~= "boolean" then
+            return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key presence could not be read", {
+                phase = "primary_read", section = section, key = key,
+                detail = ok_presence and "line_exist returned a non-boolean value" or tostring(present)
+            })
         end
         if present then
             local ok_value, value = pcall(r_string_ex, config, section, key)
-            if not ok_value or value == nil then
-                return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key value could not be read", { section = section, key = key })
+            if not ok_value or value == nil or (value == false and adapter_boolean_returns(config)) then
+                return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key value could not be read", {
+                    phase = "primary_read", section = section, key = key,
+                    detail = ok_value and "r_string_ex returned an explicit failure" or tostring(value)
+                })
             end
             entries[key] = { present = true, value = tostring(value) }
         else
@@ -62,7 +90,7 @@ end
 function snapshot(config, section, keys)
     local ok, result = pcall(snapshot_impl, config, section, keys)
     if not ok then
-        return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config snapshot raised an error", { detail = tostring(result) })
+        return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config snapshot raised an error", { phase = "primary_read", detail = tostring(result) })
     end
     return result
 end
@@ -89,29 +117,16 @@ local function order_operations(operations, options)
     return ordered
 end
 
-local function mutate(config, section, operation)
-    if operation.action == "write" then
-        return pcall(config.w_value, config, section, operation.key, operation.value)
-    end
-    return pcall(config.remove_line, config, section, operation.key)
-end
-
 local function desired_after_failure(snapshot_value, fail_closed_keys)
     local desired = {}
     for _, key in ipairs(snapshot_value.keys) do
-        if fail_closed_keys[key] then
-            desired[key] = { present = false }
-        else
-            desired[key] = snapshot_value.entries[key]
-        end
+        desired[key] = fail_closed_keys[key] and { present = false } or snapshot_value.entries[key]
     end
     return desired
 end
 
 local function update_shadow(shadow, keys, state)
-    if type(shadow) ~= "table" then
-        return
-    end
+    if type(shadow) ~= "table" then return end
     for _, key in ipairs(keys) do
         local entry = state[key]
         shadow[key] = entry.present and { present = true, value = tostring(entry.value) } or { present = false }
@@ -119,59 +134,170 @@ local function update_shadow(shadow, keys, state)
 end
 
 local function invalidate_shadow(shadow, keys, fail_closed_keys)
-    if type(shadow) ~= "table" then
-        return
-    end
+    if type(shadow) ~= "table" then return end
     for _, key in ipairs(keys) do
-        if fail_closed_keys[key] then
-            shadow[key] = { present = false }
-        else
-            shadow[key] = nil
-        end
+        shadow[key] = fail_closed_keys[key] and { present = false } or nil
     end
 end
 
-local function recover(config, section, snapshot_value, options)
-    local fail_closed_keys = key_set(options and options.fail_closed_keys)
-    local desired = desired_after_failure(snapshot_value, fail_closed_keys)
-    local recovery_order = {}
-    for _, key in ipairs(options and options.fail_closed_keys or {}) do
-        if desired[key] then recovery_order[#recovery_order + 1] = key end
+local function build_recovery_order(snapshot_value, desired, options)
+    local fail_closed_keys = key_set(options.fail_closed_keys)
+    local marker_keys = key_set(options.commit_write_keys)
+    for key in pairs(key_set(options.commit_remove_keys)) do marker_keys[key] = true end
+    local first, middle, last, seen = {}, {}, {}, {}
+
+    for _, key in ipairs(options.commit_remove_keys or {}) do
+        if desired[key] and fail_closed_keys[key] and not seen[key] then
+            first[#first + 1] = key
+            seen[key] = true
+        end
+    end
+    for _, key in ipairs(options.commit_write_keys or {}) do
+        if desired[key] and fail_closed_keys[key] and not seen[key] then
+            first[#first + 1] = key
+            seen[key] = true
+        end
     end
     for _, key in ipairs(snapshot_value.keys) do
-        if not fail_closed_keys[key] then recovery_order[#recovery_order + 1] = key end
+        if not seen[key] then
+            if marker_keys[key] then last[#last + 1] = key else middle[#middle + 1] = key end
+            seen[key] = true
+        end
     end
+    local ordered = {}
+    for _, group in ipairs({ first, middle, last }) do
+        for _, key in ipairs(group) do ordered[#ordered + 1] = key end
+    end
+    return ordered
+end
 
-    local recovery_ok = true
-    local recovery_errors = {}
-    for _, key in ipairs(recovery_order) do
-        local entry = desired[key]
+local function recovery_port(config)
+    local ok, raw_ini, cache = pcall(function()
+        return config.ini, config.cache
+    end)
+    if not ok or raw_ini == nil or type(cache) ~= "table" then
+        return fail("GA_CONFIG_RECOVERY_FAILED", "Raw ini_file_ex recovery port is unavailable", { phase = "recovery_read" })
+    end
+    local ok_methods, w_string, remove_line = pcall(function()
+        return raw_ini.w_string, raw_ini.remove_line
+    end)
+    if not ok_methods or type(w_string) ~= "function" or type(remove_line) ~= "function" then
+        return fail("GA_CONFIG_RECOVERY_FAILED", "Raw ini_file_ex recovery methods are unavailable", { phase = "recovery_read" })
+    end
+    return gamma_arena_result.ok({ ini = raw_ini, cache = cache })
+end
+
+local function synchronize_cache(cache, section, keys)
+    local ok, detail = pcall(function()
+        for _, key in ipairs(keys) do
+            cache[section .. "&" .. key] = nil
+        end
+    end)
+    if not ok then
+        return fail("GA_CONFIG_RECOVERY_FAILED", "ini_file_ex cache synchronization failed", { phase = "recovery_cache", detail = tostring(detail) })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function attempt_recovery(config, record)
+    local port = recovery_port(config)
+    if not port.ok then return port end
+
+    for _, key in ipairs(record.order) do
+        local entry = record.desired[key]
         local ok, detail
         if entry.present then
-            ok, detail = pcall(config.w_value, config, section, key, entry.value)
+            ok, detail = call_adapter(port.value.ini, "w_string", record.section, key, entry.value)
         else
-            ok, detail = pcall(config.remove_line, config, section, key)
+            ok, detail = call_adapter(port.value.ini, "remove_line", record.section, key)
         end
         if not ok then
-            recovery_ok = false
-            recovery_errors[#recovery_errors + 1] = key .. ":" .. tostring(detail)
+            invalidate_shadow(record.shadow, record.keys, record.fail_closed_set)
+            return fail("GA_CONFIG_RECOVERY_FAILED", "Touched-key recovery mutation failed; config remains quarantined", {
+                phase = "recovery_mutation", key = key, failure_kind = detail.kind, detail = detail.detail
+            })
         end
     end
-    local save_ok, save_detail = pcall(config.save, config)
+
+    local cache_result = synchronize_cache(port.value.cache, record.section, record.keys)
+    if not cache_result.ok then
+        invalidate_shadow(record.shadow, record.keys, record.fail_closed_set)
+        return cache_result
+    end
+
+    local save_ok, save_detail = call_adapter(config, "save")
     if not save_ok then
-        recovery_ok = false
-        recovery_errors[#recovery_errors + 1] = "save:" .. tostring(save_detail)
+        invalidate_shadow(record.shadow, record.keys, record.fail_closed_set)
+        return fail("GA_CONFIG_RECOVERY_FAILED", "Recovered touched keys could not be persisted; config remains quarantined", {
+            phase = "recovery_save", failure_kind = save_detail.kind, detail = save_detail.detail
+        })
     end
-    if recovery_ok then
-        update_shadow(options and options.shadow, snapshot_value.keys, desired)
-    else
-        invalidate_shadow(options and options.shadow, snapshot_value.keys, fail_closed_keys)
+
+    update_shadow(record.shadow, record.keys, record.desired)
+    quarantine_by_config[config] = nil
+    return gamma_arena_result.ok({ recovered = true, state = record.desired })
+end
+
+local function quarantine_record(config, snapshot_value, options, primary_failure)
+    local fail_closed_set = key_set(options.fail_closed_keys)
+    local desired = desired_after_failure(snapshot_value, fail_closed_set)
+    local record = {
+        section = snapshot_value.section,
+        keys = snapshot_value.keys,
+        desired = desired,
+        order = build_recovery_order(snapshot_value, desired, options),
+        fail_closed_set = fail_closed_set,
+        shadow = options.shadow,
+        primary_failure = primary_failure
+    }
+    quarantine_by_config[config] = record
+    return record
+end
+
+local function recover_impl(config)
+    local record = quarantine_by_config[config]
+    if record == nil then return gamma_arena_result.ok({ recovered = false }) end
+    return attempt_recovery(config, record)
+end
+
+function recover(config)
+    local ok, result = pcall(recover_impl, config)
+    if not ok then
+        return fail("GA_CONFIG_RECOVERY_FAILED", "Explicit config recovery raised an error", { phase = "recovery_internal", detail = tostring(result) })
     end
-    return recovery_ok, table.concat(recovery_errors, ";")
+    return result
+end
+
+function is_quarantined(config)
+    return config ~= nil and quarantine_by_config[config] ~= nil
+end
+
+local function primary_failure_result(config, snapshot_value, options, phase, failed_at, detail)
+    local primary_failure = {
+        phase = phase,
+        failed_at = failed_at,
+        failure_kind = detail.kind,
+        detail = detail.detail
+    }
+    local record = quarantine_record(config, snapshot_value, options, primary_failure)
+    local recovery = attempt_recovery(config, record)
+    return fail(options.error_code or "GA_CONFIG_TRANSACTION_FAILED", "Config transaction failed; touched-key recovery was attempted", {
+        section = snapshot_value.section,
+        primary = primary_failure,
+        recovery_ok = recovery.ok,
+        recovery_error = recovery.ok and nil or recovery.error,
+        quarantined = quarantine_by_config[config] ~= nil,
+        persisted_state_may_be_unknown = phase == "primary_save"
+    })
 end
 
 local function run_impl(config, section, operations, options)
     options = options or {}
+    if config ~= nil and quarantine_by_config[config] ~= nil then
+        return fail("GA_CONFIG_QUARANTINED", "Arena config transactions are blocked until touched-key recovery succeeds", {
+            previous = quarantine_by_config[config].primary_failure
+        })
+    end
     local keys_result = unique_keys(operations)
     if not keys_result.ok then return keys_result end
     local keys = keys_result.value
@@ -186,33 +312,34 @@ local function run_impl(config, section, operations, options)
     end
 
     local ordered = order_operations(operations, options)
-    local failure_detail = nil
-    local failure_key = nil
     for _, operation in ipairs(ordered) do
-        local ok, detail = mutate(config, section, operation)
-        if not ok then
-            failure_detail = detail
-            failure_key = operation.key
-            break
+        local ok, detail
+        if operation.action == "write" then
+            ok, detail = call_adapter(config, "w_value", section, operation.key, operation.value)
+        else
+            ok, detail = call_adapter(config, "remove_line", section, operation.key)
         end
-    end
-    if failure_detail == nil then
-        local save_ok, save_detail = pcall(save, config)
-        if not save_ok then
-            failure_detail = save_detail
-            failure_key = "<save>"
+        if not ok then
+            return primary_failure_result(config, snapshot_result.value, options, "primary_mutation", operation.key, detail)
         end
     end
 
-    if failure_detail ~= nil then
-        local recovery_ok, recovery_detail = recover(config, section, snapshot_result.value, options)
-        return fail(options.error_code or "GA_CONFIG_TRANSACTION_FAILED", "Config transaction failed and recovery was attempted", {
-            section = section,
-            failed_at = failure_key,
-            detail = tostring(failure_detail),
-            recovery_ok = recovery_ok,
-            recovery_detail = recovery_detail
+    local ok_cache, cache = pcall(function() return config.cache end)
+    if not ok_cache or type(cache) ~= "table" then
+        return primary_failure_result(config, snapshot_result.value, options, "primary_cache", "<cache>", {
+            kind = "missing_cache", detail = "ini_file_ex cache is unavailable"
         })
+    end
+    local cache_result = synchronize_cache(cache, section, keys)
+    if not cache_result.ok then
+        return primary_failure_result(config, snapshot_result.value, options, "primary_cache", "<cache>", {
+            kind = "cache_sync", detail = cache_result.error.message
+        })
+    end
+
+    local save_ok, save_detail = call_adapter(config, "save")
+    if not save_ok then
+        return primary_failure_result(config, snapshot_result.value, options, "primary_save", "<save>", save_detail)
     end
 
     local final_state = {}

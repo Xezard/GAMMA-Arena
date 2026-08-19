@@ -41,6 +41,11 @@ local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
 end
 
+local function adapter_boolean_returns(config)
+    local ok, declared = pcall(function() return config.gamma_arena_boolean_returns end)
+    return ok and declared == true
+end
+
 local function finite_integer(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge and value == math.floor(value)
 end
@@ -107,6 +112,26 @@ local function validate_start_request_impl(request)
     })
 end
 
+local function validate_persisted_launch_request(values)
+    if type(values) ~= "table" then
+        return fail("GA_START_REQUEST_INVALID", "Persisted launch payload must be a table")
+    end
+    local seed = parse_manual_seed_impl(values.launch_session_seed)
+    if not seed.ok then return seed end
+    if tostring(seed.value) ~= values.launch_session_seed then
+        return fail("GA_SESSION_SEED_INVALID", "Persisted launch seed must use canonical decimal uint32 encoding", {
+            value = values.launch_session_seed
+        })
+    end
+    return validate_start_request_impl({
+        schema_version = 1,
+        mode_id = values.launch_mode_id,
+        difficulty_id = values.launch_difficulty_id,
+        seed_mode = values.launch_seed_mode,
+        session_seed = seed.value
+    })
+end
+
 local function parse_launch_token_impl(token, now)
     if type(token) ~= "string" then
         return fail("GA_LAUNCH_TOKEN_INVALID", "Launch token is missing")
@@ -133,8 +158,8 @@ local function validate_resume_intent(intent)
     if not session_id.ok then return session_id end
     local session_nonce = nonempty_identifier(intent.session_nonce, "GA_RESUME_SESSION_NONCE_INVALID", "session_nonce")
     if not session_nonce.ok then return session_nonce end
-    if not finite_integer(intent.next_fight_index) or intent.next_fight_index < 0 then
-        return fail("GA_RESUME_FIGHT_INDEX_INVALID", "Resume fight index must be a non-negative integer")
+    if not finite_integer(intent.next_fight_index) or intent.next_fight_index < 0 or intent.next_fight_index > UINT32_MAX then
+        return fail("GA_RESUME_FIGHT_INDEX_INVALID", "Resume fight index must be uint32")
     end
     if intent.checkpoint_name ~= CHECKPOINT_NAME then
         return fail("GA_RESUME_CHECKPOINT_INVALID", "ResumeIntent must use the reserved Arena checkpoint", { value = intent.checkpoint_name })
@@ -176,8 +201,8 @@ local function validate_expected_session(session)
     if not finite_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > UINT32_MAX then
         return fail("GA_SESSION_SEED_INVALID", "ArenaSession seed must be uint32")
     end
-    if not finite_integer(session.fight_index) or session.fight_index < 0 then
-        return fail("GA_SESSION_FIGHT_INDEX_INVALID", "ArenaSession fight index must be non-negative")
+    if not finite_integer(session.fight_index) or session.fight_index < 0 or session.fight_index > UINT32_MAX then
+        return fail("GA_SESSION_FIGHT_INDEX_INVALID", "ArenaSession fight index must be uint32")
     end
     local session_id = nonempty_identifier(session.session_id, "GA_SESSION_ID_INVALID", "session_id")
     if not session_id.ok then return session_id end
@@ -224,10 +249,8 @@ function Store:raw_read(config, key)
     if config == nil then
         return fail("GA_CONFIG_INVALID", "Config is unavailable", { key = key })
     end
-    local shadow = self:get_shadow(config)
-    local shadow_entry = shadow[key]
-    if shadow_entry ~= nil then
-        return gamma_arena_result.ok(shadow_entry.present and shadow_entry.value or nil)
+    if gamma_arena_config_tx.is_quarantined(config) then
+        return fail("GA_CONFIG_QUARANTINED", "Arena config reads are blocked until touched-key recovery succeeds", { key = key })
     end
     local ok_methods, line_exist, r_string_ex = pcall(function()
         return config.line_exist, config.r_string_ex
@@ -243,10 +266,16 @@ function Store:raw_read(config, key)
         return gamma_arena_result.ok(nil)
     end
     local ok_value, value = pcall(r_string_ex, config, SECTION, key)
-    if not ok_value or value == nil then
+    if not ok_value or value == nil or (value == false and adapter_boolean_returns(config)) then
         return fail("GA_CONFIG_READ_FAILED", "Config value could not be read", { key = key })
     end
     return gamma_arena_result.ok(tostring(value))
+end
+
+function Store:clear_launch_permits(config)
+    for token, owner in pairs(self.volatile_launch_permits) do
+        if owner == config then self.volatile_launch_permits[token] = nil end
+    end
 end
 
 function Store:read_all(config, keys)
@@ -383,10 +412,17 @@ function Store:issue_launch(config, request, options)
         stale_reason = pending.error.code
     elseif pending.value then
         local parsed = parse_launch_token_impl(existing.launch_token, now.value)
-        if parsed.ok and self.volatile_launch_permits[existing.launch_token] == config then
+        local persisted_request = validate_persisted_launch_request(existing)
+        if parsed.ok and persisted_request.ok and self.volatile_launch_permits[existing.launch_token] == config then
             return fail("GA_LAUNCH_ALREADY_PENDING", "A valid launch intent is already pending")
         end
-        stale_reason = parsed.ok and "GA_LAUNCH_TOKEN_ORPHANED" or parsed.error.code
+        if not parsed.ok then
+            stale_reason = parsed.error.code
+        elseif self.volatile_launch_permits[existing.launch_token] ~= config then
+            stale_reason = "GA_LAUNCH_TOKEN_ORPHANED"
+        else
+            stale_reason = persisted_request.error.code
+        end
     else
         for _, key in ipairs(launch_keys) do
             if key ~= "launch_pending" and existing[key] ~= nil then
@@ -396,14 +432,11 @@ function Store:issue_launch(config, request, options)
         end
     end
 
-    local events = {}
     if stale_reason ~= nil then
-        if existing.launch_token ~= nil then
-            self.volatile_launch_permits[existing.launch_token] = nil
-        end
+        self:clear_launch_permits(config)
         local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_STALE_CLEAR_FAILED")
         if not cleared.ok then return cleared end
-        events[#events + 1] = { code = "GA_LAUNCH_STALE_CLEARED", reason = stale_reason }
+        return fail("GA_LAUNCH_STALE_CLEARED", "A stale launch intent was cleared; issue a fresh launch", { reason = stale_reason })
     end
 
     local nonce = self:nonce_value(options, now.value)
@@ -424,7 +457,7 @@ function Store:issue_launch(config, request, options)
     })
     if not written.ok then return written end
     self.volatile_launch_permits[token] = config
-    return gamma_arena_result.ok({ token = token, request = value, events = events })
+    return gamma_arena_result.ok({ token = token, request = value })
 end
 
 function Store:reject_launch(config, token, result)
@@ -467,13 +500,7 @@ function Store:consume_launch(config, options)
     if self.volatile_launch_permits[values.launch_token] ~= config then
         return self:reject_launch(config, values.launch_token, fail("GA_LAUNCH_TOKEN_NOT_VOLATILE", "Launch token was not issued by this SessionStore instance"))
     end
-    local request = validate_start_request_impl({
-        schema_version = 1,
-        mode_id = values.launch_mode_id,
-        difficulty_id = values.launch_difficulty_id,
-        seed_mode = values.launch_seed_mode,
-        session_seed = values.launch_session_seed and tonumber(values.launch_session_seed) or nil
-    })
+    local request = validate_persisted_launch_request(values)
     if not request.ok then return self:reject_launch(config, values.launch_token, request) end
 
     local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CONSUME_FAILED")
@@ -558,8 +585,8 @@ function Store:consume_resume(config, expected)
     if session.value.checkpoint_name ~= intent.value.checkpoint_name then
         return self:reject_resume(config, fail("GA_RESUME_CHECKPOINT_MISMATCH", "Resume checkpoint does not match ArenaSession"))
     end
-    if session.value.fight_index ~= intent.value.next_fight_index then
-        return self:reject_resume(config, fail("GA_RESUME_FIGHT_INDEX_MISMATCH", "Resume fight index does not match ArenaSession", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
+    if intent.value.next_fight_index < session.value.fight_index then
+        return self:reject_resume(config, fail("GA_RESUME_FIGHT_INDEX_MISMATCH", "Resume fight index is older than the clean checkpoint baseline", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
     end
 
     local cleared = self:clear_intent(config, resume_keys, "resume_pending", "GA_RESUME_CONSUME_FAILED")

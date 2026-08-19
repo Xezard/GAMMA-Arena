@@ -6,74 +6,159 @@ local function copy_table(source)
     return result
 end
 
+local function copy_into(target, source)
+    for key in pairs(target) do target[key] = nil end
+    for key, value in pairs(source or {}) do target[key] = value end
+end
+
+local function fake_backend(initial)
+    return {
+        working = copy_table(initial),
+        persisted = copy_table(initial)
+    }
+end
+
 local function fake_config(initial, shared_backend)
+    local backend = shared_backend or fake_backend(initial)
     local config = {
-        data = shared_backend or copy_table(initial),
+        backend = backend,
+        data = backend.working,
+        persisted = backend.persisted,
+        cache = {},
+        stale_cache = copy_table(backend.working),
         writes = {},
         removals = {},
         save_count = 0,
-        stale_cache = copy_table(initial),
-        mutation_index = 0,
-        fault_at = nil,
-        fault_used = false
+        gamma_arena_boolean_returns = true,
+        recovery_active = false,
+        faults = {
+            primary = { index = 0 },
+            read = { index = 0 },
+            recovery = { index = 0 }
+        }
     }
 
-    function config:arm_fault(position)
-        self.mutation_index = 0
-        self.fault_at = position
-        self.fault_used = false
+    for key, value in pairs(backend.working) do
+        config.cache["gamma_arena&" .. key] = value
+        config.cache["character_creation&" .. key] = value
+    end
+
+    function config:set_fault(channel, position, mode)
+        self.faults[channel] = { index = 0, at = position, mode = mode or "throw", used = false }
+    end
+
+    function config:arm_fault(position, mode)
+        self:set_fault("primary", position, mode)
+    end
+
+    function config:arm_read_fault(position, mode)
+        self:set_fault("read", position, mode)
+    end
+
+    function config:arm_recovery_fault(position, mode)
+        self:set_fault("recovery", position, mode)
     end
 
     function config:clear_fault()
-        self.fault_at = nil
-        self.fault_used = false
-        self.mutation_index = 0
+        self.faults.primary = { index = 0 }
+        self.faults.read = { index = 0 }
+        self.faults.recovery = { index = 0 }
+        self.recovery_active = false
     end
 
-    function config:maybe_fail(operation)
-        self.mutation_index = self.mutation_index + 1
-        if not self.fault_used and self.fault_at == self.mutation_index then
-            self.fault_used = true
-            error("injected " .. operation .. " failure at " .. tostring(self.mutation_index))
+    function config:maybe_fail(channel, operation)
+        local fault = self.faults[channel]
+        fault.index = fault.index + 1
+        if not fault.used and fault.at == fault.index then
+            fault.used = true
+            if fault.mode == "false" then
+                return true, false
+            end
+            error("injected " .. channel .. " " .. operation .. " failure at " .. tostring(fault.index))
+        end
+        return false, nil
+    end
+
+    function config:corrupt(section, key, value)
+        if value == nil then
+            backend.working[key] = nil
+            backend.persisted[key] = nil
+            self.cache[section .. "&" .. key] = nil
+            self.stale_cache[key] = nil
+        else
+            backend.working[key] = tostring(value)
+            backend.persisted[key] = tostring(value)
+            self.cache[section .. "&" .. key] = tostring(value)
+            self.stale_cache[key] = tostring(value)
         end
     end
 
     function config:r_string_ex(section, key)
-        if section ~= "gamma_arena" and section ~= "character_creation" then
-            return nil
-        end
-        return self.data[key]
+        local failed, result = self:maybe_fail("read", "r_string_ex")
+        if failed then return result end
+        if section ~= "gamma_arena" and section ~= "character_creation" then return nil end
+        return backend.working[key]
     end
 
     function config:r_value(section, key, _, default)
-        local value = self.stale_cache[key]
-        if value == nil then
-            return default
-        end
+        local value = self.cache[section .. "&" .. key]
+        if value == nil then value = self.stale_cache[key] end
+        if value == nil then return default end
         return value
     end
 
     function config:line_exist(section, key)
-        return self.data[key] ~= nil
+        local failed, result = self:maybe_fail("read", "line_exist")
+        if failed then return result end
+        return backend.working[key] ~= nil
     end
 
     function config:w_value(section, key, value)
-        self:maybe_fail("write")
+        local failed, result = self:maybe_fail("primary", "write")
+        if failed then return result end
         gamma_arena_test_assert.is_true(value ~= nil, "tests forbid nil w_value")
-        self.data[key] = tostring(value)
+        backend.working[key] = tostring(value)
+        self.cache[section .. "&" .. key] = tostring(value)
         self.stale_cache[key] = tostring(value)
         self.writes[#self.writes + 1] = section .. "." .. key .. "=" .. tostring(value)
+        return true
     end
 
     function config:remove_line(section, key)
-        self:maybe_fail("remove")
-        self.data[key] = nil
+        local failed, result = self:maybe_fail("primary", "remove")
+        if failed then return result end
+        backend.working[key] = nil
         self.removals[#self.removals + 1] = section .. "." .. key
+        return true
     end
 
     function config:save()
-        self:maybe_fail("save")
+        local channel = self.recovery_active and "recovery" or "primary"
+        local failed, result = self:maybe_fail(channel, "save")
+        if failed then return result end
+        copy_into(backend.persisted, backend.working)
         self.save_count = self.save_count + 1
+        self.recovery_active = false
+        return true
+    end
+
+    local raw_ini = { gamma_arena_boolean_returns = true }
+    config.ini = raw_ini
+
+    function raw_ini:w_string(section, key, value)
+        config.recovery_active = true
+        local failed, result = config:maybe_fail("recovery", "raw_write")
+        if failed then return result end
+        backend.working[key] = tostring(value)
+        return true
+    end
+
+    function raw_ini:remove_line(section, key)
+        config.recovery_active = true
+        local failed, result = config:maybe_fail("recovery", "raw_remove")
+        if failed then return result end
+        backend.working[key] = nil
+        return true
     end
 
     return config
@@ -174,6 +259,7 @@ local function durable_preferences_are_exact()
     gamma_arena_test_assert.equals(#config.writes, 3, "only three durable keys written")
     gamma_arena_test_assert.equals(config.data.unrelated, "keep", "unrelated config preserved")
     gamma_arena_test_assert.equals(config.data.launch_pending, nil, "launch is not durable preference")
+    gamma_arena_test_assert.equals(config.cache["gamma_arena&settings_schema_version"], nil, "successful transaction invalidates touched wrapper cache")
 end
 
 local function launch_token_is_volatile_ttl_bound_and_one_shot()
@@ -211,9 +297,8 @@ local function launch_token_is_volatile_ttl_bound_and_one_shot()
 end
 
 local function stale_launch_is_recovered_by_new_store()
-    local backend = {}
+    local backend = fake_backend()
     local process_a_config = fake_config(nil, backend)
-    local process_b_config = fake_config(nil, backend)
     local process_a = gamma_arena_session_store.new_store()
     local process_b = gamma_arena_session_store.new_store()
     local first = process_a:issue_launch(process_a_config, valid_request(11), {
@@ -227,41 +312,93 @@ local function stale_launch_is_recovered_by_new_store()
     })
     gamma_arena_test_assert.equals(duplicate.error.code, "GA_LAUNCH_ALREADY_PENDING", "same-store duplicate rejects")
 
+    local process_b_config = fake_config(nil, backend)
     local recovered = process_b:issue_launch(process_b_config, valid_request(22), {
         clock = function() return 1001 end,
         nonce = function() return "process_b" end
     })
-    gamma_arena_test_assert.is_true(recovered.ok, "new process clears orphan and issues fresh launch")
-    gamma_arena_test_assert.equals(recovered.value.request.session_seed, 22, "fresh request replaces orphan")
-    gamma_arena_test_assert.equals(recovered.value.events[1].code, "GA_LAUNCH_STALE_CLEARED", "orphan cleanup is reported")
+    gamma_arena_test_assert.equals(recovered.error.code, "GA_LAUNCH_STALE_CLEARED", "new process reports cleared orphan")
+    local process_b_fresh = process_b:issue_launch(process_b_config, valid_request(22), {
+        clock = function() return 1002 end,
+        nonce = function() return "process_b_fresh" end
+    })
+    gamma_arena_test_assert.is_true(process_b_fresh.ok, "fresh retry succeeds after orphan cleanup")
+    gamma_arena_test_assert.equals(process_b_fresh.value.request.session_seed, 22, "fresh retry replaces orphan")
 
     for _, stale_token in ipairs({ "ga1:1:expired", "malformed" }) do
-        local stale_backend = {
+        local stale_backend = fake_backend({
             launch_pending = "true", launch_token = stale_token, launch_mode_id = "skirmish",
             launch_difficulty_id = "stalker", launch_seed_mode = "manual", launch_session_seed = "7"
-        }
+        })
         local stale_config = fake_config(nil, stale_backend)
         local store = gamma_arena_session_store.new_store()
         local fresh = store:issue_launch(stale_config, valid_request(33), {
             clock = function() return 1000 end,
             nonce = function() return "fresh" end
         })
-        gamma_arena_test_assert.is_true(fresh.ok, "expired/malformed launch is replaced")
-        gamma_arena_test_assert.equals(fresh.value.events[1].code, "GA_LAUNCH_STALE_CLEARED", "stale replacement event")
-        gamma_arena_test_assert.equals(stale_backend.launch_session_seed, "33", "fresh payload is complete")
+        gamma_arena_test_assert.equals(fresh.error.code, "GA_LAUNCH_STALE_CLEARED", "expired/malformed launch cleanup is reported")
+        local retried = store:issue_launch(stale_config, valid_request(33), {
+            clock = function() return 1001 end,
+            nonce = function() return "fresh_retry" end
+        })
+        gamma_arena_test_assert.is_true(retried.ok, "expired/malformed launch retry succeeds")
+        gamma_arena_test_assert.equals(stale_backend.working.launch_session_seed, "33", "fresh payload is complete")
     end
 
     for _, stale_backend in ipairs({
-        { launch_pending = "maybe" },
-        { launch_difficulty_id = "stalker" }
+        fake_backend({ launch_pending = "maybe" }),
+        fake_backend({ launch_difficulty_id = "stalker" })
     }) do
         local store = gamma_arena_session_store.new_store()
         local fresh = store:issue_launch(fake_config(nil, stale_backend), valid_request(44), {
             clock = function() return 1000 end,
             nonce = function() return "missing_token" end
         })
-        gamma_arena_test_assert.is_true(fresh.ok, "marker/payload without a token is replaced")
-        gamma_arena_test_assert.equals(fresh.value.events[1].code, "GA_LAUNCH_STALE_CLEARED", "tokenless stale replacement event")
+        gamma_arena_test_assert.equals(fresh.error.code, "GA_LAUNCH_STALE_CLEARED", "marker/payload without token is cleared")
+        local retry_config = fake_config(nil, stale_backend)
+        gamma_arena_test_assert.is_true(store:issue_launch(retry_config, valid_request(44), {
+            clock = function() return 1001 end,
+            nonce = function() return "missing_token_retry" end
+        }).ok, "tokenless stale retry succeeds")
+    end
+end
+
+local function same_store_corrupt_launch_is_replaced()
+    local corruptions = {
+        { key = "launch_pending", value = "maybe" },
+        { key = "launch_token", value = nil },
+        { key = "launch_token", value = "ga1:1000:forged" },
+        { key = "launch_mode_id", value = nil },
+        { key = "launch_mode_id", value = "survival" },
+        { key = "launch_difficulty_id", value = nil },
+        { key = "launch_difficulty_id", value = "impossible" },
+        { key = "launch_seed_mode", value = nil },
+        { key = "launch_seed_mode", value = "implicit" },
+        { key = "launch_session_seed", value = nil },
+        { key = "launch_session_seed", value = "0001" },
+        { key = "launch_session_seed", value = "1e3" }
+    }
+    for index, corruption in ipairs(corruptions) do
+        local config = fake_config()
+        local store = gamma_arena_session_store.new_store()
+        local issued = store:issue_launch(config, valid_request(10), {
+            clock = function() return 1000 end,
+            nonce = function() return "permitted_" .. tostring(index) end
+        })
+        gamma_arena_test_assert.is_true(issued.ok, "same-store corruption fixture issued")
+        config:corrupt("gamma_arena", corruption.key, corruption.value)
+
+        local replaced = store:issue_launch(config, valid_request(20 + index), {
+            clock = function() return 1001 end,
+            nonce = function() return "replacement_" .. tostring(index) end
+        })
+        gamma_arena_test_assert.equals(replaced.error.code, "GA_LAUNCH_STALE_CLEARED", "corrupt same-store pending launch is cleared: " .. corruption.key)
+        local retried = store:issue_launch(config, valid_request(20 + index), {
+            clock = function() return 1002 end,
+            nonce = function() return "replacement_retry_" .. tostring(index) end
+        })
+        gamma_arena_test_assert.is_true(retried.ok, "same-store fresh retry succeeds")
+        gamma_arena_test_assert.equals(config.persisted.launch_session_seed, tostring(20 + index), "replacement is persisted completely")
     end
 end
 
@@ -312,6 +449,22 @@ local function resume_intent_requires_matching_nonce_and_is_one_shot()
     gamma_arena_test_assert.is_false(malformed_result.ok, "malformed resume marker rejects")
     gamma_arena_test_assert.equals(malformed_result.error.code, "GA_RESUME_PENDING_INVALID", "malformed resume code")
     gamma_arena_test_assert.equals(malformed.data.resume_pending, nil, "malformed resume marker is cleared")
+
+    local baseline_config = fake_config()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(baseline_config, intent).ok, "baseline override resume issued")
+    local baseline_consumed = gamma_arena_session_store.consume_resume(baseline_config, valid_session(0))
+    gamma_arena_test_assert.is_true(baseline_consumed.ok, "clean checkpoint baseline may advance to external next fight index")
+    gamma_arena_test_assert.equals(baseline_consumed.value.next_fight_index, 3, "external next fight index survives clean checkpoint validation")
+
+    local backward_config = fake_config()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(backward_config, intent).ok, "backward resume fixture issued")
+    local backward = gamma_arena_session_store.consume_resume(backward_config, valid_session(4))
+    gamma_arena_test_assert.equals(backward.error.code, "GA_RESUME_FIGHT_INDEX_MISMATCH", "resume intent cannot move behind checkpoint baseline")
+    assert_keys_absent(backward_config, resume_keys, "backward resume intent is consumed fail-closed")
+
+    local unbounded_intent = copy_table(intent)
+    unbounded_intent.next_fight_index = 4294967296
+    gamma_arena_test_assert.equals(gamma_arena_session_store.issue_resume(fake_config(), unbounded_intent).error.code, "GA_RESUME_FIGHT_INDEX_INVALID", "resume fight index is bounded uint32")
 end
 
 local function resume_rejects_tampered_expected_session()
@@ -358,6 +511,7 @@ local function mutation_failure_matrix_is_crash_safe()
         gamma_arena_test_assert.equals(config.data.settings_schema_version, nil, "migration marker rolled back")
         gamma_arena_test_assert.equals(config.data.last_difficulty_id, nil, "migration difficulty rolled back")
         gamma_arena_test_assert.equals(config.data.last_seed_mode, nil, "migration seed mode rolled back")
+        gamma_arena_test_assert.equals(config.persisted.settings_schema_version, nil, "failed migration does not advance persisted marker")
         config:clear_fault()
         gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(config).ok, "migration retry succeeds")
     end
@@ -368,6 +522,7 @@ local function mutation_failure_matrix_is_crash_safe()
         config:arm_fault(fault_at)
         gamma_arena_test_assert.is_false(gamma_arena_session_store.save_preferences(config, "master", "manual").ok, "preferences injected fault")
         assert_table_equals(config.data, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "preferences rollback")
+        assert_table_equals(config.persisted, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "preferences persisted rollback")
         config:clear_fault()
         gamma_arena_test_assert.is_true(gamma_arena_session_store.save_preferences(config, "master", "manual").ok, "preferences retry succeeds")
     end
@@ -379,6 +534,7 @@ local function mutation_failure_matrix_is_crash_safe()
         local failed = store:issue_launch(config, valid_request(9), { clock = function() return 100 end, nonce = function() return "fault" end })
         gamma_arena_test_assert.is_false(failed.ok, "launch issue injected fault")
         assert_keys_absent(config, launch_keys, "failed launch issue leaves no torn intent")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "failed launch issue does not persist torn intent")
         config:clear_fault()
         gamma_arena_test_assert.is_true(store:issue_launch(config, valid_request(9), { clock = function() return 101 end, nonce = function() return "retry" end }).ok, "launch issue retry succeeds")
     end
@@ -391,6 +547,7 @@ local function mutation_failure_matrix_is_crash_safe()
         local failed = store:consume_launch(config, { clock = function() return 101 end })
         gamma_arena_test_assert.is_false(failed.ok, "launch consume injected fault")
         assert_keys_absent(config, launch_keys, "failed launch consume is fail-closed")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "failed launch consume persisted state is fail-closed")
         config:clear_fault()
         gamma_arena_test_assert.equals(store:consume_launch(config, { clock = function() return 102 end }).error.code, "GA_LAUNCH_NOT_PENDING", "failed consume cannot replay")
         gamma_arena_test_assert.is_true(store:issue_launch(config, valid_request(10), { clock = function() return 103 end, nonce = function() return "after" end }).ok, "new launch succeeds after failed consume")
@@ -403,6 +560,7 @@ local function mutation_failure_matrix_is_crash_safe()
         config:arm_fault(fault_at)
         gamma_arena_test_assert.is_false(store:issue_resume(config, intent).ok, "resume issue injected fault")
         assert_keys_absent(config, resume_keys, "failed resume issue leaves no torn intent")
+        assert_keys_absent({ data = config.persisted }, resume_keys, "failed resume issue does not persist torn intent")
         config:clear_fault()
         gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "resume issue retry succeeds")
     end
@@ -414,6 +572,7 @@ local function mutation_failure_matrix_is_crash_safe()
         config:arm_fault(fault_at)
         gamma_arena_test_assert.is_false(store:consume_resume(config, valid_session(3)).ok, "resume consume injected fault")
         assert_keys_absent(config, resume_keys, "failed resume consume is fail-closed")
+        assert_keys_absent({ data = config.persisted }, resume_keys, "failed resume consume persisted state is fail-closed")
         config:clear_fault()
         gamma_arena_test_assert.equals(store:consume_resume(config, valid_session(3)).error.code, "GA_RESUME_NOT_PENDING", "failed resume consume cannot replay")
         gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "new resume succeeds after failed consume")
@@ -426,9 +585,195 @@ local function mutation_failure_matrix_is_crash_safe()
         config:arm_fault(fault_at)
         gamma_arena_test_assert.is_false(gamma_arena_session_store.write_character_creation(config).ok, "character bridge injected fault")
         assert_table_equals(config.data, baseline, character_keys, "character bridge rollback")
+        assert_table_equals(config.persisted, baseline, character_keys, "character bridge persisted rollback")
         config:clear_fault()
         gamma_arena_test_assert.is_true(gamma_arena_session_store.write_character_creation(config).ok, "character bridge retry succeeds")
     end
+end
+
+local function recovery_failure_quarantines_transaction()
+    local baseline = { settings_schema_version = "1", last_difficulty_id = "rookie", last_seed_mode = "random" }
+    for _, recovery_fault in ipairs({
+        { position = 1, mode = "throw" },
+        { position = 1, mode = "false" },
+        { position = 4, mode = "throw" },
+        { position = 4, mode = "false" }
+    }) do
+        local config = fake_config(baseline)
+        config:arm_fault(2)
+        config:arm_recovery_fault(recovery_fault.position, recovery_fault.mode)
+        local failed = gamma_arena_session_store.save_preferences(config, "master", "manual")
+        gamma_arena_test_assert.is_false(failed.ok, "primary plus recovery fault rejects")
+        gamma_arena_test_assert.is_true(gamma_arena_config_tx.is_quarantined(config), "incomplete recovery quarantines config")
+        gamma_arena_test_assert.equals(config.save_count, 0, "incomplete recovery never invokes a successful save")
+        assert_table_equals(config.persisted, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "incomplete recovery does not advance persisted backend")
+
+        local blocked = gamma_arena_session_store.save_preferences(config, "veteran", "manual")
+        gamma_arena_test_assert.equals(blocked.error.code, "GA_CONFIG_QUARANTINED", "quarantine blocks later Arena transaction")
+        local blocked_settings_read = gamma_arena_migrations.read_settings(config)
+        gamma_arena_test_assert.equals(blocked_settings_read.error.code, "GA_CONFIG_QUARANTINED", "quarantine blocks later Arena settings reads")
+
+        config:clear_fault()
+        local recovered = gamma_arena_config_tx.recover(config)
+        gamma_arena_test_assert.is_true(recovered.ok, "explicit touched-key recovery succeeds")
+        gamma_arena_test_assert.is_false(gamma_arena_config_tx.is_quarantined(config), "successful recovery clears quarantine")
+        assert_table_equals(config.data, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "working backend restored")
+        assert_table_equals(config.persisted, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "persisted backend restored")
+        gamma_arena_test_assert.equals(config.cache["gamma_arena&settings_schema_version"], nil, "recovery invalidates touched wrapper cache")
+        gamma_arena_test_assert.is_true(gamma_arena_session_store.save_preferences(config, "veteran", "manual").ok, "retry is allowed only after recovery")
+    end
+
+    local recovery_read = fake_config(baseline)
+    local raw_ini = recovery_read.ini
+    recovery_read.ini = nil
+    recovery_read:arm_fault(2)
+    gamma_arena_test_assert.is_false(gamma_arena_session_store.save_preferences(recovery_read, "master", "manual").ok, "missing raw recovery port rejects")
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.is_quarantined(recovery_read), "recovery read/port failure quarantines config")
+    assert_table_equals(recovery_read.persisted, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "recovery read failure preserves persisted backend")
+    recovery_read.ini = raw_ini
+    recovery_read:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.recover(recovery_read).ok, "restored raw port recovers quarantine")
+
+    local marker_config = fake_config()
+    local marker_store = gamma_arena_session_store.new_store()
+    marker_config:arm_fault(7)
+    marker_config:arm_recovery_fault(1)
+    local marker_failure = marker_store:issue_launch(marker_config, valid_request(5), {
+        clock = function() return 100 end,
+        nonce = function() return "quarantined_marker" end
+    })
+    gamma_arena_test_assert.is_false(marker_failure.ok, "primary save plus marker rollback failure rejects")
+    gamma_arena_test_assert.is_true(marker_failure.error.context.persisted_state_may_be_unknown, "primary save failure reports persisted-state uncertainty")
+    gamma_arena_test_assert.equals(marker_store:consume_launch(marker_config, { clock = function() return 101 end }).error.code, "GA_CONFIG_QUARANTINED", "working marker is never consumable while quarantined")
+    assert_keys_absent({ data = marker_config.persisted }, launch_keys, "failed marker save does not advance fake persisted backend")
+    marker_config:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.recover(marker_config).ok, "marker quarantine recovers through raw port")
+    assert_keys_absent(marker_config, launch_keys, "marker recovery clears working intent")
+    assert_keys_absent({ data = marker_config.persisted }, launch_keys, "marker recovery clears persisted intent")
+end
+
+local function read_and_false_return_faults_are_safe()
+    local read_fault = fake_config()
+    read_fault:arm_read_fault(1)
+    local unreadable = gamma_arena_session_store.new_store():issue_launch(read_fault, valid_request(1), {
+        clock = function() return 100 end,
+        nonce = function() return "read_fault" end
+    })
+    gamma_arena_test_assert.is_false(unreadable.ok, "read fault rejects before mutation")
+    assert_keys_absent(read_fault, launch_keys, "read fault leaves working backend untouched")
+    assert_keys_absent({ data = read_fault.persisted }, launch_keys, "read fault leaves persisted backend untouched")
+    gamma_arena_test_assert.is_false(gamma_arena_config_tx.is_quarantined(read_fault), "pre-mutation read fault does not poison config")
+
+    local false_read = fake_config({ resume_pending = "false" })
+    false_read:arm_read_fault(2, "false")
+    local false_read_result = gamma_arena_session_store.new_store():issue_launch(false_read, valid_request(1), {
+        clock = function() return 100 end,
+        nonce = function() return "false_read" end
+    })
+    gamma_arena_test_assert.equals(false_read_result.error.code, "GA_CONFIG_READ_FAILED", "declared false-return session read rejects")
+    assert_keys_absent(false_read, launch_keys, "false-return session read leaves working backend untouched")
+
+    local false_settings_read = fake_config({ settings_schema_version = "1", last_difficulty_id = "rookie", last_seed_mode = "random" })
+    false_settings_read:arm_read_fault(1, "false")
+    local false_settings_result = gamma_arena_migrations.read_settings(false_settings_read)
+    gamma_arena_test_assert.equals(false_settings_result.error.code, "GA_SETTINGS_READ_FAILED", "declared false-return settings read rejects")
+
+    for _, primary_fault in ipairs({
+        { position = 1, mode = "false" },
+        { position = 7, mode = "false" }
+    }) do
+        local config = fake_config()
+        config:arm_fault(primary_fault.position, primary_fault.mode)
+        local failed = gamma_arena_session_store.new_store():issue_launch(config, valid_request(2), {
+            clock = function() return 100 end,
+            nonce = function() return "false_return" end
+        })
+        gamma_arena_test_assert.is_false(failed.ok, "declared false-return primary failure rejects")
+        assert_keys_absent(config, launch_keys, "false-return primary failure restores working backend")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "false-return primary failure restores persisted backend")
+    end
+
+    local nil_success = fake_config()
+    nil_success.gamma_arena_boolean_returns = false
+    local original_write = nil_success.w_value
+    local original_remove = nil_success.remove_line
+    local original_save = nil_success.save
+    function nil_success:w_value(section, key, value) original_write(self, section, key, value) end
+    function nil_success:remove_line(section, key) original_remove(self, section, key) end
+    function nil_success:save() original_save(self) end
+    local accepted = gamma_arena_session_store.new_store():issue_launch(nil_success, valid_request(3), {
+        clock = function() return 100 end,
+        nonce = function() return "nil_success" end
+    })
+    gamma_arena_test_assert.is_true(accepted.ok, "nil returns remain success for adapters without boolean contract")
+end
+
+local function stale_cleanup_and_conflict_faults_are_safe()
+    for fault_at = 1, 7 do
+        local config = fake_config({
+            launch_pending = "true", launch_token = "ga1:1:prior", launch_mode_id = "skirmish",
+            launch_difficulty_id = "stalker", launch_seed_mode = "manual", launch_session_seed = "7"
+        })
+        config:arm_fault(fault_at)
+        local store = gamma_arena_session_store.new_store()
+        local failed = store:issue_launch(config, valid_request(8), {
+            clock = function() return 1000 end,
+            nonce = function() return "stale_retry" end
+        })
+        gamma_arena_test_assert.is_false(failed.ok, "stale cleanup injected fault")
+        assert_keys_absent(config, launch_keys, "failed stale cleanup is fail-closed in working backend")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "failed stale cleanup is fail-closed in persisted backend")
+        config:clear_fault()
+        gamma_arena_test_assert.is_true(store:issue_launch(config, valid_request(8), {
+            clock = function() return 1001 end,
+            nonce = function() return "stale_recovered" end
+        }).ok, "stale cleanup can retry after complete recovery")
+    end
+
+    local intent = { schema_version = 1, session_id = "session-1", session_nonce = "session_nonce_1", next_fight_index = 3, checkpoint_name = "_gamma_arena_checkpoint" }
+    for fault_at = 1, 13 do
+        local config = fake_config()
+        local store = gamma_arena_session_store.new_store()
+        gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "conflict-clear fixture issued")
+        config:corrupt("gamma_arena", "launch_pending", "true")
+        config:arm_fault(fault_at)
+        local failed = store:consume_resume(config, valid_session(3))
+        gamma_arena_test_assert.is_false(failed.ok, "conflict clear injected fault")
+        assert_keys_absent(config, launch_keys, "failed conflict clear removes launch working keys")
+        assert_keys_absent(config, resume_keys, "failed conflict clear removes resume working keys")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "failed conflict clear removes launch persisted keys")
+        assert_keys_absent({ data = config.persisted }, resume_keys, "failed conflict clear removes resume persisted keys")
+    end
+end
+
+local function dxml_fixture()
+    local xml = { insertions = 0 }
+    function xml:query(selector)
+        if selector == "menu_main btn[name=btn_gamma_arena]" then
+            return self.insertions > 0 and { {} } or {}
+        end
+        if selector == "menu_main" then return { { kids = {} } } end
+        return {}
+    end
+    function xml:insertFromXMLString()
+        self.insertions = self.insertions + 1
+    end
+    return xml
+end
+
+local function dxml_accepts_canonical_callback_path()
+    local canonical = dxml_fixture()
+    gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("ui\\ui_mm_main.xml", canonical).ok, "canonical DXML callback path is accepted")
+    gamma_arena_test_assert.equals(canonical.insertions, 1, "canonical callback inserts Arena once")
+
+    local normalized = dxml_fixture()
+    gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("UI/UI_MM_MAIN.XML", normalized).ok, "case and slash normalization is accepted")
+    gamma_arena_test_assert.equals(normalized.insertions, 1, "normalized canonical callback inserts Arena once")
+
+    local unrelated = dxml_fixture()
+    gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("other/ui_mm_main.xml", unrelated).ok, "unrelated DXML callback is ignored without error")
+    gamma_arena_test_assert.equals(unrelated.insertions, 0, "same basename outside ui is rejected")
+    gamma_arena_test_assert.equals(modxml_gamma_arena.apply("ui_mm_main.xml", unrelated).value, false, "bare basename alias is rejected")
 end
 
 local function character_creation_bridge_is_exact()
@@ -449,9 +794,14 @@ local cases = {
     { name = "durable_preferences", fn = durable_preferences_are_exact },
     { name = "launch_token_one_shot", fn = launch_token_is_volatile_ttl_bound_and_one_shot },
     { name = "stale_launch_recovery", fn = stale_launch_is_recovered_by_new_store },
+    { name = "same_store_corrupt_launch", fn = same_store_corrupt_launch_is_replaced },
     { name = "resume_intent_one_shot", fn = resume_intent_requires_matching_nonce_and_is_one_shot },
     { name = "resume_expected_session_validation", fn = resume_rejects_tampered_expected_session },
     { name = "mutation_failure_matrix", fn = mutation_failure_matrix_is_crash_safe },
+    { name = "recovery_quarantine", fn = recovery_failure_quarantines_transaction },
+    { name = "read_and_false_faults", fn = read_and_false_return_faults_are_safe },
+    { name = "stale_conflict_faults", fn = stale_cleanup_and_conflict_faults_are_safe },
+    { name = "dxml_callback_path", fn = dxml_accepts_canonical_callback_path },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact }
 }
 

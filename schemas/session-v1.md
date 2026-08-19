@@ -52,7 +52,7 @@ The token grammar is `ga1:<issued_at_epoch>:<nonce>`. `issued_at_epoch` is a non
 
 Issuance also creates a module-local volatile permit. Consumption requires the persisted token and the volatile permit from the same Lua process. Therefore a persisted token left by a prior crashed process cannot activate Arena. A launch intent is consumed at most once.
 
-Each `SessionStore` instance owns its own volatile permits. A valid duplicate in the same instance is rejected. On a later process/store instance, an orphaned, malformed, expired, or partially written launch intent is removed before a fresh intent is issued; this recovery is reported as `GA_LAUNCH_STALE_CLEARED`.
+Each `SessionStore` instance owns its own volatile permits. A same-instance duplicate is rejected only after the complete persisted token/request payload (mode, difficulty, seed mode, canonical decimal seed, timestamp, and volatile permit) is revalidated. An orphaned, malformed, expired, corrupted, or partially written intent is atomically removed and returns `GA_LAUNCH_STALE_CLEARED`; the start UI then performs exactly one fresh issuance attempt.
 
 ## ArenaSession v1 checkpoint payload
 
@@ -66,7 +66,7 @@ Each `SessionStore` instance owns its own volatile permits. A valid duplicate in
   mode_id = "skirmish",
   difficulty_id = string,
   session_seed = number,
-  fight_index = number,
+  fight_index = uint32,
   generator_version = 1,
   catalog_revision = 1,
   layout_id = "rostok_arena_v1",
@@ -87,7 +87,7 @@ Resume intent is transient external coordination data, not part of the save:
   pending = true,
   session_id = string,
   session_nonce = string,
-  next_fight_index = non-negative integer,
+  next_fight_index = uint32,
   checkpoint_name = string
 }
 ```
@@ -103,18 +103,22 @@ resume_checkpoint_name
 resume_schema_version
 ```
 
-Resume consumption validates the complete expected `ArenaSession` v1 payload: schema, identifiers, nonce, reserved checkpoint, generator/catalog revisions, layout, mode, difficulty, uint32 seed, fight index, and phase. `resume_session_id`, `resume_session_nonce`, `resume_checkpoint_name`, and `resume_next_fight_index` must match the checkpoint payload. A mismatch fails closed and consumes the invalid intent. The resume keys are deleted with one `save()` transaction, so stale values from the wrapper cache cannot be consumed twice.
+Resume consumption validates the complete expected `ArenaSession` v1 payload: schema, identifiers, nonce, reserved checkpoint, generator/catalog revisions, layout, mode, difficulty, uint32 seed, uint32 fight index, and phase. `resume_session_id`, `resume_session_nonce`, and `resume_checkpoint_name` must match the checkpoint payload. `resume_next_fight_index` is external recovery state: it may be newer than the clean checkpoint's embedded `fight_index`, but it must not be older. The orchestrator applies that validated override only after the checkpoint is loaded and re-hidden. A mismatch or backward index fails closed and consumes the invalid intent. The resume keys are deleted with one `save()` transaction, so stale values from the wrapper cache cannot be consumed twice.
 
 ## Transaction and cache rules
 
 - Before mutation, every touched key is snapshotted as exact presence plus raw string value via `line_exist` and `r_string_ex`.
 - Persistent validity markers are written last. One-shot pending markers are removed first during consumption.
-- Each successful multi-key write or removal performs exactly one `axr_main.config:save()`.
-- A mutation or save fault triggers best-effort rollback. Transient intent keys fail closed (removed) so a partially consumed launch/resume cannot replay; durable preferences and character-creation values are restored from their snapshot.
+- Each successful multi-key write or removal invalidates the touched `ini_file_ex.cache` entries and performs exactly one `axr_main.config:save()`.
+- A primary mutation/cache/save fault creates a touched-key recovery record. Recovery uses the raw `config.ini:w_string/remove_line` port, never replaces or reloads the whole options file, and invalidates only `cache[section .. "&" .. key]` for the touched keys.
+- Recovery calls `save()` only after every raw restoration and cache invalidation succeeds. Transient intent keys recover fail-closed (removed); durable preferences and character-creation values recover to their exact presence/raw-value snapshot.
+- If raw restoration or its save fails, the config is quarantined. No later Gamma Arena read/transaction is allowed through that config object until `gamma_arena_config_tx.recover(config)` succeeds or the wrapper/process is genuinely reloaded.
 - `w_value(..., nil)` is forbidden because the wrapper writes an empty string instead of deleting the key.
 - Removal uses `remove_line`.
-- The store maintains process-local shadow state because `ini_file_ex:remove_line` does not invalidate the wrapper's `r_value` cache.
+- Process-local shadow state is not authoritative for pending-launch validation; persisted/raw wrapper state is read again before duplicate rejection.
 - Unknown, malformed, simultaneous launch/resume, future-schema, and mismatched-nonce states return structured `Result` errors.
+
+The adapter deliberately does not restore a whole stale copy of `axr_options.ltx`, so it does not discard unrelated in-memory changes made by other addons. Conversely, the shared wrapper's eventual `save()` can also persist unrelated changes already present in that same working object. A backend that partially writes and then throws/returns failure can make on-disk state unknowable; Gamma Arena reports that uncertainty and quarantines its own operations, but cannot provide transactional isolation for unrelated mods. These runtime details remain subject to installed-game verification.
 
 ## Character creation bridge
 
