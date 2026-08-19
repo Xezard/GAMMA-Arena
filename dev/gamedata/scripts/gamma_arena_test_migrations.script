@@ -486,6 +486,33 @@ local function resume_intent_requires_matching_nonce_and_is_one_shot()
     gamma_arena_test_assert.equals(gamma_arena_session_store.issue_resume(fake_config(), unbounded_intent).error.code, "GA_RESUME_FIGHT_INDEX_INVALID", "resume fight index is bounded uint32")
 end
 
+local function prepared_resume_mismatches_use_recovery_taxonomy()
+    local intent = {
+        schema_version = 1,
+        session_id = "session-1",
+        session_nonce = "session_nonce_1",
+        next_fight_index = 3,
+        checkpoint_name = "_gamma_arena_checkpoint"
+    }
+    local cases = {
+        { label = "session id", mutate = function(session) session.session_id = "wrong" end },
+        { label = "session nonce", mutate = function(session) session.session_nonce = "wrong" end },
+        { label = "checkpoint", mutate = function(session) session.checkpoint_name = "wrong" end },
+        { label = "fight index", mutate = function(session) session.fight_index = 4 end }
+    }
+    for _, case in ipairs(cases) do
+        local config = fake_config()
+        local store = gamma_arena_session_store.new_store()
+        gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, case.label .. " recovery fixture issued")
+        local expected = valid_session(3)
+        case.mutate(expected)
+        local prepared = store:prepare_resume(config, expected)
+        gamma_arena_test_assert.is_false(prepared.ok, case.label .. " preparation mismatch rejects")
+        gamma_arena_test_assert.equals(prepared.error.code, "GA_CHECKPOINT_RECOVERY_MISMATCH", case.label .. " preparation uses the limited recovery taxonomy")
+        assert_keys_absent(config, resume_keys, case.label .. " preparation clears the rejected route")
+    end
+end
+
 local function resume_rejects_tampered_expected_session()
     local intent = {
         schema_version = 1, session_id = "session-1", session_nonce = "session_nonce_1",
@@ -851,6 +878,33 @@ local function matching_resume_cleanup_is_session_scoped()
     gamma_arena_test_assert.equals(malformed.data.resume_pending, "true", "malformed unmatched intent remains for explicit quarantine")
 end
 
+local function prepared_resume_consume_rejects_persisted_drift()
+    local intent = {
+        schema_version = 1,
+        session_id = "session-1",
+        session_nonce = "session_nonce_1",
+        next_fight_index = 4,
+        checkpoint_name = "_gamma_arena_checkpoint"
+    }
+    local config = fake_config()
+    local store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "prepared consume fixture issued")
+    local prepared = store:prepare_resume(config, valid_session(3))
+    gamma_arena_test_assert.is_true(prepared.ok, "persisted intent is prepared without consumption")
+    config.data.resume_next_fight_index = "5"
+    config.persisted.resume_next_fight_index = "5"
+    local drifted = store:consume_resume(config, valid_session(3), prepared.value)
+    gamma_arena_test_assert.is_false(drifted.ok, "consume rejects persisted intent drift")
+    gamma_arena_test_assert.equals(drifted.error.code, "GA_CHECKPOINT_RECOVERY_MISMATCH", "prepared drift uses recovery mismatch code")
+    assert_keys_absent(config, resume_keys, "drifted resume is cleared fail-closed")
+
+    gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "matching prepared consume fixture reissued")
+    prepared = store:prepare_resume(config, valid_session(3))
+    local consumed = store:consume_resume(config, valid_session(3), prepared.value)
+    gamma_arena_test_assert.is_true(consumed.ok, "unchanged prepared intent consumes once")
+    gamma_arena_test_assert.equals(consumed.value.next_fight_index, 4, "matching prepared continuation is preserved")
+end
+
 local cases = {
     { name = "settings_migrations", fn = migrations_cover_absent_v0_v1_and_future },
     { name = "start_request_validation", fn = request_validation_is_total_and_fail_closed },
@@ -860,6 +914,7 @@ local cases = {
     { name = "stale_launch_recovery", fn = stale_launch_is_recovered_by_new_store },
     { name = "same_store_corrupt_launch", fn = same_store_corrupt_launch_is_replaced },
     { name = "resume_intent_one_shot", fn = resume_intent_requires_matching_nonce_and_is_one_shot },
+    { name = "prepared_resume_taxonomy", fn = prepared_resume_mismatches_use_recovery_taxonomy },
     { name = "resume_expected_session_validation", fn = resume_rejects_tampered_expected_session },
     { name = "mutation_failure_matrix", fn = mutation_failure_matrix_is_crash_safe },
     { name = "recovery_quarantine", fn = recovery_failure_quarantines_transaction },
@@ -867,7 +922,8 @@ local cases = {
     { name = "stale_conflict_faults", fn = stale_cleanup_and_conflict_faults_are_safe },
     { name = "dxml_callback_path", fn = dxml_accepts_canonical_callback_path },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
-    { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped }
+    { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
+    { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift }
 }
 
 function run(run_case_fn)

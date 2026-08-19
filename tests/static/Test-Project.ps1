@@ -265,7 +265,7 @@ if (Test-Path -LiteralPath $DxmlPath) {
 $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','dxml_accepts_canonical_callback_path','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
 }
@@ -397,6 +397,13 @@ if (Test-Path -LiteralPath $Task5StorePath) {
     Assert-True ($Task5StoreContent -match 'function Store:inspect_intents') 'Session store must expose non-mutating intent inspection'
     Assert-True ($Task5StoreContent -match 'function Store:prepare_resume') 'Session store must validate a resume route before checkpoint re-hide'
     Assert-True ($Task5StoreContent -match 'function Store:clear_resume_if_matches') 'Checkpoint cleanup must clear only a ResumeIntent bound to its ArenaSession'
+    Assert-True ($Task5StoreContent -match 'function Store:consume_resume\s*\(\s*config\s*,\s*expected\s*,\s*prepared') 'Resume consumption must compare the persisted intent with its prepared snapshot'
+    $PrepareResumeStart = $Task5StoreContent.IndexOf('function Store:prepare_resume')
+    $ConsumeResumeStart = $Task5StoreContent.IndexOf('function Store:consume_resume')
+    $PrepareResumeContent = $Task5StoreContent.Substring($PrepareResumeStart, $ConsumeResumeStart - $PrepareResumeStart)
+    Assert-True ($PrepareResumeContent -match 'GA_CHECKPOINT_RECOVERY_MISMATCH') 'Resume preparation mismatches must use the limited checkpoint recovery taxonomy'
+    Assert-True ($PrepareResumeContent -notmatch 'GA_RESUME_(SESSION|NONCE|CHECKPOINT|FIGHT_INDEX)_MISMATCH') 'Resume preparation must not leak legacy GA_RESUME mismatch codes'
+    Assert-True ($PrepareResumeContent -match 'normalize_prepare_session_result\s*\(\s*validate_expected_session') 'Resume preparation must normalize validation-time checkpoint mismatch codes'
 }
 
 $Task5DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
@@ -418,9 +425,10 @@ foreach ($RelativePath in $Task6RuntimeFiles) {
 $Task6ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
 if (Test-Path -LiteralPath $Task6ActorPath) {
     $Task6ActorContent = Get-Content -LiteralPath $Task6ActorPath -Raw
-    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','begin_update','iterate_inventory','parent_id','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
+    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
         Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor adapter must cover $Marker"
     }
+    Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"set_bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
 }
 
@@ -433,6 +441,13 @@ if (Test-Path -LiteralPath $Task6CheckpointPath) {
     foreach ($Forbidden in @('file_list','file_list_open_ex','file_find')) {
         Assert-True ($Task6CheckpointContent -notmatch [regex]::Escape($Forbidden)) "Checkpoint adapter must not use broad path discovery: $Forbidden"
     }
+    foreach ($Marker in @('ERROR','GA_CHECKPOINT_LOAD_TIMEOUT','last_mutation_cause','mutation_attempt')) {
+        Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Task 6 bounded checkpoint retry must cover $Marker"
+    }
+    foreach ($Marker in @('begin_resume_recovery','GA_CHECKPOINT_RECOVERY_MISSING','GA_CHECKPOINT_RECOVERY_INCONSISTENT','GA_CHECKPOINT_RECOVERY_MISMATCH','GA_CHECKPOINT_RECOVERY_TIMEOUT','prepared_resume')) {
+        Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Task 6 fresh-process recovery must cover $Marker"
+    }
+    Assert-True ($Task6CheckpointContent -match 'target_info\.value\.exists\s+then\s+if\s+required\s+and\s+target_info\.value\.size\s*<=\s*0') 'Required zero-byte rename targets must remain pending after the source disappears'
 }
 
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
@@ -454,12 +469,31 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 6 orchestration must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -notmatch 'gamma_arena_generator') 'FightSpec generation must remain gated out of Task 6'
+    Assert-True ($Task5OrchestratorContent -match 'begin_resume_recovery') 'Resume orchestration must explicitly start fresh-process checkpoint recovery'
+    Assert-True ($Task5OrchestratorContent -match 'normalize_resume_preparation') 'Resume orchestration must normalize legacy preparation mismatches at the recovery boundary'
+    foreach ($Marker in @('GA_RUNTIME_CLEANUP_PENDING','cleanup_ready_for_disconnect')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Fatal checkpoint cleanup routing must cover $Marker"
+    }
+    Assert-True ($Task5OrchestratorContent -match 'self\.cleanup_required\s*=\s*true') 'Fatal routing must gate disconnect on actual checkpoint cleanup even before session assignment'
 }
 
 if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_actor_inventory_release_is_deferred_and_verified','runtime_actor_normalization_uses_gamma_bleeding_sentinel','runtime_actor_input_ownership_is_idempotent','runtime_actor_rejects_coincident_patrol_points','runtime_checkpoint_requires_stable_required_files','runtime_checkpoint_allows_absent_or_late_dds','runtime_checkpoint_wrap_clock_times_out','runtime_checkpoint_verifies_rename_and_delete_postconditions','runtime_checkpoint_recovers_mixed_crash_states','runtime_checkpoint_persists_intent_before_load','runtime_checkpoint_consumes_intent_only_after_rehide','runtime_checkpoint_rejects_mismatched_resume','runtime_checkpoint_cleanup_is_idempotent_in_every_state','runtime_checkpoint_two_sessions_leave_no_stale_paths','runtime_checkpoint_ready_gates_generation')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 Dev tests must cover $Marker"
     }
+    foreach ($Marker in @('runtime_actor_rejects_nil_inventory_parent','runtime_actor_rejects_throwing_inventory_accessors')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 actor ownership tests must cover $Marker"
+    }
+    foreach ($Marker in @('runtime_checkpoint_load_wait_is_bounded_and_wrap_safe','runtime_checkpoint_transient_mutation_failures_retry_to_success','runtime_checkpoint_permanent_mutation_throws_time_out')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 bounded checkpoint tests must cover $Marker"
+    }
+    Assert-True ($Task5DevTestContent -match 'runtime_checkpoint_zero_required_target_waits_for_timeout') 'Task 6 checkpoint tests must cover a source-absent zero-byte required target'
+    Assert-True ($Task5DevTestContent -match 'runtime_pre_session_fatal_waits_for_cleanup_before_disconnect') 'Fatal cleanup tests must cover failures before ArenaSession assignment'
+    Assert-True ($Task5DevTestContent -match 'runtime_prepare_resume_legacy_mismatch_is_normalized') 'Resume routing tests must normalize legacy store mismatch codes'
+    foreach ($Marker in @('runtime_checkpoint_fresh_process_recovers_all_exact_layouts','runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch','runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 fresh-process recovery tests must cover $Marker"
+    }
+    Assert-True ($Task5DevTestContent -match 'runtime_fatal_recovery_waits_for_cleanup_before_disconnect') 'Fatal recovery tests must gate disconnect on exact cleanup'
 }
 
 $Task3DataFiles = @(

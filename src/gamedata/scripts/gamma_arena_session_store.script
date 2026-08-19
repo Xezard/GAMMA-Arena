@@ -188,6 +188,15 @@ local function validate_resume_intent(intent)
     })
 end
 
+local function same_resume_intent(left, right)
+    return type(left) == "table" and type(right) == "table"
+        and left.schema_version == right.schema_version
+        and left.session_id == right.session_id
+        and left.session_nonce == right.session_nonce
+        and left.next_fight_index == right.next_fight_index
+        and left.checkpoint_name == right.checkpoint_name
+end
+
 local function validate_expected_session(session)
     if type(session) ~= "table" then
         return fail("GA_SESSION_INVALID", "Expected ArenaSession must be a table")
@@ -245,6 +254,16 @@ local function validate_expected_session(session)
         checkpoint_name = CHECKPOINT_NAME,
         phase = session.phase
     })
+end
+
+local function normalize_prepare_session_result(result)
+    local detail = type(result) == "table" and result.error or nil
+    if detail and detail.code == "GA_RESUME_CHECKPOINT_MISMATCH" then
+        return fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Loaded ArenaSession checkpoint does not match the recovery route", {
+            cause_code = detail.code
+        })
+    end
+    return result
 end
 
 local function new_store_impl()
@@ -603,24 +622,24 @@ function Store:prepare_resume(config, expected)
         checkpoint_name = values.resume_checkpoint_name
     })
     if not intent.ok then return self:reject_resume(config, intent) end
-    local session = validate_expected_session(expected)
+    local session = normalize_prepare_session_result(validate_expected_session(expected))
     if not session.ok then return self:reject_resume(config, session) end
     if session.value.session_id ~= intent.value.session_id then
-        return self:reject_resume(config, fail("GA_RESUME_SESSION_MISMATCH", "Resume session id does not match checkpoint state"))
+        return self:reject_resume(config, fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Resume session id does not match checkpoint state"))
     end
     if session.value.session_nonce ~= intent.value.session_nonce then
-        return self:reject_resume(config, fail("GA_RESUME_NONCE_MISMATCH", "Resume session nonce does not match checkpoint state"))
+        return self:reject_resume(config, fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Resume session nonce does not match checkpoint state"))
     end
     if session.value.checkpoint_name ~= intent.value.checkpoint_name then
-        return self:reject_resume(config, fail("GA_RESUME_CHECKPOINT_MISMATCH", "Resume checkpoint does not match ArenaSession"))
+        return self:reject_resume(config, fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Resume checkpoint does not match ArenaSession"))
     end
     if intent.value.next_fight_index < session.value.fight_index then
-        return self:reject_resume(config, fail("GA_RESUME_FIGHT_INDEX_MISMATCH", "Resume fight index is older than the clean checkpoint baseline", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
+        return self:reject_resume(config, fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Resume fight index is older than the clean checkpoint baseline", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
     end
     return intent
 end
 
-function Store:consume_resume(config, expected)
+function Store:consume_resume(config, expected, prepared)
     local values_result = self:read_all(config, resume_keys)
     if not values_result.ok then return values_result end
     local values = values_result.value
@@ -651,6 +670,14 @@ function Store:consume_resume(config, expected)
         checkpoint_name = values.resume_checkpoint_name
     })
     if not intent.ok then return self:reject_resume(config, intent) end
+    if prepared ~= nil then
+        local snapshot = validate_resume_intent(prepared)
+        if not snapshot.ok or not same_resume_intent(intent.value, snapshot.value) then
+            return self:reject_resume(config, fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Persisted ResumeIntent no longer matches its prepared snapshot", {
+                cause = snapshot.ok and nil or snapshot.error
+            }))
+        end
+    end
     local session = validate_expected_session(expected)
     if not session.ok then return self:reject_resume(config, session) end
     if session.value.session_id ~= intent.value.session_id then
@@ -757,7 +784,7 @@ function consume_launch(config, options) return default_store:consume_launch(con
 function inspect_intents(config) return default_store:inspect_intents(config) end
 function issue_resume(config, intent) return default_store:issue_resume(config, intent) end
 function prepare_resume(config, expected) return default_store:prepare_resume(config, expected) end
-function consume_resume(config, expected) return default_store:consume_resume(config, expected) end
+function consume_resume(config, expected, prepared) return default_store:consume_resume(config, expected, prepared) end
 function clear_resume_if_matches(config, expected) return default_store:clear_resume_if_matches(config, expected) end
 function clear_transient(config) return default_store:clear_transient(config) end
 function write_character_creation(config) return default_store:write_character_creation(config) end

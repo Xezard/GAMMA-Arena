@@ -50,6 +50,23 @@ local function error_results(result)
     return values
 end
 
+local resume_preparation_mismatch_codes = {
+    GA_RESUME_SESSION_MISMATCH = true,
+    GA_RESUME_NONCE_MISMATCH = true,
+    GA_RESUME_CHECKPOINT_MISMATCH = true,
+    GA_RESUME_FIGHT_INDEX_MISMATCH = true
+}
+
+local function normalize_resume_preparation(result)
+    local detail = type(result) == "table" and result.error or nil
+    if detail and resume_preparation_mismatch_codes[detail.code] then
+        return fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "ResumeIntent does not match the loaded ArenaSession", {
+            cause_code = detail.code
+        })
+    end
+    return result
+end
+
 local function find_flags(...)
     local args = { ... }
     for index = 1, #args do
@@ -81,11 +98,11 @@ function Orchestrator:__init(deps)
     self.checkpoint_reload_expected = false
     self.runtime_stage = "INACTIVE"
     self.checkpoint_ready = false
-    self.resume_bound = false
     self.teardown_done = false
     self.fatal_shown = false
     self.fatal_dialog = nil
     self.main_menu_executed = false
+    self.cleanup_required = false
     self.machine_state = gamma_arena_state_machine.states.IDLE
 end
 
@@ -128,6 +145,8 @@ end
 
 function Orchestrator:main_menu_action()
     if self.main_menu_executed then return gamma_arena_result.ok(false) end
+    local cleanup = self:cleanup_ready_for_disconnect()
+    if not cleanup.ok then return cleanup end
     if type(self.deps.disconnect) ~= "function" then
         local unavailable = fail("GA_DISCONNECT_FAILED", "Main-menu disconnect dependency is unavailable")
         pcall(gamma_arena_log.error, unavailable.error.code, unavailable.error.message, unavailable.error.context)
@@ -151,6 +170,29 @@ function Orchestrator:main_menu_action()
     return gamma_arena_result.ok(true)
 end
 
+function Orchestrator:cleanup_ready_for_disconnect()
+    if not self.cleanup_required then return gamma_arena_result.ok(true) end
+    local checkpoint = self.deps.checkpoint
+    local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
+    if not state_ok or type(state) ~= "string" then
+        return fail("GA_RUNTIME_CLEANUP_FAILED", "Checkpoint cleanup state is unavailable")
+    end
+    if state == "CLEANING" then
+        local updated = call_method("GA_RUNTIME_CLEANUP_FAILED", checkpoint, "update")
+        if not updated.ok then return updated end
+        state_ok, state = pcall(function() return checkpoint:state() end)
+        if not state_ok then return fail("GA_RUNTIME_CLEANUP_FAILED", "Checkpoint cleanup state could not be read safely") end
+    end
+    if state == "NONE" then
+        self.cleanup_required = false
+        return gamma_arena_result.ok(true)
+    end
+    if state == "ERROR" then
+        return fail("GA_RUNTIME_CLEANUP_FAILED", "Checkpoint cleanup terminated in ERROR")
+    end
+    return fail("GA_RUNTIME_CLEANUP_PENDING", "Checkpoint cleanup is still pending", { state = state })
+end
+
 function Orchestrator:enter_fatal(result, intent_finalized)
     if type(result) ~= "table" or result.ok ~= false or type(result.error) ~= "table" then
         result = fail("GA_RUNTIME_INTERNAL", "Arena runtime entered fatal routing without a structured error")
@@ -161,16 +203,17 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, clear_method, self.deps.config, self.session)
         if not cleared.ok then errors[#errors + 1] = cleared end
     end
+    local cleanup_session = self.session
     self.active = false
-    self.session = nil
     self.pending_resume = nil
     self.checkpoint_reload_expected = false
     self.runtime_stage = "ERROR"
     self.checkpoint_ready = false
-    self.resume_bound = false
     self.machine_state = gamma_arena_state_machine.states.ERROR
+    self.cleanup_required = true
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then errors[#errors + 1] = teardown end
+    self.session = nil
     for index = 1, #errors do
         local item = errors[index]
         if item and item.error then pcall(gamma_arena_log.error, item.error.code, item.error.message, item.error.context) end
@@ -214,7 +257,6 @@ function Orchestrator:on_game_load()
     self.checkpoint_reload_expected = false
     self.runtime_stage = "AWAITING_ACTIVATION"
     self.checkpoint_ready = false
-    self.resume_bound = false
     self.activation_attempted = false
     self.machine_state = gamma_arena_state_machine.states.IDLE
     if self.pending_load_state_seen then
@@ -353,13 +395,18 @@ function Orchestrator:activate_once()
         return self:enter_fatal(fail("GA_RESUME_SESSION_MISSING", "ResumeIntent requires an embedded ArenaSession"))
     end
     local prepared = call_method("GA_RESUME_INVALID", self.deps.store, "prepare_resume", self.deps.config, self.loaded_session)
-    if not prepared.ok then return self:enter_fatal(prepared, true) end
+    if not prepared.ok then return self:enter_fatal(normalize_resume_preparation(prepared), true) end
     local preflight = self:run_preflight()
     if not preflight.ok then return self:enter_fatal(preflight) end
     local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
     if not advanced.ok then return self:enter_fatal(advanced) end
     self.session = self.loaded_session
     self.pending_resume = prepared.value
+    local recovery = call_method("GA_CHECKPOINT_RECOVERY_FAILED", self.deps.checkpoint, "begin_resume_recovery", self.session, self.pending_resume)
+    if not recovery.ok then return self:enter_fatal(recovery) end
+    if recovery.value ~= true then
+        return self:enter_fatal(fail("GA_CHECKPOINT_RECOVERY_FAILED", "Checkpoint adapter did not bind the loaded recovery state"))
+    end
     self.active = true
     self.runtime_stage = "RESUME_REHIDING"
     return gamma_arena_result.ok({ route = "resume", session = self:session_snapshot(), pending_resume = self:pending_resume_snapshot() })
@@ -411,11 +458,6 @@ function Orchestrator:drive_runtime()
     end
 
     if self.runtime_stage == "RESUME_REHIDING" then
-        if not self.resume_bound then
-            local bound = call_method("GA_CHECKPOINT_LOADED_SESSION_INVALID", self.deps.checkpoint, "bind_loaded_session", self.session)
-            if not bound.ok then return bound end
-            self.resume_bound = true
-        end
         local updated = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "update")
         if not updated.ok then return updated end
         local state_ok, checkpoint_state = pcall(function() return self.deps.checkpoint:state() end)
@@ -424,7 +466,7 @@ function Orchestrator:drive_runtime()
             local resume = call_method("GA_CHECKPOINT_RESUME_MISSING", self.deps.checkpoint, "take_resume")
             if not resume.ok then return resume end
             if type(resume.value) ~= "table" or resume.value.next_fight_index ~= self.pending_resume.next_fight_index then
-                return fail("GA_CHECKPOINT_RESUME_MISMATCH", "Checkpoint continuation does not match the prepared ResumeIntent")
+                return fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Checkpoint continuation does not match the prepared ResumeIntent")
             end
             self.session.fight_index = resume.value.next_fight_index
             self.pending_resume = nil
