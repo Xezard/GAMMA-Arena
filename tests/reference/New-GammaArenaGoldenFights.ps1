@@ -159,7 +159,7 @@ function New-GaEncodedFight {
     $normalizedSeed = ConvertTo-GaNormalizedSeed -Seed $SessionSeed
     $fields = @(
         'schema_version=1','generator_version=1','catalog_revision=1','layout_version=1',
-        "fight_id=ga-$normalizedSeed-$FightIndex-g1-c1-l1",'mode_id=skirmish',"difficulty_id=$DifficultyId",
+        "session_seed=$normalizedSeed","fight_index=$FightIndex","fight_id=ga-$normalizedSeed-$FightIndex-g1-c1-l1",'mode_id=skirmish',"difficulty_id=$DifficultyId",
         'layout_id=rostok_arena_v1',"level=$($layoutEntry.level)","actor=$($layoutEntry.actor_spawn_path),$($layoutEntry.actor_look_path),$actorLoadout",'opponents='
     ) + $encodedOpponents + "diagnostic=FightSpecV1 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'

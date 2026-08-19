@@ -59,11 +59,22 @@ local function catalog_rejects_malformed_data()
         { code="GA_CATALOG_AMMO_INVALID", mutate=function(c) c.sections.weapon_pm.ammo="ammo_9x19_fmj" end },
         { code="GA_CATALOG_UNKNOWN_KEY", mutate=function(c) c.sections.profile_novice.unexpected="1" end },
         { code="GA_CATALOG_UNKNOWN_SECTION", mutate=function(c) c.sections.unexpected={} end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.profiles.ids=true end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.outfits.ids="novice,stalker,banditmerc,exo";c.sections.outfit_exo={section="exo_outfit",cost="10"} end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.outfits.ids="novice,stalker";c.sections.outfit_banditmerc=nil end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.consumables.ids="bandage,medkit,grenade";c.sections.consumable_grenade={section="grenade_f1",cost="3"} end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.consumables.ids="medkit";c.sections.consumable_bandage=nil end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.profile_novice.cost="2" end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.weapon_pm.cost="3" end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.weapon_pm.ammo_box_max="3" end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.ammo_ammo_9x18_fmj.cost="2" end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.outfit_novice.cost="2" end },
+        { code="GA_CATALOG_MANIFEST_INVALID", mutate=function(c) c.sections.consumable_bandage.cost="2" end },
         { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d) d.sections.meta.schema_version="2" end },
         { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d,l) l.sections.meta.revision="2" end },
         { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.actor_spawn_path="" end },
         { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.actor_look_path=l.sections.ga_layout_rostok_arena_v1.actor_spawn_path end },
-        { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_1" end }
+        { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_3_1" end }
     }
     for _, case in ipairs(cases) do
         local result = gamma_arena_catalog.load(fixture_factory({ mutate=case.mutate }))
@@ -78,6 +89,9 @@ local function catalog_rejects_malformed_data()
     gamma_arena_test_assert.equals(section_enumeration.error.code, "GA_CATALOG_ENUMERATION_FAILED", "throwing section enumeration must be structured")
     local key_enumeration = gamma_arena_catalog.load(fixture_factory({ enumerate_keys=function() error("enumeration failure") end }))
     gamma_arena_test_assert.equals(key_enumeration.error.code, "GA_CATALOG_ENUMERATION_FAILED", "throwing key enumeration must be structured")
+    local invalid_open = gamma_arena_catalog.load({ open=function() return true end, section_exists=function() return true end })
+    gamma_arena_test_assert.is_false(invalid_open.ok, "invalid opened objects must fail closed")
+    gamma_arena_test_assert.is_true(string.sub(invalid_open.error.code,1,11) == "GA_CATALOG_", "invalid opened object code")
 end
 local function validator_never_throws_for_malformed_specs()
     local snapshot = catalogs()
@@ -89,6 +103,11 @@ local function validator_never_throws_for_malformed_specs()
         {code="GA_OPPONENT_SLOT_INVALID",fn=function(s) s.opponents[1].slot=2 end},
         {code="GA_FIGHT_ID_INVALID",fn=function(s) s.fight_id="tampered" end},
         {code="GA_FIGHT_ID_INVALID",fn=function(s) s.fight_id="ga-01-0-g1-c1-l1" end},
+        {code="GA_FIGHT_ID_INVALID",fn=function(s) s.fight_id="ga-2-0-g1-c1-l1" end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.session_seed=0 end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.session_seed="1" end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.fight_index=-1 end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.fight_index="0" end},
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.diagnostic=false end},
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.opponents="bad" end},
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.actor="bad" end},
@@ -109,18 +128,33 @@ local function validator_never_throws_for_malformed_specs()
         gamma_arena_test_assert.equals(result.error.code, mutation.code, "malformed FightSpec code")
     end
 end
+local function validator_rejects_duplicate_spawn_path()
+    local snapshot = catalogs()
+    local generated = gamma_arena_generator.generate(request(5,"stalker"),0,snapshot)
+    gamma_arena_test_assert.is_true(generated.ok and #generated.value.opponents >= 2, "duplicate path fixture needs two valid opponents")
+    generated.value.opponents[2].spawn_path = generated.value.opponents[1].spawn_path
+    local rejected = gamma_arena_validator.validate(generated.value,snapshot)
+    gamma_arena_test_assert.is_false(rejected.ok,"duplicate spawn paths must fail validation")
+    gamma_arena_test_assert.equals(rejected.error.code,"GA_SPAWN_PATH_DUPLICATE","validator must reach duplicate-path branch")
+end
 local function stable_and_fight_index()
-    local snapshot = catalogs(); local first = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local second = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local changed = gamma_arena_generator.generate(request(3735928559,"veteran"),8,snapshot)
+    local snapshot = catalogs(); local first = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local second = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local changed = gamma_arena_generator.generate(request(3735928559,"veteran"),8,snapshot); local changed_seed = gamma_arena_generator.generate(request(3735928560,"veteran"),7,snapshot)
     gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value),gamma_arena_generator.stable_encode(second.value),"same request stable encoding")
-    gamma_arena_test_assert.is_true(first.value.fight_id ~= changed.value.fight_id and gamma_arena_generator.stable_encode(first.value) ~= gamma_arena_generator.stable_encode(changed.value),"fight index must alter procedural output")
+    local validated = gamma_arena_validator.validate(first.value,snapshot)
+    gamma_arena_test_assert.is_true(validated.ok,"generated FightSpec must expose a validated view")
+    gamma_arena_test_assert.equals(validated.value.session_seed(),first.value.session_seed,"validated view session seed")
+    gamma_arena_test_assert.equals(validated.value.fight_index(),first.value.fight_index,"validated view fight index")
+    local function procedural_differs(left,right) return #left.opponents ~= #right.opponents or left.actor.loadout.weapon ~= right.actor.loadout.weapon or left.actor.loadout.outfit ~= right.actor.loadout.outfit or left.opponents[1].profile ~= right.opponents[1].profile or left.opponents[1].spawn_path ~= right.opponents[1].spawn_path end
+    gamma_arena_test_assert.is_true(first.value.fight_id ~= changed.value.fight_id and procedural_differs(first.value,changed.value),"fight index must alter a procedural field")
+    gamma_arena_test_assert.is_true(first.value.fight_id ~= changed_seed.value.fight_id and procedural_differs(first.value,changed_seed.value),"session seed must alter a procedural field")
 end
 local function golden_fights_v1()
     local snapshot = catalogs()
     local golden = {
-        { seed = 0, difficulty = "rookie", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=rookie|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,bandage,7|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,banditmerc_outfit,bandage,8,10|diagnostic=FightSpecV1 skirmish rookie #0]] },
-        { seed = 1, difficulty = "stalker", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=stalker|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,bandage,8|opponents=|1:1,bar_arena_walk_6_3,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|2:2,bar_arena_walk_3_2,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|diagnostic=FightSpecV1 skirmish stalker #0]] },
-        { seed = 3735928559, difficulty = "veteran", fight = 7, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1588444913-7-g1-c1-l1|mode_id=skirmish|difficulty_id=veteran|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,stalker_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|2:2,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|3:3,bar_arena_monstr_walk,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|4:4,bar_arena_walk_6_3,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|diagnostic=FightSpecV1 skirmish veteran #7]] },
-        { seed = 4294967295, difficulty = "master", fight = 31, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-3-31-g1-c1-l1|mode_id=skirmish|difficulty_id=master|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_ak74,ammo_5.45x39_fmj,1,novice_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,8|2:2,bar_arena_monstr_walk,gamma_arena_bandit_experienced,3,wpn_pm,ammo_9x18_fmj,2,novice_outfit,bandage,6,9|3:3,bar_arena_walk_6_6,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|4:4,bar_arena_walk_6_3,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,9|diagnostic=FightSpecV1 skirmish master #31]] }
+        { seed = 0, difficulty = "rookie", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=rookie|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,bandage,7|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,banditmerc_outfit,bandage,8,10|diagnostic=FightSpecV1 skirmish rookie #0]] },
+        { seed = 1, difficulty = "stalker", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=stalker|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,bandage,8|opponents=|1:1,bar_arena_walk_6_3,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|2:2,bar_arena_walk_3_2,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|diagnostic=FightSpecV1 skirmish stalker #0]] },
+        { seed = 3735928559, difficulty = "veteran", fight = 7, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|session_seed=1588444913|fight_index=7|fight_id=ga-1588444913-7-g1-c1-l1|mode_id=skirmish|difficulty_id=veteran|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,stalker_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|2:2,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|3:3,bar_arena_monstr_walk,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|4:4,bar_arena_walk_6_3,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|diagnostic=FightSpecV1 skirmish veteran #7]] },
+        { seed = 4294967295, difficulty = "master", fight = 31, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|session_seed=3|fight_index=31|fight_id=ga-3-31-g1-c1-l1|mode_id=skirmish|difficulty_id=master|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_ak74,ammo_5.45x39_fmj,1,novice_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,8|2:2,bar_arena_monstr_walk,gamma_arena_bandit_experienced,3,wpn_pm,ammo_9x18_fmj,2,novice_outfit,bandage,6,9|3:3,bar_arena_walk_6_6,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|4:4,bar_arena_walk_6_3,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,9|diagnostic=FightSpecV1 skirmish master #31]] }
     }
     for _, expected in ipairs(golden) do
         local generated = gamma_arena_generator.generate(request(expected.seed, expected.difficulty), expected.fight, snapshot)
@@ -130,6 +164,6 @@ local function golden_fights_v1()
 end
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v1",fn=stable_and_fight_index},{name="golden_fights_v1",fn=golden_fights_v1}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v1",fn=stable_and_fight_index},{name="golden_fights_v1",fn=golden_fights_v1}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end

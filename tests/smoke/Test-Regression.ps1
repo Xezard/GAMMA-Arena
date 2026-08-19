@@ -106,8 +106,10 @@ events = {}
 function transition() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_catalog.script' @'
+local function load_impl() end
 function load()
-    local markers = "GA_DIFFICULTY_BUDGET_INFEASIBLE GA_CATALOG_SECTION_CHECK_FAILED GA_CATALOG_UNKNOWN_SECTION section_for_each line_count r_line"
+    local ok, result = pcall(load_impl)
+    local markers = "GA_DIFFICULTY_BUDGET_INFEASIBLE GA_CATALOG_SECTION_CHECK_FAILED GA_CATALOG_UNKNOWN_SECTION GA_CATALOG_MANIFEST_INVALID section_for_each line_count r_line"
     return markers
 end
 '@
@@ -118,11 +120,18 @@ function next_fight_index() end
 function validate_session() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_generator.script' @'
-function generate() end
-function stable_encode() end
+function generate()
+    local fight_index = 0
+    local normalized_seed = gamma_arena_rng.normalize_uint32(1)
+    return { session_seed = normalized_seed, fight_index = fight_index }
+end
+function stable_encode()
+    return "session_seed=" .. "fight_index="
+end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' @'
 function validate()
+    local expected_fight_id = "ga-1-0-g1-c1-l1"
     return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID"
 end
 '@
@@ -162,10 +171,10 @@ gamma_arena_bandit_experienced = bandit
 gamma_arena_bandit_veteran = bandit
 '@
     Write-FixtureFile $Root 'tests\fixtures\golden-fights-v1.txt' @'
-seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=1|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 rookie
-seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=1|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 stalker
-seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=1|fight_id=ga-1588444913-7-g1-c1-l1|diagnostic=FightSpecV1 veteran
-seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|fight_id=ga-3-31-g1-c1-l1|diagnostic=FightSpecV1 master
+seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 rookie
+seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 stalker
+seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=1|session_seed=1588444913|fight_index=7|fight_id=ga-1588444913-7-g1-c1-l1|diagnostic=FightSpecV1 veteran
+seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|session_seed=3|fight_index=31|fight_id=ga-3-31-g1-c1-l1|diagnostic=FightSpecV1 master
 '@
     Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
 }

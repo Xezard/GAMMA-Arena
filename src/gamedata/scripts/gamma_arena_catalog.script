@@ -3,6 +3,13 @@ local difficulty_path = "gamma_arena\\gamma_arena_difficulties.ltx"
 local layout_path = "gamma_arena\\gamma_arena_layouts.ltx"
 local human_profile_sections = { gamma_arena_bandit_novice = true, gamma_arena_bandit_trainee = true, gamma_arena_bandit_experienced = true, gamma_arena_bandit_veteran = true }
 local weapon_ammo_sections = { wpn_pm = "ammo_9x18_fmj", wpn_mp5 = "ammo_9x19_fmj", wpn_ak74u = "ammo_5.45x39_fmj", wpn_ak74 = "ammo_5.45x39_fmj", wpn_wincheaster1300 = "ammo_12x70_buck" }
+local v1_manifest = {
+    profiles = { novice={section="gamma_arena_bandit_novice",cost=1}, trainee={section="gamma_arena_bandit_trainee",cost=2}, experienced={section="gamma_arena_bandit_experienced",cost=3}, veteran={section="gamma_arena_bandit_veteran",cost=4} },
+    weapons = { pm={section="wpn_pm",ammo="ammo_9x18_fmj",cost=2,ammo_box_min=1,ammo_box_max=2}, mp5={section="wpn_mp5",ammo="ammo_9x19_fmj",cost=4,ammo_box_min=1,ammo_box_max=2}, ak74u={section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost=5,ammo_box_min=1,ammo_box_max=2}, ak74={section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost=6,ammo_box_min=1,ammo_box_max=2}, wincheaster1300={section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost=5,ammo_box_min=1,ammo_box_max=2} },
+    ammo = { ammo_9x18_fmj={section="ammo_9x18_fmj",cost=1}, ammo_9x19_fmj={section="ammo_9x19_fmj",cost=1}, ["ammo_5.45x39_fmj"]={section="ammo_5.45x39_fmj",cost=2}, ammo_12x70_buck={section="ammo_12x70_buck",cost=2} },
+    outfits = { novice={section="novice_outfit",cost=1}, stalker={section="stalker_outfit",cost=3}, banditmerc={section="banditmerc_outfit",cost=4} },
+    consumables = { bandage={section="bandage",cost=1}, medkit={section="medkit",cost=2} }
+}
 
 local function split(text, sort_values)
     local values = {}
@@ -82,6 +89,26 @@ local function integer(value, name, context)
     return parsed
 end
 
+local function exact_ids(group_name, raw_ids)
+    local expected = v1_manifest[group_name]
+    if type(raw_ids) ~= "string" or type(expected) ~= "table" then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group ids must match v1", { group = group_name }) end
+    local ids, seen, expected_count = split(raw_ids), {}, 0
+    for _, id in ipairs(ids) do if seen[id] then return nil, gamma_arena_result.err("GA_CATALOG_DUPLICATE_ID", "Catalog ids must be unique", { group = group_name, id = id }) end; seen[id] = true end
+    for _ in pairs(expected) do expected_count = expected_count + 1 end
+    if #ids ~= expected_count then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group id count differs from v1", { group = group_name, count = #ids, expected = expected_count }) end
+    for _, id in ipairs(ids) do if not expected[id] then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group contains a non-v1 id", { group = group_name, id = id }) end end
+    for id in pairs(expected) do if not seen[id] then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group is missing a v1 id", { group = group_name, id = id }) end end
+    return ids
+end
+
+local function validate_semantic_entry(group_name, item)
+    local expected = v1_manifest[group_name] and v1_manifest[group_name][item.id]
+    if not expected or item.section ~= expected.section or item.cost ~= expected.cost then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog entry differs from v1", { group = group_name, id = item.id }) end
+    if group_name == "weapons" and item.ammo ~= expected.ammo then return nil, gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo differs from v1", { id = item.id, ammo = item.ammo }) end
+    if group_name == "weapons" and (item.ammo_box_min ~= expected.ammo_box_min or item.ammo_box_max ~= expected.ammo_box_max) then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Weapon entry differs from v1", { id = item.id }) end
+    return true
+end
+
 local function validate_section_manifest(factory, ini, allowed, path)
     local sections, enumeration_error = enumerate_sections(factory, ini)
     if not sections then return nil, enumeration_error end
@@ -129,7 +156,7 @@ local function add_loadout_combinations(snapshot)
     end)
 end
 
-function load(ini_factory)
+local function load_impl(ini_factory)
     local factory = ini_factory or runtime_factory()
     if type(factory) ~= "table" or type(factory.open) ~= "function" or type(factory.section_exists) ~= "function" then
         return gamma_arena_result.err("GA_CATALOG_FACTORY_INVALID", "Catalog loader requires open and section_exists", {})
@@ -151,8 +178,9 @@ function load(ini_factory)
     for _, group in ipairs(groups) do
         local group_ok, group_error = require_section(factory, catalogs, group.name, { ids = true })
         if not group_ok then return group_error end
-        group.ids = split(read(factory, catalogs, group.name, "ids"))
-        if #group.ids == 0 then return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog group is empty", { group = group.name }) end
+        local raw_ids = read(factory, catalogs, group.name, "ids")
+        if type(raw_ids) == "string" and raw_ids == "" then return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog group is empty", { group = group.name }) end
+        group.ids, group_error = exact_ids(group.name, raw_ids); if not group.ids then return group_error end
         catalog_manifest[group.name] = true
         for _, entry_id in ipairs(group.ids) do catalog_manifest[group.singular .. "_" .. entry_id] = true end
     end
@@ -175,6 +203,7 @@ function load(ini_factory)
                 item.ammo_box_min, section_error = integer(read(factory, catalogs, section, "ammo_box_min"), "ammo_box_min", { section = section }); if not item.ammo_box_min then return section_error end
                 item.ammo_box_max, section_error = integer(read(factory, catalogs, section, "ammo_box_max"), "ammo_box_max", { section = section }); if not item.ammo_box_max or item.ammo_box_min < 1 or item.ammo_box_max < item.ammo_box_min then return gamma_arena_result.err("GA_CATALOG_AMMO_RANGE_INVALID", "Weapon ammo box range is invalid", { section = section }) end
             end
+            local semantic_ok, semantic_error = validate_semantic_entry(group.name, item); if not semantic_ok then return semantic_error end
             group.target[entry_id] = item
             if group.list then group.list[#group.list + 1] = item end
         end
@@ -217,4 +246,11 @@ function load(ini_factory)
         end
     end
     return gamma_arena_result.ok(snapshot)
+end
+
+function load(ini_factory)
+    local succeeded, result = pcall(load_impl, ini_factory)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    if succeeded then return gamma_arena_result.err("GA_CATALOG_INVALID", "Catalog loader returned an invalid Result", { result_type = type(result) }) end
+    return gamma_arena_result.err("GA_CATALOG_INVALID", "Catalog loading failed safely", { reason = tostring(result) })
 end

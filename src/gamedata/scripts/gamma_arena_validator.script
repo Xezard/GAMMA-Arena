@@ -62,10 +62,9 @@ local function validate_impl(spec, catalogs)
     if spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
     if spec.level ~= layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
-    local seed_text, index_text
-    if type(spec.fight_id) == "string" then seed_text, index_text = string.match(spec.fight_id, "^ga%-(%d+)%-(%d+)%-g" .. catalogs.generator_version .. "%-c" .. catalogs.revision .. "%-l" .. layout.version .. "$") end
-    local normalized_seed, fight_index = tonumber(seed_text), tonumber(index_text)
-    if not normalized_seed or normalized_seed < 1 or normalized_seed > 2147483646 or normalized_seed ~= math.floor(normalized_seed) or tostring(normalized_seed) ~= seed_text or not fight_index or fight_index < 0 or fight_index ~= math.floor(fight_index) or tostring(fight_index) ~= index_text then return failure("GA_FIGHT_ID_INVALID", "Fight id is not canonical stable v1 format", {}) end
+    if type(spec.session_seed) ~= "number" or spec.session_seed < 1 or spec.session_seed > 2147483646 or spec.session_seed ~= math.floor(spec.session_seed) or type(spec.fight_index) ~= "number" or spec.fight_index < 0 or spec.fight_index ~= math.floor(spec.fight_index) then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec seed and index are invalid", {}) end
+    local expected_fight_id = "ga-" .. spec.session_seed .. "-" .. spec.fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version
+    if spec.fight_id ~= expected_fight_id then return failure("GA_FIGHT_ID_INVALID", "Fight id does not match FightSpec generation inputs", { expected = expected_fight_id, actual = spec.fight_id }) end
     if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
     if spec.actor.spawn_path ~= layout.actor_spawn_path or spec.actor.look_path ~= layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
     local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget); if not actor_result.ok then return actor_result end
@@ -90,9 +89,9 @@ local function validate_impl(spec, catalogs)
         spent = spent + opponent.total_cost
     end
     if spent > difficulty.enemy_total_budget then return failure("GA_ENEMY_BUDGET_INVALID", "Enemy total cost exceeds difficulty budget", {}) end
-    local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, diagnostic = spec.diagnostic }
+    local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, session_seed = spec.session_seed, fight_index = spec.fight_index, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, diagnostic = spec.diagnostic }
     for index = 1, opponent_count do private.opponents[index] = copy_participant(spec.opponents[index]) end
-    return gamma_arena_result.ok({ fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
+    return gamma_arena_result.ok({ session_seed = function() return private.session_seed end, fight_index = function() return private.fight_index end, fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
 end
 
 function validate(spec, catalogs)
