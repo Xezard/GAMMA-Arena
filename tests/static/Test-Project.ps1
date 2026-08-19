@@ -116,6 +116,7 @@ $Task2ScriptContracts = @(
 
 foreach ($Contract in $Task2ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 2 script is missing: $($Contract.Path)"
     if (Test-Path -LiteralPath $ScriptPath) {
         $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
         $NamespacePattern = [regex]::Escape($Contract.Namespace)
@@ -125,6 +126,27 @@ foreach ($Contract in $Task2ScriptContracts) {
             Assert-True ($ScriptContent -match $RequiredPattern) "Task 2 script is missing its bare engine API: $($Contract.Path)"
         }
     }
+}
+
+$Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'
+$Task2LogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_log.script'
+$Task2RngPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rng.script'
+if (Test-Path -LiteralPath $Task2RunnerPath) {
+    $Task2RunnerContent = Get-Content -LiteralPath $Task2RunnerPath -Raw
+    Assert-True ($Task2RunnerContent -match '(?s)pcall\s*\(\s*function\s*\(\s*\)\s*return\s+gamma_arena_test_domain\.run\s*\(\s*run_case\s*\)\s*end\s*\)') 'Dev test runner must resolve and execute the domain suite inside pcall'
+}
+if (Test-Path -LiteralPath $Task2LogPath) {
+    $Task2LogContent = Get-Content -LiteralPath $Task2LogPath -Raw
+    Assert-True ($Task2LogContent -match 'sort_key\s*=\s*type\s*\(\s*key\s*\)\s*\.\.\s*":"') 'Logger must use a type-aware canonical context sort key'
+    Assert-True ($Task2LogContent -match '(?s)left\.sort_key\s*==\s*right\.sort_key') 'Logger must use a total context sort comparator'
+    Assert-True ($Task2LogContent -match 'pcall\s*\(\s*printf\s*,') 'Logger must protect the printf sink with pcall'
+}
+if (Test-Path -LiteralPath $Task2RngPath) {
+    $Task2RngContent = Get-Content -LiteralPath $Task2RngPath -Raw
+    Assert-True ($Task2RngContent -match 'minimum\s*~=\s*minimum') 'RNG must reject NaN minimum bounds'
+    Assert-True ($Task2RngContent -match 'maximum\s*~=\s*maximum') 'RNG must reject NaN maximum bounds'
+    Assert-True ($Task2RngContent -match 'math\.huge') 'RNG must reject infinite bounds and spans'
+    Assert-True ($Task2RngContent -match 'local\s+span\s*=\s*maximum\s*-\s*minimum\s*\+\s*1') 'RNG must validate its computed span before modulo'
 }
 
 if ($script:Failures.Count -gt 0) {
