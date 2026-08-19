@@ -34,6 +34,21 @@ local valid_seed_modes = {
     manual = true
 }
 
+local arena_session_keys = {
+    schema_version = true,
+    session_id = true,
+    session_nonce = true,
+    mode_id = true,
+    difficulty_id = true,
+    session_seed = true,
+    fight_index = true,
+    generator_version = true,
+    catalog_revision = true,
+    layout_id = true,
+    checkpoint_name = true,
+    phase = true
+}
+
 local Store = {}
 Store.__index = Store
 
@@ -177,6 +192,11 @@ local function validate_expected_session(session)
     if type(session) ~= "table" then
         return fail("GA_SESSION_INVALID", "Expected ArenaSession must be a table")
     end
+    for key in pairs(session) do
+        if type(key) ~= "string" or not arena_session_keys[key] then
+            return fail("GA_SESSION_UNKNOWN_FIELD", "ArenaSession contains an unknown field", { field = tostring(key) })
+        end
+    end
     if session.schema_version ~= 1 then
         return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v1", { value = session.schema_version })
     end
@@ -313,6 +333,21 @@ function Store:pending_value(raw, kind)
         return gamma_arena_result.ok(true)
     end
     return fail("GA_" .. kind .. "_PENDING_INVALID", kind .. " pending marker is malformed", { value = raw })
+end
+
+function Store:inspect_intents(config)
+    local launch_raw = self:raw_read(config, "launch_pending")
+    if not launch_raw.ok then return launch_raw end
+    local resume_raw = self:raw_read(config, "resume_pending")
+    if not resume_raw.ok then return resume_raw end
+    local launch_pending = self:pending_value(launch_raw.value, "LAUNCH")
+    if not launch_pending.ok then return launch_pending end
+    local resume_pending = self:pending_value(resume_raw.value, "RESUME")
+    if not resume_pending.ok then return resume_pending end
+    return gamma_arena_result.ok({
+        launch_pending = launch_pending.value,
+        resume_pending = resume_pending.value
+    })
 end
 
 function Store:current_time(options)
@@ -543,6 +578,48 @@ function Store:reject_resume(config, result)
     return cleared.ok and result or cleared
 end
 
+function Store:prepare_resume(config, expected)
+    local values_result = self:read_all(config, resume_keys)
+    if not values_result.ok then return values_result end
+    local values = values_result.value
+    local pending = self:pending_value(values.resume_pending, "RESUME")
+    if not pending.ok then return self:reject_resume(config, pending) end
+    if not pending.value then return fail("GA_RESUME_NOT_PENDING", "No resume intent is pending") end
+
+    local launch_raw = self:raw_read(config, "launch_pending")
+    if not launch_raw.ok then return self:reject_resume(config, launch_raw) end
+    local launch_pending = self:pending_value(launch_raw.value, "LAUNCH")
+    if not launch_pending.ok then return self:reject_resume(config, launch_pending) end
+    if launch_pending.value then
+        local cleared = self:clear_transient(config)
+        return cleared.ok and fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") or cleared
+    end
+
+    local intent = validate_resume_intent({
+        schema_version = values.resume_schema_version and tonumber(values.resume_schema_version) or nil,
+        session_id = values.resume_session_id,
+        session_nonce = values.resume_session_nonce,
+        next_fight_index = values.resume_next_fight_index and tonumber(values.resume_next_fight_index) or nil,
+        checkpoint_name = values.resume_checkpoint_name
+    })
+    if not intent.ok then return self:reject_resume(config, intent) end
+    local session = validate_expected_session(expected)
+    if not session.ok then return self:reject_resume(config, session) end
+    if session.value.session_id ~= intent.value.session_id then
+        return self:reject_resume(config, fail("GA_RESUME_SESSION_MISMATCH", "Resume session id does not match checkpoint state"))
+    end
+    if session.value.session_nonce ~= intent.value.session_nonce then
+        return self:reject_resume(config, fail("GA_RESUME_NONCE_MISMATCH", "Resume session nonce does not match checkpoint state"))
+    end
+    if session.value.checkpoint_name ~= intent.value.checkpoint_name then
+        return self:reject_resume(config, fail("GA_RESUME_CHECKPOINT_MISMATCH", "Resume checkpoint does not match ArenaSession"))
+    end
+    if intent.value.next_fight_index < session.value.fight_index then
+        return self:reject_resume(config, fail("GA_RESUME_FIGHT_INDEX_MISMATCH", "Resume fight index is older than the clean checkpoint baseline", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
+    end
+    return intent
+end
+
 function Store:consume_resume(config, expected)
     local values_result = self:read_all(config, resume_keys)
     if not values_result.ok then return values_result end
@@ -642,13 +719,19 @@ local default_store = new_store_impl()
 function new_store() return new_store_impl() end
 function parse_manual_seed(text) return parse_manual_seed_impl(text) end
 function validate_start_request(request) return validate_start_request_impl(request) end
-function validate_arena_session(session) return validate_expected_session(session) end
+function validate_arena_session(session)
+    local succeeded, result = pcall(validate_expected_session, session)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return fail("GA_SESSION_INVALID", "ArenaSession validation failed safely", { reason = tostring(result) })
+end
 function parse_launch_token(token, now) return parse_launch_token_impl(token, now) end
 function random_session_seed(provider) return default_store:random_session_seed(provider) end
 function save_preferences(config, difficulty_id, seed_mode) return default_store:save_preferences(config, difficulty_id, seed_mode) end
 function issue_launch(config, request, options) return default_store:issue_launch(config, request, options) end
 function consume_launch(config, options) return default_store:consume_launch(config, options) end
+function inspect_intents(config) return default_store:inspect_intents(config) end
 function issue_resume(config, intent) return default_store:issue_resume(config, intent) end
+function prepare_resume(config, expected) return default_store:prepare_resume(config, expected) end
 function consume_resume(config, expected) return default_store:consume_resume(config, expected) end
 function clear_transient(config) return default_store:clear_transient(config) end
 function write_character_creation(config) return default_store:write_character_creation(config) end

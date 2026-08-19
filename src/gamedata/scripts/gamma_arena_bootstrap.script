@@ -1,0 +1,230 @@
+local runtime_orchestrator = nil
+local runtime_callbacks = nil
+local callbacks_registered = false
+local identity_counter = 0
+
+local function module_store_port()
+    return {
+        inspect_intents = function(_, config) return gamma_arena_session_store.inspect_intents(config) end,
+        consume_launch = function(_, config, options) return gamma_arena_session_store.consume_launch(config, options) end,
+        prepare_resume = function(_, config, expected) return gamma_arena_session_store.prepare_resume(config, expected) end,
+        clear_transient = function(_, config) return gamma_arena_session_store.clear_transient(config) end
+    }
+end
+
+local function current_config()
+    local ok, config = pcall(function() return axr_main and axr_main.config end)
+    return ok and config or nil
+end
+
+local function runtime_probes(catalogs)
+    return {
+        RegisterScriptCallback = RegisterScriptCallback,
+        ini_file = ini_file,
+        system_ini = system_ini,
+        alife = alife,
+        alife_create = alife_create,
+        alife_create_item = alife_create_item,
+        alife_release_id = alife_release_id,
+        getFS = getFS,
+        se_save_var = se_save_var,
+        level = level,
+        patrol = patrol,
+        db = db,
+        axr_main = axr_main,
+        safe_release_manager = safe_release_manager,
+        catalogs = catalogs
+    }
+end
+
+local function default_preflight()
+    local catalogs = gamma_arena_catalog.load()
+    if not catalogs.ok then return catalogs end
+    return gamma_arena_compat.preflight(runtime_probes(catalogs.value))
+end
+
+local function default_identity()
+    identity_counter = identity_counter + 1
+    local epoch = 0
+    if os and type(os.time) == "function" then
+        local ok, value = pcall(os.time)
+        if ok and type(value) == "number" and value == math.floor(value) and value >= 0 then epoch = value end
+    end
+    return gamma_arena_result.ok({
+        session_id = "ga_session_" .. tostring(epoch) .. "_" .. tostring(identity_counter),
+        session_nonce = "ga_nonce_" .. tostring(epoch) .. "_" .. tostring(identity_counter)
+    })
+end
+
+local function default_notify(string_id)
+    local text = string_id
+    if game and type(game.translate_string) == "function" then
+        local ok, translated = pcall(game.translate_string, string_id)
+        if ok and type(translated) == "string" then text = translated end
+    end
+    if actor_menu and type(actor_menu.set_msg) == "function" then
+        actor_menu.set_msg(1, text, 5)
+        return
+    end
+    if db and db.actor and type(db.actor.give_game_news) == "function" then
+        db.actor:give_game_news(text, "", "ui_inGame2_PD_storonnik_ravnovesiya", 0, 5000)
+        return
+    end
+    gamma_arena_log.warn("GA_MANUAL_INPUT_NOTICE_UNAVAILABLE", text, {})
+end
+
+local function default_fatal_ui()
+    return {
+        show_fatal = function(errors, callback)
+            return gamma_arena_ui_start.show_fatal(nil, errors, function() callback() end, nil)
+        end
+    }
+end
+
+local function default_disconnect()
+    exec_console_cmd("disconnect")
+end
+
+local function neutral_teardown()
+    return gamma_arena_result.ok(true)
+end
+
+function compose(overrides)
+    overrides = overrides or {}
+    local deps = {
+        store = overrides.store or module_store_port(),
+        config = overrides.config or current_config(),
+        preflight = overrides.preflight or default_preflight,
+        identity = overrides.identity or default_identity,
+        ui = overrides.ui or default_fatal_ui(),
+        notify = overrides.notify or default_notify,
+        disconnect = overrides.disconnect or default_disconnect,
+        teardown = overrides.teardown or neutral_teardown,
+        launch_options = overrides.launch_options
+    }
+    return gamma_arena_orchestrator.new(deps)
+end
+
+local function callback_failure(instance, name, reason)
+    pcall(instance.on_callback_error, instance, name, reason)
+end
+
+local function invoke(instance, name, ...)
+    local ok_method, method = pcall(function() return instance[name] end)
+    if not ok_method or type(method) ~= "function" then
+        callback_failure(instance, name, "callback method is unavailable")
+        return nil
+    end
+    local ok, result = pcall(method, instance, ...)
+    if not ok then
+        callback_failure(instance, name, result)
+        return nil
+    end
+    return result
+end
+
+function make_callbacks(instance)
+    local callbacks = {}
+
+    callbacks.on_game_load = function(...)
+        local ok, result = pcall(invoke, instance, "on_game_load", ...)
+        if not ok then callback_failure(instance, "on_game_load", result) end
+        return ok and result or nil
+    end
+    callbacks.actor_on_first_update = function(...)
+        local ok, result = pcall(invoke, instance, "actor_on_first_update", ...)
+        if not ok then callback_failure(instance, "actor_on_first_update", result) end
+        return ok and result or nil
+    end
+    callbacks.actor_on_update = function(...)
+        local ok, result = pcall(invoke, instance, "actor_on_update", ...)
+        if not ok then callback_failure(instance, "actor_on_update", result) end
+        return ok and result or nil
+    end
+    callbacks.actor_on_before_death = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "actor_on_before_death", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "actor_on_before_death", result) end
+        return ok and result or nil
+    end
+    callbacks.npc_on_death_callback = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "npc_on_death_callback", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "npc_on_death_callback", result) end
+        return ok and result or nil
+    end
+    callbacks.save_state = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "save_state", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "save_state", result) end
+        return ok and result or nil
+    end
+    callbacks.load_state = function(...)
+        local ok, result = pcall(invoke, instance, "load_state", ...)
+        if not ok then callback_failure(instance, "load_state", result) end
+        return ok and result or nil
+    end
+    callbacks.on_before_save_input = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "on_before_save_input", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "on_before_save_input", result) end
+        return ok and result or nil
+    end
+    callbacks.on_before_load_input = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "on_before_load_input", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "on_before_load_input", result) end
+        return ok and result or nil
+    end
+    callbacks.actor_on_net_destroy = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "actor_on_net_destroy", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "actor_on_net_destroy", result) end
+        return ok and result or nil
+    end
+    callbacks.on_before_level_changing = function(...)
+        local ok, result = pcall(function(...)
+            if not instance:is_active() then return end
+            return invoke(instance, "on_before_level_changing", ...)
+        end, ...)
+        if not ok then callback_failure(instance, "on_before_level_changing", result) end
+        return ok and result or nil
+    end
+    return callbacks
+end
+
+function on_game_start()
+    if callbacks_registered then return end
+    local ok, reason = pcall(function()
+        runtime_orchestrator = compose()
+        if runtime_orchestrator == nil then error("orchestrator composition failed") end
+        runtime_callbacks = make_callbacks(runtime_orchestrator)
+        RegisterScriptCallback("on_game_load", runtime_callbacks.on_game_load)
+        RegisterScriptCallback("actor_on_first_update", runtime_callbacks.actor_on_first_update)
+        RegisterScriptCallback("actor_on_update", runtime_callbacks.actor_on_update)
+        RegisterScriptCallback("actor_on_before_death", runtime_callbacks.actor_on_before_death)
+        RegisterScriptCallback("npc_on_death_callback", runtime_callbacks.npc_on_death_callback)
+        RegisterScriptCallback("save_state", runtime_callbacks.save_state)
+        RegisterScriptCallback("load_state", runtime_callbacks.load_state)
+        RegisterScriptCallback("on_before_save_input", runtime_callbacks.on_before_save_input)
+        RegisterScriptCallback("on_before_load_input", runtime_callbacks.on_before_load_input)
+        RegisterScriptCallback("actor_on_net_destroy", runtime_callbacks.actor_on_net_destroy)
+        RegisterScriptCallback("on_before_level_changing", runtime_callbacks.on_before_level_changing)
+        callbacks_registered = true
+    end)
+    if not ok then
+        pcall(gamma_arena_log.error, "GA_BOOTSTRAP_FAILED", "Arena callback registration failed safely", { reason = tostring(reason) })
+    end
+end

@@ -77,6 +77,10 @@ Each `SessionStore` instance owns its own volatile permits. A same-instance dupl
 
 `session_nonce` binds external resume commands to this exact session. `checkpoint_name` identifies the single reserved Arena checkpoint. The payload is valid only for the addon/schema revisions that created it.
 
+The runtime bootstrap writes this payload only while its orchestrator is active. An ordinary campaign save therefore receives no `gamma_arena_session` field. On load, an embedded payload is accepted only together with a matching `ResumeIntent`; a payload without that external route, or a resume route without a payload, fails closed and returns to the main menu. A launch route is valid only for a distinct new game with no loaded save payload, and its one-shot intent is consumed before compatibility preflight or any Arena runtime effect.
+
+The orchestrator validates and caches a resume override but does not apply `next_fight_index` and does not consume the valid `ResumeIntent` during initial activation. Task 6 owns the hidden-checkpoint re-hide step and consumes/applies that prepared route only after re-hide succeeds. Invalid or stale routes are cleared immediately. While the orchestrator is active, manual Save and Load UI callbacks are blocked with `st_gamma_arena_manual_save_disabled`; internal checkpoint console operations are outside those UI callbacks.
+
 ## ResumeIntent v1
 
 Resume intent is transient external coordination data, not part of the save:

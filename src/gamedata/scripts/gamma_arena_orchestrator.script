@@ -1,0 +1,398 @@
+local Orchestrator = {}
+Orchestrator.__index = Orchestrator
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context)
+end
+
+local function copy_plain(value, seen)
+    local value_type = type(value)
+    if value_type == "nil" or value_type == "string" or value_type == "boolean" or value_type == "number" then return value end
+    if value_type ~= "table" then error("non-plain ArenaSession value: " .. value_type) end
+    seen = seen or {}
+    if seen[value] then error("cyclic ArenaSession value") end
+    local copy = {}
+    seen[value] = true
+    for key, item in pairs(value) do
+        if type(key) ~= "string" then error("non-string ArenaSession key") end
+        copy[key] = copy_plain(item, seen)
+    end
+    seen[value] = nil
+    return copy
+end
+
+local function safe_result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Arena dependency is unavailable") end
+    local ok, result = pcall(fn, ...)
+    if not ok then return fail(code, "Arena dependency failed safely", { reason = tostring(result) }) end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return fail(code, "Arena dependency returned an invalid Result", { result_type = type(result) })
+    end
+    return result
+end
+
+local function call_method(code, object, method_name, ...)
+    local ok, method = pcall(function() return object and object[method_name] end)
+    if not ok or type(method) ~= "function" then return fail(code, "Arena dependency method is unavailable", { method = method_name }) end
+    return safe_result_call(code, method, object, ...)
+end
+
+local function error_results(result)
+    local values = {}
+    if type(result) == "table" and result.error and result.error.code == "GA_PREFLIGHT_FAILED"
+        and type(result.error.context) == "table" and type(result.error.context.errors) == "table" then
+        for index = 1, #result.error.context.errors do
+            local item = result.error.context.errors[index]
+            values[#values + 1] = fail(item.code or "GA_PREFLIGHT_FAILED", item.message or "Preflight failed", item.context)
+        end
+    end
+    if #values == 0 then values[1] = result end
+    return values
+end
+
+local function find_flags(...)
+    local args = { ... }
+    for index = 1, #args do
+        if type(args[index]) == "table" then
+            local writable = pcall(function()
+                local old = args[index].ret
+                args[index].ret = old
+            end)
+            if writable then return args[index] end
+        end
+    end
+    return nil
+end
+
+function Orchestrator:__init(deps)
+    self.deps = deps
+    self.active = false
+    self.session = nil
+    self.pending_resume = nil
+    self.loaded_session = nil
+    self.load_state_seen = false
+    self.load_state_error = nil
+    self.pending_load_state = nil
+    self.pending_load_state_seen = false
+    self.pending_load_state_error = nil
+    self.awaiting_activation = false
+    self.game_load_seen = false
+    self.activation_attempted = false
+    self.checkpoint_reload_expected = false
+    self.teardown_done = false
+    self.fatal_shown = false
+    self.fatal_dialog = nil
+    self.main_menu_executed = false
+    self.machine_state = gamma_arena_state_machine.states.IDLE
+end
+
+function Orchestrator:is_active()
+    return self.active == true
+end
+
+function Orchestrator:session_snapshot()
+    if self.session == nil then return nil end
+    local ok, copy = pcall(copy_plain, self.session)
+    return ok and copy or nil
+end
+
+function Orchestrator:pending_resume_snapshot()
+    if self.pending_resume == nil then return nil end
+    local ok, copy = pcall(copy_plain, self.pending_resume)
+    return ok and copy or nil
+end
+
+function Orchestrator:advance(event)
+    local transition = gamma_arena_state_machine.transition(self.machine_state, event)
+    if transition.ok then self.machine_state = transition.value end
+    return transition
+end
+
+function Orchestrator:teardown_once(reason, preserve_session)
+    if self.teardown_done then return gamma_arena_result.ok(false) end
+    self.teardown_done = true
+    if type(self.deps.teardown) ~= "function" then return gamma_arena_result.ok(true) end
+    return safe_result_call("GA_RUNTIME_TEARDOWN_FAILED", self.deps.teardown, reason, preserve_session == true)
+end
+
+function Orchestrator:main_menu_action()
+    if self.main_menu_executed then return end
+    self.main_menu_executed = true
+    if type(self.deps.disconnect) == "function" then pcall(self.deps.disconnect) end
+end
+
+function Orchestrator:enter_fatal(result, intent_finalized)
+    if type(result) ~= "table" or result.ok ~= false or type(result.error) ~= "table" then
+        result = fail("GA_RUNTIME_INTERNAL", "Arena runtime entered fatal routing without a structured error")
+    end
+    local errors = error_results(result)
+    if not intent_finalized then
+        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+        if not cleared.ok then errors[#errors + 1] = cleared end
+    end
+    self.active = false
+    self.session = nil
+    self.pending_resume = nil
+    self.checkpoint_reload_expected = false
+    self.machine_state = gamma_arena_state_machine.states.ERROR
+    local teardown = self:teardown_once("fatal", false)
+    if not teardown.ok then errors[#errors + 1] = teardown end
+    for index = 1, #errors do
+        local item = errors[index]
+        if item and item.error then pcall(gamma_arena_log.error, item.error.code, item.error.message, item.error.context) end
+    end
+    if not self.fatal_shown then
+        self.fatal_shown = true
+        local ui = self.deps.ui
+        local show = type(ui) == "table" and ui.show_fatal or nil
+        local ok, dialog = pcall(show, errors, function() self:main_menu_action() end)
+        if ok then
+            self.fatal_dialog = dialog
+        else
+            pcall(gamma_arena_log.error, "GA_FATAL_UI_FAILED", "Fatal Arena UI could not be shown", { reason = tostring(dialog) })
+            self:main_menu_action()
+        end
+    end
+    return result
+end
+
+function Orchestrator:on_callback_error(callback_name, reason)
+    return self:enter_fatal(fail("GA_CALLBACK_FAILED", "Arena callback failed safely", {
+        callback = callback_name,
+        reason = tostring(reason)
+    }))
+end
+
+function Orchestrator:on_game_load()
+    self.game_load_seen = true
+    self.active = false
+    self.session = nil
+    self.pending_resume = nil
+    self.checkpoint_reload_expected = false
+    self.activation_attempted = false
+    self.machine_state = gamma_arena_state_machine.states.IDLE
+    if self.pending_load_state_seen then
+        self.load_state_seen = true
+        self.loaded_session = self.pending_load_state
+        self.load_state_error = self.pending_load_state_error
+    else
+        self.load_state_seen = false
+        self.loaded_session = nil
+        self.load_state_error = nil
+    end
+    self.pending_load_state = nil
+    self.pending_load_state_seen = false
+    self.pending_load_state_error = nil
+    self.awaiting_activation = true
+    self.teardown_done = false
+    self.fatal_shown = false
+    self.main_menu_executed = false
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:load_state(mdata)
+    local decoded_session = nil
+    local succeeded, result = pcall(function()
+        if type(mdata) ~= "table" then return fail("GA_SAVE_STATE_INVALID", "Loaded save metadata must be a table") end
+        local payload = mdata.gamma_arena_session
+        if payload == nil then return gamma_arena_result.ok(false) end
+        local validated = gamma_arena_session_store.validate_arena_session(payload)
+        if not validated.ok then return validated end
+        local copied, value = pcall(copy_plain, validated.value)
+        if not copied then return fail("GA_SESSION_INVALID", "ArenaSession payload is not plain Lua data", { reason = tostring(value) }) end
+        decoded_session = value
+        return gamma_arena_result.ok(true)
+    end)
+    if not succeeded then result = fail("GA_SAVE_STATE_INVALID", "Loaded save metadata could not be read safely", { reason = tostring(result) }) end
+    self.pending_load_state_seen = true
+    if result.ok then
+        self.pending_load_state = decoded_session
+        self.pending_load_state_error = nil
+    else
+        self.pending_load_state = nil
+        self.pending_load_state_error = result
+    end
+    if self.awaiting_activation then
+        self.load_state_seen = true
+        self.loaded_session = self.pending_load_state
+        self.load_state_error = self.pending_load_state_error
+        self.pending_load_state = nil
+        self.pending_load_state_seen = false
+        self.pending_load_state_error = nil
+    end
+    return result
+end
+
+function Orchestrator:save_state(mdata)
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    if type(mdata) ~= "table" then return fail("GA_SAVE_STATE_INVALID", "Save metadata must be a table") end
+    local validated = gamma_arena_session_store.validate_arena_session(self.session)
+    if not validated.ok then return validated end
+    local copied, value = pcall(copy_plain, validated.value)
+    if not copied then return fail("GA_SESSION_SERIALIZE_FAILED", "ArenaSession could not be copied", { reason = tostring(value) }) end
+    mdata.gamma_arena_session = value
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:create_session(request)
+    local identity = safe_result_call("GA_SESSION_IDENTITY_FAILED", self.deps.identity, request)
+    if not identity.ok then return identity end
+    local value = identity.value
+    if type(value) ~= "table" then return fail("GA_SESSION_IDENTITY_FAILED", "Session identity must be a table") end
+    return gamma_arena_session_store.validate_arena_session({
+        schema_version = 1,
+        session_id = value.session_id,
+        session_nonce = value.session_nonce,
+        mode_id = request.mode_id,
+        difficulty_id = request.difficulty_id,
+        session_seed = request.session_seed,
+        fight_index = 0,
+        generator_version = 1,
+        catalog_revision = 1,
+        layout_id = "rostok_arena_v1",
+        checkpoint_name = "_gamma_arena_checkpoint",
+        phase = gamma_arena_state_machine.states.CHECKPOINTING
+    })
+end
+
+function Orchestrator:run_preflight()
+    return safe_result_call("GA_PREFLIGHT_FAILED", self.deps.preflight)
+end
+
+function Orchestrator:activate_once()
+    if self.active then return gamma_arena_result.ok(false) end
+    if self.activation_attempted then return gamma_arena_result.ok(false) end
+    if not self.awaiting_activation then return gamma_arena_result.ok(false) end
+    self.activation_attempted = true
+    self.awaiting_activation = false
+
+    local intents = call_method("GA_INTENT_INSPECTION_FAILED", self.deps.store, "inspect_intents", self.deps.config)
+    if not intents.ok then return self:enter_fatal(intents) end
+    local state = intents.value or {}
+    if state.launch_pending and state.resume_pending then
+        return self:enter_fatal(fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist"))
+    end
+
+    local has_embedded = self.loaded_session ~= nil or self.load_state_error ~= nil
+    if not state.launch_pending and not state.resume_pending then
+        if has_embedded then
+            return self:enter_fatal(self.load_state_error or fail("GA_RESUME_INTENT_REQUIRED", "Arena checkpoint requires a matching ResumeIntent"))
+        end
+        return gamma_arena_result.ok(false)
+    end
+    if self.load_state_error then return self:enter_fatal(self.load_state_error) end
+
+    local started = self:advance(gamma_arena_state_machine.events.START)
+    if not started.ok then return self:enter_fatal(started) end
+
+    if state.launch_pending then
+        if self.load_state_seen or self.loaded_session ~= nil then
+            return self:enter_fatal(fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch intent is valid only for a distinct new game"))
+        end
+        local consumed = call_method("GA_LAUNCH_CONSUME_FAILED", self.deps.store, "consume_launch", self.deps.config, self.deps.launch_options)
+        if not consumed.ok then return self:enter_fatal(consumed, true) end
+        local preflight = self:run_preflight()
+        if not preflight.ok then return self:enter_fatal(preflight, true) end
+        local session = self:create_session(consumed.value)
+        if not session.ok then return self:enter_fatal(session, true) end
+        local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
+        if not advanced.ok then return self:enter_fatal(advanced, true) end
+        self.session = session.value
+        self.active = true
+        return gamma_arena_result.ok({ route = "launch", session = self:session_snapshot() })
+    end
+
+    if not self.load_state_seen or self.loaded_session == nil then
+        return self:enter_fatal(fail("GA_RESUME_SESSION_MISSING", "ResumeIntent requires an embedded ArenaSession"))
+    end
+    local prepared = call_method("GA_RESUME_INVALID", self.deps.store, "prepare_resume", self.deps.config, self.loaded_session)
+    if not prepared.ok then return self:enter_fatal(prepared, true) end
+    local preflight = self:run_preflight()
+    if not preflight.ok then return self:enter_fatal(preflight) end
+    local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
+    if not advanced.ok then return self:enter_fatal(advanced) end
+    self.session = self.loaded_session
+    self.pending_resume = prepared.value
+    self.active = true
+    return gamma_arena_result.ok({ route = "resume", session = self:session_snapshot(), pending_resume = self:pending_resume_snapshot() })
+end
+
+function Orchestrator:actor_on_first_update()
+    return self:activate_once()
+end
+
+function Orchestrator:actor_on_update()
+    return self:activate_once()
+end
+
+function Orchestrator:actor_on_before_death()
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    return gamma_arena_result.ok(false)
+end
+
+function Orchestrator:npc_on_death_callback()
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    return gamma_arena_result.ok(false)
+end
+
+function Orchestrator:block_manual_input(...)
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    local flags = find_flags(...)
+    if flags == nil then return fail("GA_MANUAL_INPUT_FLAGS_MISSING", "Manual save/load callback did not provide writable flags") end
+    flags.ret = true
+    if type(self.deps.notify) == "function" then
+        local ok, reason = pcall(self.deps.notify, "st_gamma_arena_manual_save_disabled")
+        if not ok then return fail("GA_MANUAL_INPUT_NOTICE_FAILED", "Manual save/load notice could not be shown", { reason = tostring(reason) }) end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:on_before_save_input(flags, save_type, text)
+    return self:block_manual_input(flags, save_type, text)
+end
+
+function Orchestrator:on_before_load_input(...)
+    return self:block_manual_input(...)
+end
+
+function Orchestrator:expect_checkpoint_reload()
+    if not self:is_active() then return fail("GA_CHECKPOINT_RELOAD_INACTIVE", "Checkpoint reload can be expected only during Arena") end
+    self.checkpoint_reload_expected = true
+    self.teardown_done = false
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:actor_on_net_destroy()
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    local preserve = self.checkpoint_reload_expected == true
+    self.checkpoint_reload_expected = false
+    local result = self:teardown_once(preserve and "checkpoint_reload" or "actor_destroyed", preserve)
+    if not preserve then
+        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+        if not cleared.ok then result = cleared end
+    end
+    self.active = false
+    if not preserve then
+        self.session = nil
+        self.pending_resume = nil
+    end
+    return result
+end
+
+function Orchestrator:on_before_level_changing()
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    local result = self:teardown_once("level_change", false)
+    local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+    if not cleared.ok then result = cleared end
+    self.active = false
+    self.session = nil
+    self.pending_resume = nil
+    return result
+end
+
+function new(deps)
+    if type(deps) ~= "table" then return nil end
+    local value = setmetatable({}, Orchestrator)
+    value:__init(deps)
+    return value
+end

@@ -1,0 +1,220 @@
+local required_capabilities = {
+    { name = "RegisterScriptCallback", present = function(p) return type(p.RegisterScriptCallback) == "function" end },
+    { name = "ini_file", present = function(p) return type(p.ini_file) == "function" end },
+    { name = "system_ini", present = function(p) return type(p.system_ini) == "function" end },
+    { name = "alife", present = function(p) return type(p.alife) == "function" end },
+    { name = "alife_create", present = function(p) return type(p.alife_create) == "function" end },
+    { name = "alife_create_item", present = function(p) return type(p.alife_create_item) == "function" end },
+    { name = "alife_release_id", present = function(p) return type(p.alife_release_id) == "function" end },
+    { name = "getFS", present = function(p) return type(p.getFS) == "function" end },
+    { name = "se_save_var", present = function(p) return type(p.se_save_var) == "function" end },
+    { name = "level.patrol_path_exists", present = function(p) return type(p.level) == "table" and type(p.level.patrol_path_exists) == "function" end },
+    { name = "patrol", present = function(p) return type(p.patrol) == "function" end },
+    { name = "db.actor", present = function(p) return type(p.db) == "table" and p.db.actor ~= nil end },
+    { name = "axr_main.config", present = function(p) return type(p.axr_main) == "table" and p.axr_main.config ~= nil end },
+    { name = "safe_release_manager.release", present = function(p) return type(p.safe_release_manager) == "table" and type(p.safe_release_manager.release) == "function" end }
+}
+
+local config_methods = { "r_value", "r_string_ex", "line_exist", "w_value", "remove_line", "save" }
+
+local function add_error(errors, code, message, context)
+    errors[#errors + 1] = { code = code, message = message, context = context or {} }
+end
+
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function finite_integer(value)
+    return finite_number(value) and value == math.floor(value)
+end
+
+local function safe_call(fn, ...)
+    local values = { pcall(fn, ...) }
+    if not values[1] then return false, values[2] end
+    return true, values[2], values[3], values[4]
+end
+
+local function resolve_path(probes, path, errors, resolved)
+    local exists_ok, exists = safe_call(probes.level.patrol_path_exists, path)
+    if not exists_ok or exists ~= true then
+        add_error(errors, "GA_PREFLIGHT_PATROL_MISSING", "Required Arena patrol path is unavailable", { path = path })
+        return
+    end
+    local patrol_ok, patrol_object = safe_call(probes.patrol, path)
+    if not patrol_ok or patrol_object == nil then
+        add_error(errors, "GA_PREFLIGHT_PATROL_INVALID", "Arena patrol path could not be opened", { path = path })
+        return
+    end
+    local methods_ok, point_method, level_vertex_method, game_vertex_method = pcall(function()
+        return patrol_object.point, patrol_object.level_vertex_id, patrol_object.game_vertex_id
+    end)
+    if not methods_ok or type(point_method) ~= "function" or type(level_vertex_method) ~= "function" or type(game_vertex_method) ~= "function" then
+        add_error(errors, "GA_PREFLIGHT_PATROL_INVALID", "Arena patrol path lacks point or vertex accessors", { path = path })
+        return
+    end
+    local point_ok, point = safe_call(point_method, patrol_object, 0)
+    local lvid_ok, lvid = safe_call(level_vertex_method, patrol_object, 0)
+    local gvid_ok, gvid = safe_call(game_vertex_method, patrol_object, 0)
+    local coordinates_ok, x, y, z = pcall(function() return point.x, point.y, point.z end)
+    if not point_ok or point == nil or not coordinates_ok or not finite_number(x) or not finite_number(y) or not finite_number(z)
+        or not lvid_ok or not finite_integer(lvid) or lvid < 0 or lvid >= 4294967295
+        or not gvid_ok or not finite_integer(gvid) or gvid < 0 or gvid >= 4294967295 then
+        add_error(errors, "GA_PREFLIGHT_PATROL_INVALID", "Arena patrol point or vertex ids are invalid", { path = path })
+        return
+    end
+    local coordinate_key = string.format("%.17g|%.17g|%.17g", x, y, z)
+    if resolved[coordinate_key] then
+        add_error(errors, "GA_PREFLIGHT_PATROL_COINCIDENT", "Arena patrol anchors must resolve to distinct points", {
+            path = path,
+            other_path = resolved[coordinate_key]
+        })
+        return
+    end
+    resolved[coordinate_key] = path
+end
+
+local function append_unique(target, seen, section, kind)
+    if type(section) == "string" and section ~= "" and not seen[section] then
+        seen[section] = true
+        target[#target + 1] = { section = section, kind = kind }
+    end
+end
+
+local function ordered_sections(catalogs)
+    local result, seen = {}, {}
+    for _, profile in ipairs(catalogs.profile_list or {}) do append_unique(result, seen, profile.section, "profile") end
+    for _, weapon in ipairs(catalogs.weapon_list or {}) do append_unique(result, seen, weapon.section, "item") end
+    local ammo = {}
+    for _, item in pairs(catalogs.ammo or {}) do ammo[#ammo + 1] = item.section end
+    table.sort(ammo)
+    for _, section in ipairs(ammo) do append_unique(result, seen, section, "item") end
+    for _, outfit in ipairs(catalogs.outfit_list or {}) do append_unique(result, seen, outfit.section, "item") end
+    local consumables = {}
+    for _, item in pairs(catalogs.consumables or {}) do consumables[#consumables + 1] = item.section end
+    table.sort(consumables)
+    for _, section in ipairs(consumables) do append_unique(result, seen, section, "item") end
+    return result
+end
+
+local function validate_sections(system, catalogs, errors)
+    local methods_ok, section_exist, r_string_ex, line_exist = pcall(function()
+        return system.section_exist, system.r_string_ex, system.line_exist
+    end)
+    if not methods_ok or type(section_exist) ~= "function" or type(r_string_ex) ~= "function" then
+        add_error(errors, "GA_PREFLIGHT_SYSTEM_INI_INVALID", "Effective system_ini lacks section/value accessors")
+        return
+    end
+    for _, entry in ipairs(ordered_sections(catalogs)) do
+        local exists_ok, exists = safe_call(section_exist, system, entry.section)
+        if not exists_ok or exists ~= true then
+            add_error(errors, "GA_PREFLIGHT_SECTION_MISSING", "Catalog section is missing from effective system.ini", {
+                section = entry.section,
+                kind = entry.kind
+            })
+        elseif entry.kind == "profile" then
+            local class_ok, class_id = safe_call(r_string_ex, system, entry.section, "class")
+            if not class_ok or class_id ~= "AI_STL_S" then
+                add_error(errors, "GA_PREFLIGHT_NPC_NOT_HUMAN", "Arena NPC profile is not an effective human stalker section", {
+                    section = entry.section,
+                    class = class_id
+                })
+            else
+                local community_present = false
+                if type(line_exist) == "function" then
+                    local present_ok, present = safe_call(line_exist, system, entry.section, "community")
+                    community_present = present_ok and present == true
+                end
+                if community_present then
+                    local community_ok, community = safe_call(r_string_ex, system, entry.section, "community")
+                    if not community_ok or community ~= "bandit" then
+                        add_error(errors, "GA_PREFLIGHT_NPC_COMMUNITY_INVALID", "Arena NPC profile has an incompatible effective community", {
+                            section = entry.section,
+                            community = community
+                        })
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function preflight_impl(probes)
+    if type(probes) ~= "table" then
+        return gamma_arena_result.err("GA_PREFLIGHT_PROBES_INVALID", "Preflight probes must be a table")
+    end
+    local errors = {}
+    for _, capability in ipairs(required_capabilities) do
+        local ok, present = pcall(capability.present, probes)
+        if not ok or not present then
+            add_error(errors, "GA_PREFLIGHT_API_MISSING", "Required runtime capability is unavailable", { capability = capability.name })
+        end
+    end
+
+    local config = type(probes.axr_main) == "table" and probes.axr_main.config or nil
+    if config ~= nil then
+        for _, method_name in ipairs(config_methods) do
+            local ok, method = pcall(function() return config[method_name] end)
+            if not ok or type(method) ~= "function" then
+                add_error(errors, "GA_PREFLIGHT_API_MISSING", "Arena config adapter lacks a required method", {
+                    capability = "axr_main.config." .. method_name
+                })
+            end
+        end
+    end
+
+    if type(probes.alife) == "function" then
+        local ok, server = safe_call(probes.alife)
+        if not ok or server == nil then add_error(errors, "GA_PREFLIGHT_ALIFE_UNAVAILABLE", "ALife simulator is unavailable") end
+    end
+
+    local system = nil
+    if type(probes.system_ini) == "function" then
+        local ok, value = safe_call(probes.system_ini)
+        if ok and value ~= nil then
+            system = value
+        else
+            add_error(errors, "GA_PREFLIGHT_SYSTEM_INI_INVALID", "Effective system_ini is unavailable")
+        end
+    end
+
+    local catalogs = probes.catalogs
+    local layout = type(catalogs) == "table" and type(catalogs.layouts) == "table" and catalogs.layouts.rostok_arena_v1 or nil
+    if type(layout) ~= "table" then
+        add_error(errors, "GA_PREFLIGHT_CATALOG_INVALID", "Validated v1 catalogs and layout are unavailable")
+    end
+
+    local current_level = nil
+    if type(probes.level) == "table" and type(probes.level.name) == "function" then
+        local ok, value = safe_call(probes.level.name)
+        if ok then current_level = value end
+    end
+    local level_is_valid = current_level == "l05_bar" and layout ~= nil and layout.level == "l05_bar"
+    if not level_is_valid then
+        add_error(errors, "GA_PREFLIGHT_LEVEL_INVALID", "Arena activation requires l05_bar", {
+            expected = "l05_bar",
+            actual = current_level
+        })
+    end
+
+    if level_is_valid and type(probes.level.patrol_path_exists) == "function" and type(probes.patrol) == "function" then
+        local paths = { layout.actor_spawn_path, layout.actor_look_path }
+        for _, path in ipairs(layout.opponent_spawn_paths or {}) do paths[#paths + 1] = path end
+        local resolved = {}
+        for _, path in ipairs(paths) do resolve_path(probes, path, errors, resolved) end
+    end
+
+    if system ~= nil and type(catalogs) == "table" then validate_sections(system, catalogs, errors) end
+    if #errors > 0 then
+        return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "Arena runtime preflight failed", { errors = errors })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function preflight(probes)
+    local succeeded, result = pcall(preflight_impl, probes)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "Arena runtime preflight failed safely", {
+        errors = { { code = "GA_PREFLIGHT_INTERNAL", message = "Preflight probe raised an exception", context = { reason = tostring(result) } } }
+    })
+end

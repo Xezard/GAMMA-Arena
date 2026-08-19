@@ -227,7 +227,7 @@ end
 local LAUNCH_TOKEN_TTL = 600
 local volatile_launch_permits = {}
 local gamma_arena_boolean_returns = true
-local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_economy_treasure new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode new_game_icon new_game_hardcore_mode new_game_hardcore_mode_lives new_game_hardcore_mode_regenerate new_game_survival_mode new_game_azazel_mode new_game_warfare new_game_campfire_mode new_game_conditions_mode new_game_timer_mode new_game_opened_routes new_game_test GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID"
+local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_economy_treasure new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode new_game_icon new_game_hardcore_mode new_game_hardcore_mode_lives new_game_hardcore_mode_regenerate new_game_survival_mode new_game_azazel_mode new_game_warfare new_game_campfire_mode new_game_conditions_mode new_game_timer_mode new_game_opened_routes new_game_test GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID GA_SESSION_UNKNOWN_FIELD"
 local function remove(config, section, key) config:remove_line(section, key) end
 local function validate_expected_session() end
 local function validate_persisted_launch_request() end
@@ -240,11 +240,49 @@ function save_preferences() end
 function issue_launch() end
 function parse_launch_token() end
 function consume_launch() end
+function Store:inspect_intents() end
+function Store:prepare_resume() end
+function inspect_intents() end
 function issue_resume() end
+function prepare_resume() end
 function consume_resume(intent, session)
     if intent.value.next_fight_index < session.value.fight_index then return "GA_RESUME_FIGHT_INDEX_MISMATCH" end
 end
 function write_character_creation() end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_bootstrap.script' @'
+local function guarded(instance)
+    local ok = pcall(function()
+        if not instance:is_active() then return end
+    end)
+    return ok
+end
+function make_callbacks() end
+function on_game_start()
+    RegisterScriptCallback("on_game_load", on_game_load)
+    RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+    RegisterScriptCallback("actor_on_update", actor_on_update)
+    RegisterScriptCallback("actor_on_before_death", actor_on_before_death)
+    RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
+    RegisterScriptCallback("save_state", save_state)
+    RegisterScriptCallback("load_state", load_state)
+    RegisterScriptCallback("on_before_save_input", on_before_save_input)
+    RegisterScriptCallback("on_before_load_input", on_before_load_input)
+    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+    RegisterScriptCallback("on_before_level_changing", on_before_level_changing)
+end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_compat.script' @'
+local markers = "RegisterScriptCallback ini_file system_ini alife alife_create alife_create_item alife_release_id getFS se_save_var level.patrol_path_exists patrol db.actor axr_main.config safe_release_manager.release l05_bar AI_STL_S bandit point level_vertex_id game_vertex_id 4294967295 GA_PREFLIGHT_PATROL_MISSING GA_PREFLIGHT_PATROL_INVALID GA_PREFLIGHT_SECTION_MISSING GA_PREFLIGHT_NPC_NOT_HUMAN"
+function preflight() return markers end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_orchestrator.script' @'
+local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation"
+function new() return markers end
+'@
+    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_runtime.script' @'
+local markers = "runtime_preflight_aggregates_in_stable_order runtime_wrong_level_skips_patrol_resolution runtime_launch_consumes_before_preflight_once runtime_activation_requires_game_load_boundary runtime_invalid_or_expired_launch_never_reaches_preflight runtime_ordinary_loaded_save_rejects_stray_launch runtime_ordinary_loaded_save_rejects_stray_resume runtime_new_game_does_not_reuse_prior_load_state_latch runtime_game_load_boundary_drops_prior_runtime_generation runtime_config_quarantine_propagates_to_fatal runtime_save_payload_is_plain_deep_copy runtime_manual_save_and_load_flags_are_blocked runtime_callback_boundary_contains_exceptions runtime_net_destroy_teardown_honors_checkpoint_latch runtime_unexpected_net_destroy_clears_external_route"
+function run() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
 local function on_read(xml_file_name, xml_obj)
@@ -330,6 +368,7 @@ function run() end
 <string id="st_gamma_arena_fatal_error_line"><text>Gamma Arena error [%s].</text></string>
 <string id="st_gamma_arena_fatal_main_menu"><text>&#x0412; &#x0433;&#x043B;&#x0430;&#x0432;&#x043D;&#x043E;&#x0435; &#x043C;&#x0435;&#x043D;&#x044E;</text></string>
 <string id="st_gamma_arena_seed_invalid"><text>Invalid</text></string>
+<string id="st_gamma_arena_manual_save_disabled"><text>Disabled</text></string>
 </string_table>
 '@
     Write-FixtureFile $Root 'src\gamedata\configs\text\rus\st_gamma_arena.xml' $Locale
