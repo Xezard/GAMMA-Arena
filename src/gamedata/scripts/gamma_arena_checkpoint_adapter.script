@@ -148,6 +148,7 @@ function CheckpointAdapter:__init(deps)
     self.last_mutation_cause = nil
     self.console_submitted = false
     self.operation_started = nil
+    self.late_dds_started = nil
 end
 
 function CheckpointAdapter:state()
@@ -312,6 +313,18 @@ function CheckpointAdapter:pending_or_timeout(code, message)
     return gamma_arena_result.ok({ state = self.current_state, pending = true })
 end
 
+function CheckpointAdapter:pending_late_dds_or_timeout()
+    local now = self:clock()
+    if not now.ok then return now end
+    if self.late_dds_started == nil then self.late_dds_started = now.value end
+    if elapsed_ms(self.late_dds_started, now.value) > (self.deps.timeout_ms or 10000) then
+        return fail("GA_CHECKPOINT_DDS_TIMEOUT", "Late optional checkpoint DDS could not be hidden before timeout", {
+            cause = self.last_mutation_cause
+        })
+    end
+    return gamma_arena_result.ok({ state = self.current_state, pending = true })
+end
+
 function CheckpointAdapter:required_hidden_ready()
     local paths = self.paths_result.value
     for _, extension in ipairs({ "scop", "scoc" }) do
@@ -403,6 +416,7 @@ function CheckpointAdapter:create(session)
     self.completed_resume = nil
     self.requested_next_fight_index = nil
     self.prepared_resume = nil
+    self.late_dds_started = nil
     self.after_cleanup = "SAVE"
     self.current_state = states.CLEANING
     self.last_error = nil
@@ -494,8 +508,23 @@ function CheckpointAdapter:update_ready()
     local visible_dds = self:file_info(paths.visible.dds)
     if not visible_dds.ok then return self:fail_operation(visible_dds) end
     if visible_dds.value.exists then
+        if self.late_dds_started == nil then
+            local started = self:clock()
+            if not started.ok then return self:fail_operation(started) end
+            self.late_dds_started = started.value
+            self.last_mutation_cause = nil
+        end
         local hidden = self:rename_exact(paths.visible.dds, paths.hidden.dds, false)
         if not hidden.ok then return self:fail_operation(hidden) end
+        if hidden.value ~= true then
+            local pending = self:pending_late_dds_or_timeout()
+            return pending.ok and pending or self:fail_operation(pending)
+        end
+        self.late_dds_started = nil
+        self.last_mutation_cause = nil
+    else
+        self.late_dds_started = nil
+        self.last_mutation_cause = nil
     end
     local ready = self:required_hidden_ready()
     if not ready.ok then return self:fail_operation(ready) end
@@ -528,6 +557,7 @@ function CheckpointAdapter:restore(session, next_fight_index)
     self.requested_next_fight_index = next_fight_index
     self.prepared_resume = copy_plain(intent)
     self.completed_resume = nil
+    self.late_dds_started = nil
     self.current_state = states.UNHIDING
     return gamma_arena_result.ok(true)
 end
@@ -607,6 +637,7 @@ function CheckpointAdapter:cleanup(session)
     self.current_state = states.CLEANING
     self.last_error = nil
     self.completed_resume = nil
+    self.late_dds_started = nil
     local started = self:start_operation_clock()
     if not started.ok then return self:fail_operation(started) end
     return gamma_arena_result.ok(true)

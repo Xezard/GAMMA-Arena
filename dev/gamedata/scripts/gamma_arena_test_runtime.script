@@ -1150,7 +1150,9 @@ local function fake_checkpoint_env()
         rename_actions = {},
         delete_actions = {},
         rename_always_throw = false,
+        rename_always_false = false,
         delete_always_throw = false,
+        delete_always_false = false,
         expect_count = 0
     }
     local function next_action(actions)
@@ -1172,7 +1174,7 @@ local function fake_checkpoint_env()
     function fs:rename(source, target)
         require_allowed(source); require_allowed(target)
         env.order[#env.order + 1] = "rename:" .. source
-        local action = env.rename_always_throw and "throw" or next_action(env.rename_actions)
+        local action = env.rename_always_throw and "throw" or (env.rename_always_false and "false" or next_action(env.rename_actions))
         if action == "throw" then error("injected rename failure") end
         if action == "false" then return false end
         if action == "zero_target" then
@@ -1186,7 +1188,7 @@ local function fake_checkpoint_env()
     function fs:delete(path)
         require_allowed(path)
         env.order[#env.order + 1] = "delete:" .. path
-        local action = env.delete_always_throw and "throw" or next_action(env.delete_actions)
+        local action = env.delete_always_throw and "throw" or (env.delete_always_false and "false" or next_action(env.delete_actions))
         if action == "throw" then error("injected delete failure") end
         if action == "false" then return false end
         if not env.delete_fail then env.files[path] = nil end
@@ -1356,6 +1358,156 @@ local function runtime_checkpoint_zero_required_target_waits_for_timeout()
     gamma_arena_test_assert.equals(timed_out.error.code, "GA_CHECKPOINT_RENAME_FAILED", "corrupt required target reports rename failure")
     gamma_arena_test_assert.is_true(timed_out.error.context and timed_out.error.context.cause ~= nil, "corrupt required target retains the last postcondition cause")
     gamma_arena_test_assert.equals(env.adapter:state(), "ERROR", "corrupt required target converges deterministically to ERROR")
+end
+
+local function runtime_checkpoint_late_dds_retries_throw_then_succeeds()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.files[env.paths.visible.dds] = 25
+    env.rename_actions = { "throw" }
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "throwing late DDS rename remains pending in READY")
+    gamma_arena_test_assert.equals(env.adapter:state(), "READY", "transient late DDS failure keeps checkpoint usable while bounded retry is active")
+    gamma_arena_test_assert.equals(env.files[env.paths.visible.dds], 25, "failed late DDS rename retains its exact visible source")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "late DDS rename retries to success")
+    gamma_arena_test_assert.equals(env.files[env.paths.visible.dds], nil, "successful late DDS retry removes the visible source")
+    gamma_arena_test_assert.equals(env.files[env.paths.hidden.dds], 25, "successful late DDS retry publishes the exact hidden target")
+    gamma_arena_test_assert.equals(env.adapter:state(), "READY", "successful optional retry remains READY")
+end
+
+local function runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe()
+    for _, case in ipairs({
+        { label = "throw", configure = function(env) env.rename_always_throw = true end },
+        { label = "false", configure = function(env) env.rename_always_false = true end }
+    }) do
+        local env = fake_checkpoint_env()
+        advance_checkpoint_to_ready(env)
+        env.now = 4294967200
+        env.files[env.paths.visible.dds] = 25
+        case.configure(env)
+        gamma_arena_test_assert.is_true(env.adapter:update().ok, case.label .. " late DDS failure starts a bounded retry")
+        env.now = 400
+        gamma_arena_test_assert.is_true(env.adapter:update().ok, case.label .. " late DDS failure remains pending across uint32 wrap before timeout")
+        env.now = 1100
+        local timed_out = env.adapter:update()
+        gamma_arena_test_assert.is_false(timed_out.ok, case.label .. " late DDS failure terminates at the wrap-safe deadline")
+        gamma_arena_test_assert.equals(timed_out.error.code, "GA_CHECKPOINT_DDS_TIMEOUT", case.label .. " late DDS failure has an explicit terminal diagnostic")
+        gamma_arena_test_assert.is_true(timed_out.error.context and timed_out.error.context.cause ~= nil, case.label .. " late DDS timeout retains the last mutation cause")
+        gamma_arena_test_assert.equals(env.adapter:state(), "ERROR", case.label .. " late DDS timeout converges deterministically to ERROR")
+    end
+end
+
+local function runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently()
+    for _, event_name in ipairs({ "actor_on_net_destroy", "on_before_level_changing" }) do
+        local env = fake_checkpoint_env()
+        env.strict_paths = true
+        for _, group in pairs(env.paths) do
+            for _, path in pairs(group) do env.files[path] = 1 end
+        end
+        env.delete_actions = { "throw", "false" }
+        local actor_cleanup_count = 0
+        local actor = {
+            cleanup = function()
+                actor_cleanup_count = actor_cleanup_count + 1
+                return gamma_arena_result.ok(true)
+            end
+        }
+        local orchestrator = gamma_arena_bootstrap.compose({
+            store = env.store,
+            config = {},
+            actor = actor,
+            checkpoint = env.adapter,
+            teardown_clock = function() return env.now end,
+            teardown_timeout_ms = 1000,
+            teardown_max_updates = 8
+        })
+        orchestrator.active = true
+        orchestrator.session = valid_session()
+        orchestrator.runtime_stage = "READY"
+        orchestrator.checkpoint_ready = true
+        local first = orchestrator[event_name](orchestrator)
+        gamma_arena_test_assert.is_true(first.ok, event_name .. " drains transient throw/false cleanup before returning")
+        gamma_arena_test_assert.equals(env.adapter:state(), "NONE", event_name .. " cleanup reaches NONE")
+        for _, group in pairs(env.paths) do
+            for _, path in pairs(group) do gamma_arena_test_assert.equals(env.files[path], nil, event_name .. " deletes only and all six exact paths") end
+        end
+        gamma_arena_test_assert.equals(actor_cleanup_count, 1, event_name .. " actor cleanup executes once")
+        gamma_arena_test_assert.is_true(orchestrator[event_name](orchestrator).ok, event_name .. " repeated inactive event is benign")
+        gamma_arena_test_assert.is_true(orchestrator:teardown_once("repeat", false).ok, event_name .. " repeated teardown call is benign")
+        gamma_arena_test_assert.equals(actor_cleanup_count, 1, event_name .. " repeated teardown/event is idempotent")
+    end
+end
+
+local function runtime_bootstrap_teardown_permanent_failures_are_bounded()
+    local cases = {
+        {
+            label = "throw wrap timeout",
+            code = "GA_RUNTIME_TEARDOWN_TIMEOUT",
+            configure = function(env) env.delete_always_throw = true end,
+            options = function(env)
+                local ticks, index = { 4294967200, 400, 1100 }, 0
+                return {
+                    clock = function()
+                        index = index + 1
+                        return ticks[index] or ticks[#ticks]
+                    end,
+                    timeout_ms = 1000,
+                    max_updates = 8
+                }
+            end
+        },
+        {
+            label = "false update cap",
+            code = "GA_RUNTIME_TEARDOWN_EXHAUSTED",
+            configure = function(env) env.delete_always_false = true end,
+            options = function(env)
+                return { clock = function() return env.now end, timeout_ms = 1000, max_updates = 3 }
+            end
+        }
+    }
+    for _, case in ipairs(cases) do
+        local env = fake_checkpoint_env()
+        env.strict_paths = true
+        env.files[env.paths.hidden.scop] = 100
+        case.configure(env)
+        local result = gamma_arena_bootstrap.drain_checkpoint_cleanup(env.adapter, valid_session(), case.options(env))
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " teardown failure is bounded")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.label .. " teardown has a deterministic terminal diagnostic")
+        gamma_arena_test_assert.equals(env.adapter:state(), "CLEANING", case.label .. " failed cleanup remains explicitly retryable")
+        gamma_arena_test_assert.equals(env.files[env.paths.hidden.scop], 100, case.label .. " failed exact deletion never claims success")
+    end
+end
+
+local function runtime_bootstrap_teardown_rejects_unbounded_update_limits()
+    for _, value in ipairs({ math.huge, 257, 0, -1 }) do
+        local env = fake_checkpoint_env()
+        env.files[env.paths.hidden.scop] = 100
+        local result = gamma_arena_bootstrap.drain_checkpoint_cleanup(env.adapter, valid_session(), {
+            clock = function() return env.now end,
+            timeout_ms = 1000,
+            max_updates = value
+        })
+        gamma_arena_test_assert.is_false(result.ok, "invalid teardown update bound rejects: " .. tostring(value))
+        gamma_arena_test_assert.equals(result.error.code, "GA_RUNTIME_TEARDOWN_INVALID", "invalid teardown update bound code")
+        gamma_arena_test_assert.equals(env.adapter:state(), "NONE", "invalid teardown bound rejects before cleanup mutation")
+        gamma_arena_test_assert.equals(env.files[env.paths.hidden.scop], 100, "invalid teardown bound leaves exact files untouched")
+    end
+end
+
+local function runtime_failed_teardown_retries_then_latches_success()
+    local attempts = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.teardown = function()
+        attempts = attempts + 1
+        if attempts == 1 then return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "injected first teardown failure") end
+        return gamma_arena_result.ok(true)
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    gamma_arena_test_assert.is_false(orchestrator:teardown_once("first", false).ok, "failed teardown remains observable")
+    gamma_arena_test_assert.is_true(orchestrator:teardown_once("retry", false).ok, "failed teardown remains retryable")
+    local repeated = orchestrator:teardown_once("repeat", false)
+    gamma_arena_test_assert.is_true(repeated.ok, "successful teardown makes later calls benign")
+    gamma_arena_test_assert.is_false(repeated.value, "successful teardown latches idempotent completion")
+    gamma_arena_test_assert.equals(attempts, 2, "teardown retries exactly until the first success")
 end
 
 local function runtime_checkpoint_permanent_mutation_throws_time_out()
@@ -1844,6 +1996,12 @@ local cases = {
     ,{ name = "runtime_checkpoint_load_wait_is_bounded_and_wrap_safe", fn = runtime_checkpoint_load_wait_is_bounded_and_wrap_safe }
     ,{ name = "runtime_checkpoint_transient_mutation_failures_retry_to_success", fn = runtime_checkpoint_transient_mutation_failures_retry_to_success }
     ,{ name = "runtime_checkpoint_zero_required_target_waits_for_timeout", fn = runtime_checkpoint_zero_required_target_waits_for_timeout }
+    ,{ name = "runtime_checkpoint_late_dds_retries_throw_then_succeeds", fn = runtime_checkpoint_late_dds_retries_throw_then_succeeds }
+    ,{ name = "runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe", fn = runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe }
+    ,{ name = "runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently", fn = runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently }
+    ,{ name = "runtime_bootstrap_teardown_permanent_failures_are_bounded", fn = runtime_bootstrap_teardown_permanent_failures_are_bounded }
+    ,{ name = "runtime_bootstrap_teardown_rejects_unbounded_update_limits", fn = runtime_bootstrap_teardown_rejects_unbounded_update_limits }
+    ,{ name = "runtime_failed_teardown_retries_then_latches_success", fn = runtime_failed_teardown_retries_then_latches_success }
     ,{ name = "runtime_checkpoint_permanent_mutation_throws_time_out", fn = runtime_checkpoint_permanent_mutation_throws_time_out }
     ,{ name = "runtime_checkpoint_verifies_rename_and_delete_postconditions", fn = runtime_checkpoint_verifies_rename_and_delete_postconditions }
     ,{ name = "runtime_checkpoint_recovers_mixed_crash_states", fn = runtime_checkpoint_recovers_mixed_crash_states }

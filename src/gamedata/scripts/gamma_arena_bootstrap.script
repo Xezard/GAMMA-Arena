@@ -3,6 +3,8 @@ local runtime_callbacks = nil
 local runtime_registrar = nil
 local identity_counter = 0
 local unpack_values = unpack
+local UINT32_MOD = 4294967296
+local MAX_TEARDOWN_UPDATES = 256
 
 local callback_names = {
     "on_game_load",
@@ -124,6 +126,111 @@ local function neutral_teardown()
     return gamma_arena_result.ok(true)
 end
 
+local function teardown_clock_value(clock)
+    if type(clock) ~= "function" then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_CLOCK_FAILED", "Teardown clock is unavailable")
+    end
+    local called, value = pcall(clock)
+    if not called then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_CLOCK_FAILED", "Teardown clock raised an exception", { reason = tostring(value) })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        value = value.value
+    end
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 0 or value >= UINT32_MOD then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_CLOCK_FAILED", "Teardown clock must return a uint32 millisecond value")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function teardown_elapsed(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function teardown_method(adapter, method_name, ...)
+    local method_ok, method = pcall(function() return adapter and adapter[method_name] end)
+    if not method_ok or type(method) ~= "function" then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method is unavailable", { method = method_name })
+    end
+    local called, result = pcall(method, adapter, ...)
+    if not called then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method raised an exception", {
+            method = method_name,
+            reason = tostring(result)
+        })
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method returned an invalid Result", { method = method_name })
+    end
+    return result
+end
+
+local function teardown_state(adapter)
+    local method_ok, method = pcall(function() return adapter and adapter.state end)
+    if not method_ok or type(method) ~= "function" then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown state method is unavailable")
+    end
+    local called, state = pcall(method, adapter)
+    if not called or type(state) ~= "string" then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown state could not be read safely", {
+            reason = called and "invalid state" or tostring(state)
+        })
+    end
+    return gamma_arena_result.ok(state)
+end
+
+function drain_checkpoint_cleanup(checkpoint_adapter, session, options)
+    options = options or {}
+    local timeout_ms = options.timeout_ms or 10000
+    local max_updates = options.max_updates or 64
+    if type(timeout_ms) ~= "number" or timeout_ms ~= math.floor(timeout_ms) or timeout_ms < 0 or timeout_ms >= UINT32_MOD
+        or type(max_updates) ~= "number" or max_updates ~= math.floor(max_updates) or max_updates < 1
+        or max_updates > MAX_TEARDOWN_UPDATES then
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_INVALID", "Teardown bounds are invalid")
+    end
+    local clock = options.clock
+    local cleanup = teardown_method(checkpoint_adapter, "cleanup", session)
+    if not cleanup.ok then return cleanup end
+    local started = teardown_clock_value(clock)
+    if not started.ok then return started end
+    local updates = 0
+    while true do
+        local state = teardown_state(checkpoint_adapter)
+        if not state.ok then return state end
+        if state.value == "NONE" then
+            return gamma_arena_result.ok({ state = "NONE", updates = updates })
+        end
+        if state.value == "ERROR" then
+            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint cleanup terminated in ERROR", { updates = updates })
+        end
+        if state.value ~= "CLEANING" then
+            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint cleanup entered an unexpected state", {
+                state = state.value,
+                updates = updates
+            })
+        end
+        if updates >= max_updates then
+            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_EXHAUSTED", "Checkpoint cleanup exhausted its bounded update budget", {
+                updates = updates,
+                max_updates = max_updates
+            })
+        end
+        local current = teardown_clock_value(clock)
+        if not current.ok then return current end
+        if teardown_elapsed(started.value, current.value) > timeout_ms then
+            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_TIMEOUT", "Checkpoint cleanup exceeded its wrap-safe deadline", {
+                updates = updates,
+                timeout_ms = timeout_ms
+            })
+        end
+        local updated = teardown_method(checkpoint_adapter, "update")
+        if not updated.ok then return updated end
+        updates = updates + 1
+    end
+end
+
 local function default_layout()
     local catalogs = gamma_arena_catalog.load()
     if not catalogs.ok then return catalogs end
@@ -210,14 +317,20 @@ function compose(overrides)
     local config = overrides.config or current_config()
     local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
     local checkpoint_adapter = overrides.checkpoint or default_checkpoint_adapter(store, config, active_instance)
+    local teardown_clock = overrides.teardown_clock or function() return time_global() end
+    local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
+    local teardown_max_updates = overrides.teardown_max_updates or 64
     local teardown = overrides.teardown
     if teardown == nil then
         teardown = function(_, preserve)
             if preserve == true then return gamma_arena_result.ok(true) end
             local errors = {}
             local session = instance and instance:session_snapshot() or nil
-            local checkpoint = checkpoint_adapter:cleanup(session)
-            if checkpoint.ok then checkpoint = checkpoint_adapter:update() end
+            local checkpoint = drain_checkpoint_cleanup(checkpoint_adapter, session, {
+                clock = teardown_clock,
+                timeout_ms = teardown_timeout_ms,
+                max_updates = teardown_max_updates
+            })
             if not checkpoint.ok then errors[#errors + 1] = checkpoint.error end
             local actor = actor_adapter:cleanup()
             if not actor.ok then errors[#errors + 1] = actor.error end

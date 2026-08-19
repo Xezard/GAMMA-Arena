@@ -448,12 +448,20 @@ if (Test-Path -LiteralPath $Task6CheckpointPath) {
         Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Task 6 fresh-process recovery must cover $Marker"
     }
     Assert-True ($Task6CheckpointContent -match 'target_info\.value\.exists\s+then\s+if\s+required\s+and\s+target_info\.value\.size\s*<=\s*0') 'Required zero-byte rename targets must remain pending after the source disappears'
+    foreach ($Marker in @('late_dds_started','GA_CHECKPOINT_DDS_TIMEOUT','pending_late_dds_or_timeout')) {
+        Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Late optional DDS retries must cover $Marker"
+    }
 }
 
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Marker in @('gamma_arena_actor_adapter.new','gamma_arena_checkpoint_adapter.new','level.disable_input','level.enable_input','safe_release_manager.release')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 6 bootstrap composition must cover $Marker"
     }
+    foreach ($Marker in @('drain_checkpoint_cleanup','teardown_clock','teardown_timeout_ms','teardown_max_updates','GA_RUNTIME_TEARDOWN_TIMEOUT','GA_RUNTIME_TEARDOWN_EXHAUSTED')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Bootstrap teardown drain must cover $Marker"
+    }
+    Assert-True ($Task5BootstrapContent -match 'MAX_TEARDOWN_UPDATES') 'Bootstrap teardown drain must impose a finite hard update cap'
+    Assert-True ($Task5BootstrapContent -match 'max_updates\s*>\s*MAX_TEARDOWN_UPDATES') 'Caller-supplied teardown update bounds must not exceed the hard cap'
 }
 
 $Task6CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
@@ -475,6 +483,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Fatal checkpoint cleanup routing must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'self\.cleanup_required\s*=\s*true') 'Fatal routing must gate disconnect on actual checkpoint cleanup even before session assignment'
+    Assert-True ($Task5OrchestratorContent -match 'if\s+result\.ok\s+then\s+self\.teardown_done\s*=\s*true\s+end') 'Failed teardown must remain retryable instead of latching completion'
 }
 
 if (Test-Path -LiteralPath $Task5DevTestPath) {
@@ -490,6 +499,9 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     Assert-True ($Task5DevTestContent -match 'runtime_checkpoint_zero_required_target_waits_for_timeout') 'Task 6 checkpoint tests must cover a source-absent zero-byte required target'
     Assert-True ($Task5DevTestContent -match 'runtime_pre_session_fatal_waits_for_cleanup_before_disconnect') 'Fatal cleanup tests must cover failures before ArenaSession assignment'
     Assert-True ($Task5DevTestContent -match 'runtime_prepare_resume_legacy_mismatch_is_normalized') 'Resume routing tests must normalize legacy store mismatch codes'
+    foreach ($Marker in @('runtime_checkpoint_late_dds_retries_throw_then_succeeds','runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe','runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently','runtime_bootstrap_teardown_permanent_failures_are_bounded','runtime_bootstrap_teardown_rejects_unbounded_update_limits','runtime_failed_teardown_retries_then_latches_success')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 final lifecycle hardening tests must cover $Marker"
+    }
     foreach ($Marker in @('runtime_checkpoint_fresh_process_recovers_all_exact_layouts','runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch','runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 fresh-process recovery tests must cover $Marker"
     }
