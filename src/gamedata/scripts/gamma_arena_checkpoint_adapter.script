@@ -1,0 +1,525 @@
+local CheckpointAdapter = {}
+CheckpointAdapter.__index = CheckpointAdapter
+
+local UINT32_MOD = 4294967296
+local CHECKPOINT_NAME = "_gamma_arena_checkpoint"
+local HIDDEN_SUFFIX = ".gamma_arena_hidden"
+
+local states = {
+    NONE = "NONE",
+    SAVING = "SAVING",
+    WAITING_STABLE = "WAITING_STABLE",
+    HIDING = "HIDING",
+    READY = "READY",
+    UNHIDING = "UNHIDING",
+    LOADING = "LOADING",
+    REHIDING = "REHIDING",
+    CLEANING = "CLEANING"
+}
+
+local file_names = {
+    scop = CHECKPOINT_NAME .. ".scop",
+    scoc = CHECKPOINT_NAME .. ".scoc",
+    dds = CHECKPOINT_NAME .. ".dds"
+}
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context)
+end
+
+local function finite_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge and value == math.floor(value)
+end
+
+local function copy_plain(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then error("cyclic checkpoint value") end
+    seen[value] = true
+    local result = {}
+    for key, item in pairs(value) do result[copy_plain(key, seen)] = copy_plain(item, seen) end
+    seen[value] = nil
+    return result
+end
+
+local function checkpoint_session_copy(session)
+    if type(session) ~= "table" then return fail("GA_CHECKPOINT_SESSION_INVALID", "Checkpoint operation requires an ArenaSession table") end
+    local copied, value = pcall(copy_plain, session)
+    if not copied or type(value) ~= "table" then
+        return fail("GA_CHECKPOINT_SESSION_INVALID", "Checkpoint ArenaSession is not plain Lua data", { reason = tostring(value) })
+    end
+    if value.checkpoint_name ~= CHECKPOINT_NAME then
+        return fail("GA_CHECKPOINT_SESSION_INVALID", "Checkpoint operation requires the reserved ArenaSession")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required checkpoint dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Checkpoint dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return fail(code, "Checkpoint dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function unsafe_path(path, name)
+    if type(path) ~= "string" or #path <= #name then return true end
+    if string.find(path, "\0", 1, true) or string.find(path, "*", 1, true) or string.find(path, "?", 1, true) then return true end
+    if string.find(path, "..", 1, true) then return true end
+    if not string.match(path, "^%a:[/\\]") and not string.match(path, "^[/\\][/\\]") then return true end
+    return string.lower(string.sub(path, -#name)) ~= string.lower(name)
+end
+
+local function resolve_paths(fs)
+    local paths = { visible = {}, hidden = {} }
+    local root = nil
+    for _, extension in ipairs({ "scop", "scoc", "dds" }) do
+        local visible_name = file_names[extension]
+        local hidden_name = visible_name .. HIDDEN_SUFFIX
+        local visible = result_call("GA_CHECKPOINT_PATH_RESOLVE_FAILED", fs and fs.resolve, fs, visible_name)
+        if not visible.ok then return visible end
+        local hidden = result_call("GA_CHECKPOINT_PATH_RESOLVE_FAILED", fs and fs.resolve, fs, hidden_name)
+        if not hidden.ok then return hidden end
+        if unsafe_path(visible.value, visible_name) or unsafe_path(hidden.value, hidden_name) then
+            return fail("GA_CHECKPOINT_UNSAFE_PATH", "Resolved checkpoint path is unsafe", { extension = extension })
+        end
+        local visible_root = string.sub(visible.value, 1, #visible.value - #visible_name)
+        local hidden_root = string.sub(hidden.value, 1, #hidden.value - #hidden_name)
+        if visible_root ~= hidden_root or (root ~= nil and root ~= visible_root) then
+            return fail("GA_CHECKPOINT_UNSAFE_PATH", "Resolved checkpoint files do not share one exact save root")
+        end
+        if type(fs.is_safe) == "function" then
+            local safe = result_call("GA_CHECKPOINT_UNSAFE_PATH", fs.is_safe, fs, visible.value, hidden.value)
+            if not safe.ok or safe.value ~= true then return safe.ok and fail("GA_CHECKPOINT_UNSAFE_PATH", "Checkpoint path safety probe rejected the resolved path") or safe end
+        end
+        root = visible_root
+        paths.visible[extension] = visible.value
+        paths.hidden[extension] = hidden.value
+    end
+    return gamma_arena_result.ok(paths)
+end
+
+function CheckpointAdapter:__init(deps)
+    self.deps = deps
+    self.current_state = states.NONE
+    self.paths_result = resolve_paths(deps.fs)
+    self.started_at = nil
+    self.last_sizes = nil
+    self.stable_polls = 0
+    self.after_cleanup = nil
+    self.session = nil
+    self.restore_session = nil
+    self.loaded_session = nil
+    self.requested_next_fight_index = nil
+    self.completed_resume = nil
+    self.last_error = nil
+    self.console_submitted = false
+    self.operation_started = nil
+end
+
+function CheckpointAdapter:state()
+    return self.current_state
+end
+
+function CheckpointAdapter:paths()
+    if not self.paths_result.ok then return self.paths_result end
+    local copied, value = pcall(copy_plain, self.paths_result.value)
+    return copied and gamma_arena_result.ok(value) or fail("GA_CHECKPOINT_PATH_RESOLVE_FAILED", "Checkpoint path snapshot failed", { reason = tostring(value) })
+end
+
+function CheckpointAdapter:fail_operation(result)
+    self.last_error = result
+    return result
+end
+
+function CheckpointAdapter:clock()
+    local current = result_call("GA_CHECKPOINT_CLOCK_FAILED", self.deps.clock)
+    if not current.ok then return current end
+    if not finite_integer(current.value) or current.value < 0 or current.value >= UINT32_MOD then
+        return fail("GA_CHECKPOINT_CLOCK_FAILED", "Checkpoint clock must be a monotonic uint32 millisecond value")
+    end
+    return current
+end
+
+function CheckpointAdapter:file_info(path)
+    local fs = self.deps.fs
+    local exists = result_call("GA_CHECKPOINT_FS_FAILED", fs and fs.exists, fs, path)
+    if not exists.ok then return exists end
+    if exists.value ~= true then return gamma_arena_result.ok({ exists = false, size = 0 }) end
+    local size = result_call("GA_CHECKPOINT_FS_FAILED", fs and fs.size, fs, path)
+    if not size.ok then return size end
+    if not finite_integer(size.value) or size.value < 0 then
+        return fail("GA_CHECKPOINT_FS_FAILED", "Checkpoint file size is invalid", { path = path })
+    end
+    return gamma_arena_result.ok({ exists = true, size = size.value })
+end
+
+function CheckpointAdapter:delete_exact(path)
+    local before = self:file_info(path)
+    if not before.ok then return before end
+    -- Exact cleanup is already complete when the target is absent. Returning
+    -- true lets an idempotent cleanup converge instead of retrying forever.
+    if not before.value.exists then return gamma_arena_result.ok(true) end
+    local fs = self.deps.fs
+    local deleted = result_call("GA_CHECKPOINT_DELETE_FAILED", fs and fs.delete, fs, path)
+    if not deleted.ok then return deleted end
+    local after = self:file_info(path)
+    if not after.ok then return after end
+    if after.value.exists then return gamma_arena_result.ok(false) end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:delete_all_exact()
+    if not self.paths_result.ok then return self.paths_result end
+    local complete = true
+    for _, group_name in ipairs({ "visible", "hidden" }) do
+        local group = self.paths_result.value[group_name]
+        for _, extension in ipairs({ "scop", "scoc", "dds" }) do
+            local deleted = self:delete_exact(group[extension])
+            if not deleted.ok then return deleted end
+            if deleted.value ~= true then complete = false end
+        end
+    end
+    return gamma_arena_result.ok(complete)
+end
+
+function CheckpointAdapter:rename_exact(source, target, required)
+    local source_info = self:file_info(source)
+    if not source_info.ok then return source_info end
+    local target_info = self:file_info(target)
+    if not target_info.ok then return target_info end
+    if not source_info.value.exists then
+        if target_info.value.exists then return gamma_arena_result.ok(true) end
+        if required then return fail("GA_CHECKPOINT_RENAME_FAILED", "Required checkpoint source and target are both absent", { source = source, target = target }) end
+        return gamma_arena_result.ok(true)
+    end
+    local fs = self.deps.fs
+    local renamed = result_call("GA_CHECKPOINT_RENAME_FAILED", fs and fs.rename, fs, source, target)
+    if not renamed.ok then return renamed end
+    local source_after = self:file_info(source)
+    local target_after = self:file_info(target)
+    if not source_after.ok then return source_after end
+    if not target_after.ok then return target_after end
+    if source_after.value.exists or not target_after.value.exists or (required and target_after.value.size <= 0) then
+        return gamma_arena_result.ok(false)
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:move_group(source_group, target_group)
+    local paths = self.paths_result.value
+    local complete = true
+    for _, extension in ipairs({ "scop", "scoc", "dds" }) do
+        local moved = self:rename_exact(paths[source_group][extension], paths[target_group][extension], extension ~= "dds")
+        if not moved.ok then return moved end
+        if moved.value ~= true then complete = false end
+    end
+    return gamma_arena_result.ok(complete)
+end
+
+function CheckpointAdapter:start_operation_clock()
+    local now = self:clock()
+    if not now.ok then return now end
+    self.operation_started = now.value
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:pending_or_timeout(code, message)
+    local now = self:clock()
+    if not now.ok then return now end
+    if self.operation_started == nil then self.operation_started = now.value end
+    if elapsed_ms(self.operation_started, now.value) > (self.deps.timeout_ms or 10000) then
+        return fail(code, message)
+    end
+    return gamma_arena_result.ok({ state = self.current_state, pending = true })
+end
+
+function CheckpointAdapter:required_hidden_ready()
+    local paths = self.paths_result.value
+    for _, extension in ipairs({ "scop", "scoc" }) do
+        local visible = self:file_info(paths.visible[extension])
+        local hidden = self:file_info(paths.hidden[extension])
+        if not visible.ok then return visible end
+        if not hidden.ok then return hidden end
+        if visible.value.exists or not hidden.value.exists or hidden.value.size <= 0 then
+            return fail("GA_CHECKPOINT_HIDE_POSTCONDITION_FAILED", "Hidden checkpoint postcondition failed", { extension = extension })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:create(session)
+    if not self.paths_result.ok then return self.paths_result end
+    local validated = checkpoint_session_copy(session)
+    if not validated.ok then return validated end
+    self.session = validated.value
+    self.restore_session = nil
+    self.loaded_session = nil
+    self.completed_resume = nil
+    self.requested_next_fight_index = nil
+    self.after_cleanup = "SAVE"
+    self.current_state = states.CLEANING
+    self.last_error = nil
+    local started = self:start_operation_clock()
+    if not started.ok then return self:fail_operation(started) end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:update_cleaning()
+    local deleted = self:delete_all_exact()
+    if not deleted.ok then return self:fail_operation(deleted) end
+    if deleted.value ~= true then
+        local pending = self:pending_or_timeout("GA_CHECKPOINT_DELETE_FAILED", "Checkpoint files could not be deleted before timeout")
+        return pending.ok and pending or self:fail_operation(pending)
+    end
+    if self.session ~= nil then
+        local store = self.deps.store
+        if type(store) == "table" and type(store.clear_resume_if_matches) == "function" then
+            local cleared = result_call("GA_CHECKPOINT_INTENT_CLEAR_FAILED", store.clear_resume_if_matches, store, self.deps.config, self.session)
+            if not cleared.ok then return self:fail_operation(cleared) end
+        end
+    end
+    if self.after_cleanup == "SAVE" then
+        self.current_state = states.SAVING
+    else
+        self.current_state = states.NONE
+        self.session = nil
+    end
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:update_saving()
+    local submitted = result_call("GA_CHECKPOINT_SAVE_COMMAND_FAILED", self.deps.console, "save " .. CHECKPOINT_NAME)
+    if not submitted.ok then return self:fail_operation(submitted) end
+    local now = self:clock()
+    if not now.ok then return self:fail_operation(now) end
+    self.started_at = now.value
+    self.last_sizes = nil
+    self.stable_polls = 0
+    self.current_state = states.WAITING_STABLE
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:update_waiting_stable()
+    local now = self:clock()
+    if not now.ok then return self:fail_operation(now) end
+    if elapsed_ms(self.started_at, now.value) > (self.deps.timeout_ms or 10000) then
+        return self:fail_operation(fail("GA_CHECKPOINT_TIMEOUT", "Checkpoint files did not stabilize before timeout"))
+    end
+    local scop = self:file_info(self.paths_result.value.visible.scop)
+    local scoc = self:file_info(self.paths_result.value.visible.scoc)
+    if not scop.ok then return self:fail_operation(scop) end
+    if not scoc.ok then return self:fail_operation(scoc) end
+    if not scop.value.exists or scop.value.size <= 0 or not scoc.value.exists or scoc.value.size <= 0 then
+        self.last_sizes = nil
+        self.stable_polls = 0
+        return gamma_arena_result.ok({ state = self.current_state })
+    end
+    if self.last_sizes and self.last_sizes.scop == scop.value.size and self.last_sizes.scoc == scoc.value.size then
+        self.stable_polls = self.stable_polls + 1
+    else
+        self.stable_polls = 0
+    end
+    self.last_sizes = { scop = scop.value.size, scoc = scoc.value.size }
+    if self.stable_polls >= 2 and elapsed_ms(self.started_at, now.value) >= (self.deps.settle_ms or 250) then
+        self.current_state = states.HIDING
+        self.operation_started = now.value
+    end
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:update_hiding()
+    local moved = self:move_group("visible", "hidden")
+    if not moved.ok then return self:fail_operation(moved) end
+    if moved.value ~= true then
+        local pending = self:pending_or_timeout("GA_CHECKPOINT_RENAME_FAILED", "Checkpoint files could not be hidden before timeout")
+        return pending.ok and pending or self:fail_operation(pending)
+    end
+    local ready = self:required_hidden_ready()
+    if not ready.ok then return self:fail_operation(ready) end
+    self.current_state = states.READY
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:update_ready()
+    local paths = self.paths_result.value
+    local visible_dds = self:file_info(paths.visible.dds)
+    if not visible_dds.ok then return self:fail_operation(visible_dds) end
+    if visible_dds.value.exists then
+        local hidden = self:rename_exact(paths.visible.dds, paths.hidden.dds, false)
+        if not hidden.ok then return self:fail_operation(hidden) end
+    end
+    local ready = self:required_hidden_ready()
+    if not ready.ok then return self:fail_operation(ready) end
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:restore(session, next_fight_index)
+    if self.current_state ~= states.READY then return fail("GA_CHECKPOINT_NOT_READY", "Checkpoint restore requires READY state") end
+    local validated = checkpoint_session_copy(session)
+    if not validated.ok then return validated end
+    local session_value = validated.value
+    if not finite_integer(next_fight_index) or not finite_integer(session_value.fight_index)
+        or next_fight_index < session_value.fight_index or next_fight_index >= UINT32_MOD then
+        return fail("GA_CHECKPOINT_NEXT_INDEX_INVALID", "Checkpoint restore next fight index is invalid")
+    end
+    local intent = {
+        schema_version = 1,
+        session_id = session_value.session_id,
+        session_nonce = session_value.session_nonce,
+        next_fight_index = next_fight_index,
+        checkpoint_name = CHECKPOINT_NAME
+    }
+    local store = self.deps.store
+    local issued = result_call("GA_CHECKPOINT_INTENT_WRITE_FAILED", store and store.issue_resume, store, self.deps.config, intent)
+    if not issued.ok then return self:fail_operation(issued) end
+    local started = self:start_operation_clock()
+    if not started.ok then return self:fail_operation(started) end
+    self.restore_session = session_value
+    self.loaded_session = nil
+    self.requested_next_fight_index = next_fight_index
+    self.completed_resume = nil
+    self.current_state = states.UNHIDING
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:update_unhiding()
+    local moved = self:move_group("hidden", "visible")
+    if not moved.ok then return self:fail_operation(moved) end
+    if moved.value ~= true then
+        local pending = self:pending_or_timeout("GA_CHECKPOINT_RENAME_FAILED", "Checkpoint files could not be unhidden before timeout")
+        return pending.ok and pending or self:fail_operation(pending)
+    end
+    local expected = result_call("GA_CHECKPOINT_EXPECT_UNLOAD_FAILED", self.deps.expect_unload)
+    if not expected.ok then return self:fail_operation(expected) end
+    self.current_state = states.LOADING
+    local loaded = result_call("GA_CHECKPOINT_LOAD_COMMAND_FAILED", self.deps.console, "load " .. CHECKPOINT_NAME)
+    if not loaded.ok then return self:fail_operation(loaded) end
+    return gamma_arena_result.ok({ state = self.current_state })
+end
+
+function CheckpointAdapter:on_game_load()
+    if self.current_state ~= states.LOADING then return gamma_arena_result.ok(false) end
+    self.current_state = states.REHIDING
+    local started = self:start_operation_clock()
+    if not started.ok then return self:fail_operation(started) end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:bind_loaded_session(session)
+    if self.current_state ~= states.REHIDING then return gamma_arena_result.ok(false) end
+    local validated = checkpoint_session_copy(session)
+    if not validated.ok then return fail("GA_CHECKPOINT_LOADED_SESSION_MISSING", "Loaded checkpoint has no valid ArenaSession payload", { cause = validated.error }) end
+    self.loaded_session = validated.value
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:update_rehiding()
+    if self.loaded_session == nil then return self:fail_operation(fail("GA_CHECKPOINT_LOADED_SESSION_MISSING", "Loaded checkpoint session must be validated before re-hide completion")) end
+    local moved = self:move_group("visible", "hidden")
+    if not moved.ok then return self:fail_operation(moved) end
+    if moved.value ~= true then
+        local pending = self:pending_or_timeout("GA_CHECKPOINT_RENAME_FAILED", "Loaded checkpoint files could not be re-hidden before timeout")
+        return pending.ok and pending or self:fail_operation(pending)
+    end
+    local ready = self:required_hidden_ready()
+    if not ready.ok then return self:fail_operation(ready) end
+    self.current_state = states.READY
+    local store = self.deps.store
+    local consumed = result_call("GA_CHECKPOINT_RESUME_CONSUME_FAILED", store and store.consume_resume, store, self.deps.config, self.loaded_session)
+    if not consumed.ok then return self:fail_operation(consumed) end
+    if type(consumed.value) ~= "table" or consumed.value.next_fight_index ~= self.requested_next_fight_index then
+        return self:fail_operation(fail("GA_CHECKPOINT_RESUME_MISMATCH", "Consumed ResumeIntent does not match the requested continuation"))
+    end
+    self.completed_resume = copy_plain(consumed.value)
+    return gamma_arena_result.ok({ state = self.current_state, resume = copy_plain(self.completed_resume) })
+end
+
+function CheckpointAdapter:take_resume()
+    if self.completed_resume == nil then return gamma_arena_result.ok(nil) end
+    local value = self.completed_resume
+    self.completed_resume = nil
+    return gamma_arena_result.ok(copy_plain(value))
+end
+
+function CheckpointAdapter:cleanup(session)
+    if session ~= nil then
+        local validated = checkpoint_session_copy(session)
+        if not validated.ok then return validated end
+        self.session = validated.value
+    end
+    self.after_cleanup = nil
+    self.current_state = states.CLEANING
+    self.last_error = nil
+    self.completed_resume = nil
+    local started = self:start_operation_clock()
+    if not started.ok then return self:fail_operation(started) end
+    return gamma_arena_result.ok(true)
+end
+
+function CheckpointAdapter:update()
+    if not self.paths_result.ok then return self.paths_result end
+    if self.current_state == states.NONE then return gamma_arena_result.ok({ state = states.NONE }) end
+    if self.current_state == states.CLEANING then return self:update_cleaning() end
+    if self.current_state == states.SAVING then return self:update_saving() end
+    if self.current_state == states.WAITING_STABLE then return self:update_waiting_stable() end
+    if self.current_state == states.HIDING then return self:update_hiding() end
+    if self.current_state == states.READY then return self:update_ready() end
+    if self.current_state == states.UNHIDING then return self:update_unhiding() end
+    if self.current_state == states.LOADING then return gamma_arena_result.ok({ state = states.LOADING }) end
+    if self.current_state == states.REHIDING then return self:update_rehiding() end
+    return self:fail_operation(fail("GA_CHECKPOINT_STATE_INVALID", "Checkpoint adapter entered an unknown state", { state = self.current_state }))
+end
+
+function engine_fs_port(fs)
+    local port = {}
+    function port:resolve(name)
+        if fs == nil or type(fs.update_path) ~= "function" then return fail("GA_CHECKPOINT_PATH_RESOLVE_FAILED", "getFS update_path is unavailable") end
+        local called, value = pcall(fs.update_path, fs, "$game_saves$", name)
+        return called and gamma_arena_result.ok(value) or fail("GA_CHECKPOINT_PATH_RESOLVE_FAILED", "getFS update_path failed safely", { reason = tostring(value) })
+    end
+    function port:exists(path)
+        if fs ~= nil and type(fs.exist) == "function" then
+            local called, value = pcall(fs.exist, fs, path)
+            if called then return gamma_arena_result.ok(value and true or false) end
+        end
+        if io == nil or type(io.open) ~= "function" then return fail("GA_CHECKPOINT_FS_FAILED", "No reliable file existence binding is available") end
+        local called, file = pcall(io.open, path, "rb")
+        if not called then return fail("GA_CHECKPOINT_FS_FAILED", "File existence fallback failed safely", { reason = tostring(file) }) end
+        if file == nil then return gamma_arena_result.ok(false) end
+        pcall(file.close, file)
+        return gamma_arena_result.ok(true)
+    end
+    function port:size(path)
+        if io == nil or type(io.open) ~= "function" then return fail("GA_CHECKPOINT_FS_FAILED", "Binary size fallback is unavailable") end
+        local called, file = pcall(io.open, path, "rb")
+        if not called or file == nil then return fail("GA_CHECKPOINT_FS_FAILED", "Checkpoint file could not be opened for size inspection", { reason = tostring(file) }) end
+        local seek_ok, size = pcall(file.seek, file, "end")
+        pcall(file.close, file)
+        return seek_ok and gamma_arena_result.ok(size) or fail("GA_CHECKPOINT_FS_FAILED", "Checkpoint file size inspection failed safely", { reason = tostring(size) })
+    end
+    function port:rename(source, target)
+        if fs == nil or type(fs.file_rename) ~= "function" then return fail("GA_CHECKPOINT_RENAME_FAILED", "getFS file_rename is unavailable") end
+        local called, reason = pcall(fs.file_rename, fs, source, target, true)
+        return called and gamma_arena_result.ok(true) or fail("GA_CHECKPOINT_RENAME_FAILED", "getFS file_rename failed safely", { reason = tostring(reason) })
+    end
+    function port:delete(path)
+        if fs == nil or type(fs.file_delete) ~= "function" then return fail("GA_CHECKPOINT_DELETE_FAILED", "getFS file_delete is unavailable") end
+        local called, reason = pcall(fs.file_delete, fs, path)
+        return called and gamma_arena_result.ok(true) or fail("GA_CHECKPOINT_DELETE_FAILED", "getFS file_delete failed safely", { reason = tostring(reason) })
+    end
+    return port
+end
+
+function new(deps)
+    if type(deps) ~= "table" then return nil end
+    local value = setmetatable({}, CheckpointAdapter)
+    value:__init(deps)
+    return value
+end

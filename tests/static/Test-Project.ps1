@@ -265,7 +265,7 @@ if (Test-Path -LiteralPath $DxmlPath) {
 $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','dxml_accepts_canonical_callback_path','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','dxml_accepts_canonical_callback_path','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
 }
@@ -389,19 +389,76 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -notmatch [regex]::Escape($Forbidden)) "Task 5 orchestrator must not contain $Forbidden"
     }
 }
+
 $Task5StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
 if (Test-Path -LiteralPath $Task5StorePath) {
     $Task5StoreContent = Get-Content -LiteralPath $Task5StorePath -Raw
     Assert-True ($Task5StoreContent -match 'GA_SESSION_UNKNOWN_FIELD') 'ArenaSession validator must reject unknown/future fields'
     Assert-True ($Task5StoreContent -match 'function Store:inspect_intents') 'Session store must expose non-mutating intent inspection'
     Assert-True ($Task5StoreContent -match 'function Store:prepare_resume') 'Session store must validate a resume route before checkpoint re-hide'
+    Assert-True ($Task5StoreContent -match 'function Store:clear_resume_if_matches') 'Checkpoint cleanup must clear only a ResumeIntent bound to its ArenaSession'
 }
 
 $Task5DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 if (Test-Path -LiteralPath $Task5DevTestPath) {
     $Task5DevTestContent = Get-Content -LiteralPath $Task5DevTestPath -Raw
-    foreach ($Marker in @('runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_bandit_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_net_destroy_teardown_honors_checkpoint_latch','runtime_unexpected_net_destroy_clears_external_route')) {
+    foreach ($Marker in @('runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_task6_actor_checkpoint_ports','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_bandit_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_net_destroy_teardown_honors_checkpoint_latch','runtime_unexpected_net_destroy_clears_external_route')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
+    }
+}
+
+$Task6RuntimeFiles = @(
+    'src\gamedata\scripts\gamma_arena_actor_adapter.script',
+    'src\gamedata\scripts\gamma_arena_checkpoint_adapter.script'
+)
+foreach ($RelativePath in $Task6RuntimeFiles) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 6 runtime contract is missing: $RelativePath"
+}
+
+$Task6ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
+if (Test-Path -LiteralPath $Task6ActorPath) {
+    $Task6ActorContent = Get-Content -LiteralPath $Task6ActorPath -Raw
+    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','begin_update','iterate_inventory','parent_id','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
+        Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor adapter must cover $Marker"
+    }
+    Assert-True ($Task6ActorContent -match '"set_bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
+}
+
+$Task6CheckpointPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_checkpoint_adapter.script'
+if (Test-Path -LiteralPath $Task6CheckpointPath) {
+    $Task6CheckpointContent = Get-Content -LiteralPath $Task6CheckpointPath -Raw
+    foreach ($Marker in @('WAITING_STABLE','HIDING','READY','UNHIDING','LOADING','REHIDING','CLEANING','_gamma_arena_checkpoint','.scop','.scoc','.dds','.gamma_arena_hidden','GA_CHECKPOINT_TIMEOUT','GA_CHECKPOINT_UNSAFE_PATH','issue_resume','consume_resume','clear_resume_if_matches','pending_or_timeout','elapsed_ms','engine_fs_port','update_path','file_rename','file_delete','"rb"','save " .. CHECKPOINT_NAME','load " .. CHECKPOINT_NAME')) {
+        Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Checkpoint adapter must cover $Marker"
+    }
+    foreach ($Forbidden in @('file_list','file_list_open_ex','file_find')) {
+        Assert-True ($Task6CheckpointContent -notmatch [regex]::Escape($Forbidden)) "Checkpoint adapter must not use broad path discovery: $Forbidden"
+    }
+}
+
+if (Test-Path -LiteralPath $Task5BootstrapPath) {
+    foreach ($Marker in @('gamma_arena_actor_adapter.new','gamma_arena_checkpoint_adapter.new','level.disable_input','level.enable_input','safe_release_manager.release')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 6 bootstrap composition must cover $Marker"
+    }
+}
+
+$Task6CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
+if (Test-Path -LiteralPath $Task6CompatPath) {
+    $Task6CompatContent = Get-Content -LiteralPath $Task6CompatPath -Raw
+    foreach ($Marker in @('getFS.update_path','getFS.file_rename','getFS.file_delete','exec_console_cmd','time_global','level.disable_input','level.enable_input','db.actor.iterate_inventory','db.actor.set_bleeding','db.actor.set_actor_position')) {
+        Assert-True ($Task6CompatContent -match [regex]::Escape($Marker)) "Task 6 preflight must require $Marker"
+    }
+}
+
+if (Test-Path -LiteralPath $Task5OrchestratorPath) {
+    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','checkpoint','request_checkpoint_restore','runtime_stage')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 6 orchestration must cover $Marker"
+    }
+    Assert-True ($Task5OrchestratorContent -notmatch 'gamma_arena_generator') 'FightSpec generation must remain gated out of Task 6'
+}
+
+if (Test-Path -LiteralPath $Task5DevTestPath) {
+    foreach ($Marker in @('runtime_actor_inventory_release_is_deferred_and_verified','runtime_actor_normalization_uses_gamma_bleeding_sentinel','runtime_actor_input_ownership_is_idempotent','runtime_actor_rejects_coincident_patrol_points','runtime_checkpoint_requires_stable_required_files','runtime_checkpoint_allows_absent_or_late_dds','runtime_checkpoint_wrap_clock_times_out','runtime_checkpoint_verifies_rename_and_delete_postconditions','runtime_checkpoint_recovers_mixed_crash_states','runtime_checkpoint_persists_intent_before_load','runtime_checkpoint_consumes_intent_only_after_rehide','runtime_checkpoint_rejects_mismatched_resume','runtime_checkpoint_cleanup_is_idempotent_in_every_state','runtime_checkpoint_two_sessions_leave_no_stale_paths','runtime_checkpoint_ready_gates_generation')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 Dev tests must cover $Marker"
     }
 }
 

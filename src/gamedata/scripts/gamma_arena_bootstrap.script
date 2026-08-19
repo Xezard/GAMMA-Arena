@@ -37,6 +37,9 @@ local function module_store_port()
         inspect_intents = function(_, config) return gamma_arena_session_store.inspect_intents(config) end,
         consume_launch = function(_, config, options) return gamma_arena_session_store.consume_launch(config, options) end,
         prepare_resume = function(_, config, expected) return gamma_arena_session_store.prepare_resume(config, expected) end,
+        issue_resume = function(_, config, intent) return gamma_arena_session_store.issue_resume(config, intent) end,
+        consume_resume = function(_, config, expected) return gamma_arena_session_store.consume_resume(config, expected) end,
+        clear_resume_if_matches = function(_, config, expected) return gamma_arena_session_store.clear_resume_if_matches(config, expected) end,
         clear_transient = function(_, config) return gamma_arena_session_store.clear_transient(config) end
     }
 end
@@ -57,6 +60,8 @@ local function runtime_probes(catalogs)
         alife_create_item = alife_create_item,
         alife_release_id = alife_release_id,
         getFS = getFS,
+        exec_console_cmd = exec_console_cmd,
+        time_global = time_global,
         se_save_var = se_save_var,
         level = level,
         patrol = patrol,
@@ -119,20 +124,123 @@ local function neutral_teardown()
     return gamma_arena_result.ok(true)
 end
 
+local function default_layout()
+    local catalogs = gamma_arena_catalog.load()
+    if not catalogs.ok then return catalogs end
+    local layout = catalogs.value and catalogs.value.layouts and catalogs.value.layouts.rostok_arena_v1
+    if type(layout) ~= "table" then return gamma_arena_result.err("GA_ACTOR_LAYOUT_INVALID", "Rostok Arena layout is unavailable") end
+    return gamma_arena_result.ok(layout)
+end
+
+local function default_actor_adapter(active_instance)
+    local effects = {}
+    function effects.disable_effects_timer(duration)
+        if actor_effects and type(actor_effects.disable_effects_timer) == "function" then
+            return actor_effects.disable_effects_timer(duration)
+        end
+    end
+    local input = {}
+    function input.acquire()
+        if level == nil or type(level.disable_input) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_INPUT_DISABLE_FAILED", "level.disable_input is unavailable")
+        end
+        level.disable_input()
+        return gamma_arena_result.ok(true)
+    end
+    function input.release()
+        if level == nil or type(level.enable_input) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_INPUT_ENABLE_FAILED", "level.enable_input is unavailable")
+        end
+        level.enable_input()
+        return gamma_arena_result.ok(true)
+    end
+    return gamma_arena_actor_adapter.new({
+        actor = function() return db and db.actor end,
+        is_session_active = function() return active_instance() and active_instance():is_active() end,
+        is_actor_owned = function(candidate)
+            local instance = active_instance()
+            return instance ~= nil and instance:is_active() and db and candidate == db.actor
+                and level and type(level.name) == "function" and level.name() == "l05_bar"
+        end,
+        release_item_id = function(id)
+            if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_INVENTORY_RELEASE_FAILED", "safe_release_manager.release is unavailable")
+            end
+            safe_release_manager.release({ id = id })
+            return gamma_arena_result.ok(true)
+        end,
+        patrol = function(path) return patrol(path) end,
+        effects = effects,
+        mod_psy_reset = function()
+            if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
+        end,
+        input = input
+    })
+end
+
+local function default_checkpoint_adapter(store, config, active_instance)
+    local fs = nil
+    local fs_ok, fs_value = pcall(function() return getFS() end)
+    if fs_ok then fs = fs_value end
+    return gamma_arena_checkpoint_adapter.new({
+        fs = gamma_arena_checkpoint_adapter.engine_fs_port(fs),
+        clock = function() return time_global() end,
+        console = function(command)
+            local submitted = exec_console_cmd(command)
+            if submitted == false then return gamma_arena_result.err("GA_CHECKPOINT_COMMAND_FAILED", "Checkpoint console command reported failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        store = store,
+        config = config,
+        expect_unload = function()
+            local instance = active_instance()
+            if instance == nil then return gamma_arena_result.err("GA_CHECKPOINT_RELOAD_INACTIVE", "Arena orchestrator is unavailable") end
+            return instance:expect_checkpoint_reload()
+        end,
+        settle_ms = 250,
+        timeout_ms = 10000
+    })
+end
+
 function compose(overrides)
     overrides = overrides or {}
+    local instance = nil
+    local function active_instance() return instance end
+    local store = overrides.store or module_store_port()
+    local config = overrides.config or current_config()
+    local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
+    local checkpoint_adapter = overrides.checkpoint or default_checkpoint_adapter(store, config, active_instance)
+    local teardown = overrides.teardown
+    if teardown == nil then
+        teardown = function(_, preserve)
+            if preserve == true then return gamma_arena_result.ok(true) end
+            local errors = {}
+            local session = instance and instance:session_snapshot() or nil
+            local checkpoint = checkpoint_adapter:cleanup(session)
+            if checkpoint.ok then checkpoint = checkpoint_adapter:update() end
+            if not checkpoint.ok then errors[#errors + 1] = checkpoint.error end
+            local actor = actor_adapter:cleanup()
+            if not actor.ok then errors[#errors + 1] = actor.error end
+            if #errors > 0 then return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Arena adapter cleanup failed", { errors = errors }) end
+            return gamma_arena_result.ok(true)
+        end
+    end
     local deps = {
-        store = overrides.store or module_store_port(),
-        config = overrides.config or current_config(),
+        store = store,
+        config = config,
         preflight = overrides.preflight or default_preflight,
         identity = overrides.identity or default_identity,
         ui = overrides.ui or default_fatal_ui(),
         notify = overrides.notify or default_notify,
         disconnect = overrides.disconnect or default_disconnect,
-        teardown = overrides.teardown or neutral_teardown,
-        launch_options = overrides.launch_options
+        teardown = teardown or neutral_teardown,
+        launch_options = overrides.launch_options,
+        actor = actor_adapter,
+        checkpoint = checkpoint_adapter,
+        layout = overrides.layout or default_layout
     }
-    return gamma_arena_orchestrator.new(deps)
+    instance = gamma_arena_orchestrator.new(deps)
+    return instance
 end
 
 local function callback_failure(instance, name, reason)

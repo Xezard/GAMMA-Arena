@@ -1,0 +1,290 @@
+local ActorAdapter = {}
+ActorAdapter.__index = ActorAdapter
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context)
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function valid_id(value)
+    return finite(value) and value == math.floor(value) and value >= 0
+end
+
+local function dependency_result(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Arena actor dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Arena actor dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return fail(code, "Arena actor dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
+local function call_actor(actor, method_name, ...)
+    local looked_up, method = pcall(function() return actor and actor[method_name] end)
+    if not looked_up or type(method) ~= "function" then
+        return fail("GA_ACTOR_API_MISSING", "Required actor method is unavailable", { method = method_name })
+    end
+    local called, value = pcall(method, actor, ...)
+    if not called then
+        return fail("GA_ACTOR_EFFECT_FAILED", "Actor effect failed safely", { method = method_name, reason = tostring(value) })
+    end
+    if value == false then
+        return fail("GA_ACTOR_EFFECT_FAILED", "Actor effect reported failure", { method = method_name })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function point_coordinates(point)
+    local ok, x, y, z = pcall(function() return point.x, point.y, point.z end)
+    if not ok or not finite(x) or not finite(y) or not finite(z) then return nil end
+    return x, y, z
+end
+
+function ActorAdapter:__init(deps)
+    self.deps = deps
+    self.input_owned = false
+    self.update_tick = 0
+    self.purge_tick = nil
+    self.inventory_clean = false
+    self.held_after_death = false
+end
+
+function ActorAdapter:begin_update()
+    self.update_tick = self.update_tick + 1
+    return gamma_arena_result.ok(self.update_tick)
+end
+
+function ActorAdapter:owned_actor()
+    local active_ok, active = pcall(self.deps.is_session_active)
+    if not active_ok or active ~= true then
+        return fail("GA_ACTOR_INACTIVE", "Actor effects are permitted only in an active Arena session")
+    end
+    local actor_ok, actor = pcall(self.deps.actor)
+    if not actor_ok or actor == nil then return fail("GA_ACTOR_MISSING", "Arena actor is unavailable") end
+    local owned_ok, owned = pcall(self.deps.is_actor_owned, actor)
+    if not owned_ok or owned ~= true then
+        return fail("GA_ACTOR_NOT_OWNED", "Campaign or foreign actor cannot be modified by Gamma Arena")
+    end
+    return gamma_arena_result.ok(actor)
+end
+
+function ActorAdapter:acquire_input()
+    if self.input_owned then return gamma_arena_result.ok(false) end
+    local input = self.deps.input
+    local acquired = dependency_result("GA_ACTOR_INPUT_DISABLE_FAILED", input and input.acquire)
+    if not acquired.ok then return acquired end
+    self.input_owned = true
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:release_input()
+    if not self.input_owned then return gamma_arena_result.ok(false) end
+    local input = self.deps.input
+    local released = dependency_result("GA_ACTOR_INPUT_ENABLE_FAILED", input and input.release)
+    if not released.ok then return released end
+    self.input_owned = false
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:purge_inventory(actor)
+    local actor_id_result = call_actor(actor, "id")
+    if not actor_id_result.ok or not valid_id(actor_id_result.value) then
+        return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id")
+    end
+    local actor_id = actor_id_result.value
+    local ids, seen, inspection_error = {}, {}, nil
+    local function collect(_, item)
+        if inspection_error ~= nil then return end
+        if item == nil then
+            inspection_error = fail("GA_ACTOR_INVENTORY_ITEM_INVALID", "Actor inventory yielded a nil item")
+            return
+        end
+        local id_result = call_actor(item, "id")
+        local parent_result = call_actor(item, "parent_id")
+        if not id_result.ok or not valid_id(id_result.value) then
+            inspection_error = fail("GA_ACTOR_INVENTORY_ITEM_INVALID", "Actor inventory item has no valid numeric id")
+            return
+        end
+        if not parent_result.ok or parent_result.value ~= actor_id then
+            inspection_error = fail("GA_ACTOR_INVENTORY_OWNER_INVALID", "Refusing to release an item not owned by the Arena actor", { item_id = id_result.value })
+            return
+        end
+        if not seen[id_result.value] then
+            seen[id_result.value] = true
+            ids[#ids + 1] = id_result.value
+        end
+    end
+    local iterated = call_actor(actor, "iterate_inventory", collect, nil)
+    if not iterated.ok then return iterated end
+    if inspection_error ~= nil then return inspection_error end
+
+    for index = 1, #ids do
+        local released = dependency_result("GA_ACTOR_INVENTORY_RELEASE_FAILED", self.deps.release_item_id, ids[index])
+        if not released.ok then return released end
+    end
+    self.purge_tick = self.update_tick
+    self.inventory_clean = false
+    return gamma_arena_result.ok(#ids)
+end
+
+function ActorAdapter:verify_inventory_empty()
+    if self.inventory_clean then return gamma_arena_result.ok(true) end
+    if self.purge_tick == nil then return fail("GA_ACTOR_INVENTORY_NOT_PURGED", "Actor inventory has not been purged") end
+    if self.update_tick <= self.purge_tick then return gamma_arena_result.ok(false) end
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local count, inspect_error = 0, nil
+    local function inspect(_, item)
+        count = count + 1
+        if item == nil then inspect_error = "nil item" end
+    end
+    local iterated = call_actor(owned.value, "iterate_inventory", inspect, nil)
+    if not iterated.ok then return iterated end
+    if inspect_error ~= nil or count ~= 0 then
+        return fail("GA_ACTOR_INVENTORY_NOT_EMPTY", "Arena actor inventory is not empty after deferred release", { count = count, reason = inspect_error })
+    end
+    self.inventory_clean = true
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:normalize_status(actor)
+    local health = call_actor(actor, "set_health_ex", 1)
+    if not health.ok then
+        health = call_actor(actor, "set_health", 1)
+        if not health.ok then return health end
+    end
+    for _, entry in ipairs({
+        { "set_power", 1 },
+        { "set_radiation", 0 },
+        { "set_bleeding", 1 },
+        { "set_psy_health", 1 }
+    }) do
+        local applied = call_actor(actor, entry[1], entry[2])
+        if not applied.ok then return applied end
+    end
+    if type(self.deps.mod_psy_reset) == "function" then
+        local ok, reason = pcall(self.deps.mod_psy_reset, actor)
+        if not ok then pcall(gamma_arena_log.warn, "GA_ACTOR_OPTIONAL_PSY_RESET_FAILED", "Optional GAMMA psy reset failed", { reason = tostring(reason) }) end
+    end
+    local effects = self.deps.effects
+    if type(effects) == "table" and type(effects.disable_effects_timer) == "function" then
+        local ok, reason = pcall(effects.disable_effects_timer, 100)
+        if not ok then pcall(gamma_arena_log.warn, "GA_ACTOR_EFFECT_TIMER_FAILED", "Optional effect timer reset failed", { reason = tostring(reason) }) end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:position_actor(actor, layout)
+    local layout_ok, spawn_path, look_path = pcall(function() return layout.actor_spawn_path, layout.actor_look_path end)
+    if type(layout) ~= "table" or not layout_ok or type(spawn_path) ~= "string" or type(look_path) ~= "string" then
+        return fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no actor spawn/look paths")
+    end
+    local spawn_ok, spawn_patrol = pcall(self.deps.patrol, spawn_path)
+    local look_ok, look_patrol = pcall(self.deps.patrol, look_path)
+    if not spawn_ok or spawn_patrol == nil or not look_ok or look_patrol == nil then
+        return fail("GA_ACTOR_PATROL_MISSING", "Arena actor patrol object is unavailable")
+    end
+    local spawn_result = call_actor(spawn_patrol, "point", 0)
+    local look_result = call_actor(look_patrol, "point", 0)
+    if not spawn_result.ok or not look_result.ok then return fail("GA_ACTOR_PATROL_INVALID", "Arena actor patrol point could not be resolved") end
+    local sx, sy, sz = point_coordinates(spawn_result.value)
+    local lx, ly, lz = point_coordinates(look_result.value)
+    if sx == nil or lx == nil then return fail("GA_ACTOR_PATROL_INVALID", "Arena actor patrol point is not finite") end
+    if sx == lx and sy == ly and sz == lz then
+        return fail("GA_ACTOR_PATROL_COINCIDENT", "Arena actor spawn and look points must differ")
+    end
+    local direction_ok, direction = pcall(function() return look_result.value:sub(spawn_result.value) end)
+    if not direction_ok or direction == nil then return fail("GA_ACTOR_PATROL_INVALID", "Arena actor look direction could not be calculated") end
+    local heading_result = call_actor(direction, "getH")
+    if not heading_result.ok or not finite(heading_result.value) then return fail("GA_ACTOR_PATROL_INVALID", "Arena actor look heading is invalid") end
+    local positioned = call_actor(actor, "set_actor_position", spawn_result.value)
+    if not positioned.ok then return positioned end
+    return call_actor(actor, "set_actor_direction", -heading_result.value)
+end
+
+function ActorAdapter:zero_money(actor)
+    local money = call_actor(actor, "money")
+    if not money.ok or not finite(money.value) then return fail("GA_ACTOR_MONEY_INVALID", "Arena actor money value is invalid") end
+    if money.value == 0 then return gamma_arena_result.ok(false) end
+    return call_actor(actor, "give_money", -money.value)
+end
+
+function ActorAdapter:normalize_for_checkpoint(layout)
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local acquired = self:acquire_input()
+    if not acquired.ok then return acquired end
+    local actor = owned.value
+    local steps = {
+        function() return self:purge_inventory(actor) end,
+        function() return self:normalize_status(actor) end,
+        function() return self:position_actor(actor, layout) end,
+        function() return self:zero_money(actor) end
+    }
+    for index = 1, #steps do
+        local result = steps[index]()
+        if not result.ok then
+            local released = self:release_input()
+            if not released.ok then
+                return fail("GA_ACTOR_NORMALIZE_ROLLBACK_FAILED", "Actor normalization and input rollback both failed", { cause = result.error, rollback = released.error })
+            end
+            return result
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:apply_loadout(loadout)
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local port = self.deps.loadout
+    return dependency_result("GA_ACTOR_LOADOUT_UNAVAILABLE", port and port.apply, owned.value, loadout)
+end
+
+function ActorAdapter:reset_after_victory(layout)
+    return self:normalize_for_checkpoint(layout)
+end
+
+function ActorAdapter:hold_after_logical_death()
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local acquired = self:acquire_input()
+    if not acquired.ok then return acquired end
+    local normalized = self:normalize_status(owned.value)
+    if not normalized.ok then self:release_input(); return normalized end
+    local invulnerability = self.deps.invulnerability
+    if type(invulnerability) ~= "table" or type(invulnerability.set) ~= "function" then
+        self:release_input()
+        return fail("GA_ACTOR_DEATH_HOLD_UNAVAILABLE", "Logical-death invulnerability port is deferred until the result-flow integration")
+    end
+    local held = dependency_result("GA_ACTOR_DEATH_HOLD_FAILED", invulnerability.set, true)
+    if not held.ok then self:release_input(); return held end
+    self.held_after_death = true
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:cleanup()
+    local errors = {}
+    if self.held_after_death then
+        local invulnerability = self.deps.invulnerability
+        local result = dependency_result("GA_ACTOR_DEATH_HOLD_RELEASE_FAILED", invulnerability and invulnerability.set, false)
+        if not result.ok then errors[#errors + 1] = result.error end
+        self.held_after_death = false
+    end
+    local input = self:release_input()
+    if not input.ok then errors[#errors + 1] = input.error end
+    self.purge_tick = nil
+    self.inventory_clean = false
+    if #errors > 0 then return fail("GA_ACTOR_CLEANUP_FAILED", "Arena actor cleanup failed", { errors = errors }) end
+    return gamma_arena_result.ok(true)
+end
+
+function new(deps)
+    if type(deps) ~= "table" then return nil end
+    local value = setmetatable({}, ActorAdapter)
+    value:__init(deps)
+    return value
+end

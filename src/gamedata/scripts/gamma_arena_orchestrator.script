@@ -79,6 +79,9 @@ function Orchestrator:__init(deps)
     self.game_load_seen = false
     self.activation_attempted = false
     self.checkpoint_reload_expected = false
+    self.runtime_stage = "INACTIVE"
+    self.checkpoint_ready = false
+    self.resume_bound = false
     self.teardown_done = false
     self.fatal_shown = false
     self.fatal_dialog = nil
@@ -100,6 +103,14 @@ function Orchestrator:pending_resume_snapshot()
     if self.pending_resume == nil then return nil end
     local ok, copy = pcall(copy_plain, self.pending_resume)
     return ok and copy or nil
+end
+
+function Orchestrator:runtime_stage_snapshot()
+    return self.runtime_stage
+end
+
+function Orchestrator:is_checkpoint_ready()
+    return self:is_active() and self.checkpoint_ready == true and self.runtime_stage == "READY"
 end
 
 function Orchestrator:advance(event)
@@ -146,13 +157,17 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     end
     local errors = error_results(result)
     if not intent_finalized then
-        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+        local clear_method = self.session ~= nil and "clear_resume_if_matches" or "clear_transient"
+        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, clear_method, self.deps.config, self.session)
         if not cleared.ok then errors[#errors + 1] = cleared end
     end
     self.active = false
     self.session = nil
     self.pending_resume = nil
     self.checkpoint_reload_expected = false
+    self.runtime_stage = "ERROR"
+    self.checkpoint_ready = false
+    self.resume_bound = false
     self.machine_state = gamma_arena_state_machine.states.ERROR
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then errors[#errors + 1] = teardown end
@@ -190,11 +205,16 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
 end
 
 function Orchestrator:on_game_load()
+    local checkpoint_load = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "on_game_load")
+    if not checkpoint_load.ok then return self:enter_fatal(checkpoint_load) end
     self.game_load_seen = true
     self.active = false
     self.session = nil
     self.pending_resume = nil
     self.checkpoint_reload_expected = false
+    self.runtime_stage = "AWAITING_ACTIVATION"
+    self.checkpoint_ready = false
+    self.resume_bound = false
     self.activation_attempted = false
     self.machine_state = gamma_arena_state_machine.states.IDLE
     if self.pending_load_state_seen then
@@ -325,6 +345,7 @@ function Orchestrator:activate_once()
         if not advanced.ok then return self:enter_fatal(advanced, true) end
         self.session = session.value
         self.active = true
+        self.runtime_stage = "NORMALIZING"
         return gamma_arena_result.ok({ route = "launch", session = self:session_snapshot() })
     end
 
@@ -340,15 +361,103 @@ function Orchestrator:activate_once()
     self.session = self.loaded_session
     self.pending_resume = prepared.value
     self.active = true
+    self.runtime_stage = "RESUME_REHIDING"
     return gamma_arena_result.ok({ route = "resume", session = self:session_snapshot(), pending_resume = self:pending_resume_snapshot() })
 end
 
+function Orchestrator:layout_snapshot()
+    return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id)
+end
+
+function Orchestrator:drive_runtime()
+    if not self:is_active() then
+        local checkpoint = self.deps.checkpoint
+        local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
+        if state_ok and state == "CLEANING" then return call_method("GA_CHECKPOINT_CLEANUP_FAILED", checkpoint, "update") end
+        return gamma_arena_result.ok(false)
+    end
+
+    if self.runtime_stage == "NORMALIZING" then
+        local layout = self:layout_snapshot()
+        if not layout.ok then return layout end
+        local normalized = call_method("GA_ACTOR_NORMALIZE_FAILED", self.deps.actor, "normalize_for_checkpoint", layout.value)
+        if not normalized.ok then return normalized end
+        self.runtime_stage = "WAIT_INVENTORY"
+        return gamma_arena_result.ok({ stage = self.runtime_stage })
+    end
+
+    if self.runtime_stage == "WAIT_INVENTORY" then
+        local empty = call_method("GA_ACTOR_INVENTORY_VERIFY_FAILED", self.deps.actor, "verify_inventory_empty")
+        if not empty.ok then return empty end
+        if empty.value ~= true then return gamma_arena_result.ok({ stage = self.runtime_stage }) end
+        local created = call_method("GA_CHECKPOINT_CREATE_FAILED", self.deps.checkpoint, "create", self.session)
+        if not created.ok then return created end
+        self.runtime_stage = "CHECKPOINTING"
+        return gamma_arena_result.ok({ stage = self.runtime_stage })
+    end
+
+    if self.runtime_stage == "CHECKPOINTING" or self.runtime_stage == "RESTORING" then
+        local updated = call_method("GA_CHECKPOINT_UPDATE_FAILED", self.deps.checkpoint, "update")
+        if not updated.ok then return updated end
+        local state_ok, checkpoint_state = pcall(function() return self.deps.checkpoint:state() end)
+        if not state_ok then return fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely") end
+        if checkpoint_state == "READY" and self.runtime_stage == "CHECKPOINTING" then
+            local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
+            if not advanced.ok then return advanced end
+            self.checkpoint_ready = true
+            self.runtime_stage = "READY"
+        end
+        return gamma_arena_result.ok({ stage = self.runtime_stage, checkpoint = checkpoint_state })
+    end
+
+    if self.runtime_stage == "RESUME_REHIDING" then
+        if not self.resume_bound then
+            local bound = call_method("GA_CHECKPOINT_LOADED_SESSION_INVALID", self.deps.checkpoint, "bind_loaded_session", self.session)
+            if not bound.ok then return bound end
+            self.resume_bound = true
+        end
+        local updated = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "update")
+        if not updated.ok then return updated end
+        local state_ok, checkpoint_state = pcall(function() return self.deps.checkpoint:state() end)
+        if not state_ok then return fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely") end
+        if checkpoint_state == "READY" then
+            local resume = call_method("GA_CHECKPOINT_RESUME_MISSING", self.deps.checkpoint, "take_resume")
+            if not resume.ok then return resume end
+            if type(resume.value) ~= "table" or resume.value.next_fight_index ~= self.pending_resume.next_fight_index then
+                return fail("GA_CHECKPOINT_RESUME_MISMATCH", "Checkpoint continuation does not match the prepared ResumeIntent")
+            end
+            self.session.fight_index = resume.value.next_fight_index
+            self.pending_resume = nil
+            local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
+            if not advanced.ok then return advanced end
+            self.checkpoint_ready = true
+            self.runtime_stage = "READY"
+        end
+        return gamma_arena_result.ok({ stage = self.runtime_stage, checkpoint = checkpoint_state })
+    end
+
+    if self.runtime_stage == "READY" then
+        local updated = call_method("GA_CHECKPOINT_UPDATE_FAILED", self.deps.checkpoint, "update")
+        if not updated.ok then return updated end
+        return gamma_arena_result.ok({ stage = "READY" })
+    end
+    return gamma_arena_result.ok({ stage = self.runtime_stage })
+end
+
+function Orchestrator:update_runtime()
+    local began = call_method("GA_ACTOR_UPDATE_FAILED", self.deps.actor, "begin_update")
+    if not began.ok then return began end
+    local activated = self:activate_once()
+    if not activated.ok then return activated end
+    return self:drive_runtime()
+end
+
 function Orchestrator:actor_on_first_update()
-    return self:activate_once()
+    return self:update_runtime()
 end
 
 function Orchestrator:actor_on_update()
-    return self:activate_once()
+    return self:update_runtime()
 end
 
 function Orchestrator:actor_on_before_death()
@@ -388,16 +497,27 @@ function Orchestrator:expect_checkpoint_reload()
     return gamma_arena_result.ok(true)
 end
 
+function Orchestrator:request_checkpoint_restore(next_fight_index)
+    if not self:is_checkpoint_ready() then return fail("GA_CHECKPOINT_NOT_READY", "Checkpoint restore requires a ready Arena checkpoint") end
+    local restored = call_method("GA_CHECKPOINT_RESTORE_FAILED", self.deps.checkpoint, "restore", self.session, next_fight_index)
+    if not restored.ok then return restored end
+    self.checkpoint_ready = false
+    self.runtime_stage = "RESTORING"
+    return gamma_arena_result.ok(true)
+end
+
 function Orchestrator:actor_on_net_destroy()
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local preserve = self.checkpoint_reload_expected == true
     self.checkpoint_reload_expected = false
     local result = self:teardown_once(preserve and "checkpoint_reload" or "actor_destroyed", preserve)
     if not preserve then
-        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+        local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
         if not cleared.ok then result = cleared end
     end
     self.active = false
+    self.runtime_stage = preserve and "RESTORING" or "CLEANING"
+    self.checkpoint_ready = false
     if not preserve then
         self.session = nil
         self.pending_resume = nil
@@ -408,9 +528,11 @@ end
 function Orchestrator:on_before_level_changing()
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local result = self:teardown_once("level_change", false)
-    local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+    local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
     if not cleared.ok then result = cleared end
     self.active = false
+    self.runtime_stage = "CLEANING"
+    self.checkpoint_ready = false
     self.session = nil
     self.pending_resume = nil
     return result

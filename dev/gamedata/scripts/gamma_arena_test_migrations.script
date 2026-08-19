@@ -817,6 +817,40 @@ local function character_creation_bridge_is_exact()
     end
 end
 
+local function matching_resume_cleanup_is_session_scoped()
+    local intent = {
+        schema_version = 1,
+        session_id = "session-1",
+        session_nonce = "session_nonce_1",
+        next_fight_index = 4,
+        checkpoint_name = "_gamma_arena_checkpoint"
+    }
+    local config = fake_config()
+    local store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "resume cleanup fixture issued")
+    local foreign = valid_session(3)
+    foreign.session_id = "session-2"
+    local skipped = store:clear_resume_if_matches(config, foreign)
+    gamma_arena_test_assert.is_true(skipped.ok and skipped.value == false, "foreign session cannot clear this resume route")
+    gamma_arena_test_assert.equals(config.data.resume_pending, "true", "foreign cleanup leaves matching route persisted")
+    local cleared = store:clear_resume_if_matches(config, valid_session(3))
+    gamma_arena_test_assert.is_true(cleared.ok, "matching session clears its own resume route")
+    assert_keys_absent(config, resume_keys, "matching cleanup clears only resume keys")
+    assert_keys_absent({ data = config.persisted }, resume_keys, "matching cleanup persists exact resume-key removal")
+
+    local malformed = fake_config({
+        resume_pending = "true",
+        resume_session_id = "../foreign",
+        resume_session_nonce = "foreign_nonce",
+        resume_next_fight_index = "4",
+        resume_checkpoint_name = "_gamma_arena_checkpoint",
+        resume_schema_version = "1"
+    })
+    local rejected = gamma_arena_session_store.new_store():clear_resume_if_matches(malformed, valid_session(3))
+    gamma_arena_test_assert.is_false(rejected.ok, "malformed foreign intent is not broadly deleted")
+    gamma_arena_test_assert.equals(malformed.data.resume_pending, "true", "malformed unmatched intent remains for explicit quarantine")
+end
+
 local cases = {
     { name = "settings_migrations", fn = migrations_cover_absent_v0_v1_and_future },
     { name = "start_request_validation", fn = request_validation_is_total_and_fail_closed },
@@ -832,7 +866,8 @@ local cases = {
     { name = "read_and_false_faults", fn = read_and_false_return_faults_are_safe },
     { name = "stale_conflict_faults", fn = stale_cleanup_and_conflict_faults_are_safe },
     { name = "dxml_callback_path", fn = dxml_accepts_canonical_callback_path },
-    { name = "character_creation_bridge", fn = character_creation_bridge_is_exact }
+    { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
+    { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped }
 }
 
 function run(run_case_fn)

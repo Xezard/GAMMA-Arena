@@ -50,7 +50,17 @@ local function valid_preflight_probes()
         snapshot.layouts.rostok_arena_v1.actor_look_path
     }
     for _, path in ipairs(snapshot.layouts.rostok_arena_v1.opponent_spawn_paths) do paths[#paths + 1] = path end
-    for index, path in ipairs(paths) do positions[path] = { x = index * 10, y = 0, z = index * 20 } end
+    for index, path in ipairs(paths) do
+        local point = { x = index * 10, y = 0, z = index * 20 }
+        function point:sub(other)
+            local result = { x = self.x - other.x, y = self.y - other.y, z = self.z - other.z }
+            function result:getH() return 0 end
+            function result:sub(value) return self end
+            return result
+        end
+        function point:getH() return 0 end
+        positions[path] = point
+    end
 
     local system = {}
     function system:section_exist(section) return sections[section] ~= nil end
@@ -65,6 +75,25 @@ local function valid_preflight_probes()
     function config:remove_line() return true end
     function config:save() return true end
 
+    local fs = {}
+    function fs:update_path() return "C:\\fake\\appdata\\savedgames\\" end
+    function fs:exist() return false end
+    function fs:file_rename() return true end
+    function fs:file_delete() return true end
+
+    local actor = {}
+    function actor:iterate_inventory() end
+    function actor:id() return 1 end
+    function actor:money() return 0 end
+    function actor:give_money() return true end
+    function actor:set_health_ex() return true end
+    function actor:set_power() return true end
+    function actor:set_radiation() return true end
+    function actor:set_bleeding() return true end
+    function actor:set_psy_health() return true end
+    function actor:set_actor_position() return true end
+    function actor:set_actor_direction() return true end
+
     local probes = {
         RegisterScriptCallback = function() end,
         UnregisterScriptCallback = function() end,
@@ -74,7 +103,9 @@ local function valid_preflight_probes()
         alife_create = function() return {} end,
         alife_create_item = function() return {} end,
         alife_release_id = function() return true end,
-        getFS = function() return {} end,
+        getFS = function() return fs end,
+        exec_console_cmd = function() return true end,
+        time_global = function() return 0 end,
         se_save_var = function() return true end,
         patrol = function(path)
             local patrol_object = {}
@@ -85,9 +116,11 @@ local function valid_preflight_probes()
         end,
         level = {
             name = function() return "l05_bar" end,
-            patrol_path_exists = function(path) return positions[path] ~= nil end
+            patrol_path_exists = function(path) return positions[path] ~= nil end,
+            disable_input = function() return true end,
+            enable_input = function() return true end
         },
-        db = { actor = {} },
+        db = { actor = actor },
         axr_main = { config = config },
         safe_release_manager = { release = function() return true end },
         catalogs = snapshot,
@@ -123,6 +156,26 @@ local function preflight_aggregates_in_stable_order()
     gamma_arena_test_assert.equals(errors[2].context.capability, "UnregisterScriptCallback", "rollback API order")
     gamma_arena_test_assert.equals(errors[3].context.capability, "ini_file", "third required API")
     gamma_arena_test_assert.equals(errors[4].context.capability, "safe_release_manager.release", "safe release API order")
+end
+
+local function preflight_requires_task6_actor_checkpoint_ports()
+    local cases = {
+        { capability = "exec_console_cmd", mutate = function(probes) probes.exec_console_cmd = nil end },
+        { capability = "level.disable_input", mutate = function(probes) probes.level.disable_input = nil end },
+        { capability = "db.actor.iterate_inventory", mutate = function(probes) probes.db.actor.iterate_inventory = nil end },
+        { capability = "getFS.file_rename", mutate = function(probes) probes.getFS = function() return {} end end }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "missing Task 6 port must fail: " .. case.capability)
+        local found = false
+        for _, item in ipairs(result.error.context.errors or {}) do
+            if item.context and item.context.capability == case.capability then found = true end
+        end
+        gamma_arena_test_assert.is_true(found, "preflight identifies missing Task 6 capability: " .. case.capability)
+    end
 end
 
 local function wrong_level_skips_patrol_resolution()
@@ -290,6 +343,21 @@ local function fake_store(intent_state)
         self.prepare_resume_count = self.prepare_resume_count + 1
         return self.resume_result or gamma_arena_result.ok({ schema_version = 1, session_id = expected.session_id, session_nonce = expected.session_nonce, next_fight_index = expected.fight_index, checkpoint_name = expected.checkpoint_name })
     end
+    function store:issue_resume(_, intent)
+        self.issue_resume_count = (self.issue_resume_count or 0) + 1
+        self.issued_resume = clone(intent)
+        return self.issue_resume_result or gamma_arena_result.ok(true)
+    end
+    function store:consume_resume(_, expected)
+        self.consume_resume_count = (self.consume_resume_count or 0) + 1
+        self.consumed_expected = clone(expected)
+        return self.consume_resume_result or gamma_arena_result.ok(clone(self.issued_resume))
+    end
+    function store:clear_resume_if_matches(_, expected)
+        self.clear_matching_count = (self.clear_matching_count or 0) + 1
+        self.cleared_expected = clone(expected)
+        return self.clear_matching_result or gamma_arena_result.ok(true)
+    end
     function store:clear_transient()
         self.clear_count = self.clear_count + 1
         self.intent_state.launch_pending = false
@@ -300,6 +368,42 @@ local function fake_store(intent_state)
 end
 
 local function fake_orchestrator_deps(store)
+    local actor_adapter = {
+        begin_update = function() return gamma_arena_result.ok(true) end,
+        normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
+        verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        release_input = function() return gamma_arena_result.ok(true) end,
+        cleanup = function() return gamma_arena_result.ok(true) end
+    }
+    local checkpoint_adapter = { current = "READY" }
+    function checkpoint_adapter:create() self.current = "READY"; return gamma_arena_result.ok(true) end
+    function checkpoint_adapter:update()
+        if self.current == "REHIDING" then
+            self.rehide_updates = (self.rehide_updates or 0) + 1
+            if self.rehide_updates >= 2 then self.current = "READY" end
+        end
+        return gamma_arena_result.ok({ state = self.current })
+    end
+    function checkpoint_adapter:state() return self.current end
+    function checkpoint_adapter:on_game_load() return gamma_arena_result.ok(false) end
+    function checkpoint_adapter:bind_loaded_session(session)
+        self.bound_session = clone(session)
+        self.current = "REHIDING"
+        self.rehide_updates = 0
+        return gamma_arena_result.ok(true)
+    end
+    function checkpoint_adapter:take_resume()
+        local value = store.resume_result and store.resume_result.value or {
+            schema_version = 1,
+            session_id = self.bound_session and self.bound_session.session_id,
+            session_nonce = self.bound_session and self.bound_session.session_nonce,
+            next_fight_index = self.bound_session and self.bound_session.fight_index,
+            checkpoint_name = "_gamma_arena_checkpoint"
+        }
+        return gamma_arena_result.ok(clone(value))
+    end
+    function checkpoint_adapter:restore() self.current = "LOADING"; return gamma_arena_result.ok(true) end
+    function checkpoint_adapter:cleanup() self.current = "NONE"; return gamma_arena_result.ok(true) end
     local deps = {
         store = store,
         config = {},
@@ -308,7 +412,10 @@ local function fake_orchestrator_deps(store)
         ui = { show_fatal = function(errors, callback) return { errors = errors, callback = callback } end },
         notify = function() end,
         disconnect = function() end,
-        teardown = function() return gamma_arena_result.ok(true) end
+        teardown = function() return gamma_arena_result.ok(true) end,
+        actor = actor_adapter,
+        checkpoint = checkpoint_adapter,
+        layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
     }
     return deps
 end
@@ -761,12 +868,483 @@ local function unexpected_net_destroy_clears_external_route()
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
     orchestrator:actor_on_net_destroy()
-    gamma_arena_test_assert.equals(store.clear_count, 1, "unexpected actor destruction must clear Arena external intents")
+    gamma_arena_test_assert.equals(store.clear_matching_count, 1, "unexpected actor destruction clears only this Arena session's resume route")
+end
+
+local function fake_vector(x, y, z)
+    local value = { x = x, y = y, z = z }
+    function value:sub(other)
+        return fake_vector(self.x - other.x, self.y - other.y, self.z - other.z)
+    end
+    function value:getH()
+        return self.x + self.z
+    end
+    return value
+end
+
+local function fake_actor_adapter_env()
+    local env = {
+        active = true,
+        owned = true,
+        iterating = false,
+        released = {},
+        input_acquires = 0,
+        input_releases = 0,
+        effect_calls = 0,
+        positions = {
+            actor_spawn = fake_vector(1, 2, 3),
+            actor_look = fake_vector(5, 2, 9)
+        }
+    }
+    local actor = { items = {}, actor_id = 700, money_value = 2500 }
+    function actor:id() return self.actor_id end
+    function actor:money() return self.money_value end
+    function actor:give_money(value) self.money_delta = value; self.money_value = self.money_value + value end
+    function actor:iterate_inventory(callback, context)
+        env.iterating = true
+        local snapshot = {}
+        for index = 1, #self.items do snapshot[index] = self.items[index] end
+        for index = 1, #snapshot do callback(context, snapshot[index]) end
+        env.iterating = false
+    end
+    function actor:set_health_ex(value) self.health_value = value end
+    function actor:set_power(value) self.power_value = value end
+    function actor:set_radiation(value) self.radiation_value = value end
+    function actor:set_bleeding(value) self.bleeding_value = value end
+    function actor:set_psy_health(value) self.psy_value = value end
+    function actor:set_actor_position(value) self.position_value = value end
+    function actor:set_actor_direction(value) self.direction_value = value end
+    function actor:set_invulnerable(value) self.invulnerable_value = value end
+    env.actor = actor
+    function env:add_item(id, parent_id)
+        local item = { item_id = id, owner_id = parent_id or actor.actor_id }
+        function item:id() return self.item_id end
+        function item:parent_id() return self.owner_id end
+        actor.items[#actor.items + 1] = item
+        return item
+    end
+    local function release(id)
+        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
+        env.released[#env.released + 1] = id
+        for index = #actor.items, 1, -1 do
+            if actor.items[index].item_id == id then table.remove(actor.items, index) end
+        end
+        return gamma_arena_result.ok(true)
+    end
+    local deps = {
+        actor = function() return actor end,
+        is_session_active = function() return env.active end,
+        is_actor_owned = function(candidate) return env.owned and candidate == actor end,
+        release_item_id = release,
+        patrol = function(path)
+            local object = {}
+            function object:point() return env.positions[path] end
+            return object
+        end,
+        effects = { disable_effects_timer = function() env.effect_calls = env.effect_calls + 1 end },
+        input = {
+            acquire = function() env.input_acquires = env.input_acquires + 1; return gamma_arena_result.ok(true) end,
+            release = function() env.input_releases = env.input_releases + 1; return gamma_arena_result.ok(true) end
+        }
+    }
+    return env, gamma_arena_actor_adapter.new(deps)
+end
+
+local function runtime_actor_inventory_release_is_deferred_and_verified()
+    local env, adapter = fake_actor_adapter_env()
+    env:add_item(12)
+    env:add_item(13)
+    adapter:begin_update()
+    local normalized = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(normalized.ok, "owned Arena actor normalization must start")
+    gamma_arena_test_assert.equals(env.released[1], 12, "inventory IDs retain deterministic iteration order")
+    gamma_arena_test_assert.equals(env.released[2], 13, "equipped/inventory items are released after collection")
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "inventory cannot be verified on the purge update")
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "a later update confirms the inventory is empty")
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "inventory verification is idempotent")
+end
+
+local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(result.ok, "normalization succeeds")
+    gamma_arena_test_assert.equals(env.actor.health_value, 1, "health normalized")
+    gamma_arena_test_assert.equals(env.actor.power_value, 1, "power normalized")
+    gamma_arena_test_assert.equals(env.actor.radiation_value, 0, "radiation normalized")
+    gamma_arena_test_assert.equals(env.actor.bleeding_value, 1, "GAMMA cured bleeding sentinel is one")
+    gamma_arena_test_assert.equals(env.actor.psy_value, 1, "psy health normalized")
+    gamma_arena_test_assert.equals(env.actor.money_delta, -2500, "Arena actor money is zeroed by delta")
+    gamma_arena_test_assert.equals(env.effect_calls, 1, "optional animation timer feature is invoked when present")
+end
+
+local function runtime_actor_input_ownership_is_idempotent()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "global input is acquired once by this adapter")
+    adapter:release_input()
+    adapter:release_input()
+    gamma_arena_test_assert.equals(env.input_releases, 1, "only owned input is released once")
+end
+
+local function runtime_actor_rejects_coincident_patrol_points()
+    local env, adapter = fake_actor_adapter_env()
+    env.positions.actor_look = fake_vector(1, 2, 3)
+    adapter:begin_update()
+    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "coincident spawn/look anchors fail closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_PATROL_COINCIDENT", "coincident patrol error code")
+    gamma_arena_test_assert.equals(env.input_releases, 1, "normalization failure releases owned input")
+end
+
+local function runtime_actor_rejects_campaign_actor()
+    local env, adapter = fake_actor_adapter_env()
+    env.active = false
+    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "inactive/campaign actor must never be normalized")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INACTIVE", "campaign guard code")
+end
+
+local function fake_checkpoint_env()
+    local env = { now = 0, files = {}, commands = {}, order = {}, rename_fail = false, delete_fail = false, expect_count = 0 }
+    local prefix = "C:\\ArenaSaves\\"
+    local fs = {}
+    function fs:resolve(name) return gamma_arena_result.ok(prefix .. name) end
+    function fs:exists(path) return gamma_arena_result.ok(env.files[path] ~= nil) end
+    function fs:size(path) return gamma_arena_result.ok(env.files[path]) end
+    function fs:rename(source, target)
+        env.order[#env.order + 1] = "rename:" .. source
+        if not env.rename_fail and env.files[source] ~= nil then env.files[target] = env.files[source]; env.files[source] = nil end
+        return gamma_arena_result.ok(true)
+    end
+    function fs:delete(path)
+        env.order[#env.order + 1] = "delete:" .. path
+        if not env.delete_fail then env.files[path] = nil end
+        return gamma_arena_result.ok(true)
+    end
+    env.store = fake_store()
+    local adapter = gamma_arena_checkpoint_adapter.new({
+        fs = fs,
+        clock = function() return env.now end,
+        console = function(command)
+            if env.command_throw then error("injected console failure") end
+            env.commands[#env.commands + 1] = command
+            env.order[#env.order + 1] = "console:" .. command
+            return gamma_arena_result.ok(true)
+        end,
+        store = env.store,
+        config = {},
+        expect_unload = function() env.expect_count = env.expect_count + 1; return gamma_arena_result.ok(true) end,
+        settle_ms = 250,
+        timeout_ms = 1000
+    })
+    env.adapter = adapter
+    env.paths = adapter:paths().value
+    return env
+end
+
+local function start_checkpoint_save(env)
+    gamma_arena_test_assert.is_true(env.adapter:create(valid_session()).ok, "checkpoint create starts")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "initial exact cleanup completes")
+    gamma_arena_test_assert.equals(env.adapter:state(), "SAVING", "cleanup transitions through SAVING")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "fixed save command is submitted asynchronously")
+    gamma_arena_test_assert.equals(env.commands[1], "save _gamma_arena_checkpoint", "only the fixed save command is submitted")
+end
+
+local function make_required_visible(env, scop_size, scoc_size)
+    env.files[env.paths.visible.scop] = scop_size
+    env.files[env.paths.visible.scoc] = scoc_size
+end
+
+local function advance_checkpoint_to_ready(env)
+    start_checkpoint_save(env)
+    make_required_visible(env, 100, 50)
+    env.now = 10; env.adapter:update()
+    env.now = 140; env.adapter:update()
+    env.now = 300; env.adapter:update()
+    env.now = 320; env.adapter:update()
+    return env.adapter:state()
+end
+
+local function runtime_checkpoint_requires_stable_required_files()
+    local env = fake_checkpoint_env()
+    start_checkpoint_save(env)
+    env.files[env.paths.visible.scop] = 100
+    env.now = 300
+    gamma_arena_test_assert.equals(env.adapter:update().value.state, "WAITING_STABLE", "scoc is mandatory")
+    env.files[env.paths.visible.scoc] = 50
+    env.now = 400; env.adapter:update()
+    env.files[env.paths.visible.scop] = 101
+    env.now = 700; env.adapter:update()
+    gamma_arena_test_assert.equals(env.adapter:state(), "WAITING_STABLE", "size change resets stability")
+    env.now = 850; env.adapter:update()
+    env.now = 1000; env.adapter:update()
+    env.adapter:update()
+    gamma_arena_test_assert.equals(env.adapter:state(), "READY", "both nonzero required files become hidden only after distinct stable polls")
+    gamma_arena_test_assert.equals(env.files[env.paths.hidden.scop], 101, "hidden scop retained")
+    gamma_arena_test_assert.equals(env.files[env.paths.hidden.scoc], 50, "hidden scoc retained")
+end
+
+local function runtime_checkpoint_allows_absent_or_late_dds()
+    local env = fake_checkpoint_env()
+    gamma_arena_test_assert.equals(advance_checkpoint_to_ready(env), "READY", "missing screenshot cannot block checkpoint")
+    env.files[env.paths.visible.dds] = 25
+    env.now = env.now + 10
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "late screenshot is handled while ready")
+    gamma_arena_test_assert.equals(env.files[env.paths.visible.dds], nil, "late visible screenshot is hidden")
+    gamma_arena_test_assert.equals(env.files[env.paths.hidden.dds], 25, "late screenshot remains available")
+end
+
+local function runtime_checkpoint_wrap_clock_times_out()
+    local env = fake_checkpoint_env()
+    env.now = 4294967200
+    start_checkpoint_save(env)
+    env.now = 950
+    local result = env.adapter:update()
+    gamma_arena_test_assert.is_false(result.ok, "uint32 clock wrap still reaches timeout")
+    gamma_arena_test_assert.equals(result.error.code, "GA_CHECKPOINT_TIMEOUT", "wrap-safe timeout code")
+end
+
+local function runtime_checkpoint_verifies_rename_and_delete_postconditions()
+    local rename_env = fake_checkpoint_env()
+    rename_env.rename_fail = true
+    start_checkpoint_save(rename_env)
+    make_required_visible(rename_env, 100, 50)
+    rename_env.now = 100; rename_env.adapter:update()
+    rename_env.now = 260; rename_env.adapter:update()
+    rename_env.now = 420; rename_env.adapter:update()
+    gamma_arena_test_assert.is_true(rename_env.adapter:update().ok, "locked rename is retried before timeout")
+    rename_env.now = 1421
+    local rename_result = rename_env.adapter:update()
+    gamma_arena_test_assert.is_false(rename_result.ok, "truthy rename return cannot override failed postcondition")
+    gamma_arena_test_assert.equals(rename_result.error.code, "GA_CHECKPOINT_RENAME_FAILED", "rename postcondition code")
+
+    local delete_env = fake_checkpoint_env()
+    delete_env.files[delete_env.paths.hidden.scop] = 100
+    delete_env.delete_fail = true
+    delete_env.adapter:cleanup(valid_session())
+    gamma_arena_test_assert.is_true(delete_env.adapter:update().ok, "locked delete is retried before timeout")
+    delete_env.now = 1001
+    local delete_result = delete_env.adapter:update()
+    gamma_arena_test_assert.is_false(delete_result.ok, "truthy delete return cannot override failed postcondition")
+    gamma_arena_test_assert.equals(delete_result.error.code, "GA_CHECKPOINT_DELETE_FAILED", "delete postcondition code")
+end
+
+local function runtime_checkpoint_recovers_mixed_crash_states()
+    local env = fake_checkpoint_env()
+    env.files[env.paths.visible.scop] = 100
+    env.files[env.paths.hidden.scoc] = 50
+    env.files[env.paths.visible.dds] = 25
+    start_checkpoint_save(env)
+    gamma_arena_test_assert.equals(env.files[env.paths.visible.scop], nil, "mixed visible required file cleared")
+    gamma_arena_test_assert.equals(env.files[env.paths.hidden.scoc], nil, "mixed hidden required file cleared")
+    gamma_arena_test_assert.equals(env.files[env.paths.visible.dds], nil, "mixed optional file cleared")
+end
+
+local function runtime_checkpoint_persists_intent_before_load()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.order = {}
+    local restored = env.adapter:restore(valid_session(), 1)
+    gamma_arena_test_assert.is_true(restored.ok, "restore starts")
+    gamma_arena_test_assert.equals(env.store.issue_resume_count, 1, "ResumeIntent is saved before any unhide")
+    gamma_arena_test_assert.equals(#env.order, 0, "no file/load effect happens before persisted intent success")
+    env.adapter:update()
+    local issue_position, load_position
+    for index = 1, #env.order do
+        if string.find(env.order[index], "load _gamma_arena_checkpoint", 1, true) then load_position = index end
+    end
+    issue_position = 0
+    gamma_arena_test_assert.is_true(load_position ~= nil and issue_position < load_position, "intent persistence precedes the fixed load command")
+    gamma_arena_test_assert.equals(env.expect_count, 1, "expected-unload latch is acquired before load")
+end
+
+local function runtime_checkpoint_consumes_intent_only_after_rehide()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.adapter:restore(valid_session(), 2)
+    env.adapter:update()
+    gamma_arena_test_assert.equals(env.store.consume_resume_count, nil, "intent is not consumed on load submission")
+    env.adapter:on_game_load()
+    gamma_arena_test_assert.equals(env.store.consume_resume_count, nil, "intent is not consumed before rehide update")
+    env.adapter:bind_loaded_session(valid_session())
+    env.adapter:update()
+    gamma_arena_test_assert.equals(env.store.consume_resume_count, 1, "matching intent is consumed only after hidden postconditions")
+    gamma_arena_test_assert.equals(env.adapter:state(), "READY", "restore converges back to ready")
+    gamma_arena_test_assert.equals(env.adapter:take_resume().value.next_fight_index, 2, "consumed resume index is cached for orchestration")
+end
+
+local function runtime_checkpoint_rejects_mismatched_resume()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.adapter:restore(valid_session(), 3)
+    env.adapter:update()
+    env.adapter:on_game_load()
+    env.adapter:bind_loaded_session(valid_session())
+    env.store.consume_resume_result = gamma_arena_result.err("GA_RESUME_NONCE_MISMATCH", "injected mismatch")
+    local result = env.adapter:update()
+    gamma_arena_test_assert.is_false(result.ok, "mismatched loaded session/intent fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_RESUME_NONCE_MISMATCH", "store mismatch Result is preserved")
+end
+
+local function runtime_checkpoint_cleanup_is_idempotent_in_every_state()
+    for _, setup in ipairs({ "NONE", "SAVING", "WAITING", "READY", "LOADING" }) do
+        local env = fake_checkpoint_env()
+        if setup == "SAVING" then env.adapter:create(valid_session()) end
+        if setup == "WAITING" then start_checkpoint_save(env) end
+        if setup == "READY" or setup == "LOADING" then
+            advance_checkpoint_to_ready(env)
+            if setup == "LOADING" then env.adapter:restore(valid_session(), 1); env.adapter:update() end
+        end
+        env.adapter:cleanup(valid_session())
+        local first = env.adapter:update()
+        local second = env.adapter:cleanup(valid_session())
+        local third = env.adapter:update()
+        gamma_arena_test_assert.is_true(first.ok and second.ok and third.ok, "cleanup is total and repeatable from " .. setup)
+        gamma_arena_test_assert.equals(env.adapter:state(), "NONE", "cleanup converges to NONE from " .. setup)
+    end
+end
+
+local function runtime_checkpoint_two_sessions_leave_no_stale_paths()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.adapter:cleanup(valid_session()); env.adapter:update()
+    gamma_arena_test_assert.equals(advance_checkpoint_to_ready(env), "READY", "a second session creates a fresh checkpoint")
+    for _, path in pairs(env.paths.visible) do gamma_arena_test_assert.equals(env.files[path], nil, "no visible checkpoint remains") end
+end
+
+local function runtime_checkpoint_six_paths_are_fixed_and_safe()
+    local env = fake_checkpoint_env()
+    local count = 0
+    for _, group in pairs(env.paths) do
+        for _, path in pairs(group) do
+            count = count + 1
+            gamma_arena_test_assert.is_true(string.find(path, "_gamma_arena_checkpoint", 1, true) ~= nil, "path uses fixed checkpoint base")
+            gamma_arena_test_assert.is_true(string.find(path, "..", 1, true) == nil, "path traversal is impossible")
+        end
+    end
+    gamma_arena_test_assert.equals(count, 6, "checkpoint adapter resolves exactly six absolute paths")
+end
+
+local function runtime_checkpoint_rejects_unsafe_resolved_paths()
+    local fs = {}
+    function fs:resolve(name) return gamma_arena_result.ok("C:\\ArenaSaves\\..\\" .. name) end
+    function fs:exists() return gamma_arena_result.ok(false) end
+    function fs:size() return gamma_arena_result.ok(0) end
+    function fs:rename() return gamma_arena_result.ok(true) end
+    function fs:delete() return gamma_arena_result.ok(true) end
+    local adapter = gamma_arena_checkpoint_adapter.new({ fs = fs, clock = function() return 0 end })
+    local result = adapter:paths()
+    gamma_arena_test_assert.is_false(result.ok, "resolved traversal path must fail before any file operation")
+    gamma_arena_test_assert.equals(result.error.code, "GA_CHECKPOINT_UNSAFE_PATH", "unsafe path code")
+end
+
+local function runtime_checkpoint_command_throw_fails_safely()
+    local env = fake_checkpoint_env()
+    env.command_throw = true
+    env.adapter:create(valid_session())
+    env.adapter:update()
+    local result = env.adapter:update()
+    gamma_arena_test_assert.is_false(result.ok, "throwing console command must remain inside Result boundary")
+    gamma_arena_test_assert.equals(result.error.code, "GA_CHECKPOINT_SAVE_COMMAND_FAILED", "save command throw code")
+end
+
+local function runtime_checkpoint_failed_intent_never_unhides()
+    local env = fake_checkpoint_env()
+    advance_checkpoint_to_ready(env)
+    env.store.issue_resume_result = gamma_arena_result.err("GA_RESUME_WRITE_FAILED", "injected persistence failure")
+    env.order = {}
+    local result = env.adapter:restore(valid_session(), 1)
+    gamma_arena_test_assert.is_false(result.ok, "failed ResumeIntent persistence aborts restore")
+    gamma_arena_test_assert.equals(#env.order, 0, "failed intent persistence performs no rename/load effect")
+    gamma_arena_test_assert.equals(env.adapter:state(), "READY", "checkpoint remains safely hidden after intent failure")
+end
+
+local function runtime_actor_rejects_foreign_inventory_children()
+    local env, adapter = fake_actor_adapter_env()
+    env:add_item(44, 999)
+    adapter:begin_update()
+    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "foreign inventory child must never be released")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "foreign item guard code")
+    gamma_arena_test_assert.equals(#env.released, 0, "foreign object remains untouched")
+end
+
+local function runtime_actor_future_seams_are_injected_and_total()
+    local env, adapter = fake_actor_adapter_env()
+    local loadout_seen, invulnerability_values = nil, {}
+    adapter.deps.loadout = {
+        apply = function(actor, loadout)
+            gamma_arena_test_assert.is_true(actor == env.actor, "loadout seam receives only the owned Arena actor")
+            loadout_seen = loadout
+            return gamma_arena_result.ok(true)
+        end
+    }
+    adapter.deps.invulnerability = {
+        set = function(value) invulnerability_values[#invulnerability_values + 1] = value; return gamma_arena_result.ok(true) end
+    }
+    local loadout = { primary = "wpn_pm" }
+    gamma_arena_test_assert.is_true(adapter:apply_loadout(loadout).ok, "Task 7 loadout seam is injectable")
+    gamma_arena_test_assert.is_true(loadout_seen == loadout, "loadout seam preserves immutable spec identity")
+    gamma_arena_test_assert.is_true(adapter:hold_after_logical_death().ok, "Task 9 logical-death seam is injectable")
+    gamma_arena_test_assert.equals(invulnerability_values[1], true, "logical death acquires invulnerability")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "death hold cleanup is total")
+    gamma_arena_test_assert.equals(invulnerability_values[2], false, "cleanup releases only owned invulnerability")
+end
+
+local function runtime_checkpoint_ready_gates_generation()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local actor = {
+        begin_update = function() return gamma_arena_result.ok(true) end,
+        normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
+        verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        release_input = function() return gamma_arena_result.ok(true) end
+    }
+    local checkpoint = { current = "WAITING_STABLE", create_count = 0, updates = 0 }
+    function checkpoint:create() self.create_count = self.create_count + 1; return gamma_arena_result.ok(true) end
+    function checkpoint:update() self.updates = self.updates + 1; return gamma_arena_result.ok({ state = self.current }) end
+    function checkpoint:state() return self.current end
+    function checkpoint:on_game_load() return gamma_arena_result.ok(false) end
+    function checkpoint:cleanup() return gamma_arena_result.ok(true) end
+    local deps = fake_orchestrator_deps(store)
+    deps.actor = actor
+    deps.checkpoint = checkpoint
+    deps.layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load(); orchestrator:actor_on_first_update(); orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(orchestrator:is_checkpoint_ready(), "generation gate stays closed while required files are unstable")
+    checkpoint.current = "READY"; orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(orchestrator:is_checkpoint_ready(), "generation gate opens only on verified READY")
+    gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "READY", "Task 6 stops before FightSpec generation")
+end
+
+local function runtime_checkpoint_resume_applies_index_after_ready()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.ok({
+        schema_version = 1,
+        session_id = "ga_test_session",
+        session_nonce = "ga_test_nonce",
+        next_fight_index = 5,
+        checkpoint_name = "_gamma_arena_checkpoint"
+    })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({ gamma_arena_session = valid_session() })
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot().fight_index, 0, "loaded checkpoint baseline remains unchanged before rehide READY")
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot().fight_index, 5, "orchestrator caches the consumed continuation index only after READY")
+    gamma_arena_test_assert.is_true(orchestrator:is_checkpoint_ready(), "restored checkpoint opens the generation gate")
 end
 
 local cases = {
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_aggregates_in_stable_order", fn = preflight_aggregates_in_stable_order },
+    { name = "runtime_preflight_requires_task6_actor_checkpoint_ports", fn = preflight_requires_task6_actor_checkpoint_ports },
     { name = "runtime_wrong_level_skips_patrol_resolution", fn = wrong_level_skips_patrol_resolution },
     { name = "runtime_preflight_rejects_missing_patrol", fn = preflight_rejects_missing_patrol },
     { name = "runtime_preflight_rejects_invalid_patrol_resolution", fn = preflight_rejects_invalid_patrol_resolution },
@@ -803,6 +1381,29 @@ local cases = {
     { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
     { name = "runtime_net_destroy_teardown_honors_checkpoint_latch", fn = net_destroy_teardown_honors_checkpoint_latch },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
+    ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }
+    ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
+    ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
+    ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }
+    ,{ name = "runtime_actor_rejects_campaign_actor", fn = runtime_actor_rejects_campaign_actor }
+    ,{ name = "runtime_actor_rejects_foreign_inventory_children", fn = runtime_actor_rejects_foreign_inventory_children }
+    ,{ name = "runtime_actor_future_seams_are_injected_and_total", fn = runtime_actor_future_seams_are_injected_and_total }
+    ,{ name = "runtime_checkpoint_requires_stable_required_files", fn = runtime_checkpoint_requires_stable_required_files }
+    ,{ name = "runtime_checkpoint_allows_absent_or_late_dds", fn = runtime_checkpoint_allows_absent_or_late_dds }
+    ,{ name = "runtime_checkpoint_wrap_clock_times_out", fn = runtime_checkpoint_wrap_clock_times_out }
+    ,{ name = "runtime_checkpoint_verifies_rename_and_delete_postconditions", fn = runtime_checkpoint_verifies_rename_and_delete_postconditions }
+    ,{ name = "runtime_checkpoint_recovers_mixed_crash_states", fn = runtime_checkpoint_recovers_mixed_crash_states }
+    ,{ name = "runtime_checkpoint_persists_intent_before_load", fn = runtime_checkpoint_persists_intent_before_load }
+    ,{ name = "runtime_checkpoint_consumes_intent_only_after_rehide", fn = runtime_checkpoint_consumes_intent_only_after_rehide }
+    ,{ name = "runtime_checkpoint_rejects_mismatched_resume", fn = runtime_checkpoint_rejects_mismatched_resume }
+    ,{ name = "runtime_checkpoint_cleanup_is_idempotent_in_every_state", fn = runtime_checkpoint_cleanup_is_idempotent_in_every_state }
+    ,{ name = "runtime_checkpoint_two_sessions_leave_no_stale_paths", fn = runtime_checkpoint_two_sessions_leave_no_stale_paths }
+    ,{ name = "runtime_checkpoint_six_paths_are_fixed_and_safe", fn = runtime_checkpoint_six_paths_are_fixed_and_safe }
+    ,{ name = "runtime_checkpoint_rejects_unsafe_resolved_paths", fn = runtime_checkpoint_rejects_unsafe_resolved_paths }
+    ,{ name = "runtime_checkpoint_command_throw_fails_safely", fn = runtime_checkpoint_command_throw_fails_safely }
+    ,{ name = "runtime_checkpoint_failed_intent_never_unhides", fn = runtime_checkpoint_failed_intent_never_unhides }
+    ,{ name = "runtime_checkpoint_ready_gates_generation", fn = runtime_checkpoint_ready_gates_generation }
+    ,{ name = "runtime_checkpoint_resume_applies_index_after_ready", fn = runtime_checkpoint_resume_applies_index_after_ready }
 }
 
 function run(run_case_fn)
