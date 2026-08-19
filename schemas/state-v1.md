@@ -57,3 +57,15 @@ base `131` and modulus `2147483646`. Callers pass a complete stream key ending i
 one of the stable tags `actor_loadout`, `enemy_count`, `enemy_profile`,
 `enemy_loadout`, or `spawn_path`. New decisions use a new tag, so they do not
 consume or perturb an existing stream.
+
+`normalize_uint32` maps `NaN`, positive infinity, and negative infinity to the
+valid Park-Miller seed `1` before any arithmetic.
+
+## Logging context-key policy
+
+Structured logging accepts only scalar context keys: strings, finite numbers, and
+booleans. It serializes these as unambiguous type-prefixed canonical keys and sorts
+them lexically. Unsupported keys (including tables, functions, userdata, threads,
+and non-finite numbers) are skipped. If a canonical key would collide, its value is
+replaced with the stable `<canonical-key-collision>` placeholder. This avoids
+memory-address output and any dependency on the iteration order of `pairs`.

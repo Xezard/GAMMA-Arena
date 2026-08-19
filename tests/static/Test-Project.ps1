@@ -137,8 +137,12 @@ if (Test-Path -LiteralPath $Task2RunnerPath) {
 }
 if (Test-Path -LiteralPath $Task2LogPath) {
     $Task2LogContent = Get-Content -LiteralPath $Task2LogPath -Raw
-    Assert-True ($Task2LogContent -match 'sort_key\s*=\s*type\s*\(\s*key\s*\)\s*\.\.\s*":"') 'Logger must use a type-aware canonical context sort key'
-    Assert-True ($Task2LogContent -match '(?s)left\.sort_key\s*==\s*right\.sort_key') 'Logger must use a total context sort comparator'
+    Assert-True ($Task2LogContent -match 'local\s+function\s+canonical_key\s*\(') 'Logger must define a canonical scalar context key function'
+    Assert-True ($Task2LogContent -match 'key_type\s*==\s*"string"') 'Logger must canonicalize string keys'
+    Assert-True ($Task2LogContent -match 'key_type\s*==\s*"number"') 'Logger must canonicalize number keys'
+    Assert-True ($Task2LogContent -match 'key_type\s*==\s*"boolean"') 'Logger must canonicalize boolean keys'
+    Assert-True ($Task2LogContent -match 'seen_keys\s*\[\s*canonical\s*\]') 'Logger must handle canonical key collisions without depending on pairs order'
+    Assert-True ($Task2LogContent -match '<canonical-key-collision>') 'Logger must emit a stable collision placeholder'
     Assert-True ($Task2LogContent -match 'pcall\s*\(\s*printf\s*,') 'Logger must protect the printf sink with pcall'
 }
 if (Test-Path -LiteralPath $Task2RngPath) {
@@ -147,6 +151,8 @@ if (Test-Path -LiteralPath $Task2RngPath) {
     Assert-True ($Task2RngContent -match 'maximum\s*~=\s*maximum') 'RNG must reject NaN maximum bounds'
     Assert-True ($Task2RngContent -match 'math\.huge') 'RNG must reject infinite bounds and spans'
     Assert-True ($Task2RngContent -match 'local\s+span\s*=\s*maximum\s*-\s*minimum\s*\+\s*1') 'RNG must validate its computed span before modulo'
+    Assert-True ($Task2RngContent -match 'value\s*==\s*math\.huge') 'RNG seed normalization must reject positive infinity'
+    Assert-True ($Task2RngContent -match 'value\s*==\s*-math\.huge') 'RNG seed normalization must reject negative infinity'
 }
 
 if ($script:Failures.Count -gt 0) {

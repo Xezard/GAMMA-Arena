@@ -6,6 +6,26 @@ local function safe_tostring(value)
     return "<unserializable>"
 end
 
+local function canonical_key(key)
+    local key_type = type(key)
+    if key_type == "string" then
+        return "string:" .. #key .. ":" .. key
+    end
+    if key_type == "boolean" then
+        return key and "boolean:true" or "boolean:false"
+    end
+    if key_type == "number" then
+        if key ~= key or key == math.huge or key == -math.huge then
+            return nil
+        end
+        if key == 0 then
+            key = 0
+        end
+        return "number:" .. string.format("%.17g", key)
+    end
+    return nil
+end
+
 local function serialize(value, seen)
     local value_type = type(value)
     if value_type == "nil" or value_type == "number" or value_type == "boolean" then
@@ -24,14 +44,20 @@ local function serialize(value, seen)
     seen[value] = true
 
     local entries = {}
+    local seen_keys = {}
     local collected, collect_error = pcall(function()
         for key, item in pairs(value) do
-            entries[#entries + 1] = {
-                key = safe_tostring(key),
-                sort_key = type(key) .. ":" .. safe_tostring(key),
-                ordinal = #entries + 1,
-                value = item
-            }
+            local canonical = canonical_key(key)
+            local existing_index = canonical and seen_keys[canonical]
+            if existing_index then
+                entries[existing_index].value = "<canonical-key-collision>"
+            elseif canonical then
+                seen_keys[canonical] = #entries + 1
+                entries[#entries + 1] = {
+                    key = canonical,
+                    value = item
+                }
+            end
         end
     end)
     if not collected then
@@ -40,10 +66,7 @@ local function serialize(value, seen)
     end
 
     table.sort(entries, function(left, right)
-        if left.sort_key == right.sort_key then
-            return left.ordinal < right.ordinal
-        end
-        return left.sort_key < right.sort_key
+        return left.key < right.key
     end)
 
     local values = {}
