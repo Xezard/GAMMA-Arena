@@ -2,11 +2,12 @@ local catalog_path = "gamma_arena\\gamma_arena_catalogs.ltx"
 local difficulty_path = "gamma_arena\\gamma_arena_difficulties.ltx"
 local layout_path = "gamma_arena\\gamma_arena_layouts.ltx"
 local human_profile_sections = { gamma_arena_bandit_novice = true, gamma_arena_bandit_trainee = true, gamma_arena_bandit_experienced = true, gamma_arena_bandit_veteran = true }
+local weapon_ammo_sections = { wpn_pm = "ammo_9x18_fmj", wpn_mp5 = "ammo_9x19_fmj", wpn_ak74u = "ammo_5.45x39_fmj", wpn_ak74 = "ammo_5.45x39_fmj", wpn_wincheaster1300 = "ammo_12x70_buck" }
 
-local function split(text)
+local function split(text, sort_values)
     local values = {}
     for value in string.gmatch(text or "", "[^,%s]+") do values[#values + 1] = value end
-    table.sort(values)
+    if sort_values ~= false then table.sort(values) end
     return values
 end
 
@@ -14,7 +15,21 @@ local function runtime_factory()
     local base = system_ini()
     return {
         open = function(path) return ini_file(path) end,
-        section_exists = function(section) return base:section_exist(section) end
+        section_exists = function(section) return base:section_exist(section) end,
+        enumerate_sections = function(ini)
+            local sections = {}
+            ini:section_for_each(function(section) sections[#sections + 1] = section end)
+            return sections
+        end,
+        enumerate_keys = function(ini, section)
+            local keys = {}
+            local count = ini:line_count(section)
+            for index = 0, count - 1 do
+                local _, key = ini:r_line(section, index, "", "")
+                keys[#keys + 1] = key
+            end
+            return keys
+        end
     }
 end
 
@@ -27,10 +42,36 @@ local function read(factory, ini, section, key)
     return ok and value or nil
 end
 
-local function exists(ini, section)
-    if type(ini.sections) == "table" then return type(ini.sections[section]) == "table" end
-    local ok, value = pcall(function() return ini:section_exist(section) end)
-    return ok and value
+local function safe_open(factory, path)
+    local succeeded, value = pcall(factory.open, path)
+    if not succeeded or value == nil then return nil, gamma_arena_result.err("GA_CATALOG_OPEN_FAILED", "Arena catalog file could not be opened", { path = path, reason = succeeded and "nil" or tostring(value) }) end
+    return value
+end
+
+local function safe_section_exists(factory, section)
+    local succeeded, value = pcall(factory.section_exists, section)
+    if not succeeded then return nil, gamma_arena_result.err("GA_CATALOG_SECTION_CHECK_FAILED", "Game section check failed", { section = section, reason = tostring(value) }) end
+    return value == true
+end
+
+local function enumerate_sections(factory, ini)
+    if type(factory.enumerate_sections) == "function" then
+        local succeeded, values = pcall(factory.enumerate_sections, ini)
+        if not succeeded or type(values) ~= "table" then return nil, gamma_arena_result.err("GA_CATALOG_ENUMERATION_FAILED", "Catalog section enumeration failed", { reason = tostring(values) }) end
+        return values
+    end
+    if type(ini.sections) == "table" then local values = {}; for section in pairs(ini.sections) do values[#values + 1] = section end; table.sort(values); return values end
+    return nil, gamma_arena_result.err("GA_CATALOG_ENUMERATION_FAILED", "Catalog section enumeration is unavailable", {})
+end
+
+local function enumerate_keys(factory, ini, section)
+    if type(factory.enumerate_keys) == "function" then
+        local succeeded, values = pcall(factory.enumerate_keys, ini, section)
+        if not succeeded or type(values) ~= "table" then return nil, gamma_arena_result.err("GA_CATALOG_ENUMERATION_FAILED", "Catalog key enumeration failed", { section = section, reason = tostring(values) }) end
+        return values
+    end
+    if type(ini.sections) == "table" then local values = {}; for key in pairs(ini.sections[section] or {}) do values[#values + 1] = key end; table.sort(values); return values end
+    return nil, gamma_arena_result.err("GA_CATALOG_ENUMERATION_FAILED", "Catalog key enumeration is unavailable", { section = section })
 end
 
 local function integer(value, name, context)
@@ -41,18 +82,30 @@ local function integer(value, name, context)
     return parsed
 end
 
-local function section_keys_are_known(ini, section, allowed)
-    if type(ini.sections) ~= "table" then return true end
-    for key in pairs(ini.sections[section]) do
-        if not allowed[key] then return false, key end
+local function validate_section_manifest(factory, ini, allowed, path)
+    local sections, enumeration_error = enumerate_sections(factory, ini)
+    if not sections then return nil, enumeration_error end
+    local seen = {}
+    for _, section in ipairs(sections) do
+        if type(section) ~= "string" or seen[section] then return nil, gamma_arena_result.err("GA_CATALOG_DUPLICATE_SECTION", "Catalog section names must be unique strings", { path = path, section = section }) end
+        seen[section] = true
+        if not allowed[section] then return nil, gamma_arena_result.err("GA_CATALOG_UNKNOWN_SECTION", "Catalog contains an unknown section", { path = path, section = section }) end
     end
     return true
 end
 
 local function require_section(factory, ini, section, allowed)
-    if not exists(ini, section) then return nil, gamma_arena_result.err("GA_CATALOG_SECTION_MISSING", "Catalog section is missing", { section = section }) end
-    local known, key = section_keys_are_known(ini, section, allowed)
-    if not known then return nil, gamma_arena_result.err("GA_CATALOG_UNKNOWN_KEY", "Catalog contains an unknown key", { section = section, key = key }) end
+    local exists
+    if type(ini.sections) == "table" then exists = type(ini.sections[section]) == "table" else local succeeded, value = pcall(function() return ini:section_exist(section) end); exists = succeeded and value end
+    if not exists then return nil, gamma_arena_result.err("GA_CATALOG_SECTION_MISSING", "Catalog section is missing", { section = section }) end
+    local keys, enumeration_error = enumerate_keys(factory, ini, section)
+    if not keys then return nil, enumeration_error end
+    local seen = {}
+    for _, key in ipairs(keys) do
+        if type(key) ~= "string" or seen[key] then return nil, gamma_arena_result.err("GA_CATALOG_DUPLICATE_KEY", "Catalog keys must be unique strings", { section = section, key = key }) end
+        seen[key] = true
+        if not allowed[key] then return nil, gamma_arena_result.err("GA_CATALOG_UNKNOWN_KEY", "Catalog contains an unknown key", { section = section, key = key }) end
+    end
     return true
 end
 
@@ -81,30 +134,39 @@ function load(ini_factory)
     if type(factory) ~= "table" or type(factory.open) ~= "function" or type(factory.section_exists) ~= "function" then
         return gamma_arena_result.err("GA_CATALOG_FACTORY_INVALID", "Catalog loader requires open and section_exists", {})
     end
-    local catalogs, difficulties, layouts = factory.open(catalog_path), factory.open(difficulty_path), factory.open(layout_path)
-    if not catalogs or not difficulties or not layouts then return gamma_arena_result.err("GA_CATALOG_OPEN_FAILED", "Arena catalog file could not be opened", {}) end
+    local catalogs, open_error = safe_open(factory, catalog_path); if not catalogs then return open_error end
+    local difficulties; difficulties, open_error = safe_open(factory, difficulty_path); if not difficulties then return open_error end
+    local layouts; layouts, open_error = safe_open(factory, layout_path); if not layouts then return open_error end
     local snapshot = { schema_version = 1, revision = 1, generator_version = 1, profiles = {}, profile_list = {}, weapons = {}, weapon_list = {}, ammo = {}, outfits = {}, outfit_list = {}, consumables = {}, difficulties = {}, difficulty_ids = {}, layouts = {}, layout_ids = {} }
     local metadata, metadata_error = require_section(factory, catalogs, "meta", { schema_version = true, revision = true, generator_version = true })
     if not metadata then return metadata_error end
     for _, pair in ipairs({ { "schema_version", 1 }, { "revision", 1 }, { "generator_version", 1 } }) do
         local value, parse_error = integer(read(factory, catalogs, "meta", pair[1]), pair[1], { section = "meta" })
         if not value then return parse_error end
-        if pair[1] == "schema_version" and value ~= pair[2] then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported catalog schema version", { schema_version = value }) end
+        if value ~= pair[2] then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported catalog version", { field = pair[1], value = value }) end
         snapshot[pair[1]] = value
     end
     local groups = { { name = "profiles", singular = "profile", target = snapshot.profiles, list = snapshot.profile_list, keys = { section = true, cost = true } }, { name = "weapons", singular = "weapon", target = snapshot.weapons, list = snapshot.weapon_list, keys = { section = true, ammo = true, cost = true, ammo_box_min = true, ammo_box_max = true } }, { name = "ammo", singular = "ammo", target = snapshot.ammo, keys = { section = true, cost = true } }, { name = "outfits", singular = "outfit", target = snapshot.outfits, list = snapshot.outfit_list, keys = { section = true, cost = true } }, { name = "consumables", singular = "consumable", target = snapshot.consumables, keys = { section = true, cost = true } } }
+    local catalog_manifest = { meta = true }
     for _, group in ipairs(groups) do
         local group_ok, group_error = require_section(factory, catalogs, group.name, { ids = true })
         if not group_ok then return group_error end
-        local ids = split(read(factory, catalogs, group.name, "ids"))
-        if #ids == 0 then return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog group is empty", { group = group.name }) end
-        for _, entry_id in ipairs(ids) do
+        group.ids = split(read(factory, catalogs, group.name, "ids"))
+        if #group.ids == 0 then return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog group is empty", { group = group.name }) end
+        catalog_manifest[group.name] = true
+        for _, entry_id in ipairs(group.ids) do catalog_manifest[group.singular .. "_" .. entry_id] = true end
+    end
+    local manifest_ok, manifest_error = validate_section_manifest(factory, catalogs, catalog_manifest, catalog_path); if not manifest_ok then return manifest_error end
+    for _, group in ipairs(groups) do
+        for _, entry_id in ipairs(group.ids) do
             if group.target[entry_id] then return gamma_arena_result.err("GA_CATALOG_DUPLICATE_ID", "Catalog ids must be unique", { group = group.name, id = entry_id }) end
             local section = group.singular .. "_" .. entry_id
             local section_ok, section_error = require_section(factory, catalogs, section, group.keys)
             if not section_ok then return section_error end
             local item = { id = entry_id, section = read(factory, catalogs, section, "section") }
-            if type(item.section) ~= "string" or item.section == "" or not factory.section_exists(item.section) then return gamma_arena_result.err("GA_CATALOG_SECTION_UNKNOWN", "Referenced game section does not exist", { section = item.section, group = group.name }) end
+            if type(item.section) ~= "string" or item.section == "" then return gamma_arena_result.err("GA_CATALOG_SECTION_UNKNOWN", "Referenced game section is empty", { group = group.name }) end
+            local game_section_exists, section_check_error = safe_section_exists(factory, item.section); if game_section_exists == nil then return section_check_error end
+            if not game_section_exists then return gamma_arena_result.err("GA_CATALOG_SECTION_UNKNOWN", "Referenced game section does not exist", { section = item.section, group = group.name }) end
             if group.name == "profiles" and not human_profile_sections[item.section] then return gamma_arena_result.err("GA_CATALOG_PROFILE_NOT_HUMAN", "NPC profile is not in the human-only allowlist", { section = item.section }) end
             item.cost, section_error = integer(read(factory, catalogs, section, "cost"), "cost", { section = section })
             if not item.cost or item.cost <= 0 then return gamma_arena_result.err("GA_CATALOG_COST_INVALID", "Catalog cost must be positive", { section = section }) end
@@ -118,9 +180,12 @@ function load(ini_factory)
         end
     end
     for _, weapon in ipairs(snapshot.weapon_list) do
-        if not snapshot.ammo[weapon.ammo] or snapshot.ammo[weapon.ammo].section ~= weapon.ammo then return gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo is not a cataloged matching section", { weapon = weapon.section, ammo = weapon.ammo }) end
+        if not snapshot.ammo[weapon.ammo] or snapshot.ammo[weapon.ammo].section ~= weapon.ammo or weapon_ammo_sections[weapon.section] ~= weapon.ammo then return gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo is not the allowlisted matching section", { weapon = weapon.section, ammo = weapon.ammo }) end
     end
     local difficulty_ok, difficulty_error = require_section(factory, difficulties, "meta", { schema_version = true, revision = true }); if not difficulty_ok then return difficulty_error end
+    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, difficulties, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 1 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported difficulty catalog version", { field = key, value = value }) end end
+    local difficulty_manifest = { meta = true, ga_difficulty_rookie = true, ga_difficulty_stalker = true, ga_difficulty_veteran = true, ga_difficulty_master = true }
+    local difficulty_manifest_ok, difficulty_manifest_error = validate_section_manifest(factory, difficulties, difficulty_manifest, difficulty_path); if not difficulty_manifest_ok then return difficulty_manifest_error end
     for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
         local section = "ga_difficulty_" .. difficulty_id
         local section_ok, section_error = require_section(factory, difficulties, section, { enemy_min = true, enemy_max = true, enemy_total_budget = true, player_loadout_budget = true }); if not section_ok then return section_error end
@@ -128,9 +193,14 @@ function load(ini_factory)
         if item.enemy_max < item.enemy_min then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty maximum is below minimum", { section = section }) end
         snapshot.difficulties[difficulty_id] = item; snapshot.difficulty_ids[#snapshot.difficulty_ids + 1] = difficulty_id
     end
+    local layout_meta_ok, layout_meta_error = require_section(factory, layouts, "meta", { schema_version = true, revision = true }); if not layout_meta_ok then return layout_meta_error end
+    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, layouts, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 1 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported layout catalog version", { field = key, value = value }) end end
+    local layout_manifest_ok, layout_manifest_error = validate_section_manifest(factory, layouts, { meta = true, ga_layout_rostok_arena_v1 = true }, layout_path); if not layout_manifest_ok then return layout_manifest_error end
     local layout_ok, layout_error = require_section(factory, layouts, "ga_layout_rostok_arena_v1", { level = true, actor_spawn_path = true, actor_look_path = true, opponent_spawn_paths = true }); if not layout_ok then return layout_error end
-    local layout = { id = "rostok_arena_v1", version = 1, level = read(factory, layouts, "ga_layout_rostok_arena_v1", "level"), actor_spawn_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_spawn_path"), actor_look_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_look_path"), opponent_spawn_paths = split(read(factory, layouts, "ga_layout_rostok_arena_v1", "opponent_spawn_paths")) }
-    if layout.level ~= "l05_bar" or #layout.opponent_spawn_paths ~= 6 then return gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout must contain six Rostok opponent paths", {}) end
+    local layout = { id = "rostok_arena_v1", version = 1, level = read(factory, layouts, "ga_layout_rostok_arena_v1", "level"), actor_spawn_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_spawn_path"), actor_look_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_look_path"), opponent_spawn_paths = split(read(factory, layouts, "ga_layout_rostok_arena_v1", "opponent_spawn_paths"), false) }
+    if layout.level ~= "l05_bar" or type(layout.actor_spawn_path) ~= "string" or layout.actor_spawn_path == "" or type(layout.actor_look_path) ~= "string" or layout.actor_look_path == "" or layout.actor_spawn_path == layout.actor_look_path or #layout.opponent_spawn_paths ~= 6 then return gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout paths and level are invalid", {}) end
+    local unique_paths = {}
+    for _, path in ipairs(layout.opponent_spawn_paths) do if path == "" or path == layout.actor_spawn_path or path == layout.actor_look_path or unique_paths[path] then return gamma_arena_result.err("GA_LAYOUT_INVALID", "All actor and opponent paths must be non-empty and unique", { path = path }) end; unique_paths[path] = true end
     snapshot.layouts[layout.id] = layout; snapshot.layout_ids[1] = layout.id
     add_loadout_combinations(snapshot)
     local minimum_profile_cost = snapshot.profile_list[1].cost

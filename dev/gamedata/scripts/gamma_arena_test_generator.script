@@ -1,6 +1,7 @@
 local function section(values) return values end
 
-function fixture_factory(rookie_enemy_budget)
+function fixture_factory(options)
+    if type(options) ~= "table" then options = { rookie_enemy_budget = options } end
     local game_sections = { wpn_pm=true, wpn_mp5=true, wpn_ak74u=true, wpn_ak74=true, wpn_wincheaster1300=true, ammo_9x18_fmj=true, ammo_9x19_fmj=true, ammo_5.45x39_fmj=true, ammo_12x70_buck=true, novice_outfit=true, stalker_outfit=true, banditmerc_outfit=true, bandage=true, medkit=true, gamma_arena_bandit_novice=true, gamma_arena_bandit_trainee=true, gamma_arena_bandit_experienced=true, gamma_arena_bandit_veteran=true }
     local catalog = { sections = {
         meta=section{schema_version="1",revision="1",generator_version="1"}, profiles=section{ids="novice,trainee,experienced,veteran"},
@@ -8,9 +9,15 @@ function fixture_factory(rookie_enemy_budget)
         weapons=section{ids="pm,mp5,ak74u,ak74,wincheaster1300"}, weapon_pm=section{section="wpn_pm",ammo="ammo_9x18_fmj",cost="2",ammo_box_min="1",ammo_box_max="2"}, weapon_mp5=section{section="wpn_mp5",ammo="ammo_9x19_fmj",cost="4",ammo_box_min="1",ammo_box_max="2"}, weapon_ak74u=section{section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost="5",ammo_box_min="1",ammo_box_max="2"}, weapon_ak74=section{section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost="6",ammo_box_min="1",ammo_box_max="2"}, weapon_wincheaster1300=section{section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost="5",ammo_box_min="1",ammo_box_max="2"},
         ammo=section{ids="ammo_9x18_fmj,ammo_9x19_fmj,ammo_5.45x39_fmj,ammo_12x70_buck"}, ammo_ammo_9x18_fmj=section{section="ammo_9x18_fmj",cost="1"}, ammo_ammo_9x19_fmj=section{section="ammo_9x19_fmj",cost="1"}, ammo_ammo_5.45x39_fmj=section{section="ammo_5.45x39_fmj",cost="2"}, ammo_ammo_12x70_buck=section{section="ammo_12x70_buck",cost="2"},
         outfits=section{ids="novice,stalker,banditmerc"}, outfit_novice=section{section="novice_outfit",cost="1"}, outfit_stalker=section{section="stalker_outfit",cost="3"}, outfit_banditmerc=section{section="banditmerc_outfit",cost="4"}, consumables=section{ids="bandage,medkit"}, consumable_bandage=section{section="bandage",cost="1"}, consumable_medkit=section{section="medkit",cost="2"} } }
-    local difficulties = { sections = { meta=section{schema_version="1",revision="1"}, ga_difficulty_rookie=section{enemy_min="1",enemy_max="2",enemy_total_budget=tostring(rookie_enemy_budget or 12),player_loadout_budget="12"}, ga_difficulty_stalker=section{enemy_min="2",enemy_max="3",enemy_total_budget="18",player_loadout_budget="15"}, ga_difficulty_veteran=section{enemy_min="3",enemy_max="4",enemy_total_budget="26",player_loadout_budget="18"}, ga_difficulty_master=section{enemy_min="4",enemy_max="6",enemy_total_budget="38",player_loadout_budget="22"} } }
-    local layouts = { sections = { ga_layout_rostok_arena_v1=section{level="l05_bar",actor_spawn_path="bar_arena_walk_1_1",actor_look_path="bar_arena_walk_attack",opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk"} } }
-    return { open=function(path) if string.find(path,"catalogs") then return catalog elseif string.find(path,"difficulties") then return difficulties else return layouts end end, section_exists=function(name) return game_sections[name] == true end }
+    local difficulties = { sections = { meta=section{schema_version="1",revision="1"}, ga_difficulty_rookie=section{enemy_min="1",enemy_max="2",enemy_total_budget=tostring(options.rookie_enemy_budget or 12),player_loadout_budget="12"}, ga_difficulty_stalker=section{enemy_min="2",enemy_max="3",enemy_total_budget="18",player_loadout_budget="15"}, ga_difficulty_veteran=section{enemy_min="3",enemy_max="4",enemy_total_budget="26",player_loadout_budget="18"}, ga_difficulty_master=section{enemy_min="4",enemy_max="6",enemy_total_budget="38",player_loadout_budget="22"} } }
+    local layouts = { sections = { meta=section{schema_version="1",revision="1"}, ga_layout_rostok_arena_v1=section{level="l05_bar",actor_spawn_path="bar_arena_walk_1_1",actor_look_path="bar_arena_walk_attack",opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk"} } }
+    if type(options.mutate) == "function" then options.mutate(catalog, difficulties, layouts, game_sections) end
+    return {
+        open=function(path) if options.throw_open then error("fixture open failure") end; if string.find(path,"catalogs") then return catalog elseif string.find(path,"difficulties") then return difficulties else return layouts end end,
+        section_exists=function(name) if options.throw_section_exists then error("fixture section failure") end; return game_sections[name] == true end,
+        enumerate_sections=options.enumerate_sections,
+        enumerate_keys=options.enumerate_keys
+    }
 end
 
 local function catalogs() local result = gamma_arena_catalog.load(fixture_factory()); gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load"); return result.value end
@@ -43,6 +50,65 @@ local function validator_rejects_unknown_spawn_path()
     gamma_arena_test_assert.is_false(rejected.ok, "validator must reject an unknown spawn path")
     gamma_arena_test_assert.equals(rejected.error.code, "GA_SPAWN_PATH_INVALID", "unknown spawn path code")
 end
+local function catalog_rejects_malformed_data()
+    local cases = {
+        { code="GA_CATALOG_SECTION_MISSING", mutate=function(c) c.sections.profiles=nil end },
+        { code="GA_CATALOG_EMPTY", mutate=function(c) c.sections.profiles.ids="" end },
+        { code="GA_CATALOG_DUPLICATE_ID", mutate=function(c) c.sections.profiles.ids="novice,novice" end },
+        { code="GA_CATALOG_PROFILE_NOT_HUMAN", mutate=function(c,d,l,s) c.sections.profile_novice.section="sim_default_bloodsucker";s.sim_default_bloodsucker=true end },
+        { code="GA_CATALOG_AMMO_INVALID", mutate=function(c) c.sections.weapon_pm.ammo="ammo_9x19_fmj" end },
+        { code="GA_CATALOG_UNKNOWN_KEY", mutate=function(c) c.sections.profile_novice.unexpected="1" end },
+        { code="GA_CATALOG_UNKNOWN_SECTION", mutate=function(c) c.sections.unexpected={} end },
+        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d) d.sections.meta.schema_version="2" end },
+        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d,l) l.sections.meta.revision="2" end },
+        { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.actor_spawn_path="" end },
+        { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.actor_look_path=l.sections.ga_layout_rostok_arena_v1.actor_spawn_path end },
+        { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_1" end }
+    }
+    for _, case in ipairs(cases) do
+        local result = gamma_arena_catalog.load(fixture_factory({ mutate=case.mutate }))
+        gamma_arena_test_assert.is_false(result.ok, "malformed catalog must fail closed")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "malformed catalog error code")
+    end
+    local open_failure = gamma_arena_catalog.load(fixture_factory({ throw_open=true }))
+    gamma_arena_test_assert.equals(open_failure.error.code, "GA_CATALOG_OPEN_FAILED", "throwing open must be structured")
+    local section_failure = gamma_arena_catalog.load(fixture_factory({ throw_section_exists=true }))
+    gamma_arena_test_assert.equals(section_failure.error.code, "GA_CATALOG_SECTION_CHECK_FAILED", "throwing section_exists must be structured")
+    local section_enumeration = gamma_arena_catalog.load(fixture_factory({ enumerate_sections=function() error("enumeration failure") end }))
+    gamma_arena_test_assert.equals(section_enumeration.error.code, "GA_CATALOG_ENUMERATION_FAILED", "throwing section enumeration must be structured")
+    local key_enumeration = gamma_arena_catalog.load(fixture_factory({ enumerate_keys=function() error("enumeration failure") end }))
+    gamma_arena_test_assert.equals(key_enumeration.error.code, "GA_CATALOG_ENUMERATION_FAILED", "throwing key enumeration must be structured")
+end
+local function validator_never_throws_for_malformed_specs()
+    local snapshot = catalogs()
+    local mutations = {
+        {code="GA_MODE_INVALID",fn=function(s) s.mode_id="survival" end},
+        {code="GA_LAYOUT_UNKNOWN",fn=function(s) s.layout_id="missing" end},
+        {code="GA_LEVEL_INVALID",fn=function(s) s.level="bad" end},
+        {code="GA_LAYOUT_VERSION_INVALID",fn=function(s) s.layout_version=2 end},
+        {code="GA_OPPONENT_SLOT_INVALID",fn=function(s) s.opponents[1].slot=2 end},
+        {code="GA_FIGHT_ID_INVALID",fn=function(s) s.fight_id="tampered" end},
+        {code="GA_FIGHT_ID_INVALID",fn=function(s) s.fight_id="ga-01-0-g1-c1-l1" end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.diagnostic=false end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.opponents="bad" end},
+        {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.actor="bad" end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.weapon=4 end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.ammo=nil end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.ammo_boxes="1" end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.outfit=false end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.cost="5" end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.consumables=nil end},
+        {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.consumables="bandage" end}
+    }
+    for _, mutation in ipairs(mutations) do
+        local generated = gamma_arena_generator.generate(request(17,"rookie"),0,snapshot)
+        mutation.fn(generated.value)
+        local did_not_throw, result = pcall(function() return gamma_arena_validator.validate(generated.value,snapshot) end)
+        gamma_arena_test_assert.is_true(did_not_throw, "malformed FightSpec validation must not throw")
+        gamma_arena_test_assert.is_false(result.ok, "malformed FightSpec must fail")
+        gamma_arena_test_assert.equals(result.error.code, mutation.code, "malformed FightSpec code")
+    end
+end
 local function stable_and_fight_index()
     local snapshot = catalogs(); local first = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local second = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local changed = gamma_arena_generator.generate(request(3735928559,"veteran"),8,snapshot)
     gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value),gamma_arena_generator.stable_encode(second.value),"same request stable encoding")
@@ -64,6 +130,6 @@ local function golden_fights_v1()
 end
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v1",fn=stable_and_fight_index},{name="golden_fights_v1",fn=golden_fights_v1}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v1",fn=stable_and_fight_index},{name="golden_fights_v1",fn=golden_fights_v1}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end

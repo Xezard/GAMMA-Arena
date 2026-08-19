@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v1.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+$difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
+$layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
 $generatorPath = Join-Path $repoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 $catalogText = Get-Content -LiteralPath $catalogPath -Raw
 $generatorText = Get-Content -LiteralPath $generatorPath -Raw
@@ -15,6 +17,27 @@ if ($catalogText -notmatch '(?m)^schema_version\s*=\s*1\s*$' -or
     $generatorText -notmatch 'diagnostic=') {
     throw 'Reference oracle supports only FightSpec/catalog/generator v1.'
 }
+
+function Read-GaSimpleLtx {
+    param([string]$Path)
+    $sections = @{}; $currentSection = $null
+    foreach ($rawLine in Get-Content -LiteralPath $Path) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith(';')) { continue }
+        if ($line -match '^\[([^\]]+)\]$') { $currentSection = $Matches[1]; if ($sections.ContainsKey($currentSection)) { throw "Duplicate LTX section $currentSection in $Path" }; $sections[$currentSection] = @{}; continue }
+        if ($null -eq $currentSection -or $line -notmatch '^([^=]+?)\s*=\s*(.*?)\s*$') { throw "Unsupported LTX line '$rawLine' in $Path" }
+        $key = $Matches[1].Trim(); if ($sections[$currentSection].ContainsKey($key)) { throw "Duplicate LTX key $currentSection.$key in $Path" }; $sections[$currentSection][$key] = $Matches[2].Trim()
+    }
+    return $sections
+}
+
+$catalogSections = Read-GaSimpleLtx -Path $catalogPath
+$difficultySections = Read-GaSimpleLtx -Path $difficultyPath
+$layoutSections = Read-GaSimpleLtx -Path $layoutPath
+foreach ($metadata in @($catalogSections.meta, $difficultySections.meta, $layoutSections.meta)) {
+    if ([int]$metadata.schema_version -ne 1 -or [int]$metadata.revision -ne 1) { throw 'Reference oracle supports only schema/revision v1.' }
+}
+if ([int]$catalogSections.meta.generator_version -ne 1) { throw 'Reference oracle supports only generator v1.' }
 
 $parkMillerModulus = [int64]2147483647
 $parkMillerStateModulus = [int64]2147483646
@@ -68,36 +91,19 @@ function New-GaStream {
     return New-GaReferenceRng -Parts $streamParts
 }
 
-$ammoCosts = @{
-    'ammo_9x18_fmj' = 1; 'ammo_9x19_fmj' = 1
-    'ammo_5.45x39_fmj' = 2; 'ammo_12x70_buck' = 2
-}
-$weaponCatalog = @(
-    [pscustomobject]@{ Section='wpn_ak74'; Ammo='ammo_5.45x39_fmj'; Cost=6 }
-    [pscustomobject]@{ Section='wpn_ak74u'; Ammo='ammo_5.45x39_fmj'; Cost=5 }
-    [pscustomobject]@{ Section='wpn_mp5'; Ammo='ammo_9x19_fmj'; Cost=4 }
-    [pscustomobject]@{ Section='wpn_pm'; Ammo='ammo_9x18_fmj'; Cost=2 }
-    [pscustomobject]@{ Section='wpn_wincheaster1300'; Ammo='ammo_12x70_buck'; Cost=5 }
-)
-$outfitCatalog = @(
-    [pscustomobject]@{ Section='banditmerc_outfit'; Cost=4 }
-    [pscustomobject]@{ Section='novice_outfit'; Cost=1 }
-    [pscustomobject]@{ Section='stalker_outfit'; Cost=3 }
-)
-$profileCatalog = @(
-    [pscustomobject]@{ Section='gamma_arena_bandit_experienced'; Cost=3 }
-    [pscustomobject]@{ Section='gamma_arena_bandit_novice'; Cost=1 }
-    [pscustomobject]@{ Section='gamma_arena_bandit_trainee'; Cost=2 }
-    [pscustomobject]@{ Section='gamma_arena_bandit_veteran'; Cost=4 }
-)
+$ammoCosts = @{}; foreach ($ammoId in @($catalogSections.ammo.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object)) { $ammoCosts[$catalogSections["ammo_$ammoId"].section] = [int]$catalogSections["ammo_$ammoId"].cost }
+$weaponCatalog = @($catalogSections.weapons.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalogSections["weapon_$_"]; [pscustomobject]@{Section=$entry.section;Ammo=$entry.ammo;Cost=[int]$entry.cost;AmmoBoxMin=[int]$entry.ammo_box_min;AmmoBoxMax=[int]$entry.ammo_box_max} })
+$outfitCatalog = @($catalogSections.outfits.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalogSections["outfit_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
+$profileCatalog = @($catalogSections.profiles.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalogSections["profile_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
+$bandageCost = [int]$catalogSections.consumable_bandage.cost
 $loadoutCombinations = @()
 foreach ($weaponEntry in $weaponCatalog) {
     foreach ($outfitEntry in $outfitCatalog) {
-        foreach ($ammoBoxCount in 1..2) {
+        foreach ($ammoBoxCount in $weaponEntry.AmmoBoxMin..$weaponEntry.AmmoBoxMax) {
             $loadoutCombinations += [pscustomobject]@{
                 Weapon=$weaponEntry.Section; Ammo=$weaponEntry.Ammo; AmmoBoxes=$ammoBoxCount
                 Outfit=$outfitEntry.Section
-                Cost=$weaponEntry.Cost + $ammoCosts[$weaponEntry.Ammo] * $ammoBoxCount + $outfitEntry.Cost + 1
+                Cost=$weaponEntry.Cost + $ammoCosts[$weaponEntry.Ammo] * $ammoBoxCount + $outfitEntry.Cost + $bandageCost
             }
         }
     }
@@ -105,12 +111,9 @@ foreach ($weaponEntry in $weaponCatalog) {
 $loadoutCombinations = @($loadoutCombinations | Sort-Object Cost, Weapon, Outfit, AmmoBoxes)
 if ($loadoutCombinations.Count -ne 30) { throw "Reference catalog must construct 30 combinations, got $($loadoutCombinations.Count)." }
 
-$difficultyCatalog = @{
-    rookie=[pscustomobject]@{EnemyMin=1;EnemyMax=2;EnemyBudget=12;PlayerBudget=12}
-    stalker=[pscustomobject]@{EnemyMin=2;EnemyMax=3;EnemyBudget=18;PlayerBudget=15}
-    veteran=[pscustomobject]@{EnemyMin=3;EnemyMax=4;EnemyBudget=26;PlayerBudget=18}
-    master=[pscustomobject]@{EnemyMin=4;EnemyMax=6;EnemyBudget=38;PlayerBudget=22}
-}
+$difficultyCatalog = @{}; foreach ($difficultyId in @('rookie','stalker','veteran','master')) { $entry=$difficultySections["ga_difficulty_$difficultyId"]; $difficultyCatalog[$difficultyId]=[pscustomobject]@{EnemyMin=[int]$entry.enemy_min;EnemyMax=[int]$entry.enemy_max;EnemyBudget=[int]$entry.enemy_total_budget;PlayerBudget=[int]$entry.player_loadout_budget} }
+$layoutEntry = $layoutSections.ga_layout_rostok_arena_v1
+$layoutOpponentPaths = @($layoutEntry.opponent_spawn_paths.Split(',') | ForEach-Object { $_.Trim() })
 
 function Select-GaAffordable {
     param([hashtable]$Rng, [array]$Values, [int]$Budget)
@@ -132,7 +135,7 @@ function New-GaEncodedFight {
     $difficulty = $difficultyCatalog[$DifficultyId]
     $enemyCountRng = New-GaStream -Request $request -FightIndex $FightIndex -Tag 'enemy_count'
     $enemyCount = Get-GaNextInt -Rng $enemyCountRng -Minimum $difficulty.EnemyMin -Maximum $difficulty.EnemyMax
-    $spawnPaths = @('bar_arena_walk_3_1','bar_arena_walk_3_2','bar_arena_walk_6_1','bar_arena_walk_6_3','bar_arena_walk_6_6','bar_arena_monstr_walk')
+    $spawnPaths = @($layoutOpponentPaths)
     $spawnRng = New-GaStream -Request $request -FightIndex $FightIndex -Tag 'spawn_path'
     for ($pathIndex = $spawnPaths.Count - 1; $pathIndex -ge 1; $pathIndex--) {
         $targetIndex = (Get-GaNextInt -Rng $spawnRng -Minimum 1 -Maximum ($pathIndex + 1)) - 1
@@ -157,7 +160,7 @@ function New-GaEncodedFight {
     $fields = @(
         'schema_version=1','generator_version=1','catalog_revision=1','layout_version=1',
         "fight_id=ga-$normalizedSeed-$FightIndex-g1-c1-l1",'mode_id=skirmish',"difficulty_id=$DifficultyId",
-        'layout_id=rostok_arena_v1','level=l05_bar',"actor=bar_arena_walk_1_1,bar_arena_walk_attack,$actorLoadout",'opponents='
+        'layout_id=rostok_arena_v1',"level=$($layoutEntry.level)","actor=$($layoutEntry.actor_spawn_path),$($layoutEntry.actor_look_path),$actorLoadout",'opponents='
     ) + $encodedOpponents + "diagnostic=FightSpecV1 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }

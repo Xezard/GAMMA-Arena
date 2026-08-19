@@ -107,7 +107,8 @@ function transition() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_catalog.script' @'
 function load()
-    return "GA_DIFFICULTY_BUDGET_INFEASIBLE"
+    local markers = "GA_DIFFICULTY_BUDGET_INFEASIBLE GA_CATALOG_SECTION_CHECK_FAILED GA_CATALOG_UNKNOWN_SECTION section_for_each line_count r_line"
+    return markers
 end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_mode_skirmish.script' @'
@@ -120,7 +121,11 @@ function validate_session() end
 function generate() end
 function stable_encode() end
 '@
-    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' 'function validate() end'
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' @'
+function validate()
+    return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID"
+end
+'@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_generator.script' 'function run() end'
     Write-FixtureFile $Root 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx' @'
 [meta]

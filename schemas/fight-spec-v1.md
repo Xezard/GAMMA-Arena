@@ -16,4 +16,16 @@
 
 The catalog is versioned by `schema_version=1`, `revision=1`, and `generator_version=1`. NPC profiles are only the four `gamma_arena_bandit_*` sections. The validator rechecks all item sections through the normalized catalog, all costs, ammo compatibility, count/capacity, unique spawn paths, and fight-id grammar. On success it returns an accessor-only view (`fight_id`, `actor`, `opponents`, `stable_encode`) which retains the validated source privately.
 
+Catalog, difficulty, and layout metadata must all declare schema/revision `1`.
+The loader enumerates every LTX section and key and rejects undeclared additions,
+duplicates, empty ids, non-human profiles, incompatible weapon/ammo pairs, missing
+game sections, and infeasible budgets. Factory and INI enumeration exceptions are
+converted to structured `GA_CATALOG_*` errors.
+
+Validation is total for arbitrary Lua values: malformed nested tables return a
+structured Result rather than throwing. It enforces `mode_id=skirmish`, known
+difficulty/layout, exact level/layout version, stable fight-id grammar, dense
+opponent and consumable arrays, `opponent.slot == array index`, non-empty unique
+layout paths, and typed loadout fields before cost or compatibility checks.
+
 `stable_encode` emits the complete fixed v1 schema in this lexical field order: schema/version fields, identity and routing fields, actor, indexed opponents, then diagnostic. A loadout is encoded as weapon, ammo, ammo-box count, outfit, ordered consumables, and cost; opponents are indexed in their stable array order. It never serializes table addresses or iterates an unordered map. The fixture records four complete encodings; Lua equality is exercised by the dev suite only when GAMMA is available. Golden fixture changes require a generator version or catalog revision increment and a matching changelog entry.

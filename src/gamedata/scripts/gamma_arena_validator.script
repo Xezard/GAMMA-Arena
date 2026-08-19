@@ -1,15 +1,45 @@
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function positive_integer(value)
+    return type(value) == "number" and value == math.floor(value) and value > 0
+end
+
+local function array_length(value)
+    if type(value) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then return nil end
+        count = count + 1; maximum = math.max(maximum, key)
+    end
+    if maximum ~= count then return nil end
+    return count
+end
+
 local function item_exists(values, section)
-    for _, value in pairs(values) do if value.section == section then return value end end
+    if type(values) ~= "table" then return nil end
+    for _, value in pairs(values) do if type(value) == "table" and value.section == section then return value end end
 end
 
 local function validate_loadout(loadout, catalogs, budget)
-    if type(loadout) ~= "table" then return gamma_arena_result.err("GA_LOADOUT_INVALID", "Loadout is missing", {}) end
+    if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.cost) then
+        return failure("GA_LOADOUT_TYPE_INVALID", "Loadout fields have invalid types", {})
+    end
+    local consumable_count = array_length(loadout.consumables)
+    if consumable_count == nil then return failure("GA_LOADOUT_TYPE_INVALID", "Loadout consumables must be an array", {}) end
     local weapon = item_exists(catalogs.weapons, loadout.weapon); local ammo = item_exists(catalogs.ammo, loadout.ammo); local outfit = item_exists(catalogs.outfits, loadout.outfit)
-    if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return gamma_arena_result.err("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
-    if type(loadout.ammo_boxes) ~= "number" or loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return gamma_arena_result.err("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
+    if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
+    if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
     local cost = weapon.cost + ammo.cost * loadout.ammo_boxes + outfit.cost
-    for _, section in ipairs(loadout.consumables or {}) do local consumable = item_exists(catalogs.consumables, section); if not consumable then return gamma_arena_result.err("GA_LOADOUT_CONSUMABLE_INVALID", "Consumable is not cataloged", { section = section }) end; cost = cost + consumable.cost end
-    if cost ~= loadout.cost or cost > budget then return gamma_arena_result.err("GA_LOADOUT_COST_INVALID", "Loadout cost exceeds budget", { cost = cost, budget = budget }) end
+    for index = 1, consumable_count do
+        local section = loadout.consumables[index]
+        if type(section) ~= "string" or section == "" then return failure("GA_LOADOUT_TYPE_INVALID", "Consumable sections must be non-empty strings", { index = index }) end
+        local consumable = item_exists(catalogs.consumables, section)
+        if not consumable then return failure("GA_LOADOUT_CONSUMABLE_INVALID", "Consumable is not cataloged", { section = section }) end
+        cost = cost + consumable.cost
+    end
+    if cost ~= loadout.cost or cost > budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout cost exceeds budget", { cost = cost, budget = budget }) end
     return gamma_arena_result.ok(true)
 end
 
@@ -22,28 +52,51 @@ local function copy_participant(participant)
     return { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost }
 end
 
-function validate(spec, catalogs)
-    if type(spec) ~= "table" or type(catalogs) ~= "table" then return gamma_arena_result.err("GA_FIGHTSPEC_INVALID", "FightSpec and catalogs are required", {}) end
+local function validate_impl(spec, catalogs)
+    if type(spec) ~= "table" or type(catalogs) ~= "table" or type(catalogs.layouts) ~= "table" or type(catalogs.difficulties) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec and normalized catalogs are required", {}) end
+    if spec.mode_id ~= "skirmish" then return failure("GA_MODE_INVALID", "FightSpec mode must be skirmish", { mode_id = spec.mode_id }) end
+    if type(spec.layout_id) ~= "string" or type(catalogs.layouts[spec.layout_id]) ~= "table" then return failure("GA_LAYOUT_UNKNOWN", "FightSpec layout is unknown", { layout_id = spec.layout_id }) end
+    if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
-    if spec.schema_version ~= 1 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision or not layout or not difficulty then return gamma_arena_result.err("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
-    if type(spec.fight_id) ~= "string" or not string.match(spec.fight_id, "^ga%-%d+%-%d+%-g1%-c" .. catalogs.revision .. "%-l" .. layout.version .. "$") then return gamma_arena_result.err("GA_FIGHT_ID_INVALID", "Fight id is not stable v1 format", {}) end
-    if not spec.actor or spec.actor.spawn_path ~= layout.actor_spawn_path or spec.actor.look_path ~= layout.actor_look_path then return gamma_arena_result.err("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
-    local actor = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget); if not actor.ok then return actor end
-    if #spec.opponents < difficulty.enemy_min or #spec.opponents > math.min(difficulty.enemy_max, #layout.opponent_spawn_paths) then return gamma_arena_result.err("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
-    local seen, spent = {}, 0
+    if spec.schema_version ~= 1 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
+    if spec.level ~= layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
+    if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
+    local seed_text, index_text
+    if type(spec.fight_id) == "string" then seed_text, index_text = string.match(spec.fight_id, "^ga%-(%d+)%-(%d+)%-g" .. catalogs.generator_version .. "%-c" .. catalogs.revision .. "%-l" .. layout.version .. "$") end
+    local normalized_seed, fight_index = tonumber(seed_text), tonumber(index_text)
+    if not normalized_seed or normalized_seed < 1 or normalized_seed > 2147483646 or normalized_seed ~= math.floor(normalized_seed) or tostring(normalized_seed) ~= seed_text or not fight_index or fight_index < 0 or fight_index ~= math.floor(fight_index) or tostring(fight_index) ~= index_text then return failure("GA_FIGHT_ID_INVALID", "Fight id is not canonical stable v1 format", {}) end
+    if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
+    if spec.actor.spawn_path ~= layout.actor_spawn_path or spec.actor.look_path ~= layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
+    local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget); if not actor_result.ok then return actor_result end
+    local opponent_count = array_length(spec.opponents)
+    if opponent_count == nil then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec opponents must be a dense array", {}) end
+    if opponent_count < difficulty.enemy_min or opponent_count > math.min(difficulty.enemy_max, #layout.opponent_spawn_paths) then return failure("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
     local valid_paths = {}; for _, path in ipairs(layout.opponent_spawn_paths) do valid_paths[path] = true end
-    for index, opponent in ipairs(spec.opponents) do
+    local seen, spent = {}, 0
+    for index = 1, opponent_count do
+        local opponent = spec.opponents[index]
+        if type(opponent) ~= "table" or opponent.slot ~= index or type(opponent.spawn_path) ~= "string" or opponent.spawn_path == "" or type(opponent.profile) ~= "string" or not positive_integer(opponent.profile_cost) or not positive_integer(opponent.total_cost) or type(opponent.loadout) ~= "table" then
+            if type(opponent) == "table" and opponent.slot ~= index then return failure("GA_OPPONENT_SLOT_INVALID", "Opponent slot must equal array index", { index = index, slot = opponent.slot }) end
+            return failure("GA_FIGHTSPEC_TYPE_INVALID", "Opponent fields have invalid types", { index = index })
+        end
         local profile = item_exists(catalogs.profiles, opponent.profile)
-        if not profile then return gamma_arena_result.err("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
-        if not valid_paths[opponent.spawn_path] then return gamma_arena_result.err("GA_SPAWN_PATH_INVALID", "Opponent spawn path is not in the selected layout", { path = opponent.spawn_path }) end
-        if seen[opponent.spawn_path] then return gamma_arena_result.err("GA_SPAWN_PATH_DUPLICATE", "Opponent spawn paths must be unique", { path = opponent.spawn_path }) end
+        if not profile then return failure("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
+        if not valid_paths[opponent.spawn_path] then return failure("GA_SPAWN_PATH_INVALID", "Opponent spawn path is not in the selected layout", { path = opponent.spawn_path }) end
+        if seen[opponent.spawn_path] then return failure("GA_SPAWN_PATH_DUPLICATE", "Opponent spawn paths must be unique", { path = opponent.spawn_path }) end
         seen[opponent.spawn_path] = true
-        local gear = validate_loadout(opponent.loadout, catalogs, difficulty.enemy_total_budget - profile.cost); if not gear.ok then return gear end
-        if opponent.profile_cost ~= profile.cost or opponent.total_cost ~= profile.cost + opponent.loadout.cost then return gamma_arena_result.err("GA_ENEMY_COST_INVALID", "Opponent cost is inconsistent", { slot = index }) end
+        local gear_result = validate_loadout(opponent.loadout, catalogs, difficulty.enemy_total_budget - profile.cost); if not gear_result.ok then return gear_result end
+        if opponent.profile_cost ~= profile.cost or opponent.total_cost ~= profile.cost + opponent.loadout.cost then return failure("GA_ENEMY_COST_INVALID", "Opponent cost is inconsistent", { slot = index }) end
         spent = spent + opponent.total_cost
     end
-    if spent > difficulty.enemy_total_budget then return gamma_arena_result.err("GA_ENEMY_BUDGET_INVALID", "Enemy total cost exceeds difficulty budget", {}) end
+    if spent > difficulty.enemy_total_budget then return failure("GA_ENEMY_BUDGET_INVALID", "Enemy total cost exceeds difficulty budget", {}) end
     local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, diagnostic = spec.diagnostic }
-    for index, opponent in ipairs(spec.opponents) do private.opponents[index] = copy_participant(opponent) end
+    for index = 1, opponent_count do private.opponents[index] = copy_participant(spec.opponents[index]) end
     return gamma_arena_result.ok({ fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
+end
+
+function validate(spec, catalogs)
+    local succeeded, result = pcall(validate_impl, spec, catalogs)
+    if succeeded then return result end
+    return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec validation failed safely", { reason = tostring(result) })
 end
