@@ -44,19 +44,38 @@ try {
     $DevFixtureExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DevFixture)
     Assert-True ($DevFixtureExit -eq 0) 'Static release policy must ignore dev/gamedata gamma_arena_test_* fixtures.'
 
-    $InvalidStaticFixture = New-StaticFixture 'invalid-static-fixture'
-    Write-FixtureFile $InvalidStaticFixture 'src\gamedata\scripts\nested\gamma_arena_random.script' 'local value = math.random()'
-    Write-FixtureFile $InvalidStaticFixture 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx' 'bloodsucker = mutant'
-    Write-FixtureFile $InvalidStaticFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>btn_gamma_arena exists</insert></dxml>'
-    $InvalidStaticExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $InvalidStaticFixture)
-    Assert-True ($InvalidStaticExit -ne 0) 'Static policy must reject nested random calls, planned gamma_arena catalogs mutants, and positive-only DXML guards.'
+    $NestedGammaRandomFixture = New-StaticFixture 'nested-gamma-random'
+    Write-FixtureFile $NestedGammaRandomFixture 'src\gamedata\scripts\nested\gamma_arena_random.script' 'local value = math.random()'
+    $NestedGammaRandomExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NestedGammaRandomFixture)
+    Assert-True ($NestedGammaRandomExit -ne 0) 'Static policy must reject a nested gamma_arena_* math.random call.'
+
+    $NestedGaRandomFixture = New-StaticFixture 'nested-ga-random'
+    Write-FixtureFile $NestedGaRandomFixture 'src\gamedata\scripts\nested\ga_random.script' 'local value = math.randomseed(7)'
+    $NestedGaRandomExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NestedGaRandomFixture)
+    Assert-True ($NestedGaRandomExit -ne 0) 'Static policy must reject a nested ga_* math.randomseed call.'
+
+    $PrefixedMutantCatalogFixture = New-StaticFixture 'prefixed-mutant-catalog'
+    Write-FixtureFile $PrefixedMutantCatalogFixture 'src\gamedata\configs\gamma_arena\arena_population.ltx' 'sim_default_bloodsucker = 1'
+    $PrefixedMutantCatalogExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PrefixedMutantCatalogFixture)
+    Assert-True ($PrefixedMutantCatalogExit -ne 0) 'Static policy must reject prefixed mutant class tokens in Arena configs.'
+
+    $PositiveOnlyDxmlFixture = New-StaticFixture 'positive-only-dxml'
+    Write-FixtureFile $PositiveOnlyDxmlFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert></dxml>'
+    $PositiveOnlyDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PositiveOnlyDxmlFixture)
+    Assert-True ($PositiveOnlyDxmlExit -ne 0) 'Static policy must reject a positive-only DXML duplicate query.'
+
+    $MixedDxmlFixture = New-StaticFixture 'mixed-dxml'
+    Write-FixtureFile $MixedDxmlFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if not menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert><insert>add("btn_gamma_arena")</insert></dxml>'
+    $MixedDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MixedDxmlFixture)
+    Assert-True ($MixedDxmlExit -ne 0) 'Static policy must reject an unsafe DXML insert even when another insert is guarded.'
 
     $ValidStaticFixture = New-StaticFixture 'valid-static-fixture'
     Write-FixtureFile $ValidStaticFixture 'src\gamedata\scripts\nested\gamma_arena_safe.script' 'local value = 4'
-    Write-FixtureFile $ValidStaticFixture 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx' 'stalker = human'
+    Write-FixtureFile $ValidStaticFixture 'src\gamedata\scripts\nested\ga_safe.script' 'local value = 8'
+    Write-FixtureFile $ValidStaticFixture 'src\gamedata\configs\gamma_arena\arena_population.ltx' 'sim_default_stalker = 1'
     Write-FixtureFile $ValidStaticFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if not menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert></dxml>'
     $ValidStaticExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $ValidStaticFixture)
-    Assert-True ($ValidStaticExit -eq 0) 'Static policy must accept a deterministic nested script, human catalog, and negative DXML duplicate guard.'
+    Assert-True ($ValidStaticExit -eq 0) 'Static policy must accept deterministic gamma_arena_/ga_ scripts, a human Arena config, and a guarded DXML insert.'
 
     $OutsideReleaseOutput = Join-Path $TempRoot 'outside-release-output'
     $ReleaseOutputExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tools\Build-GammaArena.ps1') @('-Configuration', 'Release', '-OutputDirectory', $OutsideReleaseOutput)

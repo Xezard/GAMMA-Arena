@@ -63,7 +63,7 @@ if (Test-Path -LiteralPath $SourceGamedata) {
 
     $ArenaScripts = @($AllSourceFiles | Where-Object {
         $RelativePath = $_.FullName.Substring($SourceGamedata.Length).TrimStart('\', '/').Replace('/', '\')
-        $RelativePath -match '^scripts\\' -and $_.Name -like 'gamma_arena_*'
+        $RelativePath -match '^scripts\\' -and ($_.Name -like 'gamma_arena_*' -or $_.Name -like 'ga_*')
     })
     foreach ($Script in $ArenaScripts) {
         Assert-True (-not (Test-TextPattern $Script.FullName '\bmath\.random(seed)?\b')) "Non-deterministic random call: $(Get-RelativeRepoPath $Script.FullName)"
@@ -78,20 +78,23 @@ if (Test-Path -LiteralPath $SourceGamedata) {
 
     $CatalogFiles = @($AllSourceFiles | Where-Object {
         $RelativePath = $_.FullName.Substring($SourceGamedata.Length).TrimStart('\', '/').Replace('/', '\')
-        $RelativePath -ieq 'configs\gamma_arena\gamma_arena_catalogs.ltx' -or $_.Name -match '(?i)(npc.*catalog|catalog.*npc|npc_catalog)'
+        ($RelativePath -match '^configs\\gamma_arena\\' -and $_.Extension -ieq '.ltx') -or
+            $_.Name -match '(?i)(npc.*catalog|catalog.*npc|npc_catalog)'
     })
-    $MutantPattern = '(?i)\b(bloodsucker|boar|burer|cat|chimera|controller|dog|flesh|fracture|gigant|izlom|karlik|pseudodog|pseudogiant|psy[_-]?dog|snork|tushkano|zombie|mutant)\b'
+    $MutantPattern = '(?i)(?:^|[^a-z0-9])(bloodsucker|boar|burer|cat|chimera|controller|dog|flesh|fracture|gigant|izlom|karlik|pseudodog|pseudogiant|psy[_-]?dog|snork|tushkano|zombie|mutant)(?:$|[^a-z0-9])'
     foreach ($Catalog in $CatalogFiles) {
         Assert-True (-not (Test-TextPattern $Catalog.FullName $MutantPattern)) "NPC catalog contains known mutant entry: $(Get-RelativeRepoPath $Catalog.FullName)"
     }
 
     $MenuXmlFiles = @($AllSourceFiles | Where-Object { $_.Name -match '(?i)(main.*menu|menu.*main)' -and $_.Extension -ieq '.xml' })
     foreach ($MenuXml in $MenuXmlFiles) {
-        $MenuContent = Get-Content -LiteralPath $MenuXml.FullName -Raw
-        $HasDxmlInsert = $MenuContent -match '(?i)dxml|insert'
-        if ($HasDxmlInsert) {
-            Assert-True ($MenuContent -match 'btn_gamma_arena') "DXML main-menu insert lacks btn_gamma_arena: $(Get-RelativeRepoPath $MenuXml.FullName)"
-            Assert-True ($MenuContent -match '(?is)\bnot\s+[\w.:_]+\s*:\s*(find|exists|query|has)\s*\(\s*["'']btn_gamma_arena["'']\s*\)') "DXML main-menu insert lacks a negative duplicate query guard: $(Get-RelativeRepoPath $MenuXml.FullName)"
+        [xml]$MenuDocument = Get-Content -LiteralPath $MenuXml.FullName -Raw
+        $DxmlInserts = @($MenuDocument.SelectNodes('//*[local-name()="insert"]'))
+        foreach ($DxmlInsert in $DxmlInserts) {
+            $InsertBlock = $DxmlInsert.OuterXml
+            if ($InsertBlock -match 'btn_gamma_arena') {
+                Assert-True ($InsertBlock -match '(?is)\bnot\s+[\w.:_]+\s*:\s*(find|exists|query|has)\s*\(\s*["'']btn_gamma_arena["'']\s*\)') "DXML Gamma Arena insert lacks a negative duplicate query guard: $(Get-RelativeRepoPath $MenuXml.FullName)"
+            }
         }
     }
 }
