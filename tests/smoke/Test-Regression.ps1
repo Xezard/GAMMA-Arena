@@ -6,6 +6,9 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gamma-arena-regression-" + [Guid]::NewGuid().ToString('N'))
 
+& (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1') -Verify
+if (-not $?) { exit 1 }
+
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
         $script:Failures.Add($Message)
@@ -102,6 +105,64 @@ states = {}
 events = {}
 function transition() end
 '@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_catalog.script' @'
+function load()
+    return "GA_DIFFICULTY_BUDGET_INFEASIBLE"
+end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_mode_skirmish.script' @'
+function id() end
+function difficulty_envelope() end
+function next_fight_index() end
+function validate_session() end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_generator.script' @'
+function generate() end
+function stable_encode() end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' 'function validate() end'
+    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_generator.script' 'function run() end'
+    Write-FixtureFile $Root 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx' @'
+[meta]
+schema_version = 1
+revision = 1
+gamma_arena_bandit_novice
+gamma_arena_bandit_trainee
+gamma_arena_bandit_experienced
+gamma_arena_bandit_veteran
+[outfit_novice]
+section = novice_outfit
+cost = 1
+'@
+    Write-FixtureFile $Root 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx' @'
+[ga_difficulty_rookie]
+[ga_difficulty_stalker]
+[ga_difficulty_veteran]
+[ga_difficulty_master]
+'@
+    Write-FixtureFile $Root 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx' @'
+[ga_layout_rostok_arena_v1]
+level = l05_bar
+opponent_spawn_paths = bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk
+'@
+    Write-FixtureFile $Root 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx' @'
+[gamma_arena_bandit_novice]:sim_default_bandit_0
+[gamma_arena_bandit_veteran]:sim_default_bandit_3
+'@
+    Write-FixtureFile $Root 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx' @'
+![skip_npcs]
+gamma_arena_bandit_novice = bandit
+gamma_arena_bandit_trainee = bandit
+gamma_arena_bandit_experienced = bandit
+gamma_arena_bandit_veteran = bandit
+'@
+    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v1.txt' @'
+seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=1|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 rookie
+seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=1|fight_id=ga-1-0-g1-c1-l1|diagnostic=FightSpecV1 stalker
+seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=1|fight_id=ga-1588444913-7-g1-c1-l1|diagnostic=FightSpecV1 veteran
+seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|fight_id=ga-3-31-g1-c1-l1|diagnostic=FightSpecV1 master
+'@
+    Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
 }
 
 function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {

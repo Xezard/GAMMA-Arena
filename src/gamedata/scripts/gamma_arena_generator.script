@@ -1,0 +1,59 @@
+local function stream(request, fight_index, catalogs, tag)
+    return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ request.mode_id, request.difficulty_id, request.session_seed, fight_index, catalogs.generator_version, catalogs.revision, catalogs.layouts[request.layout_id].version, tag }))
+end
+
+local function pick_affordable(rng, values, maximum)
+    local choices = {}
+    for _, value in ipairs(values) do if value.cost <= maximum then choices[#choices + 1] = value end end
+    if #choices == 0 then return nil end
+    return rng:pick(choices)
+end
+
+local function loadout(rng, combinations, budget, code)
+    local choice = pick_affordable(rng, combinations, budget)
+    if not choice then return gamma_arena_result.err(code, "No valid loadout fits the requested budget", { budget = budget }) end
+    return gamma_arena_result.ok({ weapon = choice.weapon, ammo = choice.ammo, ammo_boxes = choice.ammo_boxes, outfit = choice.outfit, consumables = { choice.consumables[1] }, cost = choice.cost })
+end
+
+local function shuffled_paths(rng, values, count)
+    local paths = {}; for index = 1, #values do paths[index] = values[index] end
+    for index = #paths, 2, -1 do local target = rng:next_int(1, index); paths[index], paths[target] = paths[target], paths[index] end
+    local picked = {}; for index = 1, count do picked[index] = paths[index] end
+    return picked
+end
+
+function generate(start_request, fight_index, catalogs)
+    if type(start_request) ~= "table" or type(catalogs) ~= "table" then return gamma_arena_result.err("GA_GENERATE_ARGUMENT_INVALID", "Fight generation requires request and catalogs", {}) end
+    local session = gamma_arena_mode_skirmish.validate_session(start_request); if not session.ok then return session end
+    if fight_index ~= math.floor(tonumber(fight_index) or -1) or fight_index < 0 then return gamma_arena_result.err("GA_FIGHT_INDEX_INVALID", "Fight index must be a non-negative integer", { fight_index = fight_index }) end
+    local layout = catalogs.layouts[start_request.layout_id]; if not layout then return gamma_arena_result.err("GA_LAYOUT_UNKNOWN", "Unknown Arena layout", { layout_id = start_request.layout_id }) end
+    local envelope = gamma_arena_mode_skirmish.difficulty_envelope(start_request.difficulty_id, catalogs); if not envelope.ok then return envelope end
+    local difficulty = envelope.value
+    local maximum = math.min(difficulty.enemy_max, #layout.opponent_spawn_paths)
+    if maximum < difficulty.enemy_min then return gamma_arena_result.err("GA_SPAWN_CAPACITY_INVALID", "Layout cannot support difficulty minimum", { capacity = #layout.opponent_spawn_paths }) end
+    local enemy_count = stream(start_request, fight_index, catalogs, "enemy_count"):next_int(difficulty.enemy_min, maximum)
+    local paths = shuffled_paths(stream(start_request, fight_index, catalogs, "spawn_path"), layout.opponent_spawn_paths, enemy_count)
+    local actor = loadout(stream(start_request, fight_index, catalogs, "actor_loadout"), catalogs.combinations, difficulty.player_loadout_budget, "GA_NO_VALID_PLAYER_LOADOUT"); if not actor.ok then return actor end
+    local spec = { schema_version = 1, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = layout.version, fight_id = "ga-" .. gamma_arena_rng.normalize_uint32(start_request.session_seed) .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = layout.level, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV1 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local base, remainder = math.floor(difficulty.enemy_total_budget / enemy_count), difficulty.enemy_total_budget % enemy_count
+    for index = 1, enemy_count do
+        local slot_budget = base + (index <= remainder and 1 or 0)
+        local profile_rng = stream(start_request, fight_index, catalogs, "enemy_profile:" .. index)
+        local profile = pick_affordable(profile_rng, catalogs.profile_list, slot_budget - catalogs.combinations[1].cost)
+        if not profile then return gamma_arena_result.err("GA_NO_VALID_ENEMY_PROFILE", "No human profile fits enemy slot", { slot = index, budget = slot_budget }) end
+        local gear = loadout(stream(start_request, fight_index, catalogs, "enemy_loadout:" .. index), catalogs.combinations, slot_budget - profile.cost, "GA_NO_VALID_ENEMY_LOADOUT"); if not gear.ok then return gear end
+        spec.opponents[index] = { slot = index, spawn_path = paths[index], profile = profile.section, profile_cost = profile.cost, loadout = gear.value, total_cost = profile.cost + gear.value.cost }
+    end
+    return gamma_arena_result.ok(spec)
+end
+
+function stable_encode(spec)
+    if type(spec) ~= "table" or type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return "invalid" end
+    local function gear(value)
+        return value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
+    end
+    local parts = { "schema_version=" .. spec.schema_version, "generator_version=" .. spec.generator_version, "catalog_revision=" .. spec.catalog_revision, "layout_version=" .. spec.layout_version, "fight_id=" .. spec.fight_id, "mode_id=" .. spec.mode_id, "difficulty_id=" .. spec.difficulty_id, "layout_id=" .. spec.layout_id, "level=" .. spec.level, "actor=" .. spec.actor.spawn_path .. "," .. spec.actor.look_path .. "," .. gear(spec.actor.loadout), "opponents=" }
+    for index, opponent in ipairs(spec.opponents) do parts[#parts + 1] = index .. ":" .. opponent.slot .. "," .. opponent.spawn_path .. "," .. opponent.profile .. "," .. opponent.profile_cost .. "," .. gear(opponent.loadout) .. "," .. opponent.total_cost end
+    parts[#parts + 1] = "diagnostic=" .. spec.diagnostic
+    return table.concat(parts, "|")
+end

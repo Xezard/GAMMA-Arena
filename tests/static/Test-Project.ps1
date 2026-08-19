@@ -114,6 +114,14 @@ $Task2ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_state_machine.script'; Namespace = 'gamma_arena_state_machine'; Required = @('(?m)^states\s*=\s*\{', '(?m)^events\s*=\s*\{', '(?m)^function\s+transition\s*\(') }
 )
 
+$Task3ScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog.script'; Namespace = 'gamma_arena_catalog'; Required = @('(?m)^function\s+load\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') }
+)
+
 foreach ($Contract in $Task2ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
     Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 2 script is missing: $($Contract.Path)"
@@ -126,6 +134,79 @@ foreach ($Contract in $Task2ScriptContracts) {
             Assert-True ($ScriptContent -match $RequiredPattern) "Task 2 script is missing its bare engine API: $($Contract.Path)"
         }
     }
+}
+
+foreach ($Contract in $Task3ScriptContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 3 script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 3 script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Task 3 script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Task 3 script is missing its bare engine API: $($Contract.Path)"
+        }
+    }
+}
+
+$Task3DataFiles = @(
+    'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx',
+    'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx',
+    'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
+    'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx',
+    'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx',
+    'tests\fixtures\golden-fights-v1.txt',
+    'schemas\fight-spec-v1.md'
+)
+foreach ($RelativePath in $Task3DataFiles) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
+}
+
+$CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+$DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
+$LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
+$NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
+$SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
+if (Test-Path -LiteralPath $CatalogPath) {
+    $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*1\s*$') 'Catalog must declare schema_version = 1'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*1\s*$') 'Catalog must declare revision = 1'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s*$') 'Novice outfit must cost 1 so every maximum-count envelope is feasible'
+    foreach ($Profile in @('gamma_arena_bandit_novice', 'gamma_arena_bandit_trainee', 'gamma_arena_bandit_experienced', 'gamma_arena_bandit_veteran')) {
+        Assert-True ($CatalogContent -match [regex]::Escape($Profile)) "Human profile catalog must include $Profile"
+    }
+}
+$Task3CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
+if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
+    $Task3CatalogScriptContent = Get-Content -LiteralPath $Task3CatalogScriptPath -Raw
+    Assert-True ($Task3CatalogScriptContent -match 'GA_DIFFICULTY_BUDGET_INFEASIBLE') 'Catalog loader must reject infeasible maximum-count budgets'
+}
+if (Test-Path -LiteralPath $DifficultyPath) {
+    $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw
+    foreach ($Difficulty in @('rookie', 'stalker', 'veteran', 'master')) {
+        Assert-True ($DifficultyContent -match ("(?m)^\[ga_difficulty_" + $Difficulty + "\]$")) "Difficulty catalog must include $Difficulty"
+    }
+}
+if (Test-Path -LiteralPath $LayoutPath) {
+    $LayoutContent = Get-Content -LiteralPath $LayoutPath -Raw
+    Assert-True ($LayoutContent -match '(?m)^level\s*=\s*l05_bar\s*$') 'Layout must target l05_bar'
+    Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk') 'Layout must retain the six unique opponent paths'
+}
+if (Test-Path -LiteralPath $NpcPath) {
+    $NpcContent = Get-Content -LiteralPath $NpcPath -Raw
+    Assert-True ($NpcContent -match '(?m)^\[gamma_arena_bandit_novice\]:sim_default_bandit_0$') 'NPC novice profile must inherit sim_default_bandit_0'
+    Assert-True ($NpcContent -match '(?m)^\[gamma_arena_bandit_veteran\]:sim_default_bandit_3$') 'NPC veteran profile must inherit sim_default_bandit_3'
+}
+if (Test-Path -LiteralPath $SkipPath) {
+    $SkipContent = Get-Content -LiteralPath $SkipPath -Raw
+    Assert-True ($SkipContent -match '(?m)^!\[skip_npcs\]\s*$') 'Loadout patch must use ![skip_npcs]'
+    Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_bandit_[a-z]+\s*=\s*bandit\s*$')).Count -eq 4) 'Loadout patch must add exactly four Arena humans to skip_npcs'
+}
+$GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v1.txt'
+if (Test-Path -LiteralPath $GoldenPath) {
+    $GoldenContent = Get-Content -LiteralPath $GoldenPath -Raw
+    Assert-True (([regex]::Matches($GoldenContent, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=1\|.+\|diagnostic=FightSpecV1 .+$')).Count -eq 4) 'Golden fixture must contain four complete v1 stable encodings'
 }
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'

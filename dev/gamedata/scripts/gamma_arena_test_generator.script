@@ -1,0 +1,69 @@
+local function section(values) return values end
+
+function fixture_factory(rookie_enemy_budget)
+    local game_sections = { wpn_pm=true, wpn_mp5=true, wpn_ak74u=true, wpn_ak74=true, wpn_wincheaster1300=true, ammo_9x18_fmj=true, ammo_9x19_fmj=true, ammo_5.45x39_fmj=true, ammo_12x70_buck=true, novice_outfit=true, stalker_outfit=true, banditmerc_outfit=true, bandage=true, medkit=true, gamma_arena_bandit_novice=true, gamma_arena_bandit_trainee=true, gamma_arena_bandit_experienced=true, gamma_arena_bandit_veteran=true }
+    local catalog = { sections = {
+        meta=section{schema_version="1",revision="1",generator_version="1"}, profiles=section{ids="novice,trainee,experienced,veteran"},
+        profile_novice=section{section="gamma_arena_bandit_novice",cost="1"}, profile_trainee=section{section="gamma_arena_bandit_trainee",cost="2"}, profile_experienced=section{section="gamma_arena_bandit_experienced",cost="3"}, profile_veteran=section{section="gamma_arena_bandit_veteran",cost="4"},
+        weapons=section{ids="pm,mp5,ak74u,ak74,wincheaster1300"}, weapon_pm=section{section="wpn_pm",ammo="ammo_9x18_fmj",cost="2",ammo_box_min="1",ammo_box_max="2"}, weapon_mp5=section{section="wpn_mp5",ammo="ammo_9x19_fmj",cost="4",ammo_box_min="1",ammo_box_max="2"}, weapon_ak74u=section{section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost="5",ammo_box_min="1",ammo_box_max="2"}, weapon_ak74=section{section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost="6",ammo_box_min="1",ammo_box_max="2"}, weapon_wincheaster1300=section{section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost="5",ammo_box_min="1",ammo_box_max="2"},
+        ammo=section{ids="ammo_9x18_fmj,ammo_9x19_fmj,ammo_5.45x39_fmj,ammo_12x70_buck"}, ammo_ammo_9x18_fmj=section{section="ammo_9x18_fmj",cost="1"}, ammo_ammo_9x19_fmj=section{section="ammo_9x19_fmj",cost="1"}, ammo_ammo_5.45x39_fmj=section{section="ammo_5.45x39_fmj",cost="2"}, ammo_ammo_12x70_buck=section{section="ammo_12x70_buck",cost="2"},
+        outfits=section{ids="novice,stalker,banditmerc"}, outfit_novice=section{section="novice_outfit",cost="1"}, outfit_stalker=section{section="stalker_outfit",cost="3"}, outfit_banditmerc=section{section="banditmerc_outfit",cost="4"}, consumables=section{ids="bandage,medkit"}, consumable_bandage=section{section="bandage",cost="1"}, consumable_medkit=section{section="medkit",cost="2"} } }
+    local difficulties = { sections = { meta=section{schema_version="1",revision="1"}, ga_difficulty_rookie=section{enemy_min="1",enemy_max="2",enemy_total_budget=tostring(rookie_enemy_budget or 12),player_loadout_budget="12"}, ga_difficulty_stalker=section{enemy_min="2",enemy_max="3",enemy_total_budget="18",player_loadout_budget="15"}, ga_difficulty_veteran=section{enemy_min="3",enemy_max="4",enemy_total_budget="26",player_loadout_budget="18"}, ga_difficulty_master=section{enemy_min="4",enemy_max="6",enemy_total_budget="38",player_loadout_budget="22"} } }
+    local layouts = { sections = { ga_layout_rostok_arena_v1=section{level="l05_bar",actor_spawn_path="bar_arena_walk_1_1",actor_look_path="bar_arena_walk_attack",opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk"} } }
+    return { open=function(path) if string.find(path,"catalogs") then return catalog elseif string.find(path,"difficulties") then return difficulties else return layouts end end, section_exists=function(name) return game_sections[name] == true end }
+end
+
+local function catalogs() local result = gamma_arena_catalog.load(fixture_factory()); gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load"); return result.value end
+local function request(seed, difficulty) return { session_seed=seed, mode_id="skirmish", difficulty_id=difficulty, layout_id="rostok_arena_v1" } end
+
+local function generator_10000_seeds()
+    local snapshot = catalogs(); local ids = { "rookie", "stalker", "veteran", "master" }
+    for seed = 0, 9999 do local generated = gamma_arena_generator.generate(request(seed, ids[(seed % 4) + 1]), seed % 32, snapshot); gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed"); gamma_arena_test_assert.is_true(gamma_arena_validator.validate(generated.value, snapshot).ok, "10k generated FightSpec must validate") end
+end
+local function catalog_enforces_max_count_viability()
+    local loaded = gamma_arena_catalog.load(fixture_factory())
+    gamma_arena_test_assert.is_true(loaded.ok, "v1 catalog must be viable at every enemy_max")
+    local minimum_profile_cost = loaded.value.profile_list[1].cost
+    for _, profile in ipairs(loaded.value.profile_list) do minimum_profile_cost = math.min(minimum_profile_cost, profile.cost) end
+    local minimum = minimum_profile_cost + loaded.value.combinations[1].cost
+    for _, difficulty_id in ipairs(loaded.value.difficulty_ids) do
+        local difficulty = loaded.value.difficulties[difficulty_id]
+        gamma_arena_test_assert.is_true(difficulty.enemy_total_budget >= difficulty.enemy_max * minimum, "difficulty max count must fit minimum enemies")
+    end
+    local rejected = gamma_arena_catalog.load(fixture_factory(11))
+    gamma_arena_test_assert.is_false(rejected.ok, "infeasible difficulty fixture must fail closed")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_DIFFICULTY_BUDGET_INFEASIBLE", "infeasible difficulty code")
+end
+local function validator_rejects_unknown_spawn_path()
+    local snapshot = catalogs()
+    local generated = gamma_arena_generator.generate(request(1, "rookie"), 0, snapshot)
+    gamma_arena_test_assert.is_true(generated.ok, "path validation fixture must generate")
+    generated.value.opponents[1].spawn_path = "not_an_arena_path"
+    local rejected = gamma_arena_validator.validate(generated.value, snapshot)
+    gamma_arena_test_assert.is_false(rejected.ok, "validator must reject an unknown spawn path")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_SPAWN_PATH_INVALID", "unknown spawn path code")
+end
+local function stable_and_fight_index()
+    local snapshot = catalogs(); local first = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local second = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local changed = gamma_arena_generator.generate(request(3735928559,"veteran"),8,snapshot)
+    gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value),gamma_arena_generator.stable_encode(second.value),"same request stable encoding")
+    gamma_arena_test_assert.is_true(first.value.fight_id ~= changed.value.fight_id and gamma_arena_generator.stable_encode(first.value) ~= gamma_arena_generator.stable_encode(changed.value),"fight index must alter procedural output")
+end
+local function golden_fights_v1()
+    local snapshot = catalogs()
+    local golden = {
+        { seed = 0, difficulty = "rookie", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=rookie|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,bandage,7|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,banditmerc_outfit,bandage,8,10|diagnostic=FightSpecV1 skirmish rookie #0]] },
+        { seed = 1, difficulty = "stalker", fight = 0, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1-0-g1-c1-l1|mode_id=skirmish|difficulty_id=stalker|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,bandage,8|opponents=|1:1,bar_arena_walk_6_3,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|2:2,bar_arena_walk_3_2,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|diagnostic=FightSpecV1 skirmish stalker #0]] },
+        { seed = 3735928559, difficulty = "veteran", fight = 7, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-1588444913-7-g1-c1-l1|mode_id=skirmish|difficulty_id=veteran|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_mp5,ammo_9x19_fmj,2,stalker_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,7|2:2,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|3:3,bar_arena_monstr_walk,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|4:4,bar_arena_walk_6_3,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,6|diagnostic=FightSpecV1 skirmish veteran #7]] },
+        { seed = 4294967295, difficulty = "master", fight = 31, encoded = [[schema_version=1|generator_version=1|catalog_revision=1|layout_version=1|fight_id=ga-3-31-g1-c1-l1|mode_id=skirmish|difficulty_id=master|layout_id=rostok_arena_v1|level=l05_bar|actor=bar_arena_walk_1_1,bar_arena_walk_attack,wpn_ak74,ammo_5.45x39_fmj,1,novice_outfit,bandage,10|opponents=|1:1,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,8|2:2,bar_arena_monstr_walk,gamma_arena_bandit_experienced,3,wpn_pm,ammo_9x18_fmj,2,novice_outfit,bandage,6,9|3:3,bar_arena_walk_6_6,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,bandage,5,9|4:4,bar_arena_walk_6_3,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,bandage,7,9|diagnostic=FightSpecV1 skirmish master #31]] }
+    }
+    for _, expected in ipairs(golden) do
+        local generated = gamma_arena_generator.generate(request(expected.seed, expected.difficulty), expected.fight, snapshot)
+        gamma_arena_test_assert.is_true(generated.ok, "golden request must generate")
+        gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(generated.value), expected.encoded, "golden fixture stable encoding")
+    end
+end
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v1",fn=stable_and_fight_index},{name="golden_fights_v1",fn=golden_fights_v1}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    return all_passed
+end
