@@ -34,6 +34,10 @@ difficulty/layout, exact level/layout version, normalized seed, non-negative fig
 index, recomputed fight identity, dense
 opponent and consumable arrays, `opponent.slot == array index`, non-empty unique
 layout paths, and typed loadout fields before cost or compatibility checks.
+For `N` opponents, validation recomputes the generator allocation exactly:
+`base = floor(enemy_total_budget / N)`, `remainder = enemy_total_budget % N`,
+and slot `i` receives `base + 1` only when `i <= remainder`. Each profile plus
+loadout must fit its own slot; unused budget cannot be transferred between slots.
 All numeric parsing uses one finite-integer contract that rejects NaN and both
 infinities before `math.floor`. A valid v1 loadout must match an exact normalized
 catalog combination, including its non-empty ordered consumables; recomputing a

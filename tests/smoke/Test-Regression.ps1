@@ -143,8 +143,11 @@ end
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_validator.script' @'
 function validate()
     local expected_fight_id = "ga-1-0-g1-c1-l1"
+    local difficulty = { enemy_total_budget = 1 }
+    local opponent_count = 1
+    local slot_base = math.floor(difficulty.enemy_total_budget / opponent_count)
     gamma_arena_number.is_integer(1)
-    return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID GA_LOADOUT_COMBINATION_INVALID"
+    return "GA_MODE_INVALID GA_LEVEL_INVALID GA_LAYOUT_VERSION_INVALID GA_OPPONENT_SLOT_INVALID GA_FIGHT_ID_INVALID GA_FIGHTSPEC_TYPE_INVALID GA_LOADOUT_COMBINATION_INVALID GA_ENEMY_SLOT_BUDGET_INVALID"
 end
 '@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_generator.script' 'function run() end'
