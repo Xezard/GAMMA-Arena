@@ -193,8 +193,12 @@ seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|sessio
 '@
     Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
-function snapshot()
+local function _snapshot_unchecked()
     return "line_exist r_string_ex"
+end
+function snapshot(config, section, keys)
+    if is_quarantined(config) then return "GA_CONFIG_QUARANTINED" end
+    return _snapshot_unchecked(config, section, keys)
 end
 local function synchronize_cache() end
 function run()
@@ -223,7 +227,7 @@ end
 local LAUNCH_TOKEN_TTL = 600
 local volatile_launch_permits = {}
 local gamma_arena_boolean_returns = true
-local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID"
+local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_economy_treasure new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode new_game_icon new_game_hardcore_mode new_game_hardcore_mode_lives new_game_hardcore_mode_regenerate new_game_survival_mode new_game_azazel_mode new_game_warfare new_game_campfire_mode new_game_conditions_mode new_game_timer_mode new_game_opened_routes new_game_test GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID"
 local function remove(config, section, key) config:remove_line(section, key) end
 local function validate_expected_session() end
 local function validate_persisted_launch_request() end

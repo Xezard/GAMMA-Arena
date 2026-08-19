@@ -215,6 +215,8 @@ if (Test-Path -LiteralPath $ConfigTxPath) {
     Assert-True ($ConfigTxContent -match 'GA_CONFIG_QUARANTINED') 'Incomplete recovery must quarantine later Arena transactions'
     Assert-True ($ConfigTxContent -match 'GA_CONFIG_RECOVERY_FAILED') 'Recovery failures must be distinct from primary transaction failures'
     Assert-True ($ConfigTxContent -match 'boolean_returns') 'Explicit false-return failure semantics must be opt-in for adapters'
+    Assert-True ($ConfigTxContent -match 'local function _snapshot_unchecked') 'Transactions must use a private unchecked snapshot only after their quarantine guard'
+    Assert-True ($ConfigTxContent -match '(?s)function snapshot\s*\(\s*config\s*,\s*section\s*,\s*keys\s*\)\s*if is_quarantined\s*\(\s*config\s*\)') 'The public config snapshot API must reject quarantined configs'
 }
 
 $StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
@@ -241,7 +243,7 @@ if (Test-Path -LiteralPath $StorePath) {
     foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
         Assert-True ($StoreContent -match [regex]::Escape($Key)) "Session store must cover transient key $Key"
     }
-    foreach ($Key in @('new_game_difficulty','new_game_economy','new_game_character_name','new_game_faction','new_game_map','new_game_money','new_game_loadout','new_game_story_mode')) {
+    foreach ($Key in @('new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_character_name','new_game_faction','new_game_map','new_game_money','new_game_loadout','new_game_story_mode','new_game_icon','new_game_hardcore_mode','new_game_hardcore_mode_lives','new_game_hardcore_mode_regenerate','new_game_survival_mode','new_game_azazel_mode','new_game_warfare','new_game_campfire_mode','new_game_conditions_mode','new_game_timer_mode','new_game_opened_routes','new_game_test')) {
         Assert-True ($StoreContent -match [regex]::Escape($Key)) "Character-creation bridge must cover $Key"
     }
 }

@@ -189,6 +189,25 @@ end
 
 local launch_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed" }
 local resume_keys = { "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" }
+local character_write_values = {
+    new_game_difficulty = "2",
+    new_game_economy = "2",
+    new_game_economy_treasure = "2",
+    new_game_character_name = "Arena_Fighter",
+    new_game_faction = "dolg",
+    new_game_map = "makeshift_barracks",
+    new_game_money = "0"
+}
+local character_remove_keys = {
+    "new_game_loadout", "new_game_story_mode", "new_game_icon",
+    "new_game_hardcore_mode", "new_game_hardcore_mode_lives", "new_game_hardcore_mode_regenerate",
+    "new_game_survival_mode", "new_game_azazel_mode", "new_game_warfare",
+    "new_game_campfire_mode", "new_game_conditions_mode", "new_game_timer_mode",
+    "new_game_opened_routes", "new_game_test"
+}
+local character_keys = {}
+for key in pairs(character_write_values) do character_keys[#character_keys + 1] = key end
+for _, key in ipairs(character_remove_keys) do character_keys[#character_keys + 1] = key end
 
 local function valid_request(seed)
     return {
@@ -578,9 +597,9 @@ local function mutation_failure_matrix_is_crash_safe()
         gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "new resume succeeds after failed consume")
     end
 
-    local character_keys = { "new_game_difficulty", "new_game_economy", "new_game_character_name", "new_game_faction", "new_game_map", "new_game_money", "new_game_loadout", "new_game_story_mode" }
-    for fault_at = 1, 9 do
-        local baseline = { new_game_difficulty = "4", new_game_loadout = "old", new_game_story_mode = "true" }
+    for fault_at = 1, 22 do
+        local baseline = {}
+        for _, key in ipairs(character_keys) do baseline[key] = "old_" .. key end
         local config = fake_config(baseline)
         config:arm_fault(fault_at)
         gamma_arena_test_assert.is_false(gamma_arena_session_store.write_character_creation(config).ok, "character bridge injected fault")
@@ -610,6 +629,8 @@ local function recovery_failure_quarantines_transaction()
 
         local blocked = gamma_arena_session_store.save_preferences(config, "veteran", "manual")
         gamma_arena_test_assert.equals(blocked.error.code, "GA_CONFIG_QUARANTINED", "quarantine blocks later Arena transaction")
+        local blocked_snapshot = gamma_arena_config_tx.snapshot(config, "gamma_arena", { "settings_schema_version" })
+        gamma_arena_test_assert.equals(blocked_snapshot.error.code, "GA_CONFIG_QUARANTINED", "public snapshot is blocked while recovery is quarantined")
         local blocked_settings_read = gamma_arena_migrations.read_settings(config)
         gamma_arena_test_assert.equals(blocked_settings_read.error.code, "GA_CONFIG_QUARANTINED", "quarantine blocks later Arena settings reads")
 
@@ -617,6 +638,7 @@ local function recovery_failure_quarantines_transaction()
         local recovered = gamma_arena_config_tx.recover(config)
         gamma_arena_test_assert.is_true(recovered.ok, "explicit touched-key recovery succeeds")
         gamma_arena_test_assert.is_false(gamma_arena_config_tx.is_quarantined(config), "successful recovery clears quarantine")
+        gamma_arena_test_assert.is_true(gamma_arena_config_tx.snapshot(config, "gamma_arena", { "settings_schema_version" }).ok, "public snapshot succeeds after explicit recovery")
         assert_table_equals(config.data, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "working backend restored")
         assert_table_equals(config.persisted, baseline, { "settings_schema_version", "last_difficulty_id", "last_seed_mode" }, "persisted backend restored")
         gamma_arena_test_assert.equals(config.cache["gamma_arena&settings_schema_version"], nil, "recovery invalidates touched wrapper cache")
@@ -777,14 +799,22 @@ local function dxml_accepts_canonical_callback_path()
 end
 
 local function character_creation_bridge_is_exact()
-    local config = fake_config({ new_game_loadout = "old", new_game_story_mode = "true" })
+    local initial = {}
+    for _, key in ipairs(character_keys) do initial[key] = "stale_" .. key end
+    local config = fake_config(initial)
     local result = gamma_arena_session_store.write_character_creation(config)
     gamma_arena_test_assert.is_true(result.ok, "character creation bridge writes")
     gamma_arena_test_assert.equals(config.save_count, 1, "character bridge saves once")
-    gamma_arena_test_assert.equals(#config.writes, 6, "six fixed bridge keys")
-    gamma_arena_test_assert.equals(#config.removals, 2, "optional bridge keys removed")
-    gamma_arena_test_assert.equals(config.data.new_game_loadout, nil, "loadout removed")
-    gamma_arena_test_assert.equals(config.data.new_game_story_mode, nil, "story mode removed")
+    gamma_arena_test_assert.equals(#config.writes, 7, "seven fixed bridge keys")
+    gamma_arena_test_assert.equals(#config.removals, 14, "all stale gameplay-mode bridge keys removed")
+    for key, value in pairs(character_write_values) do
+        gamma_arena_test_assert.equals(config.data[key], value, "fixed character bridge value: " .. key)
+        gamma_arena_test_assert.equals(config.persisted[key], value, "fixed persisted character bridge value: " .. key)
+    end
+    for _, key in ipairs(character_remove_keys) do
+        gamma_arena_test_assert.equals(config.data[key], nil, "stale character mode removed: " .. key)
+        gamma_arena_test_assert.equals(config.persisted[key], nil, "stale persisted character mode removed: " .. key)
+    end
 end
 
 local cases = {

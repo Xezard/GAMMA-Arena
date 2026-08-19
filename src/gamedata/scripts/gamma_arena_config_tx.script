@@ -51,7 +51,7 @@ local function unique_keys(operations)
     return gamma_arena_result.ok(keys)
 end
 
-local function snapshot_impl(config, section, keys)
+local function _snapshot_unchecked(config, section, keys)
     if config == nil or type(section) ~= "string" then
         return fail("GA_CONFIG_INVALID", "Config snapshot target is invalid")
     end
@@ -88,7 +88,10 @@ local function snapshot_impl(config, section, keys)
 end
 
 function snapshot(config, section, keys)
-    local ok, result = pcall(snapshot_impl, config, section, keys)
+    if is_quarantined(config) then
+        return fail("GA_CONFIG_QUARANTINED", "Arena config snapshots are blocked until touched-key recovery succeeds")
+    end
+    local ok, result = pcall(_snapshot_unchecked, config, section, keys)
     if not ok then
         return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config snapshot raised an error", { phase = "primary_read", detail = tostring(result) })
     end
@@ -301,7 +304,10 @@ local function run_impl(config, section, operations, options)
     local keys_result = unique_keys(operations)
     if not keys_result.ok then return keys_result end
     local keys = keys_result.value
-    local snapshot_result = snapshot(config, section, keys)
+    local snapshot_ok, snapshot_result = pcall(_snapshot_unchecked, config, section, keys)
+    if not snapshot_ok then
+        return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config snapshot raised an error", { phase = "primary_read", detail = tostring(snapshot_result) })
+    end
     if not snapshot_result.ok then return snapshot_result end
 
     local ok_methods, w_value, remove_line, save = pcall(function()
