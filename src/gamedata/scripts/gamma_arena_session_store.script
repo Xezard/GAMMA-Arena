@@ -1,8 +1,8 @@
 local SECTION = "gamma_arena"
 local CHARACTER_SECTION = "character_creation"
+local CHECKPOINT_NAME = "_gamma_arena_checkpoint"
 local LAUNCH_TOKEN_TTL = 600
 local UINT32_MAX = 4294967295
-local REMOVED = {}
 
 local launch_keys = {
     "launch_pending",
@@ -34,10 +34,8 @@ local valid_seed_modes = {
     manual = true
 }
 
-local shadow_by_config = setmetatable({}, { __mode = "k" })
-local volatile_launch_permits = {}
-local nonce_counter = 0
-local random_counter = 0
+local Store = {}
+Store.__index = Store
 
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
@@ -47,137 +45,6 @@ local function finite_integer(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge and value == math.floor(value)
 end
 
-local function get_shadow(config)
-    local shadow = shadow_by_config[config]
-    if shadow == nil then
-        shadow = {}
-        shadow_by_config[config] = shadow
-    end
-    return shadow
-end
-
-local function raw_read(config, key)
-    if config == nil then
-        return fail("GA_CONFIG_INVALID", "Config is unavailable", { key = key })
-    end
-    local shadow = get_shadow(config)
-    if shadow[key] ~= nil then
-        if shadow[key] == REMOVED then
-            return gamma_arena_result.ok(nil)
-        end
-        return gamma_arena_result.ok(shadow[key])
-    end
-
-    local ok_method, method = pcall(function() return config.r_string_ex end)
-    if not ok_method or type(method) ~= "function" then
-        return fail("GA_CONFIG_INVALID", "Config does not expose raw reads", { key = key })
-    end
-    local ok, value = pcall(method, config, SECTION, key)
-    if not ok then
-        return fail("GA_CONFIG_READ_FAILED", "Config value could not be read", { key = key })
-    end
-    if value == nil or value == "" then
-        return gamma_arena_result.ok(nil)
-    end
-    return gamma_arena_result.ok(tostring(value))
-end
-
-local function transaction(config, section, writes, removals)
-    if config == nil then
-        return fail("GA_CONFIG_INVALID", "Config is unavailable")
-    end
-    local ok_methods, w_value, remove_line, save = pcall(function()
-        return config.w_value, config.remove_line, config.save
-    end)
-    if not ok_methods or type(w_value) ~= "function" or type(remove_line) ~= "function" or type(save) ~= "function" then
-        return fail("GA_CONFIG_INVALID", "Config does not expose transaction APIs")
-    end
-
-    local ok, detail = pcall(function()
-        for _, entry in ipairs(writes or {}) do
-            config:w_value(section, entry[1], entry[2])
-        end
-        for _, key in ipairs(removals or {}) do
-            config:remove_line(section, key)
-        end
-        config:save()
-    end)
-    if not ok then
-        return fail("GA_CONFIG_WRITE_FAILED", "Config transaction failed", { detail = tostring(detail) })
-    end
-
-    if section == SECTION then
-        local shadow = get_shadow(config)
-        for _, entry in ipairs(writes or {}) do
-            shadow[entry[1]] = tostring(entry[2])
-        end
-        for _, key in ipairs(removals or {}) do
-            shadow[key] = REMOVED
-        end
-    end
-    return gamma_arena_result.ok(true)
-end
-
-local function read_all(config, keys)
-    local values = {}
-    for _, key in ipairs(keys) do
-        local read = raw_read(config, key)
-        if not read.ok then
-            return read
-        end
-        values[key] = read.value
-    end
-    return gamma_arena_result.ok(values)
-end
-
-local function clear_keys(config, keys)
-    return transaction(config, SECTION, {}, keys)
-end
-
-local function pending_value(raw, kind)
-    if raw == nil or raw == "false" or raw == "0" then
-        return gamma_arena_result.ok(false)
-    end
-    if raw == "true" or raw == "1" then
-        return gamma_arena_result.ok(true)
-    end
-    return fail("GA_" .. kind .. "_PENDING_INVALID", kind .. " pending marker is malformed", { value = raw })
-end
-
-local function current_time(options)
-    local clock = options and options.clock or (os and os.time)
-    if type(clock) ~= "function" then
-        return fail("GA_CLOCK_UNAVAILABLE", "A wall-clock provider is unavailable")
-    end
-    local ok, value = pcall(clock)
-    if not ok or not finite_integer(value) or value < 0 then
-        return fail("GA_CLOCK_INVALID", "Wall-clock provider returned an invalid epoch")
-    end
-    return gamma_arena_result.ok(value)
-end
-
-local function nonce_value(options, issued_at)
-    local generator = options and options.nonce
-    local value
-    if generator ~= nil then
-        if type(generator) ~= "function" then
-            return fail("GA_LAUNCH_NONCE_INVALID", "Nonce provider must be a function")
-        end
-        local ok, generated = pcall(generator)
-        if not ok then
-            return fail("GA_LAUNCH_NONCE_INVALID", "Nonce provider failed")
-        end
-        value = generated
-    else
-        nonce_counter = nonce_counter + 1
-        value = tostring(issued_at) .. "_" .. tostring(nonce_counter)
-    end
-    if type(value) ~= "string" or #value < 1 or #value > 64 or not string.match(value, "^[%w_-]+$") then
-        return fail("GA_LAUNCH_NONCE_INVALID", "Launch nonce has an invalid format")
-    end
-    return gamma_arena_result.ok(value)
-end
-
 local function nonempty_identifier(value, code, field)
     if type(value) ~= "string" or #value < 1 or #value > 128 or not string.match(value, "^[%w_.-]+$") then
         return fail(code, field .. " is invalid", { field = field })
@@ -185,7 +52,23 @@ local function nonempty_identifier(value, code, field)
     return gamma_arena_result.ok(value)
 end
 
-function parse_manual_seed(text)
+local function operations_for_writes(entries)
+    local operations = {}
+    for _, entry in ipairs(entries) do
+        operations[#operations + 1] = { action = "write", key = entry[1], value = entry[2] }
+    end
+    return operations
+end
+
+local function operations_for_removals(keys)
+    local operations = {}
+    for _, key in ipairs(keys) do
+        operations[#operations + 1] = { action = "remove", key = key }
+    end
+    return operations
+end
+
+local function parse_manual_seed_impl(text)
     if type(text) ~= "string" or #text < 1 or #text > 10 or not string.match(text, "^%d+$") then
         return fail("GA_SESSION_SEED_INVALID", "Seed must be a decimal uint32")
     end
@@ -196,7 +79,7 @@ function parse_manual_seed(text)
     return gamma_arena_result.ok(value)
 end
 
-function validate_start_request(request)
+local function validate_start_request_impl(request)
     if type(request) ~= "table" then
         return fail("GA_START_REQUEST_INVALID", "ArenaStartRequest must be a table")
     end
@@ -224,46 +107,7 @@ function validate_start_request(request)
     })
 end
 
-function random_session_seed(provider)
-    local value
-    if provider ~= nil then
-        if type(provider) ~= "function" then
-            return fail("GA_RANDOM_SEED_PROVIDER_INVALID", "Random seed provider must be a function")
-        end
-        local ok, generated = pcall(provider)
-        if not ok then
-            return fail("GA_RANDOM_SEED_PROVIDER_FAILED", "Random seed provider failed")
-        end
-        value = generated
-    else
-        local now = current_time()
-        if not now.ok then
-            return now
-        end
-        random_counter = random_counter + 1
-        value = (now.value + random_counter * 2654435761) % 4294967296
-    end
-    if not finite_integer(value) or value < 0 or value > UINT32_MAX then
-        return fail("GA_RANDOM_SEED_INVALID", "Random seed provider returned a non-uint32 value")
-    end
-    return gamma_arena_result.ok(value)
-end
-
-function save_preferences(config, difficulty_id, seed_mode)
-    if not valid_difficulties[difficulty_id] then
-        return fail("GA_SETTINGS_DIFFICULTY_INVALID", "Difficulty preference is unknown", { value = difficulty_id })
-    end
-    if not valid_seed_modes[seed_mode] then
-        return fail("GA_SETTINGS_SEED_MODE_INVALID", "Seed mode preference is unknown", { value = seed_mode })
-    end
-    return transaction(config, SECTION, {
-        { "settings_schema_version", 1 },
-        { "last_difficulty_id", difficulty_id },
-        { "last_seed_mode", seed_mode }
-    }, {})
-end
-
-function parse_launch_token(token, now)
+local function parse_launch_token_impl(token, now)
     if type(token) ~= "string" then
         return fail("GA_LAUNCH_TOKEN_INVALID", "Launch token is missing")
     end
@@ -281,101 +125,6 @@ function parse_launch_token(token, now)
     return gamma_arena_result.ok({ issued_at = issued_at, nonce = nonce, token = token })
 end
 
-function issue_launch(config, request, options)
-    local validated = validate_start_request(request)
-    if not validated.ok then
-        return validated
-    end
-    local existing_launch = raw_read(config, "launch_pending")
-    if not existing_launch.ok then return existing_launch end
-    local launch_pending = pending_value(existing_launch.value, "LAUNCH")
-    if not launch_pending.ok then return launch_pending end
-    if launch_pending.value then
-        return fail("GA_LAUNCH_ALREADY_PENDING", "A launch intent is already pending")
-    end
-    local existing_resume = raw_read(config, "resume_pending")
-    if not existing_resume.ok then return existing_resume end
-    local resume_pending = pending_value(existing_resume.value, "RESUME")
-    if not resume_pending.ok then return resume_pending end
-    if resume_pending.value then
-        return fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
-    end
-
-    local now = current_time(options)
-    if not now.ok then return now end
-    local nonce = nonce_value(options, now.value)
-    if not nonce.ok then return nonce end
-    local token = "ga1:" .. tostring(now.value) .. ":" .. nonce.value
-    local value = validated.value
-    local written = transaction(config, SECTION, {
-        { "launch_pending", true },
-        { "launch_token", token },
-        { "launch_mode_id", value.mode_id },
-        { "launch_difficulty_id", value.difficulty_id },
-        { "launch_seed_mode", value.seed_mode },
-        { "launch_session_seed", value.session_seed }
-    }, {})
-    if not written.ok then return written end
-    volatile_launch_permits[token] = config
-    return gamma_arena_result.ok({ token = token, request = value })
-end
-
-local function reject_launch(config, token, result)
-    if token ~= nil then
-        volatile_launch_permits[token] = nil
-    end
-    local cleared = clear_keys(config, launch_keys)
-    if not cleared.ok then
-        return cleared
-    end
-    return result
-end
-
-function consume_launch(config, options)
-    local values_result = read_all(config, launch_keys)
-    if not values_result.ok then return values_result end
-    local values = values_result.value
-    local pending = pending_value(values.launch_pending, "LAUNCH")
-    if not pending.ok then return reject_launch(config, values.launch_token, pending) end
-    if not pending.value then
-        return fail("GA_LAUNCH_NOT_PENDING", "No launch intent is pending")
-    end
-    local resume_raw = raw_read(config, "resume_pending")
-    if not resume_raw.ok then return reject_launch(config, values.launch_token, resume_raw) end
-    local resume_pending = pending_value(resume_raw.value, "RESUME")
-    if not resume_pending.ok then return reject_launch(config, values.launch_token, resume_pending) end
-    if resume_pending.value then
-        local conflict = fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
-        local cleared = transaction(config, SECTION, {}, {
-            "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed",
-            "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version"
-        })
-        volatile_launch_permits[values.launch_token] = nil
-        return cleared.ok and conflict or cleared
-    end
-
-    local now = current_time(options)
-    if not now.ok then return reject_launch(config, values.launch_token, now) end
-    local parsed_token = parse_launch_token(values.launch_token, now.value)
-    if not parsed_token.ok then return reject_launch(config, values.launch_token, parsed_token) end
-    if volatile_launch_permits[values.launch_token] ~= config then
-        return reject_launch(config, values.launch_token, fail("GA_LAUNCH_TOKEN_NOT_VOLATILE", "Launch token was not issued in this process"))
-    end
-    local seed = values.launch_session_seed and tonumber(values.launch_session_seed) or nil
-    local request = validate_start_request({
-        schema_version = 1,
-        mode_id = values.launch_mode_id,
-        difficulty_id = values.launch_difficulty_id,
-        seed_mode = values.launch_seed_mode,
-        session_seed = seed
-    })
-    if not request.ok then return reject_launch(config, values.launch_token, request) end
-    local cleared = clear_keys(config, launch_keys)
-    volatile_launch_permits[values.launch_token] = nil
-    if not cleared.ok then return cleared end
-    return request
-end
-
 local function validate_resume_intent(intent)
     if type(intent) ~= "table" or intent.schema_version ~= 1 then
         return fail("GA_RESUME_SCHEMA_INVALID", "ResumeIntent schema must be v1")
@@ -387,72 +136,409 @@ local function validate_resume_intent(intent)
     if not finite_integer(intent.next_fight_index) or intent.next_fight_index < 0 then
         return fail("GA_RESUME_FIGHT_INDEX_INVALID", "Resume fight index must be a non-negative integer")
     end
-    local checkpoint = nonempty_identifier(intent.checkpoint_name, "GA_RESUME_CHECKPOINT_INVALID", "checkpoint_name")
-    if not checkpoint.ok then return checkpoint end
+    if intent.checkpoint_name ~= CHECKPOINT_NAME then
+        return fail("GA_RESUME_CHECKPOINT_INVALID", "ResumeIntent must use the reserved Arena checkpoint", { value = intent.checkpoint_name })
+    end
     return gamma_arena_result.ok({
         schema_version = 1,
         session_id = session_id.value,
         session_nonce = session_nonce.value,
         next_fight_index = intent.next_fight_index,
-        checkpoint_name = checkpoint.value
+        checkpoint_name = CHECKPOINT_NAME
     })
 end
 
-function issue_resume(config, intent)
-    local validated = validate_resume_intent(intent)
-    if not validated.ok then return validated end
-    local launch_raw = raw_read(config, "launch_pending")
-    if not launch_raw.ok then return launch_raw end
-    local launch_pending = pending_value(launch_raw.value, "LAUNCH")
-    if not launch_pending.ok then return launch_pending end
-    if launch_pending.value then
-        return fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
+local function validate_expected_session(session)
+    if type(session) ~= "table" then
+        return fail("GA_SESSION_INVALID", "Expected ArenaSession must be a table")
     end
-    local resume_raw = raw_read(config, "resume_pending")
+    if session.schema_version ~= 1 then
+        return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v1", { value = session.schema_version })
+    end
+    if session.checkpoint_name ~= CHECKPOINT_NAME then
+        return fail("GA_RESUME_CHECKPOINT_MISMATCH", "ArenaSession checkpoint name is not the reserved checkpoint", { value = session.checkpoint_name })
+    end
+    if session.generator_version ~= 1 then
+        return fail("GA_SESSION_GENERATOR_VERSION_INVALID", "ArenaSession generator version is incompatible", { value = session.generator_version })
+    end
+    if session.catalog_revision ~= 1 then
+        return fail("GA_SESSION_CATALOG_REVISION_INVALID", "ArenaSession catalog revision is incompatible", { value = session.catalog_revision })
+    end
+    if session.layout_id ~= "rostok_arena_v1" then
+        return fail("GA_SESSION_LAYOUT_INVALID", "ArenaSession layout is incompatible", { value = session.layout_id })
+    end
+    if session.mode_id ~= "skirmish" then
+        return fail("GA_SESSION_MODE_INVALID", "ArenaSession mode is incompatible", { value = session.mode_id })
+    end
+    if not valid_difficulties[session.difficulty_id] then
+        return fail("GA_SESSION_DIFFICULTY_INVALID", "ArenaSession difficulty is unknown", { value = session.difficulty_id })
+    end
+    if not finite_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > UINT32_MAX then
+        return fail("GA_SESSION_SEED_INVALID", "ArenaSession seed must be uint32")
+    end
+    if not finite_integer(session.fight_index) or session.fight_index < 0 then
+        return fail("GA_SESSION_FIGHT_INDEX_INVALID", "ArenaSession fight index must be non-negative")
+    end
+    local session_id = nonempty_identifier(session.session_id, "GA_SESSION_ID_INVALID", "session_id")
+    if not session_id.ok then return session_id end
+    local session_nonce = nonempty_identifier(session.session_nonce, "GA_SESSION_NONCE_INVALID", "session_nonce")
+    if not session_nonce.ok then return session_nonce end
+    if type(session.phase) ~= "string" or #session.phase < 1 then
+        return fail("GA_SESSION_PHASE_INVALID", "ArenaSession phase is missing")
+    end
+    return gamma_arena_result.ok({
+        schema_version = 1,
+        session_id = session_id.value,
+        session_nonce = session_nonce.value,
+        mode_id = session.mode_id,
+        difficulty_id = session.difficulty_id,
+        session_seed = session.session_seed,
+        fight_index = session.fight_index,
+        generator_version = 1,
+        catalog_revision = 1,
+        layout_id = "rostok_arena_v1",
+        checkpoint_name = CHECKPOINT_NAME,
+        phase = session.phase
+    })
+end
+
+local function new_store_impl()
+    return setmetatable({
+        shadow_by_config = setmetatable({}, { __mode = "k" }),
+        volatile_launch_permits = {},
+        nonce_counter = 0,
+        random_counter = 0
+    }, Store)
+end
+
+function Store:get_shadow(config)
+    local shadow = self.shadow_by_config[config]
+    if shadow == nil then
+        shadow = {}
+        self.shadow_by_config[config] = shadow
+    end
+    return shadow
+end
+
+function Store:raw_read(config, key)
+    if config == nil then
+        return fail("GA_CONFIG_INVALID", "Config is unavailable", { key = key })
+    end
+    local shadow = self:get_shadow(config)
+    local shadow_entry = shadow[key]
+    if shadow_entry ~= nil then
+        return gamma_arena_result.ok(shadow_entry.present and shadow_entry.value or nil)
+    end
+    local ok_methods, line_exist, r_string_ex = pcall(function()
+        return config.line_exist, config.r_string_ex
+    end)
+    if not ok_methods or type(line_exist) ~= "function" or type(r_string_ex) ~= "function" then
+        return fail("GA_CONFIG_INVALID", "Config does not expose raw presence/value reads", { key = key })
+    end
+    local ok_presence, present = pcall(line_exist, config, SECTION, key)
+    if not ok_presence then
+        return fail("GA_CONFIG_READ_FAILED", "Config key presence could not be read", { key = key })
+    end
+    if not present then
+        return gamma_arena_result.ok(nil)
+    end
+    local ok_value, value = pcall(r_string_ex, config, SECTION, key)
+    if not ok_value or value == nil then
+        return fail("GA_CONFIG_READ_FAILED", "Config value could not be read", { key = key })
+    end
+    return gamma_arena_result.ok(tostring(value))
+end
+
+function Store:read_all(config, keys)
+    local values = {}
+    for _, key in ipairs(keys) do
+        local read = self:raw_read(config, key)
+        if not read.ok then return read end
+        values[key] = read.value
+    end
+    return gamma_arena_result.ok(values)
+end
+
+function Store:transaction(config, section, operations, options)
+    if config == nil then
+        return fail("GA_CONFIG_INVALID", "Config is unavailable")
+    end
+    options = options or {}
+    options.shadow = self:get_shadow(config)
+    return gamma_arena_config_tx.run(config, section, operations, options)
+end
+
+function Store:clear_intent(config, keys, marker, error_code)
+    return self:transaction(config, SECTION, operations_for_removals(keys), {
+        commit_remove_keys = { marker },
+        fail_closed_keys = keys,
+        error_code = error_code or "GA_INTENT_CLEAR_FAILED"
+    })
+end
+
+function Store:pending_value(raw, kind)
+    if raw == nil or raw == "false" or raw == "0" then
+        return gamma_arena_result.ok(false)
+    end
+    if raw == "true" or raw == "1" then
+        return gamma_arena_result.ok(true)
+    end
+    return fail("GA_" .. kind .. "_PENDING_INVALID", kind .. " pending marker is malformed", { value = raw })
+end
+
+function Store:current_time(options)
+    local clock = options and options.clock or (os and os.time)
+    if type(clock) ~= "function" then
+        return fail("GA_CLOCK_UNAVAILABLE", "A wall-clock provider is unavailable")
+    end
+    local ok, value = pcall(clock)
+    if not ok or not finite_integer(value) or value < 0 then
+        return fail("GA_CLOCK_INVALID", "Wall-clock provider returned an invalid epoch")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function Store:nonce_value(options, issued_at)
+    local generator = options and options.nonce
+    local value
+    if generator ~= nil then
+        if type(generator) ~= "function" then
+            return fail("GA_LAUNCH_NONCE_INVALID", "Nonce provider must be a function")
+        end
+        local ok, generated = pcall(generator)
+        if not ok then
+            return fail("GA_LAUNCH_NONCE_INVALID", "Nonce provider failed")
+        end
+        value = generated
+    else
+        self.nonce_counter = self.nonce_counter + 1
+        value = tostring(issued_at) .. "_" .. tostring(self.nonce_counter)
+    end
+    if type(value) ~= "string" or #value < 1 or #value > 64 or not string.match(value, "^[%w_-]+$") then
+        return fail("GA_LAUNCH_NONCE_INVALID", "Launch nonce has an invalid format")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function Store:random_session_seed(provider)
+    local value
+    if provider ~= nil then
+        if type(provider) ~= "function" then
+            return fail("GA_RANDOM_SEED_PROVIDER_INVALID", "Random seed provider must be a function")
+        end
+        local ok, generated = pcall(provider)
+        if not ok then
+            return fail("GA_RANDOM_SEED_PROVIDER_FAILED", "Random seed provider failed")
+        end
+        value = generated
+    else
+        local now = self:current_time()
+        if not now.ok then return now end
+        self.random_counter = self.random_counter + 1
+        value = (now.value + self.random_counter * 2654435761) % 4294967296
+    end
+    if not finite_integer(value) or value < 0 or value > UINT32_MAX then
+        return fail("GA_RANDOM_SEED_INVALID", "Random seed provider returned a non-uint32 value")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function Store:save_preferences(config, difficulty_id, seed_mode)
+    if not valid_difficulties[difficulty_id] then
+        return fail("GA_SETTINGS_DIFFICULTY_INVALID", "Difficulty preference is unknown", { value = difficulty_id })
+    end
+    if not valid_seed_modes[seed_mode] then
+        return fail("GA_SETTINGS_SEED_MODE_INVALID", "Seed mode preference is unknown", { value = seed_mode })
+    end
+    return self:transaction(config, SECTION, operations_for_writes({
+        { "last_difficulty_id", difficulty_id },
+        { "last_seed_mode", seed_mode },
+        { "settings_schema_version", 1 }
+    }), {
+        commit_write_keys = { "settings_schema_version" },
+        error_code = "GA_SETTINGS_WRITE_FAILED"
+    })
+end
+
+function Store:issue_launch(config, request, options)
+    local validated = validate_start_request_impl(request)
+    if not validated.ok then return validated end
+    local now = self:current_time(options)
+    if not now.ok then return now end
+
+    local resume_raw = self:raw_read(config, "resume_pending")
     if not resume_raw.ok then return resume_raw end
-    local resume_pending = pending_value(resume_raw.value, "RESUME")
+    local resume_pending = self:pending_value(resume_raw.value, "RESUME")
     if not resume_pending.ok then return resume_pending end
     if resume_pending.value then
-        return fail("GA_RESUME_ALREADY_PENDING", "A resume intent is already pending")
+        return fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
     end
+
+    local existing_result = self:read_all(config, launch_keys)
+    if not existing_result.ok then return existing_result end
+    local existing = existing_result.value
+    local pending = self:pending_value(existing.launch_pending, "LAUNCH")
+    local stale_reason = nil
+    if not pending.ok then
+        stale_reason = pending.error.code
+    elseif pending.value then
+        local parsed = parse_launch_token_impl(existing.launch_token, now.value)
+        if parsed.ok and self.volatile_launch_permits[existing.launch_token] == config then
+            return fail("GA_LAUNCH_ALREADY_PENDING", "A valid launch intent is already pending")
+        end
+        stale_reason = parsed.ok and "GA_LAUNCH_TOKEN_ORPHANED" or parsed.error.code
+    else
+        for _, key in ipairs(launch_keys) do
+            if key ~= "launch_pending" and existing[key] ~= nil then
+                stale_reason = "GA_LAUNCH_PAYLOAD_ORPHANED"
+                break
+            end
+        end
+    end
+
+    local events = {}
+    if stale_reason ~= nil then
+        if existing.launch_token ~= nil then
+            self.volatile_launch_permits[existing.launch_token] = nil
+        end
+        local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_STALE_CLEAR_FAILED")
+        if not cleared.ok then return cleared end
+        events[#events + 1] = { code = "GA_LAUNCH_STALE_CLEARED", reason = stale_reason }
+    end
+
+    local nonce = self:nonce_value(options, now.value)
+    if not nonce.ok then return nonce end
+    local token = "ga1:" .. tostring(now.value) .. ":" .. nonce.value
     local value = validated.value
-    return transaction(config, SECTION, {
-        { "resume_pending", true },
+    local written = self:transaction(config, SECTION, operations_for_writes({
+        { "launch_token", token },
+        { "launch_mode_id", value.mode_id },
+        { "launch_difficulty_id", value.difficulty_id },
+        { "launch_seed_mode", value.seed_mode },
+        { "launch_session_seed", value.session_seed },
+        { "launch_pending", true }
+    }), {
+        commit_write_keys = { "launch_pending" },
+        fail_closed_keys = launch_keys,
+        error_code = "GA_LAUNCH_WRITE_FAILED"
+    })
+    if not written.ok then return written end
+    self.volatile_launch_permits[token] = config
+    return gamma_arena_result.ok({ token = token, request = value, events = events })
+end
+
+function Store:reject_launch(config, token, result)
+    if token ~= nil then self.volatile_launch_permits[token] = nil end
+    local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CLEAR_FAILED")
+    return cleared.ok and result or cleared
+end
+
+function Store:consume_launch(config, options)
+    local values_result = self:read_all(config, launch_keys)
+    if not values_result.ok then return values_result end
+    local values = values_result.value
+    local pending = self:pending_value(values.launch_pending, "LAUNCH")
+    if not pending.ok then return self:reject_launch(config, values.launch_token, pending) end
+    if not pending.value then
+        return fail("GA_LAUNCH_NOT_PENDING", "No launch intent is pending")
+    end
+    local resume_raw = self:raw_read(config, "resume_pending")
+    if not resume_raw.ok then return self:reject_launch(config, values.launch_token, resume_raw) end
+    local resume_pending = self:pending_value(resume_raw.value, "RESUME")
+    if not resume_pending.ok then return self:reject_launch(config, values.launch_token, resume_pending) end
+    if resume_pending.value then
+        local operations = operations_for_removals(launch_keys)
+        for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
+        local cleared = self:transaction(config, SECTION, operations, {
+            commit_remove_keys = { "launch_pending", "resume_pending" },
+            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+            error_code = "GA_INTENT_CONFLICT_CLEAR_FAILED"
+        })
+        if values.launch_token ~= nil then
+            self.volatile_launch_permits[values.launch_token] = nil
+        end
+        return cleared.ok and fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") or cleared
+    end
+
+    local now = self:current_time(options)
+    if not now.ok then return self:reject_launch(config, values.launch_token, now) end
+    local parsed = parse_launch_token_impl(values.launch_token, now.value)
+    if not parsed.ok then return self:reject_launch(config, values.launch_token, parsed) end
+    if self.volatile_launch_permits[values.launch_token] ~= config then
+        return self:reject_launch(config, values.launch_token, fail("GA_LAUNCH_TOKEN_NOT_VOLATILE", "Launch token was not issued by this SessionStore instance"))
+    end
+    local request = validate_start_request_impl({
+        schema_version = 1,
+        mode_id = values.launch_mode_id,
+        difficulty_id = values.launch_difficulty_id,
+        seed_mode = values.launch_seed_mode,
+        session_seed = values.launch_session_seed and tonumber(values.launch_session_seed) or nil
+    })
+    if not request.ok then return self:reject_launch(config, values.launch_token, request) end
+
+    local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CONSUME_FAILED")
+    self.volatile_launch_permits[values.launch_token] = nil
+    if not cleared.ok then return cleared end
+    return request
+end
+
+function Store:issue_resume(config, intent)
+    local validated = validate_resume_intent(intent)
+    if not validated.ok then return validated end
+    local launch_raw = self:raw_read(config, "launch_pending")
+    if not launch_raw.ok then return launch_raw end
+    local launch_pending = self:pending_value(launch_raw.value, "LAUNCH")
+    if not launch_pending.ok then return launch_pending end
+    if launch_pending.value then return fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") end
+    local resume_raw = self:raw_read(config, "resume_pending")
+    if not resume_raw.ok then return resume_raw end
+    local resume_pending = self:pending_value(resume_raw.value, "RESUME")
+    if not resume_pending.ok then return resume_pending end
+    if resume_pending.value then return fail("GA_RESUME_ALREADY_PENDING", "A resume intent is already pending") end
+
+    local value = validated.value
+    return self:transaction(config, SECTION, operations_for_writes({
         { "resume_session_id", value.session_id },
         { "resume_session_nonce", value.session_nonce },
         { "resume_next_fight_index", value.next_fight_index },
         { "resume_checkpoint_name", value.checkpoint_name },
-        { "resume_schema_version", value.schema_version }
-    }, {})
+        { "resume_schema_version", value.schema_version },
+        { "resume_pending", true }
+    }), {
+        commit_write_keys = { "resume_pending" },
+        fail_closed_keys = resume_keys,
+        error_code = "GA_RESUME_WRITE_FAILED"
+    })
 end
 
-local function reject_resume(config, result)
-    local cleared = clear_keys(config, resume_keys)
-    if not cleared.ok then return cleared end
-    return result
+function Store:reject_resume(config, result)
+    local cleared = self:clear_intent(config, resume_keys, "resume_pending", "GA_RESUME_CLEAR_FAILED")
+    return cleared.ok and result or cleared
 end
 
-function consume_resume(config, expected)
-    local values_result = read_all(config, resume_keys)
+function Store:consume_resume(config, expected)
+    local values_result = self:read_all(config, resume_keys)
     if not values_result.ok then return values_result end
     local values = values_result.value
-    local pending = pending_value(values.resume_pending, "RESUME")
-    if not pending.ok then return reject_resume(config, pending) end
-    if not pending.value then
-        return fail("GA_RESUME_NOT_PENDING", "No resume intent is pending")
-    end
-    local launch_raw = raw_read(config, "launch_pending")
-    if not launch_raw.ok then return reject_resume(config, launch_raw) end
-    local launch_pending = pending_value(launch_raw.value, "LAUNCH")
-    if not launch_pending.ok then return reject_resume(config, launch_pending) end
+    local pending = self:pending_value(values.resume_pending, "RESUME")
+    if not pending.ok then return self:reject_resume(config, pending) end
+    if not pending.value then return fail("GA_RESUME_NOT_PENDING", "No resume intent is pending") end
+
+    local launch_raw = self:raw_read(config, "launch_pending")
+    if not launch_raw.ok then return self:reject_resume(config, launch_raw) end
+    local launch_pending = self:pending_value(launch_raw.value, "LAUNCH")
+    if not launch_pending.ok then return self:reject_resume(config, launch_pending) end
     if launch_pending.value then
-        local conflict = fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
-        local cleared = transaction(config, SECTION, {}, {
-            "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed",
-            "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version"
+        local operations = operations_for_removals(launch_keys)
+        for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
+        local cleared = self:transaction(config, SECTION, operations, {
+            commit_remove_keys = { "launch_pending", "resume_pending" },
+            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+            error_code = "GA_INTENT_CONFLICT_CLEAR_FAILED"
         })
-        return cleared.ok and conflict or cleared
+        return cleared.ok and fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") or cleared
     end
+
     local intent = validate_resume_intent({
         schema_version = values.resume_schema_version and tonumber(values.resume_schema_version) or nil,
         session_id = values.resume_session_id,
@@ -460,39 +546,66 @@ function consume_resume(config, expected)
         next_fight_index = values.resume_next_fight_index and tonumber(values.resume_next_fight_index) or nil,
         checkpoint_name = values.resume_checkpoint_name
     })
-    if not intent.ok then return reject_resume(config, intent) end
-    if type(expected) ~= "table" or expected.session_id ~= intent.value.session_id then
-        return reject_resume(config, fail("GA_RESUME_SESSION_MISMATCH", "Resume session id does not match checkpoint state"))
+    if not intent.ok then return self:reject_resume(config, intent) end
+    local session = validate_expected_session(expected)
+    if not session.ok then return self:reject_resume(config, session) end
+    if session.value.session_id ~= intent.value.session_id then
+        return self:reject_resume(config, fail("GA_RESUME_SESSION_MISMATCH", "Resume session id does not match checkpoint state"))
     end
-    if expected.session_nonce ~= intent.value.session_nonce then
-        return reject_resume(config, fail("GA_RESUME_NONCE_MISMATCH", "Resume session nonce does not match checkpoint state"))
+    if session.value.session_nonce ~= intent.value.session_nonce then
+        return self:reject_resume(config, fail("GA_RESUME_NONCE_MISMATCH", "Resume session nonce does not match checkpoint state"))
     end
-    local cleared = clear_keys(config, resume_keys)
+    if session.value.checkpoint_name ~= intent.value.checkpoint_name then
+        return self:reject_resume(config, fail("GA_RESUME_CHECKPOINT_MISMATCH", "Resume checkpoint does not match ArenaSession"))
+    end
+    if session.value.fight_index ~= intent.value.next_fight_index then
+        return self:reject_resume(config, fail("GA_RESUME_FIGHT_INDEX_MISMATCH", "Resume fight index does not match ArenaSession", { intent = intent.value.next_fight_index, session = session.value.fight_index }))
+    end
+
+    local cleared = self:clear_intent(config, resume_keys, "resume_pending", "GA_RESUME_CONSUME_FAILED")
     if not cleared.ok then return cleared end
     return intent
 end
 
-function clear_transient(config)
-    local token = raw_read(config, "launch_token")
-    if token.ok and token.value ~= nil then
-        volatile_launch_permits[token.value] = nil
-    end
-    local removals = {}
-    for _, key in ipairs(launch_keys) do removals[#removals + 1] = key end
-    for _, key in ipairs(resume_keys) do removals[#removals + 1] = key end
-    return clear_keys(config, removals)
+function Store:clear_transient(config)
+    local token = self:raw_read(config, "launch_token")
+    if token.ok and token.value ~= nil then self.volatile_launch_permits[token.value] = nil end
+    local operations = operations_for_removals(launch_keys)
+    for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
+    return self:transaction(config, SECTION, operations, {
+        commit_remove_keys = { "launch_pending", "resume_pending" },
+        fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+        error_code = "GA_TRANSIENT_CLEAR_FAILED"
+    })
 end
 
-function write_character_creation(config)
-    return transaction(config, CHARACTER_SECTION, {
+function Store:write_character_creation(config)
+    local operations = operations_for_writes({
         { "new_game_difficulty", 2 },
         { "new_game_economy", 2 },
         { "new_game_character_name", "Arena_Fighter" },
         { "new_game_faction", "dolg" },
         { "new_game_map", "makeshift_barracks" },
         { "new_game_money", 0 }
-    }, {
-        "new_game_loadout",
-        "new_game_story_mode"
     })
+    for _, operation in ipairs(operations_for_removals({ "new_game_loadout", "new_game_story_mode" })) do
+        operations[#operations + 1] = operation
+    end
+    return self:transaction(config, CHARACTER_SECTION, operations, { error_code = "GA_CHARACTER_CREATION_WRITE_FAILED" })
 end
+
+local default_store = new_store_impl()
+
+function new_store() return new_store_impl() end
+function parse_manual_seed(text) return parse_manual_seed_impl(text) end
+function validate_start_request(request) return validate_start_request_impl(request) end
+function validate_arena_session(session) return validate_expected_session(session) end
+function parse_launch_token(token, now) return parse_launch_token_impl(token, now) end
+function random_session_seed(provider) return default_store:random_session_seed(provider) end
+function save_preferences(config, difficulty_id, seed_mode) return default_store:save_preferences(config, difficulty_id, seed_mode) end
+function issue_launch(config, request, options) return default_store:issue_launch(config, request, options) end
+function consume_launch(config, options) return default_store:consume_launch(config, options) end
+function issue_resume(config, intent) return default_store:issue_resume(config, intent) end
+function consume_resume(config, expected) return default_store:consume_resume(config, expected) end
+function clear_transient(config) return default_store:clear_transient(config) end
+function write_character_creation(config) return default_store:write_character_creation(config) end

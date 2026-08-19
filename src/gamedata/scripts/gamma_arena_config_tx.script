@@ -1,0 +1,235 @@
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context)
+end
+
+local function key_set(keys)
+    local result = {}
+    for _, key in ipairs(keys or {}) do
+        result[key] = true
+    end
+    return result
+end
+
+local function unique_keys(operations)
+    local keys = {}
+    local seen = {}
+    for _, operation in ipairs(operations or {}) do
+        if type(operation) ~= "table" or type(operation.key) ~= "string" or (operation.action ~= "write" and operation.action ~= "remove") then
+            return fail("GA_CONFIG_TRANSACTION_INVALID", "Config transaction contains an invalid operation")
+        end
+        if operation.action == "write" and operation.value == nil then
+            return fail("GA_CONFIG_TRANSACTION_INVALID", "Config transaction cannot write nil", { key = operation.key })
+        end
+        if seen[operation.key] then
+            return fail("GA_CONFIG_TRANSACTION_INVALID", "Config transaction touches a key more than once", { key = operation.key })
+        end
+        seen[operation.key] = true
+        keys[#keys + 1] = operation.key
+    end
+    return gamma_arena_result.ok(keys)
+end
+
+local function snapshot_impl(config, section, keys)
+    if config == nil or type(section) ~= "string" then
+        return fail("GA_CONFIG_INVALID", "Config snapshot target is invalid")
+    end
+    local ok_methods, line_exist, r_string_ex = pcall(function()
+        return config.line_exist, config.r_string_ex
+    end)
+    if not ok_methods or type(line_exist) ~= "function" or type(r_string_ex) ~= "function" then
+        return fail("GA_CONFIG_INVALID", "Config does not expose line_exist and r_string_ex")
+    end
+
+    local entries = {}
+    for _, key in ipairs(keys) do
+        local ok_presence, present = pcall(line_exist, config, section, key)
+        if not ok_presence then
+            return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key presence could not be read", { section = section, key = key })
+        end
+        if present then
+            local ok_value, value = pcall(r_string_ex, config, section, key)
+            if not ok_value or value == nil then
+                return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config key value could not be read", { section = section, key = key })
+            end
+            entries[key] = { present = true, value = tostring(value) }
+        else
+            entries[key] = { present = false }
+        end
+    end
+    return gamma_arena_result.ok({ section = section, keys = keys, entries = entries })
+end
+
+function snapshot(config, section, keys)
+    local ok, result = pcall(snapshot_impl, config, section, keys)
+    if not ok then
+        return fail("GA_CONFIG_SNAPSHOT_FAILED", "Config snapshot raised an error", { detail = tostring(result) })
+    end
+    return result
+end
+
+local function order_operations(operations, options)
+    local commit_write_keys = key_set(options and options.commit_write_keys)
+    local commit_remove_keys = key_set(options and options.commit_remove_keys)
+    local first, middle, last = {}, {}, {}
+    for _, operation in ipairs(operations) do
+        if operation.action == "remove" and commit_remove_keys[operation.key] then
+            first[#first + 1] = operation
+        elseif operation.action == "write" and commit_write_keys[operation.key] then
+            last[#last + 1] = operation
+        else
+            middle[#middle + 1] = operation
+        end
+    end
+    local ordered = {}
+    for _, group in ipairs({ first, middle, last }) do
+        for _, operation in ipairs(group) do
+            ordered[#ordered + 1] = operation
+        end
+    end
+    return ordered
+end
+
+local function mutate(config, section, operation)
+    if operation.action == "write" then
+        return pcall(config.w_value, config, section, operation.key, operation.value)
+    end
+    return pcall(config.remove_line, config, section, operation.key)
+end
+
+local function desired_after_failure(snapshot_value, fail_closed_keys)
+    local desired = {}
+    for _, key in ipairs(snapshot_value.keys) do
+        if fail_closed_keys[key] then
+            desired[key] = { present = false }
+        else
+            desired[key] = snapshot_value.entries[key]
+        end
+    end
+    return desired
+end
+
+local function update_shadow(shadow, keys, state)
+    if type(shadow) ~= "table" then
+        return
+    end
+    for _, key in ipairs(keys) do
+        local entry = state[key]
+        shadow[key] = entry.present and { present = true, value = tostring(entry.value) } or { present = false }
+    end
+end
+
+local function invalidate_shadow(shadow, keys, fail_closed_keys)
+    if type(shadow) ~= "table" then
+        return
+    end
+    for _, key in ipairs(keys) do
+        if fail_closed_keys[key] then
+            shadow[key] = { present = false }
+        else
+            shadow[key] = nil
+        end
+    end
+end
+
+local function recover(config, section, snapshot_value, options)
+    local fail_closed_keys = key_set(options and options.fail_closed_keys)
+    local desired = desired_after_failure(snapshot_value, fail_closed_keys)
+    local recovery_order = {}
+    for _, key in ipairs(options and options.fail_closed_keys or {}) do
+        if desired[key] then recovery_order[#recovery_order + 1] = key end
+    end
+    for _, key in ipairs(snapshot_value.keys) do
+        if not fail_closed_keys[key] then recovery_order[#recovery_order + 1] = key end
+    end
+
+    local recovery_ok = true
+    local recovery_errors = {}
+    for _, key in ipairs(recovery_order) do
+        local entry = desired[key]
+        local ok, detail
+        if entry.present then
+            ok, detail = pcall(config.w_value, config, section, key, entry.value)
+        else
+            ok, detail = pcall(config.remove_line, config, section, key)
+        end
+        if not ok then
+            recovery_ok = false
+            recovery_errors[#recovery_errors + 1] = key .. ":" .. tostring(detail)
+        end
+    end
+    local save_ok, save_detail = pcall(config.save, config)
+    if not save_ok then
+        recovery_ok = false
+        recovery_errors[#recovery_errors + 1] = "save:" .. tostring(save_detail)
+    end
+    if recovery_ok then
+        update_shadow(options and options.shadow, snapshot_value.keys, desired)
+    else
+        invalidate_shadow(options and options.shadow, snapshot_value.keys, fail_closed_keys)
+    end
+    return recovery_ok, table.concat(recovery_errors, ";")
+end
+
+local function run_impl(config, section, operations, options)
+    options = options or {}
+    local keys_result = unique_keys(operations)
+    if not keys_result.ok then return keys_result end
+    local keys = keys_result.value
+    local snapshot_result = snapshot(config, section, keys)
+    if not snapshot_result.ok then return snapshot_result end
+
+    local ok_methods, w_value, remove_line, save = pcall(function()
+        return config.w_value, config.remove_line, config.save
+    end)
+    if not ok_methods or type(w_value) ~= "function" or type(remove_line) ~= "function" or type(save) ~= "function" then
+        return fail("GA_CONFIG_INVALID", "Config does not expose mutation APIs")
+    end
+
+    local ordered = order_operations(operations, options)
+    local failure_detail = nil
+    local failure_key = nil
+    for _, operation in ipairs(ordered) do
+        local ok, detail = mutate(config, section, operation)
+        if not ok then
+            failure_detail = detail
+            failure_key = operation.key
+            break
+        end
+    end
+    if failure_detail == nil then
+        local save_ok, save_detail = pcall(save, config)
+        if not save_ok then
+            failure_detail = save_detail
+            failure_key = "<save>"
+        end
+    end
+
+    if failure_detail ~= nil then
+        local recovery_ok, recovery_detail = recover(config, section, snapshot_result.value, options)
+        return fail(options.error_code or "GA_CONFIG_TRANSACTION_FAILED", "Config transaction failed and recovery was attempted", {
+            section = section,
+            failed_at = failure_key,
+            detail = tostring(failure_detail),
+            recovery_ok = recovery_ok,
+            recovery_detail = recovery_detail
+        })
+    end
+
+    local final_state = {}
+    for _, key in ipairs(keys) do final_state[key] = snapshot_result.value.entries[key] end
+    for _, operation in ipairs(ordered) do
+        final_state[operation.key] = operation.action == "write"
+            and { present = true, value = tostring(operation.value) }
+            or { present = false }
+    end
+    update_shadow(options.shadow, keys, final_state)
+    return gamma_arena_result.ok({ snapshot = snapshot_result.value, state = final_state })
+end
+
+function run(config, section, operations, options)
+    local ok, result = pcall(run_impl, config, section, operations, options)
+    if not ok then
+        return fail("GA_CONFIG_TRANSACTION_FAILED", "Config transaction raised an error before completion", { detail = tostring(result) })
+    end
+    return result
+end

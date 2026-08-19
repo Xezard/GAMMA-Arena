@@ -125,8 +125,9 @@ $Task3ScriptContracts = @(
 )
 
 $Task4ScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_config_tx.script'; Namespace = 'gamma_arena_config_tx'; Required = @('(?m)^function\s+run\s*\(', '(?m)^function\s+snapshot\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_session_store.script'; Namespace = 'gamma_arena_session_store'; Required = @('(?m)^function\s+parse_manual_seed\s*\(', '(?m)^function\s+validate_start_request\s*\(', '(?m)^function\s+random_session_seed\s*\(', '(?m)^function\s+save_preferences\s*\(', '(?m)^function\s+issue_launch\s*\(', '(?m)^function\s+parse_launch_token\s*\(', '(?m)^function\s+consume_launch\s*\(', '(?m)^function\s+issue_resume\s*\(', '(?m)^function\s+consume_resume\s*\(', '(?m)^function\s+write_character_creation\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_session_store.script'; Namespace = 'gamma_arena_session_store'; Required = @('(?m)^function\s+new_store\s*\(', '(?m)^function\s+parse_manual_seed\s*\(', '(?m)^function\s+validate_start_request\s*\(', '(?m)^function\s+random_session_seed\s*\(', '(?m)^function\s+save_preferences\s*\(', '(?m)^function\s+issue_launch\s*\(', '(?m)^function\s+parse_launch_token\s*\(', '(?m)^function\s+consume_launch\s*\(', '(?m)^function\s+issue_resume\s*\(', '(?m)^function\s+consume_resume\s*\(', '(?m)^function\s+write_character_creation\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\modxml_gamma_arena.script'; Namespace = 'modxml_gamma_arena'; Required = @('(?m)^function\s+on_xml_read\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_main_menu.script'; Namespace = 'gamma_arena_main_menu'; Required = @('(?m)^function\s+on_game_start\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_start.script'; Namespace = 'gamma_arena_ui_start'; Required = @('class\s+"UIStart"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+show_fatal\s*\(') },
@@ -194,6 +195,18 @@ if (Test-Path -LiteralPath $MigrationPath) {
     Assert-True ($MigrationContent -match 'GA_SETTINGS_SCHEMA_NEWER') 'Settings migration must reject future schemas'
     Assert-True ($MigrationContent -match 'events') 'Settings reads and migrations must report events'
     Assert-True ($MigrationContent -match 'settings_schema_version') 'Settings migration must write schema v1'
+    Assert-True ($MigrationContent -match 'gamma_arena_config_tx\.run') 'Settings migration must use the crash-safe config transaction adapter'
+}
+
+$ConfigTxPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_config_tx.script'
+if (Test-Path -LiteralPath $ConfigTxPath) {
+    $ConfigTxContent = Get-Content -LiteralPath $ConfigTxPath -Raw
+    Assert-True ($ConfigTxContent -match 'line_exist') 'Config transactions must snapshot key presence'
+    Assert-True ($ConfigTxContent -match 'r_string_ex') 'Config transactions must snapshot raw values'
+    Assert-True ($ConfigTxContent -match 'commit_write_keys') 'Config transactions must commit persistent markers last'
+    Assert-True ($ConfigTxContent -match 'commit_remove_keys') 'Config transactions must clear one-shot markers first'
+    Assert-True ($ConfigTxContent -match 'fail_closed_keys') 'Config transactions must fail closed for transient intent keys'
+    Assert-True ($ConfigTxContent -match 'recover') 'Config transactions must attempt rollback/recovery after mutation failure'
 }
 
 $StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
@@ -202,9 +215,15 @@ if (Test-Path -LiteralPath $StorePath) {
     Assert-True ($StoreContent -match 'LAUNCH_TOKEN_TTL\s*=\s*600') 'Launch token TTL must be 600 seconds'
     Assert-True ($StoreContent -match 'ga1:') 'Launch token must use the ga1:<epoch>:<nonce> grammar'
     Assert-True ($StoreContent -match 'volatile_launch_permits') 'Launch activation must require a process-local volatile permit'
+    Assert-True ($StoreContent -match 'GA_LAUNCH_STALE_CLEARED') 'A fresh SessionStore must clear and report orphaned launch intents'
+    Assert-True ($StoreContent -match 'validate_expected_session') 'Resume consumption must validate the complete expected ArenaSession'
+    Assert-True ($StoreContent -match 'GA_RESUME_CHECKPOINT_MISMATCH') 'Resume consumption must bind the reserved checkpoint name'
+    Assert-True ($StoreContent -match 'GA_RESUME_FIGHT_INDEX_MISMATCH') 'Resume consumption must bind next_fight_index to ArenaSession fight_index'
+    Assert-True ($StoreContent -match 'GA_SESSION_GENERATOR_VERSION_INVALID') 'Resume consumption must reject incompatible generator versions'
+    Assert-True ($StoreContent -match 'gamma_arena_config_tx\.run') 'Session writes must use the crash-safe config transaction adapter'
     Assert-True ($StoreContent -match 'GA_RESUME_ALREADY_PENDING') 'Session store must not overwrite a pending resume intent'
     Assert-True (([regex]::Matches($StoreContent, 'GA_INTENT_CONFLICT')).Count -ge 4) 'Launch/resume issuance and consumption must reject intent conflicts'
-    Assert-True ($StoreContent -match 'remove_line') 'Transient and optional character-creation keys must use remove_line'
+    Assert-True ($ConfigTxContent -match 'remove_line') 'Transient and optional character-creation keys must use transactional remove_line operations'
     Assert-True ($StoreContent -notmatch '\btime_global\b') 'Session store must use injected wall-clock/os.time instead of time_global'
     Assert-True ($StoreContent -notmatch '(?is)\bw_value\s*\([^\)]*,\s*nil\s*\)') 'Session store must never use w_value(..., nil)'
     foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
@@ -224,6 +243,15 @@ if (Test-Path -LiteralPath $DxmlPath) {
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
     Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
     Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
+    Assert-True ($DxmlContent -match 'pcall\s*\(\s*gamma_arena_log\.error') 'DXML callback must internally log structured failures because callback returns are ignored'
+}
+
+$Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
+if (Test-Path -LiteralPath $Task4DevTestPath) {
+    $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','arm_fault')) {
+        Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
+    }
 }
 
 $MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'

@@ -192,8 +192,19 @@ seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=1|sessio
 seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|session_seed=3|fight_index=31|fight_id=ga-3-31-g1-c1-l1|diagnostic=FightSpecV1 master
 '@
     Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
+function snapshot()
+    return "line_exist r_string_ex"
+end
+function run()
+    local markers = "commit_write_keys commit_remove_keys fail_closed_keys recover"
+    local remove = config.remove_line
+    return markers
+end
+'@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_migrations.script' @'
 function migrate()
+    gamma_arena_config_tx.run()
     return { ok = true, value = { events = {} } }
 end
 function read_settings()
@@ -203,8 +214,11 @@ end
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_session_store.script' @'
 local LAUNCH_TOKEN_TTL = 600
 local volatile_launch_permits = {}
-local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT"
+local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID"
 local function remove(config, section, key) config:remove_line(section, key) end
+local function validate_expected_session() end
+gamma_arena_config_tx.run()
+function new_store() end
 function parse_manual_seed() end
 function validate_start_request() end
 function random_session_seed() end
@@ -227,6 +241,7 @@ local function on_read(xml_file_name, xml_obj)
     end
 end
 function on_xml_read()
+    pcall(gamma_arena_log.error, "GA_DXML", "fixture", {})
     RegisterScriptCallback("on_xml_read", on_read)
 end
 '@
@@ -257,7 +272,13 @@ function UIStart:ShowFatal() self.fatal_main_menu = true end
 function create() end
 function show_fatal() end
 '@
-    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_migrations.script' 'function run() end'
+    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_migrations.script' @'
+local function stale_launch_is_recovered_by_new_store() end
+local function resume_rejects_tampered_expected_session() end
+local function mutation_failure_matrix_is_crash_safe() end
+local function arm_fault() end
+function run() end
+'@
     $DomainPath = Join-Path $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script'
     $DomainContent = Get-Content -LiteralPath $DomainPath -Raw
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script' ($DomainContent + "`nfunction task4_fixture() return gamma_arena_test_migrations.run(run_case_fn) end`n")

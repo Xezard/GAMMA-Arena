@@ -52,6 +52,8 @@ The token grammar is `ga1:<issued_at_epoch>:<nonce>`. `issued_at_epoch` is a non
 
 Issuance also creates a module-local volatile permit. Consumption requires the persisted token and the volatile permit from the same Lua process. Therefore a persisted token left by a prior crashed process cannot activate Arena. A launch intent is consumed at most once.
 
+Each `SessionStore` instance owns its own volatile permits. A valid duplicate in the same instance is rejected. On a later process/store instance, an orphaned, malformed, expired, or partially written launch intent is removed before a fresh intent is issued; this recovery is reported as `GA_LAUNCH_STALE_CLEARED`.
+
 ## ArenaSession v1 checkpoint payload
 
 `ArenaSession` is embedded only in the hidden Arena checkpoint save payload:
@@ -101,11 +103,14 @@ resume_checkpoint_name
 resume_schema_version
 ```
 
-`resume_session_id` and `resume_session_nonce` must both match the checkpoint `ArenaSession`. A mismatch fails closed and consumes the invalid intent. The resume keys are deleted with one `save()` transaction, so stale values from the wrapper cache cannot be consumed twice.
+Resume consumption validates the complete expected `ArenaSession` v1 payload: schema, identifiers, nonce, reserved checkpoint, generator/catalog revisions, layout, mode, difficulty, uint32 seed, fight index, and phase. `resume_session_id`, `resume_session_nonce`, `resume_checkpoint_name`, and `resume_next_fight_index` must match the checkpoint payload. A mismatch fails closed and consumes the invalid intent. The resume keys are deleted with one `save()` transaction, so stale values from the wrapper cache cannot be consumed twice.
 
 ## Transaction and cache rules
 
-- Each multi-key write or removal performs exactly one `axr_main.config:save()`.
+- Before mutation, every touched key is snapshotted as exact presence plus raw string value via `line_exist` and `r_string_ex`.
+- Persistent validity markers are written last. One-shot pending markers are removed first during consumption.
+- Each successful multi-key write or removal performs exactly one `axr_main.config:save()`.
+- A mutation or save fault triggers best-effort rollback. Transient intent keys fail closed (removed) so a partially consumed launch/resume cannot replay; durable preferences and character-creation values are restored from their snapshot.
 - `w_value(..., nil)` is forbidden because the wrapper writes an empty string instead of deleting the key.
 - Removal uses `remove_line`.
 - The store maintains process-local shadow state because `ini_file_ex:remove_line` does not invalidate the wrapper's `r_value` cache.
