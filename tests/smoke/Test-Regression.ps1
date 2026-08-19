@@ -192,6 +192,102 @@ seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=1|sessio
 seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|session_seed=3|fight_index=31|fight_id=ga-3-31-g1-c1-l1|diagnostic=FightSpecV1 master
 '@
     Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_migrations.script' @'
+function migrate()
+    return { ok = true, value = { events = {} } }
+end
+function read_settings()
+    return "GA_SETTINGS_SCHEMA_NEWER settings_schema_version events"
+end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_session_store.script' @'
+local LAUNCH_TOKEN_TTL = 600
+local volatile_launch_permits = {}
+local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT"
+local function remove(config, section, key) config:remove_line(section, key) end
+function parse_manual_seed() end
+function validate_start_request() end
+function random_session_seed() end
+function save_preferences() end
+function issue_launch() end
+function parse_launch_token() end
+function consume_launch() end
+function issue_resume() end
+function consume_resume() end
+function write_character_creation() end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
+local function on_read(xml_file_name, xml_obj)
+    if xml_file_name ~= "ui_mm_main.xml" then return end
+    local existing = xml_obj:query("menu_main btn[name=btn_gamma_arena]")
+    if existing and #existing > 0 then return end
+    local menu = xml_obj:query("menu_main")
+    if menu and #menu > 0 then
+        xml_obj:insertFromXMLString([[<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu" />]], menu[1], #menu[1].kids)
+    end
+end
+function on_xml_read()
+    RegisterScriptCallback("on_xml_read", on_read)
+end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_main_menu.script' @'
+local function bind(menu)
+    if type(menu.AddCallback) == "function" then
+        menu:AddCallback("btn_gamma_arena", ui_events.BUTTON_CLICKED, function() end, menu)
+    end
+end
+function on_game_start()
+    RegisterScriptCallback("main_menu_on_init", bind)
+end
+'@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_ui_start.script' @'
+class "UIStart" (CUIScriptWnd)
+function UIStart:InitControls()
+    local xml = CScriptXmlInit()
+    xml:InitStatic("x", self)
+    xml:InitTextWnd("x", self)
+    xml:InitEditBox("x", self)
+    xml:Init3tButton("x", self)
+    xml:InitComboBox("x", self)
+    self:Register(self, "x")
+    self:AddCallback("x", ui_events.BUTTON_CLICKED, self.StartGame, self)
+end
+function UIStart:StartGame() self.owner:StartGame() end
+function UIStart:ShowFatal() self.fatal_main_menu = true end
+function create() end
+function show_fatal() end
+'@
+    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_migrations.script' 'function run() end'
+    $DomainPath = Join-Path $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script'
+    $DomainContent = Get-Content -LiteralPath $DomainPath -Raw
+    Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script' ($DomainContent + "`nfunction task4_fixture() return gamma_arena_test_migrations.run(run_case_fn) end`n")
+    Write-FixtureFile $Root 'src\gamedata\configs\ui\gamma_arena_start.xml' @'
+<w><gamma_arena_start><title/><difficulty/><seed/><random_seed/><validation/><start/><back/><fatal><fatal_text/><fatal_main_menu/></fatal></gamma_arena_start></w>
+'@
+    $Locale = @'
+<?xml version="1.0" encoding="utf-8"?>
+<string_table>
+<string id="st_gamma_arena_main_menu"><text>ARENA</text></string>
+<string id="st_gamma_arena_title"><text>Gamma Arena</text></string>
+<string id="st_gamma_arena_difficulty_rookie"><text>&#x041D;&#x043E;&#x0432;&#x0438;&#x0447;&#x043E;&#x043A;</text></string>
+<string id="st_gamma_arena_difficulty_stalker"><text>&#x0421;&#x0442;&#x0430;&#x043B;&#x043A;&#x0435;&#x0440;</text></string>
+<string id="st_gamma_arena_difficulty_veteran"><text>&#x0412;&#x0435;&#x0442;&#x0435;&#x0440;&#x0430;&#x043D;</text></string>
+<string id="st_gamma_arena_difficulty_master"><text>&#x041C;&#x0430;&#x0441;&#x0442;&#x0435;&#x0440;</text></string>
+<string id="st_gamma_arena_random_seed"><text>&#x0421;&#x043B;&#x0443;&#x0447;&#x0430;&#x0439;&#x043D;&#x044B;&#x0439; seed</text></string>
+<string id="st_gamma_arena_start"><text>&#x041D;&#x0410;&#x0427;&#x0410;&#x0422;&#x042C;</text></string>
+<string id="st_gamma_arena_back"><text>&#x041D;&#x0410;&#x0417;&#x0410;&#x0414;</text></string>
+<string id="st_gamma_arena_fatal_title"><text>Fatal</text></string>
+<string id="st_gamma_arena_fatal_error_line"><text>Gamma Arena error [%s].</text></string>
+<string id="st_gamma_arena_fatal_main_menu"><text>&#x0412; &#x0433;&#x043B;&#x0430;&#x0432;&#x043D;&#x043E;&#x0435; &#x043C;&#x0435;&#x043D;&#x044E;</text></string>
+<string id="st_gamma_arena_seed_invalid"><text>Invalid</text></string>
+</string_table>
+'@
+    Write-FixtureFile $Root 'src\gamedata\configs\text\rus\st_gamma_arena.xml' $Locale
+    Write-FixtureFile $Root 'src\gamedata\configs\text\eng\st_gamma_arena.xml' $Locale
+    Write-FixtureFile $Root 'tests\fixtures\settings-v0.ltx' "[gamma_arena]`nlast_difficulty_id = veteran`nlast_seed_mode = manual"
+    Write-FixtureFile $Root 'tests\fixtures\settings-v1.ltx' "[gamma_arena]`nsettings_schema_version = 1`nlast_difficulty_id = master`nlast_seed_mode = random"
+    Write-FixtureFile $Root 'schemas\session-v1.md' 'session_nonce checkpoint_name resume_session_nonce FightSpec FightRegistry ResumeIntent non-durable ga1:<issued_at_epoch>:<nonce> 600'
+    Write-FixtureFile $Root 'docs\compatibility.md' 'fixture'
 }
 
 function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {
@@ -241,6 +337,36 @@ try {
     Write-FixtureFile $MixedDxmlFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if not menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert><insert>add("btn_gamma_arena")</insert></dxml>'
     $MixedDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MixedDxmlFixture)
     Assert-True ($MixedDxmlExit -ne 0) 'Static policy must reject an unsafe DXML insert even when another insert is guarded.'
+
+    $MissingLuaDxmlGuardFixture = New-StaticFixture 'missing-lua-dxml-guard'
+    Add-Task2ContractFixture $MissingLuaDxmlGuardFixture
+    Write-FixtureFile $MissingLuaDxmlGuardFixture 'src\gamedata\scripts\modxml_gamma_arena.script' @'
+function on_xml_read()
+    RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj)
+        if xml_file_name ~= "ui_mm_main.xml" then return end
+        local menu = xml_obj:query("menu_main")
+        xml_obj:insertFromXMLString([[<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu" />]], menu[1], #menu[1].kids)
+    end)
+end
+'@
+    $MissingLuaDxmlGuardExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingLuaDxmlGuardFixture)
+    Assert-True ($MissingLuaDxmlGuardExit -ne 0) 'Static policy must reject a Lua DXML insert without the exact duplicate query guard.'
+
+    $DuplicateLuaDxmlFixture = New-StaticFixture 'duplicate-lua-dxml-button'
+    Add-Task2ContractFixture $DuplicateLuaDxmlFixture
+    $DuplicateDxmlPath = Join-Path $DuplicateLuaDxmlFixture 'src\gamedata\scripts\modxml_gamma_arena.script'
+    $DuplicateDxmlContent = Get-Content -LiteralPath $DuplicateDxmlPath -Raw
+    Write-FixtureFile $DuplicateLuaDxmlFixture 'src\gamedata\scripts\modxml_gamma_arena.script' ($DuplicateDxmlContent + "`nlocal duplicate = [[<btn name=`"btn_gamma_arena`" caption=`"st_gamma_arena_main_menu`" />]]`n")
+    $DuplicateLuaDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DuplicateLuaDxmlFixture)
+    Assert-True ($DuplicateLuaDxmlExit -ne 0) 'Static policy must reject duplicate Arena button insertion definitions.'
+
+    $NilWriteFixture = New-StaticFixture 'nil-write'
+    Add-Task2ContractFixture $NilWriteFixture
+    $NilWritePath = Join-Path $NilWriteFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
+    $NilWriteContent = Get-Content -LiteralPath $NilWritePath -Raw
+    Write-FixtureFile $NilWriteFixture 'src\gamedata\scripts\gamma_arena_session_store.script' ($NilWriteContent + "`nlocal function bad(config) config:w_value(`"gamma_arena`", `"launch_pending`", nil) end`n")
+    $NilWriteExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NilWriteFixture)
+    Assert-True ($NilWriteExit -ne 0) 'Static policy must reject w_value(..., nil) because it persists an empty string.'
 
     $ValidStaticFixture = New-StaticFixture 'valid-static-fixture'
     Add-Task2ContractFixture $ValidStaticFixture

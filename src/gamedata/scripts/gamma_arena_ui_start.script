@@ -1,0 +1,297 @@
+local difficulty_ids = { "rookie", "stalker", "veteran", "master" }
+local difficulty_string_ids = {
+    rookie = "st_gamma_arena_difficulty_rookie",
+    stalker = "st_gamma_arena_difficulty_stalker",
+    veteran = "st_gamma_arena_difficulty_veteran",
+    master = "st_gamma_arena_difficulty_master"
+}
+local fatal_dialog = nil
+
+local function translated(string_id)
+    if game and type(game.translate_string) == "function" then
+        local ok, value = pcall(game.translate_string, string_id)
+        if ok and value then
+            return value
+        end
+    end
+    return string_id
+end
+
+local function result_line(result)
+    local code
+    if type(result) == "table" and result.error then
+        code = result.error.code
+    elseif type(result) == "table" then
+        code = result.code
+    end
+    code = tostring(code or "GA_UNKNOWN")
+    local ok, line = pcall(string.format, translated("st_gamma_arena_fatal_error_line"), code)
+    return ok and line or ("Gamma Arena [" .. code .. "]")
+end
+
+class "UIStart" (CUIScriptWnd)
+
+function UIStart:__init(owner, ports) super()
+    self.owner = owner
+    self.ports = ports or {}
+    self.seed_mode = "random"
+    self.last_random_seed_text = nil
+    self.fatal_main_menu_callback = nil
+    self.fatal_main_menu_context = nil
+    self:InitControls()
+    self:InitCallbacks()
+    self:LoadSettings()
+end
+
+function UIStart:__finalize()
+    if fatal_dialog == self then
+        fatal_dialog = nil
+    end
+end
+
+function UIStart:InitControls()
+    self:SetWndRect(Frect():set(0, 0, 1024, 768))
+    self:SetAutoDelete(true)
+
+    local xml = CScriptXmlInit()
+    xml:ParseFile("gamma_arena_start.xml")
+    self.root = xml:InitStatic("gamma_arena_start", self)
+    self.title = xml:InitStatic("gamma_arena_start:title", self.root)
+    self.start_form = xml:InitStatic("gamma_arena_start:start_form", self.root)
+    self.difficulty_label = xml:InitStatic("gamma_arena_start:start_form:difficulty_label", self.start_form)
+    self.difficulty_combo = xml:InitComboBox("gamma_arena_start:start_form:difficulty", self.start_form)
+    self.seed_label = xml:InitStatic("gamma_arena_start:start_form:seed_label", self.start_form)
+    self.seed_edit = xml:InitEditBox("gamma_arena_start:start_form:seed", self.start_form)
+    self.random_seed = xml:Init3tButton("gamma_arena_start:start_form:random_seed", self.start_form)
+    self.validation = xml:InitTextWnd("gamma_arena_start:start_form:validation", self.start_form)
+    self.start_button = xml:Init3tButton("gamma_arena_start:start_form:start", self.start_form)
+    self.back_button = xml:Init3tButton("gamma_arena_start:start_form:back", self.start_form)
+    self.fatal = xml:InitStatic("gamma_arena_start:fatal", self.root)
+    self.fatal_title = xml:InitStatic("gamma_arena_start:fatal:fatal_title", self.fatal)
+    self.fatal_text = xml:InitTextWnd("gamma_arena_start:fatal:fatal_text", self.fatal)
+    self.fatal_main_menu = xml:Init3tButton("gamma_arena_start:fatal:fatal_main_menu", self.fatal)
+
+    self:Register(self.difficulty_combo, "difficulty")
+    self:Register(self.seed_edit, "seed")
+    self:Register(self.random_seed, "random_seed")
+    self:Register(self.start_button, "start")
+    self:Register(self.back_button, "back")
+    self:Register(self.fatal_main_menu, "fatal_main_menu")
+
+    self.validation:Show(false)
+    self.fatal:Show(false)
+    for index, difficulty_id in ipairs(difficulty_ids) do
+        self.difficulty_combo:AddItem(translated(difficulty_string_ids[difficulty_id]), index)
+    end
+end
+
+function UIStart:InitCallbacks()
+    self:AddCallback("random_seed", ui_events.BUTTON_CLICKED, self.OnRandomSeed, self)
+    self:AddCallback("start", ui_events.BUTTON_CLICKED, self.OnStart, self)
+    self:AddCallback("back", ui_events.BUTTON_CLICKED, self.OnBack, self)
+    self:AddCallback("fatal_main_menu", ui_events.BUTTON_CLICKED, self.OnFatalMainMenu, self)
+end
+
+function UIStart:SetDifficulty(difficulty_id)
+    local selected = 1
+    for index, value in ipairs(difficulty_ids) do
+        if value == difficulty_id then
+            selected = index
+            break
+        end
+    end
+    self.difficulty_combo:enable_id(selected)
+    self.difficulty_combo:SetText(translated(difficulty_string_ids[difficulty_ids[selected]]))
+end
+
+function UIStart:GetDifficulty()
+    local current = self.difficulty_combo:GetText()
+    for _, difficulty_id in ipairs(difficulty_ids) do
+        if current == translated(difficulty_string_ids[difficulty_id]) then
+            return difficulty_id
+        end
+    end
+    return nil
+end
+
+function UIStart:LoadSettings()
+    if not axr_main or not axr_main.config then
+        self:ShowFatal({ gamma_arena_result.err("GA_SETTINGS_CONFIG_UNAVAILABLE", "axr_main.config is unavailable") })
+        return
+    end
+    local migrated = gamma_arena_migrations.migrate(axr_main.config)
+    if not migrated.ok then
+        self:ShowFatal({ migrated })
+        return
+    end
+    for _, event in ipairs(migrated.value.events or {}) do
+        gamma_arena_log.info(event.code, "Settings migration event", event)
+    end
+    self:SetDifficulty(migrated.value.last_difficulty_id)
+    if migrated.value.last_seed_mode == "random" then
+        self:OnRandomSeed()
+    else
+        self.seed_mode = "manual"
+        self.seed_edit:SetText("")
+    end
+end
+
+function UIStart:ShowValidation(result)
+    local code = result and result.error and result.error.code or "GA_START_REQUEST_INVALID"
+    self.validation:SetText(translated("st_gamma_arena_seed_invalid") .. " [" .. tostring(code) .. "]")
+    self.validation:Show(true)
+end
+
+function UIStart:OnRandomSeed()
+    local provider = self.ports and self.ports.random_seed_provider or nil
+    local generated = gamma_arena_session_store.random_session_seed(provider)
+    if not generated.ok then
+        self:ShowFatal({ generated })
+        return
+    end
+    self.seed_mode = "random"
+    self.last_random_seed_text = tostring(generated.value)
+    self.seed_edit:SetText(self.last_random_seed_text)
+    self.validation:Show(false)
+end
+
+function UIStart:OnStart()
+    local seed_text = self.seed_edit:GetText()
+    local seed_result = gamma_arena_session_store.parse_manual_seed(seed_text)
+    if not seed_result.ok then
+        self:ShowValidation(seed_result)
+        return
+    end
+    local seed_mode = self.seed_mode
+    if seed_mode == "random" and seed_text ~= self.last_random_seed_text then
+        seed_mode = "manual"
+    end
+    local request = gamma_arena_session_store.validate_start_request({
+        schema_version = 1,
+        mode_id = "skirmish",
+        difficulty_id = self:GetDifficulty(),
+        seed_mode = seed_mode,
+        session_seed = seed_result.value
+    })
+    if not request.ok then
+        self:ShowValidation(request)
+        return
+    end
+    self.validation:Show(false)
+
+    local preferences = gamma_arena_session_store.save_preferences(axr_main.config, request.value.difficulty_id, request.value.seed_mode)
+    if not preferences.ok then
+        self:ShowFatal({ preferences })
+        return
+    end
+    local launch_options = self.ports and self.ports.launch_options or nil
+    local launch = gamma_arena_session_store.issue_launch(axr_main.config, request.value, launch_options)
+    if not launch.ok then
+        self:ShowFatal({ launch })
+        return
+    end
+    local bridge = gamma_arena_session_store.write_character_creation(axr_main.config)
+    if not bridge.ok then
+        gamma_arena_session_store.clear_transient(axr_main.config)
+        self:ShowFatal({ bridge })
+        return
+    end
+    if self.owner == nil or type(self.owner.StartGame) ~= "function" then
+        gamma_arena_session_store.clear_transient(axr_main.config)
+        self:ShowFatal({ gamma_arena_result.err("GA_START_GAME_UNAVAILABLE", "Main menu does not expose StartGame") })
+        return
+    end
+    local ok, detail = pcall(function() self.owner:StartGame() end)
+    if not ok then
+        gamma_arena_session_store.clear_transient(axr_main.config)
+        self:ShowFatal({ gamma_arena_result.err("GA_START_GAME_FAILED", "Engine new-game start failed", { detail = tostring(detail) }) })
+    end
+end
+
+function UIStart:RestoreOwner()
+    if self.owner then
+        if type(self.owner.ShowDialog) == "function" then
+            self.owner:ShowDialog(true)
+        end
+        if type(self.owner.Show) == "function" then
+            self.owner:Show(true)
+        end
+    end
+    self:HideDialog()
+    self:Show(false)
+end
+
+function UIStart:OnBack()
+    self:RestoreOwner()
+end
+
+function UIStart:SetFatalMainMenuHandler(callback, context)
+    if callback ~= nil and type(callback) ~= "function" then
+        return gamma_arena_result.err("GA_FATAL_HANDLER_INVALID", "Fatal main-menu handler must be a function")
+    end
+    self.fatal_main_menu_callback = callback
+    self.fatal_main_menu_context = context
+    return gamma_arena_result.ok(true)
+end
+
+function UIStart:ShowFatal(errors, callback, context)
+    if callback ~= nil then
+        local handler = self:SetFatalMainMenuHandler(callback, context)
+        if not handler.ok then
+            errors = { handler }
+        end
+    end
+    local lines = {}
+    if type(errors) == "table" then
+        for index = 1, #errors do
+            local item = errors[index]
+            if type(item) == "table" and item.error then
+                gamma_arena_log.error(item.error.code or "GA_UNKNOWN", item.error.message or "Fatal UI error", item.error.context)
+            end
+            lines[#lines + 1] = result_line(errors[index])
+        end
+    end
+    if #lines == 0 then
+        lines[1] = "GA_UNKNOWN: " .. translated("st_gamma_arena_fatal_unknown")
+    end
+    self.start_form:Show(false)
+    self.fatal_text:SetText(table.concat(lines, "\n"))
+    self.fatal:Show(true)
+end
+
+function UIStart:OnFatalMainMenu()
+    if self.fatal_main_menu_callback then
+        local ok, result = pcall(self.fatal_main_menu_callback, self.fatal_main_menu_context, self)
+        if ok and result ~= false then
+            return
+        end
+    end
+    self:RestoreOwner()
+end
+
+function UIStart:OnKeyboard(dik, keyboard_action)
+    local result = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
+    if result == false and keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then
+        if self.fatal:IsShown() then
+            self:OnFatalMainMenu()
+        else
+            self:OnBack()
+        end
+    end
+    return result
+end
+
+function create(owner, ports)
+    return UIStart(owner, ports)
+end
+
+function show_fatal(owner, errors, callback, context)
+    fatal_dialog = UIStart(owner, {})
+    fatal_dialog:ShowFatal(errors, callback, context)
+    fatal_dialog:ShowDialog(true)
+    if owner then
+        if type(owner.HideDialog) == "function" then owner:HideDialog() end
+        if type(owner.Show) == "function" then owner:Show(false) end
+    end
+    return fatal_dialog
+end

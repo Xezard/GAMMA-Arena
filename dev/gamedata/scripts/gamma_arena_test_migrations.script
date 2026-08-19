@@ -1,0 +1,227 @@
+local function copy_table(source)
+    local result = {}
+    for key, value in pairs(source or {}) do
+        result[key] = value
+    end
+    return result
+end
+
+local function fake_config(initial)
+    local config = {
+        data = copy_table(initial),
+        writes = {},
+        removals = {},
+        save_count = 0,
+        stale_cache = copy_table(initial)
+    }
+
+    function config:r_string_ex(section, key)
+        if section ~= "gamma_arena" and section ~= "character_creation" then
+            return nil
+        end
+        return self.data[key]
+    end
+
+    function config:r_value(section, key, _, default)
+        local value = self.stale_cache[key]
+        if value == nil then
+            return default
+        end
+        return value
+    end
+
+    function config:w_value(section, key, value)
+        gamma_arena_test_assert.is_true(value ~= nil, "tests forbid nil w_value")
+        self.data[key] = tostring(value)
+        self.stale_cache[key] = tostring(value)
+        self.writes[#self.writes + 1] = section .. "." .. key .. "=" .. tostring(value)
+    end
+
+    function config:remove_line(section, key)
+        self.data[key] = nil
+        self.removals[#self.removals + 1] = section .. "." .. key
+    end
+
+    function config:save()
+        self.save_count = self.save_count + 1
+    end
+
+    return config
+end
+
+local function valid_request(seed)
+    return {
+        schema_version = 1,
+        mode_id = "skirmish",
+        difficulty_id = "stalker",
+        seed_mode = "manual",
+        session_seed = seed or 42
+    }
+end
+
+local function migrations_cover_absent_v0_v1_and_future()
+    local absent = fake_config()
+    local absent_result = gamma_arena_migrations.migrate(absent)
+    gamma_arena_test_assert.is_true(absent_result.ok, "absent settings migrate")
+    gamma_arena_test_assert.equals(absent.data.settings_schema_version, "1", "absent schema becomes v1")
+    gamma_arena_test_assert.equals(absent.save_count, 1, "migration saves exactly once")
+    gamma_arena_test_assert.is_true(#absent_result.value.events > 0, "migration reports events")
+
+    local v0 = fake_config({ last_difficulty_id = "veteran", last_seed_mode = "manual" })
+    local v0_result = gamma_arena_migrations.migrate(v0)
+    gamma_arena_test_assert.is_true(v0_result.ok, "v0 settings migrate")
+    gamma_arena_test_assert.equals(v0.data.last_difficulty_id, "veteran", "v0 difficulty preserved")
+    gamma_arena_test_assert.equals(v0.data.last_seed_mode, "manual", "v0 seed mode preserved")
+
+    local v1 = fake_config({ settings_schema_version = "1", last_difficulty_id = "master", last_seed_mode = "random" })
+    local v1_result = gamma_arena_migrations.migrate(v1)
+    gamma_arena_test_assert.is_true(v1_result.ok, "v1 migration is idempotent")
+    gamma_arena_test_assert.equals(v1.save_count, 0, "idempotent v1 does not save")
+
+    local future = fake_config({ settings_schema_version = "2" })
+    local future_result = gamma_arena_migrations.migrate(future)
+    gamma_arena_test_assert.is_false(future_result.ok, "future settings reject")
+    gamma_arena_test_assert.equals(future_result.error.code, "GA_SETTINGS_SCHEMA_NEWER", "future schema code")
+    gamma_arena_test_assert.equals(future.save_count, 0, "future settings remain untouched")
+end
+
+local function request_validation_is_total_and_fail_closed()
+    for _, text in ipairs({ "", "-1", "+1", "1.0", "1e3", "4294967296", " 1", "1 " }) do
+        local result = gamma_arena_session_store.parse_manual_seed(text)
+        gamma_arena_test_assert.is_false(result.ok, "invalid decimal seed rejects: " .. text)
+    end
+    gamma_arena_test_assert.equals(gamma_arena_session_store.parse_manual_seed("0").value, 0, "zero seed")
+    gamma_arena_test_assert.equals(gamma_arena_session_store.parse_manual_seed("4294967295").value, 4294967295, "maximum seed")
+
+    for _, seed in ipairs({ math.huge, -math.huge, 0/0, -1, 4294967296, 1.5 }) do
+        local result = gamma_arena_session_store.validate_start_request(valid_request(seed))
+        gamma_arena_test_assert.is_false(result.ok, "invalid numeric seed rejects")
+    end
+    gamma_arena_test_assert.equals(gamma_arena_session_store.validate_start_request(nil).error.code, "GA_START_REQUEST_INVALID", "nil request is Result error")
+    gamma_arena_test_assert.equals(gamma_arena_session_store.validate_start_request({}).error.code, "GA_START_REQUEST_SCHEMA_INVALID", "missing schema is Result error")
+end
+
+local function random_seed_uses_injected_generator()
+    local first = gamma_arena_session_store.random_session_seed(function() return 123456789 end)
+    local second = gamma_arena_session_store.random_session_seed(function() return 123456789 end)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "injected random generation succeeds")
+    gamma_arena_test_assert.equals(first.value, second.value, "injected random generation is deterministic")
+    gamma_arena_test_assert.equals(first.value, 123456789, "injected seed retained")
+    gamma_arena_test_assert.is_false(gamma_arena_session_store.random_session_seed(function() return math.huge end).ok, "invalid injected random rejects")
+end
+
+local function durable_preferences_are_exact()
+    local config = fake_config({ unrelated = "keep" })
+    local result = gamma_arena_session_store.save_preferences(config, "master", "manual")
+    gamma_arena_test_assert.is_true(result.ok, "preferences save")
+    gamma_arena_test_assert.equals(config.save_count, 1, "preferences transaction saves once")
+    gamma_arena_test_assert.equals(#config.writes, 3, "only three durable keys written")
+    gamma_arena_test_assert.equals(config.data.unrelated, "keep", "unrelated config preserved")
+    gamma_arena_test_assert.equals(config.data.launch_pending, nil, "launch is not durable preference")
+end
+
+local function launch_token_is_volatile_ttl_bound_and_one_shot()
+    local config = fake_config()
+    local issued = gamma_arena_session_store.issue_launch(config, valid_request(99), {
+        clock = function() return 1000 end,
+        nonce = function() return "nonce_1" end
+    })
+    gamma_arena_test_assert.is_true(issued.ok, "launch intent issued")
+    gamma_arena_test_assert.equals(issued.value.token, "ga1:1000:nonce_1", "launch token grammar")
+    gamma_arena_test_assert.equals(config.save_count, 1, "launch write saves once")
+
+    local parsed = gamma_arena_session_store.parse_launch_token(issued.value.token, 1600)
+    gamma_arena_test_assert.is_true(parsed.ok, "token valid at TTL boundary")
+    gamma_arena_test_assert.is_false(gamma_arena_session_store.parse_launch_token(issued.value.token, 1601).ok, "expired token rejects")
+    gamma_arena_test_assert.is_false(gamma_arena_session_store.parse_launch_token("ga1:bad:nonce", 1000).ok, "malformed token rejects")
+
+    local consumed = gamma_arena_session_store.consume_launch(config, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_true(consumed.ok, "fresh volatile launch consumes")
+    gamma_arena_test_assert.equals(consumed.value.session_seed, 99, "consumed request restored")
+    gamma_arena_test_assert.equals(config.save_count, 2, "launch consume saves once")
+    gamma_arena_test_assert.equals(config.data.launch_pending, nil, "launch keys removed")
+
+    local repeated = gamma_arena_session_store.consume_launch(config, { clock = function() return 1002 end })
+    gamma_arena_test_assert.is_false(repeated.ok, "stale-cache repeated consume rejects")
+    gamma_arena_test_assert.equals(repeated.error.code, "GA_LAUNCH_NOT_PENDING", "repeated consume code")
+
+    local stale = fake_config({
+        launch_pending = "true", launch_token = "ga1:1000:prior_process", launch_mode_id = "skirmish",
+        launch_difficulty_id = "stalker", launch_seed_mode = "manual", launch_session_seed = "99"
+    })
+    local stale_result = gamma_arena_session_store.consume_launch(stale, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_false(stale_result.ok, "persisted prior-process token rejects")
+    gamma_arena_test_assert.equals(stale_result.error.code, "GA_LAUNCH_TOKEN_NOT_VOLATILE", "volatile permit code")
+end
+
+local function resume_intent_requires_matching_nonce_and_is_one_shot()
+    local config = fake_config()
+    local intent = {
+        schema_version = 1,
+        session_id = "session-1",
+        session_nonce = "session_nonce_1",
+        next_fight_index = 3,
+        checkpoint_name = "_gamma_arena_checkpoint"
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(config, intent).ok, "resume intent issued")
+    local mismatch = gamma_arena_session_store.consume_resume(config, { session_id = "session-1", session_nonce = "wrong" })
+    gamma_arena_test_assert.is_false(mismatch.ok, "resume nonce mismatch rejects")
+    gamma_arena_test_assert.equals(mismatch.error.code, "GA_RESUME_NONCE_MISMATCH", "resume mismatch code")
+
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(config, intent).ok, "resume can be reissued")
+    local consumed = gamma_arena_session_store.consume_resume(config, { session_id = "session-1", session_nonce = "session_nonce_1" })
+    gamma_arena_test_assert.is_true(consumed.ok, "matching resume consumes")
+    gamma_arena_test_assert.equals(consumed.value.checkpoint_name, "_gamma_arena_checkpoint", "checkpoint retained")
+    gamma_arena_test_assert.equals(gamma_arena_session_store.consume_resume(config, { session_id = "session-1", session_nonce = "session_nonce_1" }).error.code, "GA_RESUME_NOT_PENDING", "resume is one-shot")
+
+    local already_pending = fake_config()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(already_pending, intent).ok, "first resume issuance succeeds")
+    local duplicate = gamma_arena_session_store.issue_resume(already_pending, intent)
+    gamma_arena_test_assert.is_false(duplicate.ok, "existing resume cannot be overwritten")
+    gamma_arena_test_assert.equals(duplicate.error.code, "GA_RESUME_ALREADY_PENDING", "duplicate resume code")
+
+    local conflict = fake_config()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.issue_resume(conflict, intent).ok, "resume for conflict fixture issued")
+    conflict.data.launch_pending = "true"
+    local conflicted = gamma_arena_session_store.consume_resume(conflict, { session_id = "session-1", session_nonce = "session_nonce_1" })
+    gamma_arena_test_assert.is_false(conflicted.ok, "simultaneous launch and resume reject")
+    gamma_arena_test_assert.equals(conflicted.error.code, "GA_INTENT_CONFLICT", "resume conflict code")
+    gamma_arena_test_assert.equals(conflict.data.resume_pending, nil, "conflicted resume is cleared")
+
+    local malformed = fake_config({ resume_pending = "maybe" })
+    local malformed_result = gamma_arena_session_store.consume_resume(malformed, { session_id = "session-1", session_nonce = "session_nonce_1" })
+    gamma_arena_test_assert.is_false(malformed_result.ok, "malformed resume marker rejects")
+    gamma_arena_test_assert.equals(malformed_result.error.code, "GA_RESUME_PENDING_INVALID", "malformed resume code")
+    gamma_arena_test_assert.equals(malformed.data.resume_pending, nil, "malformed resume marker is cleared")
+end
+
+local function character_creation_bridge_is_exact()
+    local config = fake_config({ new_game_loadout = "old", new_game_story_mode = "true" })
+    local result = gamma_arena_session_store.write_character_creation(config)
+    gamma_arena_test_assert.is_true(result.ok, "character creation bridge writes")
+    gamma_arena_test_assert.equals(config.save_count, 1, "character bridge saves once")
+    gamma_arena_test_assert.equals(#config.writes, 6, "six fixed bridge keys")
+    gamma_arena_test_assert.equals(#config.removals, 2, "optional bridge keys removed")
+    gamma_arena_test_assert.equals(config.data.new_game_loadout, nil, "loadout removed")
+    gamma_arena_test_assert.equals(config.data.new_game_story_mode, nil, "story mode removed")
+end
+
+local cases = {
+    { name = "settings_migrations", fn = migrations_cover_absent_v0_v1_and_future },
+    { name = "start_request_validation", fn = request_validation_is_total_and_fail_closed },
+    { name = "random_seed_injection", fn = random_seed_uses_injected_generator },
+    { name = "durable_preferences", fn = durable_preferences_are_exact },
+    { name = "launch_token_one_shot", fn = launch_token_is_volatile_ttl_bound_and_one_shot },
+    { name = "resume_intent_one_shot", fn = resume_intent_requires_matching_nonce_and_is_one_shot },
+    { name = "character_creation_bridge", fn = character_creation_bridge_is_exact }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        if not run_case_fn(cases[index].name, cases[index].fn) then
+            all_passed = false
+        end
+    end
+    return all_passed
+end

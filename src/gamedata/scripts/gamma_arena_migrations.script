@@ -1,0 +1,171 @@
+local SETTINGS_SECTION = "gamma_arena"
+local CURRENT_SETTINGS_SCHEMA = 1
+local DEFAULT_DIFFICULTY_ID = "rookie"
+local DEFAULT_SEED_MODE = "random"
+
+local valid_difficulties = {
+    rookie = true,
+    stalker = true,
+    veteran = true,
+    master = true
+}
+
+local valid_seed_modes = {
+    random = true,
+    manual = true
+}
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context)
+end
+
+local function raw_read(config, key)
+    if config == nil then
+        return fail("GA_SETTINGS_CONFIG_INVALID", "Settings config is unavailable")
+    end
+    local ok_method, method = pcall(function() return config.r_string_ex end)
+    if not ok_method or type(method) ~= "function" then
+        return fail("GA_SETTINGS_CONFIG_INVALID", "Settings config does not expose r_string_ex", { key = key })
+    end
+    local ok, value = pcall(method, config, SETTINGS_SECTION, key)
+    if not ok then
+        return fail("GA_SETTINGS_READ_FAILED", "Settings value could not be read", { key = key })
+    end
+    if value == nil or value == "" then
+        return gamma_arena_result.ok(nil)
+    end
+    return gamma_arena_result.ok(tostring(value))
+end
+
+local function read_snapshot(config)
+    local snapshot = {}
+    for _, key in ipairs({ "settings_schema_version", "last_difficulty_id", "last_seed_mode" }) do
+        local read = raw_read(config, key)
+        if not read.ok then
+            return read
+        end
+        snapshot[key] = read.value
+    end
+    return gamma_arena_result.ok(snapshot)
+end
+
+local function parse_schema(raw)
+    if raw == nil then
+        return gamma_arena_result.ok(0)
+    end
+    if not string.match(raw, "^%d+$") then
+        return fail("GA_SETTINGS_SCHEMA_INVALID", "Settings schema version is malformed", { value = raw })
+    end
+    local value = tonumber(raw)
+    if value == nil or value ~= math.floor(value) then
+        return fail("GA_SETTINGS_SCHEMA_INVALID", "Settings schema version is malformed", { value = raw })
+    end
+    if value > CURRENT_SETTINGS_SCHEMA then
+        return fail("GA_SETTINGS_SCHEMA_NEWER", "Settings were created by a newer Gamma Arena version", { schema_version = value, supported = CURRENT_SETTINGS_SCHEMA })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function validate_preferences(snapshot)
+    if not valid_difficulties[snapshot.last_difficulty_id] then
+        return fail("GA_SETTINGS_DIFFICULTY_INVALID", "Stored difficulty is unknown", { value = snapshot.last_difficulty_id })
+    end
+    if not valid_seed_modes[snapshot.last_seed_mode] then
+        return fail("GA_SETTINGS_SEED_MODE_INVALID", "Stored seed mode is unknown", { value = snapshot.last_seed_mode })
+    end
+    return gamma_arena_result.ok({
+        settings_schema_version = CURRENT_SETTINGS_SCHEMA,
+        last_difficulty_id = snapshot.last_difficulty_id,
+        last_seed_mode = snapshot.last_seed_mode
+    })
+end
+
+local function write_v1(config, difficulty_id, seed_mode)
+    local ok_methods, w_value, save = pcall(function()
+        return config.w_value, config.save
+    end)
+    if not ok_methods or type(w_value) ~= "function" or type(save) ~= "function" then
+        return fail("GA_SETTINGS_CONFIG_INVALID", "Settings config does not expose write APIs")
+    end
+    local ok, err = pcall(function()
+        config:w_value(SETTINGS_SECTION, "settings_schema_version", CURRENT_SETTINGS_SCHEMA)
+        config:w_value(SETTINGS_SECTION, "last_difficulty_id", difficulty_id)
+        config:w_value(SETTINGS_SECTION, "last_seed_mode", seed_mode)
+        config:save()
+    end)
+    if not ok then
+        return fail("GA_SETTINGS_WRITE_FAILED", "Settings migration could not be saved", { detail = tostring(err) })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function read_settings(config)
+    local snapshot_result = read_snapshot(config)
+    if not snapshot_result.ok then
+        return snapshot_result
+    end
+    local schema_result = parse_schema(snapshot_result.value.settings_schema_version)
+    if not schema_result.ok then
+        return schema_result
+    end
+    if schema_result.value ~= CURRENT_SETTINGS_SCHEMA then
+        return fail("GA_SETTINGS_MIGRATION_REQUIRED", "Settings must be migrated before use", { schema_version = schema_result.value })
+    end
+    local preferences = validate_preferences(snapshot_result.value)
+    if not preferences.ok then
+        return preferences
+    end
+    preferences.value.events = {}
+    return preferences
+end
+
+function migrate(config)
+    local snapshot_result = read_snapshot(config)
+    if not snapshot_result.ok then
+        return snapshot_result
+    end
+    local snapshot = snapshot_result.value
+    local schema_result = parse_schema(snapshot.settings_schema_version)
+    if not schema_result.ok then
+        return schema_result
+    end
+    if schema_result.value == CURRENT_SETTINGS_SCHEMA then
+        return read_settings(config)
+    end
+
+    local events = {}
+    local difficulty_id = snapshot.last_difficulty_id
+    if not valid_difficulties[difficulty_id] then
+        difficulty_id = DEFAULT_DIFFICULTY_ID
+        events[#events + 1] = {
+            code = "GA_SETTINGS_DIFFICULTY_DEFAULTED",
+            previous = snapshot.last_difficulty_id,
+            value = difficulty_id
+        }
+    end
+    local seed_mode = snapshot.last_seed_mode
+    if not valid_seed_modes[seed_mode] then
+        seed_mode = DEFAULT_SEED_MODE
+        events[#events + 1] = {
+            code = "GA_SETTINGS_SEED_MODE_DEFAULTED",
+            previous = snapshot.last_seed_mode,
+            value = seed_mode
+        }
+    end
+    events[#events + 1] = {
+        code = snapshot.settings_schema_version == nil and "GA_SETTINGS_INITIALIZED" or "GA_SETTINGS_MIGRATED",
+        from_schema = 0,
+        to_schema = CURRENT_SETTINGS_SCHEMA
+    }
+
+    local written = write_v1(config, difficulty_id, seed_mode)
+    if not written.ok then
+        return written
+    end
+    return gamma_arena_result.ok({
+        settings_schema_version = CURRENT_SETTINGS_SCHEMA,
+        last_difficulty_id = difficulty_id,
+        last_seed_mode = seed_mode,
+        events = events
+    })
+end

@@ -67,6 +67,7 @@ if (Test-Path -LiteralPath $SourceGamedata) {
     })
     foreach ($Script in $ArenaScripts) {
         Assert-True (-not (Test-TextPattern $Script.FullName '\bmath\.random(seed)?\b')) "Non-deterministic random call: $(Get-RelativeRepoPath $Script.FullName)"
+        Assert-True (-not (Test-TextPattern $Script.FullName '(?is)\bw_value\s*\([^\)]*,\s*nil\s*\)')) "w_value(..., nil) writes an empty string; use remove_line: $(Get-RelativeRepoPath $Script.FullName)"
     }
 
     $MutationNamePattern = '(?i)(spawn|give|remove|teleport|set|add|delete|replace|patch|inject|override|mutat)'
@@ -123,6 +124,15 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') }
 )
 
+$Task4ScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_session_store.script'; Namespace = 'gamma_arena_session_store'; Required = @('(?m)^function\s+parse_manual_seed\s*\(', '(?m)^function\s+validate_start_request\s*\(', '(?m)^function\s+random_session_seed\s*\(', '(?m)^function\s+save_preferences\s*\(', '(?m)^function\s+issue_launch\s*\(', '(?m)^function\s+parse_launch_token\s*\(', '(?m)^function\s+consume_launch\s*\(', '(?m)^function\s+issue_resume\s*\(', '(?m)^function\s+consume_resume\s*\(', '(?m)^function\s+write_character_creation\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\modxml_gamma_arena.script'; Namespace = 'modxml_gamma_arena'; Required = @('(?m)^function\s+on_xml_read\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_main_menu.script'; Namespace = 'gamma_arena_main_menu'; Required = @('(?m)^function\s+on_game_start\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_start.script'; Namespace = 'gamma_arena_ui_start'; Required = @('class\s+"UIStart"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+show_fatal\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_migrations.script'; Namespace = 'gamma_arena_test_migrations'; Required = @('(?m)^function\s+run\s*\(') }
+)
+
 foreach ($Contract in $Task2ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
     Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 2 script is missing: $($Contract.Path)"
@@ -148,6 +158,138 @@ foreach ($Contract in $Task3ScriptContracts) {
         foreach ($RequiredPattern in $Contract.Required) {
             Assert-True ($ScriptContent -match $RequiredPattern) "Task 3 script is missing its bare engine API: $($Contract.Path)"
         }
+    }
+}
+
+foreach ($Contract in $Task4ScriptContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 4 script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 4 script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Task 4 script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Task 4 script is missing its required API: $($Contract.Path)"
+        }
+    }
+}
+
+$Task4DataFiles = @(
+    'src\gamedata\configs\ui\gamma_arena_start.xml',
+    'src\gamedata\configs\text\rus\st_gamma_arena.xml',
+    'src\gamedata\configs\text\eng\st_gamma_arena.xml',
+    'tests\fixtures\settings-v0.ltx',
+    'tests\fixtures\settings-v1.ltx',
+    'schemas\session-v1.md',
+    'docs\compatibility.md'
+)
+foreach ($RelativePath in $Task4DataFiles) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 4 data contract is missing: $RelativePath"
+}
+
+$MigrationPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script'
+if (Test-Path -LiteralPath $MigrationPath) {
+    $MigrationContent = Get-Content -LiteralPath $MigrationPath -Raw
+    Assert-True ($MigrationContent -match 'GA_SETTINGS_SCHEMA_NEWER') 'Settings migration must reject future schemas'
+    Assert-True ($MigrationContent -match 'events') 'Settings reads and migrations must report events'
+    Assert-True ($MigrationContent -match 'settings_schema_version') 'Settings migration must write schema v1'
+}
+
+$StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
+if (Test-Path -LiteralPath $StorePath) {
+    $StoreContent = Get-Content -LiteralPath $StorePath -Raw
+    Assert-True ($StoreContent -match 'LAUNCH_TOKEN_TTL\s*=\s*600') 'Launch token TTL must be 600 seconds'
+    Assert-True ($StoreContent -match 'ga1:') 'Launch token must use the ga1:<epoch>:<nonce> grammar'
+    Assert-True ($StoreContent -match 'volatile_launch_permits') 'Launch activation must require a process-local volatile permit'
+    Assert-True ($StoreContent -match 'GA_RESUME_ALREADY_PENDING') 'Session store must not overwrite a pending resume intent'
+    Assert-True (([regex]::Matches($StoreContent, 'GA_INTENT_CONFLICT')).Count -ge 4) 'Launch/resume issuance and consumption must reject intent conflicts'
+    Assert-True ($StoreContent -match 'remove_line') 'Transient and optional character-creation keys must use remove_line'
+    Assert-True ($StoreContent -notmatch '\btime_global\b') 'Session store must use injected wall-clock/os.time instead of time_global'
+    Assert-True ($StoreContent -notmatch '(?is)\bw_value\s*\([^\)]*,\s*nil\s*\)') 'Session store must never use w_value(..., nil)'
+    foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
+        Assert-True ($StoreContent -match [regex]::Escape($Key)) "Session store must cover transient key $Key"
+    }
+    foreach ($Key in @('new_game_difficulty','new_game_economy','new_game_character_name','new_game_faction','new_game_map','new_game_money','new_game_loadout','new_game_story_mode')) {
+        Assert-True ($StoreContent -match [regex]::Escape($Key)) "Character-creation bridge must cover $Key"
+    }
+}
+
+$DxmlPath = Join-Path $RepoRoot 'src\gamedata\scripts\modxml_gamma_arena.script'
+if (Test-Path -LiteralPath $DxmlPath) {
+    $DxmlContent = Get-Content -LiteralPath $DxmlPath -Raw
+    Assert-True ($DxmlContent -match 'RegisterScriptCallback\s*\(\s*"on_xml_read"') 'DXML module must register on_xml_read from its zero-argument registrar'
+    Assert-True ($DxmlContent -match 'xml_file_name\s*~=\s*"ui_mm_main\.xml"') 'DXML handler must ignore every file except ui_mm_main.xml'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main btn\[name=btn_gamma_arena\]"\s*\)') 'DXML handler must query the exact duplicate guard selector'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
+    Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
+    Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
+}
+
+$MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
+if (Test-Path -LiteralPath $MainMenuPath) {
+    $MainMenuContent = Get-Content -LiteralPath $MainMenuPath -Raw
+    Assert-True ($MainMenuContent -match 'RegisterScriptCallback\s*\(\s*"main_menu_on_init"') 'Main-menu adapter must bind through main_menu_on_init'
+    Assert-True ($MainMenuContent -match 'type\s*\(\s*menu\.AddCallback\s*\)\s*==\s*"function"') 'Main-menu adapter must feature-probe AddCallback'
+    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind only btn_gamma_arena'
+    Assert-True ($MainMenuContent -notmatch 'ui_main_menu') 'Main-menu adapter must not monkey-patch ui_main_menu'
+}
+
+$UiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
+if (Test-Path -LiteralPath $UiScriptPath) {
+    $UiContent = Get-Content -LiteralPath $UiScriptPath -Raw
+    foreach ($Api in @('CScriptXmlInit','InitStatic','InitTextWnd','InitEditBox','Init3tButton','InitComboBox','Register','AddCallback','StartGame')) {
+        Assert-True ($UiContent -match $Api) "Start UI must use native API $Api"
+    }
+    Assert-True ($UiContent -match 'ShowFatal') 'Start UI must expose fatal-error mode'
+    Assert-True ($UiContent -match 'fatal_main_menu') 'Fatal mode must expose exactly one main-menu action seam'
+}
+
+$UiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
+if (Test-Path -LiteralPath $UiXmlPath) {
+    [xml]$UiXml = Get-Content -LiteralPath $UiXmlPath -Raw
+    foreach ($Id in @('gamma_arena_start','title','difficulty','seed','random_seed','validation','start','back','fatal','fatal_text','fatal_main_menu')) {
+        Assert-True ($null -ne $UiXml.SelectSingleNode("//*[local-name()='$Id']")) "Start UI XML is missing control $Id"
+    }
+    Assert-True (@($UiXml.SelectNodes("//*[local-name()='fatal']/*[local-name()='fatal_main_menu']")).Count -eq 1) 'Fatal UI must contain exactly one main-menu action'
+}
+
+foreach ($Locale in @('rus','eng')) {
+    $LocalePath = Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena.xml"
+    if (Test-Path -LiteralPath $LocalePath) {
+        [xml]$LocaleXml = Get-Content -LiteralPath $LocalePath -Raw
+        $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
+        Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
+        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid')) {
+            Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
+        }
+    }
+}
+
+$RussianLocalePath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
+if (Test-Path -LiteralPath $RussianLocalePath) {
+    [xml]$RussianXml = Get-Content -LiteralPath $RussianLocalePath -Raw -Encoding UTF8
+    $RussianContent = (@($RussianXml.SelectNodes('//text')) | ForEach-Object { $_.InnerText }) -join "`n"
+    $RussianExpected = @(
+        (ConvertFrom-Json '"\u041d\u043e\u0432\u0438\u0447\u043e\u043a"'),
+        (ConvertFrom-Json '"\u0421\u0442\u0430\u043b\u043a\u0435\u0440"'),
+        (ConvertFrom-Json '"\u0412\u0435\u0442\u0435\u0440\u0430\u043d"'),
+        (ConvertFrom-Json '"\u041c\u0430\u0441\u0442\u0435\u0440"'),
+        ((ConvertFrom-Json '"\u0421\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0439"') + ' seed'),
+        (ConvertFrom-Json '"\u041d\u0410\u0427\u0410\u0422\u042c"'),
+        (ConvertFrom-Json '"\u041d\u0410\u0417\u0410\u0414"'),
+        (ConvertFrom-Json '"\u0412 \u0433\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e"')
+    )
+    foreach ($Text in $RussianExpected) {
+        Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact UTF-8 text: $Text"
+    }
+}
+
+$SessionSchemaPath = Join-Path $RepoRoot 'schemas\session-v1.md'
+if (Test-Path -LiteralPath $SessionSchemaPath) {
+    $SessionSchemaContent = Get-Content -LiteralPath $SessionSchemaPath -Raw
+    foreach ($Term in @('session_nonce','checkpoint_name','resume_session_nonce','FightSpec','FightRegistry','ResumeIntent','non-durable','ga1:<issued_at_epoch>:<nonce>','600')) {
+        Assert-True ($SessionSchemaContent -match [regex]::Escape($Term)) "Session schema must document $Term"
     }
 }
 
@@ -250,6 +392,11 @@ $Task2RngPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rng.script
 if (Test-Path -LiteralPath $Task2RunnerPath) {
     $Task2RunnerContent = Get-Content -LiteralPath $Task2RunnerPath -Raw
     Assert-True ($Task2RunnerContent -match '(?s)pcall\s*\(\s*function\s*\(\s*\)\s*return\s+gamma_arena_test_domain\.run\s*\(\s*run_case\s*\)\s*end\s*\)') 'Dev test runner must resolve and execute the domain suite inside pcall'
+}
+$Task4DomainTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script'
+if (Test-Path -LiteralPath $Task4DomainTestPath) {
+    $Task4DomainTestContent = Get-Content -LiteralPath $Task4DomainTestPath -Raw
+    Assert-True ($Task4DomainTestContent -match 'gamma_arena_test_migrations\.run\s*\(\s*run_case_fn\s*\)') 'Dev domain suite must execute Task 4 migration/session tests'
 }
 if (Test-Path -LiteralPath $Task2LogPath) {
     $Task2LogContent = Get-Content -LiteralPath $Task2LogPath -Raw
