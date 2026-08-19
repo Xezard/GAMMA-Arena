@@ -40,6 +40,7 @@ $ForbiddenOverrides = @(
 )
 
 $SourceGamedata = Join-Path $RepoRoot 'src\gamedata'
+$AllSourceFiles = @()
 if (Test-Path -LiteralPath $SourceGamedata) {
     $AllSourceFiles = @(Get-ChildItem -LiteralPath $SourceGamedata -File -Recurse)
 
@@ -60,7 +61,10 @@ if (Test-Path -LiteralPath $SourceGamedata) {
         }
     }
 
-    $ArenaScripts = @(Get-ChildItem -LiteralPath (Join-Path $SourceGamedata 'scripts') -Filter 'gamma_arena_*' -File -ErrorAction SilentlyContinue)
+    $ArenaScripts = @($AllSourceFiles | Where-Object {
+        $RelativePath = $_.FullName.Substring($SourceGamedata.Length).TrimStart('\', '/').Replace('/', '\')
+        $RelativePath -match '^scripts\\' -and $_.Name -like 'gamma_arena_*'
+    })
     foreach ($Script in $ArenaScripts) {
         Assert-True (-not (Test-TextPattern $Script.FullName '\bmath\.random(seed)?\b')) "Non-deterministic random call: $(Get-RelativeRepoPath $Script.FullName)"
     }
@@ -72,7 +76,10 @@ if (Test-Path -LiteralPath $SourceGamedata) {
         }
     }
 
-    $CatalogFiles = @($AllSourceFiles | Where-Object { $_.Name -match '(?i)(npc.*catalog|catalog.*npc|npc_catalog)' })
+    $CatalogFiles = @($AllSourceFiles | Where-Object {
+        $RelativePath = $_.FullName.Substring($SourceGamedata.Length).TrimStart('\', '/').Replace('/', '\')
+        $RelativePath -ieq 'configs\gamma_arena\gamma_arena_catalogs.ltx' -or $_.Name -match '(?i)(npc.*catalog|catalog.*npc|npc_catalog)'
+    })
     $MutantPattern = '(?i)\b(bloodsucker|boar|burer|cat|chimera|controller|dog|flesh|fracture|gigant|izlom|karlik|pseudodog|pseudogiant|psy[_-]?dog|snork|tushkano|zombie|mutant)\b'
     foreach ($Catalog in $CatalogFiles) {
         Assert-True (-not (Test-TextPattern $Catalog.FullName $MutantPattern)) "NPC catalog contains known mutant entry: $(Get-RelativeRepoPath $Catalog.FullName)"
@@ -84,14 +91,12 @@ if (Test-Path -LiteralPath $SourceGamedata) {
         $HasDxmlInsert = $MenuContent -match '(?i)dxml|insert'
         if ($HasDxmlInsert) {
             Assert-True ($MenuContent -match 'btn_gamma_arena') "DXML main-menu insert lacks btn_gamma_arena: $(Get-RelativeRepoPath $MenuXml.FullName)"
-            Assert-True ($MenuContent -match '(?i)(not\s+.*btn_gamma_arena|btn_gamma_arena.*(not|exists|find|query)|duplicate)') "DXML main-menu insert lacks duplicate query guard: $(Get-RelativeRepoPath $MenuXml.FullName)"
+            Assert-True ($MenuContent -match '(?is)\bnot\s+[\w.:_]+\s*:\s*(find|exists|query|has)\s*\(\s*["'']btn_gamma_arena["'']\s*\)') "DXML main-menu insert lacks a negative duplicate query guard: $(Get-RelativeRepoPath $MenuXml.FullName)"
         }
     }
 }
 
-$ReleaseFiles = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -ErrorAction SilentlyContinue | Where-Object {
-    $_.FullName -notmatch '\\(\.git|dist|build|work)\\'
-})
+$ReleaseFiles = $AllSourceFiles
 foreach ($File in $ReleaseFiles) {
     Assert-True ($File.Name -notmatch '(?i)^gamma_arena_test_') "Release source contains test fixture: $(Get-RelativeRepoPath $File.FullName)"
 }

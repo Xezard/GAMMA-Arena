@@ -24,13 +24,20 @@ if ($RunIndexes.Count -eq 0) {
 
 $LastRunIndex = $RunIndexes[$RunIndexes.Count - 1]
 $RunLines = @($Lines[$LastRunIndex..($Lines.Count - 1)])
-if (-not ($RunLines -contains '[GammaArenaTest] ALL PASS')) {
+$AllPassIndex = [Array]::LastIndexOf([string[]]$RunLines, '[GammaArenaTest] ALL PASS')
+if ($AllPassIndex -lt 0) {
     throw 'The final Gamma Arena test run has no [GammaArenaTest] ALL PASS marker.'
 }
 
 foreach ($Line in $RunLines) {
-    if ($Line -match '\[GammaArenaTest\]\s+FAIL' -or $Line -match '\[error\]\s+\[GammaArena\]') {
+    if ($Line -match '\[GammaArenaTest\]\s+.*\b(FAIL|FAILED)\b' -or $Line -match '\[error\]\s+\[GammaArena\]') {
         throw "Gamma Arena game test failure: $Line"
+    }
+}
+
+for ($Index = $AllPassIndex + 1; $Index -lt $RunLines.Count; $Index++) {
+    if ($RunLines[$Index] -match '^\[GammaArenaTest\]\s+') {
+        throw "Gamma Arena test status appears after ALL PASS: $($RunLines[$Index])"
     }
 }
 

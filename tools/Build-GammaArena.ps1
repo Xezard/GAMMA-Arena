@@ -7,8 +7,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+$ReleaseOutputDirectory = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'dist')).TrimEnd('\', '/')
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = Join-Path $RepoRoot 'dist'
+    $OutputDirectory = $ReleaseOutputDirectory
+}
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\', '/')
+if ($Configuration -eq 'Release' -and -not [string]::Equals($OutputDirectory, $ReleaseOutputDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Release output directory must be $ReleaseOutputDirectory"
 }
 
 & (Join-Path $RepoRoot 'tools\Test-GammaArena.ps1')
@@ -20,7 +25,6 @@ $Version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim(
 $BuildRoot = Join-Path $RepoRoot 'build'
 $StageRoot = Join-Path $BuildRoot ("staging-$Configuration")
 $StageGameData = Join-Path $StageRoot 'gamedata'
-$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $PackagePath = Join-Path $OutputDirectory ("Gamma-Arena-v$Version-MO2.zip")
 
 if (Test-Path -LiteralPath $StageRoot) {
