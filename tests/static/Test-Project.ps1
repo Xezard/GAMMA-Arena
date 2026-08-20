@@ -836,6 +836,7 @@ if ($IsRepositoryCheckout) {
             'CURRENT_ADDON_VERSION',
             'migrate_v0_to_v1',
             'while schema_version < CURRENT_SETTINGS_SCHEMA',
+            'GA_ADDON_VERSION_UNKNOWN',
             'GA_ADDON_VERSION_CHANGED',
             'active_fight_compatible = false',
             'commit_remove_keys = TRANSIENT_INTENT_KEYS',
@@ -843,6 +844,22 @@ if ($IsRepositoryCheckout) {
             'resume_pending'
         )) {
             Assert-True ($MigrationContent -match [regex]::Escape($Marker)) "Task 10 migration policy must cover $Marker"
+        }
+        Assert-True ($MigrationContent -notmatch 'snapshot\.addon_version\s*==\s*nil\s+or') 'Schema-v1 state without addon_version must not be treated as current-version state'
+        $Task10MigrationTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
+        Assert-True (Test-Path -LiteralPath $Task10MigrationTestPath) 'Task 10 Dev migration tests are missing'
+        if (Test-Path -LiteralPath $Task10MigrationTestPath) {
+            $Task10MigrationTestContent = Get-Content -LiteralPath $Task10MigrationTestPath -Raw
+            foreach ($CaseName in @(
+                'schema_v1_without_addon_version_is_incompatible',
+                'schema_v1_current_addon_preserves_transient_intents',
+                'schema_v1_different_addon_clears_transient_intents',
+                'GA_ADDON_VERSION_UNKNOWN',
+                'GA_ADDON_VERSION_CHANGED',
+                'active_fight_compatible'
+            )) {
+                Assert-True ($Task10MigrationTestContent -match [regex]::Escape($CaseName)) "Task 10 Dev migration tests must cover $CaseName"
+            }
         }
     }
 
@@ -893,14 +910,14 @@ if ($IsRepositoryCheckout) {
             $null = Write-Task10FixtureFile $AnomalyRoot 'bin\VerifiedDX11.exe' 'verified'
             $null = Write-Task10FixtureFile $AnomalyRoot 'gamedata\scripts\ui_main_menu.script' 'base menu'
 
-            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\configs\ui\ui_mm_main.xml' 'framework menu xml'
-            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\axr_main.script' 'axr'
-            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\bind_stalker_ext.script' 'bind'
-            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\xrs_rnd_npc_loadout.script' 'loadout'
+            $EffectiveMenuXmlPath = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\configs\ui\ui_mm_main.xml' 'framework menu xml'
+            $EffectiveAxrPath = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\axr_main.script' 'axr'
+            $EffectiveBindPath = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\bind_stalker_ext.script' 'bind'
+            $EffectiveLoadoutPath = Write-Task10FixtureFile $Mo2Root 'mods\Direct Root\scripts\xrs_rnd_npc_loadout.script' 'wrapperless loadout'
             $EffectiveMenuPath = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_main_menu.script' 'effective menu'
-            $null = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_mm_faction_select.script' 'faction select'
+            $EffectiveFactionPath = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_mm_faction_select.script' 'faction select'
             $null = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\modxml_gamma_arena.script' 'conflicting patch'
-            $ModListPath = Write-Task10FixtureFile $Mo2Root ("profiles\$Profile\modlist.txt") "-Disabled`r`n+Framework`r`n+High Priority`r`n"
+            $ModListPath = Write-Task10FixtureFile $Mo2Root ("profiles\$Profile\modlist.txt") "-Disabled`r`n+Framework`r`n+Direct Root`r`n+High Priority`r`n"
 
             $null = Write-Task10FixtureFile $ReleaseRoot 'configs\ui\modxml_gamma_arena.xml' 'unique dxml'
             $null = Write-Task10FixtureFile $ReleaseRoot 'scripts\modxml_gamma_arena.script' 'release patch'
@@ -922,7 +939,10 @@ if ($IsRepositoryCheckout) {
             Assert-True ($BeforeFingerprint -ceq $AfterFingerprint) 'Compatibility report must never write to Anomaly or MO2 roots'
             Assert-True ($FirstReport -match [regex]::Escape(('Active MO2 profile: `' + $Profile + '`'))) 'Compatibility report must identify the active MO2 profile'
             Assert-True ($FirstReport -match [regex]::Escape((Get-FileHash -LiteralPath $ModListPath -Algorithm SHA256).Hash)) 'Compatibility report must hash active modlist.txt'
-            Assert-True ($FirstReport -match [regex]::Escape((Get-FileHash -LiteralPath $EffectiveMenuPath -Algorithm SHA256).Hash)) 'Compatibility report must hash the effective high-priority callback provider'
+            foreach ($ProviderPath in @($EffectiveMenuXmlPath, $EffectiveAxrPath, $EffectiveBindPath, $EffectiveLoadoutPath, $EffectiveMenuPath, $EffectiveFactionPath)) {
+                Assert-True ($FirstReport -match [regex]::Escape((Get-FileHash -LiteralPath $ProviderPath -Algorithm SHA256).Hash)) "Compatibility report must hash every effective provider: $ProviderPath"
+            }
+            Assert-True ($FirstReport -match 'MO2 mod: Direct Root') 'Compatibility report must resolve wrapperless mod data roots'
             foreach ($RequiredName in @('AnomalyDX9.exe','AnomalyDX11.exe','VerifiedDX11.exe','ui_main_menu.script','ui_mm_main.xml','ui_mm_faction_select.script','axr_main.script','bind_stalker_ext.script','xrs_rnd_npc_loadout.script')) {
                 Assert-True ($FirstReport -match [regex]::Escape($RequiredName)) "Compatibility report must list $RequiredName"
             }
@@ -933,6 +953,57 @@ if ($IsRepositoryCheckout) {
 
             $PreviousErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
+
+            Remove-Item -LiteralPath $EffectiveFactionPath -Force
+            $MissingProviderOutput = (& powershell.exe @Arguments 2>&1 | Out-String)
+            $MissingProviderExit = $LASTEXITCODE
+            Assert-True ($MissingProviderExit -ne 0) 'Compatibility report must fail nonzero when a critical provider is missing'
+            Assert-True ($MissingProviderOutput -match 'Missing critical providers:\s*1') 'Compatibility report must count missing critical providers'
+            Assert-True ($MissingProviderOutput -match 'INCOMPLETE') 'Compatibility report must label missing-provider evidence incomplete'
+            $EffectiveFactionPath = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_mm_faction_select.script' 'faction select'
+
+            $null = Write-Task10FixtureFile $Mo2Root 'Outside\placeholder.txt' 'traversal target'
+            $InvalidModNames = @('..\Outside', 'Nested\Child', 'Nested/Child', 'Bad:Name', 'Trailing.', 'Trailing ', 'CON')
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\Nested\Child\placeholder.txt' 'nested target'
+            $InvalidIndex = 0
+            foreach ($InvalidModName in $InvalidModNames) {
+                $InvalidProfile = "Invalid Mod $InvalidIndex"
+                $null = Write-Task10FixtureFile $Mo2Root ("profiles\$InvalidProfile\modlist.txt") ("+" + $InvalidModName + "`r`n")
+                $InvalidOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $InvalidProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+                $InvalidExit = $LASTEXITCODE
+                Assert-True ($InvalidExit -ne 0 -and $InvalidOutput -match 'Enabled MO2 mod name is invalid') "Compatibility report must reject non-component enabled mod name: $InvalidModName"
+                $InvalidIndex += 1
+            }
+
+            $OutsideProfileRoot = Join-Path $Task10TempRoot 'outside-profile'
+            $null = Write-Task10FixtureFile $OutsideProfileRoot 'modlist.txt' "+Framework`r`n+Direct Root`r`n+High Priority`r`n"
+            $EscapedProfilePath = Join-Path $Mo2Root 'profiles\Escaped Profile'
+            $null = New-Item -ItemType Junction -Path $EscapedProfilePath -Target $OutsideProfileRoot
+            $EscapedProfileOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile 'Escaped Profile' -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $EscapedProfileExit = $LASTEXITCODE
+            Assert-True ($EscapedProfileExit -ne 0 -and $EscapedProfileOutput -match 'Resolved MO2 profile escapes profiles root') 'Compatibility report must reject a profile junction outside profiles root'
+
+            $OutsideModRoot = Join-Path $Task10TempRoot 'outside-mod'
+            $null = Write-Task10FixtureFile $OutsideModRoot 'placeholder.txt' 'escaped mod'
+            $EscapedModPath = Join-Path $Mo2Root 'mods\Escaped Mod'
+            $null = New-Item -ItemType Junction -Path $EscapedModPath -Target $OutsideModRoot
+            $EscapedModProfile = 'Escaped Mod Profile'
+            $null = Write-Task10FixtureFile $Mo2Root ("profiles\$EscapedModProfile\modlist.txt") "+Escaped Mod`r`n"
+            $EscapedModOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $EscapedModProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $EscapedModExit = $LASTEXITCODE
+            Assert-True ($EscapedModExit -ne 0 -and $EscapedModOutput -match 'Resolved enabled MO2 mod escapes mods root') 'Compatibility report must reject a mod junction outside mods root'
+
+            $DataEscapeModRoot = Join-Path $Mo2Root 'mods\Data Escape'
+            $OutsideDataRoot = Join-Path $Task10TempRoot 'outside-data'
+            $null = Write-Task10FixtureFile $DataEscapeModRoot 'placeholder.txt' 'data escape mod'
+            $null = Write-Task10FixtureFile $OutsideDataRoot 'scripts\xrs_rnd_npc_loadout.script' 'escaped data'
+            $null = New-Item -ItemType Junction -Path (Join-Path $DataEscapeModRoot 'gamedata') -Target $OutsideDataRoot
+            $DataEscapeProfile = 'Data Escape Profile'
+            $null = Write-Task10FixtureFile $Mo2Root ("profiles\$DataEscapeProfile\modlist.txt") "+Data Escape`r`n"
+            $DataEscapeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $DataEscapeProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $DataEscapeExit = $LASTEXITCODE
+            Assert-True ($DataEscapeExit -ne 0 -and $DataEscapeOutput -match 'Resolved MO2 mod data root escapes enabled mod root') 'Compatibility report must reject a gamedata junction outside its enabled mod root'
+
             $MissingRootOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot (Join-Path $Task10TempRoot 'missing') -Mo2Root $Mo2Root -Profile $Profile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
             $MissingRootExit = $LASTEXITCODE
             Assert-True ($MissingRootExit -ne 0 -and $MissingRootOutput -match 'Anomaly root does not exist') 'Compatibility report must fail clearly for a missing Anomaly root'

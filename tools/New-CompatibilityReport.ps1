@@ -15,11 +15,80 @@ if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
     $ReleaseRoot = Join-Path $RepoRoot 'src\gamedata'
 }
 
+function Resolve-PhysicalDirectory([string]$Path) {
+    $Resolved = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\', '/')
+    $Seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    while ($true) {
+        if (-not $Seen.Add($Resolved)) {
+            throw "Directory reparse-point cycle detected: $Path"
+        }
+        $Item = Get-Item -LiteralPath $Resolved -Force
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            return $Item.FullName.TrimEnd('\', '/')
+        }
+        $Targets = @($Item.Target)
+        if ($Targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$Targets[0])) {
+            throw "Directory reparse point has no single target: $Resolved"
+        }
+        $Target = [string]$Targets[0]
+        if (-not [IO.Path]::IsPathRooted($Target)) {
+            $Target = Join-Path $Item.Parent.FullName $Target
+        }
+        if (-not (Test-Path -LiteralPath $Target -PathType Container)) {
+            throw "Directory reparse-point target does not exist: $Resolved"
+        }
+        $Resolved = (Resolve-Path -LiteralPath $Target).Path.TrimEnd('\', '/')
+    }
+}
+
 function Resolve-RequiredDirectory([string]$Path, [string]$Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         throw "$Label does not exist: $Path"
     }
-    return (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\', '/')
+    return Resolve-PhysicalDirectory $Path
+}
+
+function Test-ContainedPath([string]$Parent, [string]$Candidate, [bool]$AllowEqual) {
+    $NormalizedParent = $Parent.TrimEnd('\', '/')
+    $NormalizedCandidate = $Candidate.TrimEnd('\', '/')
+    if ($AllowEqual -and [string]::Equals($NormalizedParent, $NormalizedCandidate, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    $Prefix = $NormalizedParent + [IO.Path]::DirectorySeparatorChar
+    return $NormalizedCandidate.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-ContainedDirectory(
+    [string]$Path,
+    [string]$Parent,
+    [string]$Label,
+    [string]$ParentLabel,
+    [bool]$AllowEqual = $false
+) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "$Label does not exist: $Path"
+    }
+    $Resolved = Resolve-PhysicalDirectory $Path
+    if (-not (Test-ContainedPath $Parent $Resolved $AllowEqual)) {
+        throw "Resolved $Label escapes $ParentLabel root: $Resolved"
+    }
+    return $Resolved
+}
+
+function Test-SinglePathComponent([string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Name) -or $Name -eq '.' -or $Name -eq '..') {
+        return $false
+    }
+    if ($Name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        return $false
+    }
+    if (-not [string]::Equals($Name.TrimEnd([char[]]@(' ', '.')), $Name, [StringComparison]::Ordinal)) {
+        return $false
+    }
+    if ($Name -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') {
+        return $false
+    }
+    return [string]::Equals([IO.Path]::GetFileName($Name), $Name, [StringComparison]::Ordinal)
 }
 
 function Get-OrdinalSortedFiles([string]$Root) {
@@ -46,7 +115,7 @@ function ConvertTo-MarkdownCell([object]$Value) {
 function Get-ModDataRoot([string]$ModRoot) {
     $NestedGameData = Join-Path $ModRoot 'gamedata'
     if (Test-Path -LiteralPath $NestedGameData -PathType Container) {
-        return $NestedGameData
+        return Resolve-ContainedDirectory $NestedGameData $ModRoot 'MO2 mod data root' 'enabled mod' $false
     }
     return $ModRoot
 }
@@ -62,22 +131,14 @@ if ([string]::IsNullOrWhiteSpace($Profile) -or
     throw "MO2 profile name is invalid: $Profile"
 }
 
-$ProfilesRoot = Join-Path $Mo2Root 'profiles'
-$ProfileRoot = Join-Path $ProfilesRoot $Profile
-if (-not (Test-Path -LiteralPath $ProfileRoot -PathType Container)) {
-    throw "MO2 profile does not exist: $ProfileRoot"
-}
-$ProfileRoot = (Resolve-Path -LiteralPath $ProfileRoot).Path
+$ProfilesRoot = Resolve-RequiredDirectory (Join-Path $Mo2Root 'profiles') 'MO2 profiles root'
+$ProfileRoot = Resolve-ContainedDirectory (Join-Path $ProfilesRoot $Profile) $ProfilesRoot 'MO2 profile' 'profiles' $false
 $ModListPath = Join-Path $ProfileRoot 'modlist.txt'
 if (-not (Test-Path -LiteralPath $ModListPath -PathType Leaf)) {
     throw "Active MO2 profile modlist.txt does not exist: $ModListPath"
 }
 
-$ModsRoot = Join-Path $Mo2Root 'mods'
-if (-not (Test-Path -LiteralPath $ModsRoot -PathType Container)) {
-    throw "MO2 mods root does not exist: $ModsRoot"
-}
-$ModsRoot = (Resolve-Path -LiteralPath $ModsRoot).Path
+$ModsRoot = Resolve-RequiredDirectory (Join-Path $Mo2Root 'mods') 'MO2 mods root'
 
 $EnabledMods = @()
 $Priority = 0
@@ -87,14 +148,10 @@ foreach ($RawLine in @(Get-Content -LiteralPath $ModListPath)) {
         continue
     }
     $ModName = $Line.Substring(1)
-    if ([string]::IsNullOrWhiteSpace($ModName)) {
-        throw "Active MO2 profile contains an empty enabled-mod entry: $ModListPath"
+    if (-not (Test-SinglePathComponent $ModName)) {
+        throw "Enabled MO2 mod name is invalid: $ModName"
     }
-    $ModRoot = Join-Path $ModsRoot $ModName
-    if (-not (Test-Path -LiteralPath $ModRoot -PathType Container)) {
-        throw "Enabled MO2 mod folder does not exist: $ModRoot"
-    }
-    $ModRoot = (Resolve-Path -LiteralPath $ModRoot).Path
+    $ModRoot = Resolve-ContainedDirectory (Join-Path $ModsRoot $ModName) $ModsRoot 'enabled MO2 mod' 'mods' $false
     $EnabledMods += [PSCustomObject]@{
         Priority = $Priority
         Name = $ModName
@@ -154,6 +211,7 @@ foreach ($RelativePath in $CriticalPaths) {
         Sha256 = if ($null -eq $ProviderPath) { '-' } else { Get-Sha256 $ProviderPath }
     }
 }
+$MissingProviders = @($Providers | Where-Object { $null -eq $_.Path })
 
 $ForbiddenOverrides = @(
     'configs/items/settings/npc_loadouts/npc_loadouts.ltx',
@@ -238,6 +296,11 @@ foreach ($Provider in $Providers) {
     $Lines.Add('| `' + (ConvertTo-MarkdownCell $Provider.RelativePath) + '` | ' + (ConvertTo-MarkdownCell $Provider.Provider) + ' | ' + $ProviderPathText + ' | ' + $HashText + ' |')
 }
 $Lines.Add('')
+$Lines.Add('Missing critical providers: ' + $MissingProviders.Count)
+if ($MissingProviders.Count -gt 0) {
+    $Lines.Add('Evidence status: **INCOMPLETE**')
+}
+$Lines.Add('')
 $Lines.Add('## Release overlap review')
 $Lines.Add('')
 $Lines.Add('- **' + $BlockingOverrides.Count + ' blocking overlaps**')
@@ -266,9 +329,17 @@ else {
     }
 }
 $Lines.Add('')
-$Lines.Add('This fingerprint is compatibility evidence only; it is not an installed-runtime PASS result.')
+if ($MissingProviders.Count -gt 0) {
+    $Lines.Add('This fingerprint is INCOMPLETE because one or more critical providers are missing; it is not an installed-runtime PASS result.')
+}
+else {
+    $Lines.Add('This fingerprint is compatibility evidence only; it is not an installed-runtime PASS result.')
+}
 
 [Console]::Out.Write(($Lines -join "`n") + "`n")
 if ($BlockingOverrides.Count -gt 0) {
     exit 2
+}
+if ($MissingProviders.Count -gt 0) {
+    exit 3
 }

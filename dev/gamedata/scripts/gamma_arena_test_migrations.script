@@ -233,16 +233,57 @@ local function migrations_cover_absent_v0_v1_and_future()
     gamma_arena_test_assert.equals(v0.data.last_difficulty_id, "veteran", "v0 difficulty preserved")
     gamma_arena_test_assert.equals(v0.data.last_seed_mode, "manual", "v0 seed mode preserved")
 
-    local v1 = fake_config({ settings_schema_version = "1", last_difficulty_id = "master", last_seed_mode = "random" })
-    local v1_result = gamma_arena_migrations.migrate(v1)
-    gamma_arena_test_assert.is_true(v1_result.ok, "v1 migration is idempotent")
-    gamma_arena_test_assert.equals(v1.save_count, 0, "idempotent v1 does not save")
-
     local future = fake_config({ settings_schema_version = "2" })
     local future_result = gamma_arena_migrations.migrate(future)
     gamma_arena_test_assert.is_false(future_result.ok, "future settings reject")
     gamma_arena_test_assert.equals(future_result.error.code, "GA_SETTINGS_SCHEMA_NEWER", "future schema code")
     gamma_arena_test_assert.equals(future.save_count, 0, "future settings remain untouched")
+end
+
+local function versioned_v1_config(addon_version)
+    local initial = {
+        settings_schema_version = "1",
+        last_difficulty_id = "master",
+        last_seed_mode = "random"
+    }
+    if addon_version ~= nil then initial.addon_version = addon_version end
+    for _, key in ipairs(launch_keys) do initial[key] = "stale_launch" end
+    for _, key in ipairs(resume_keys) do initial[key] = "stale_resume" end
+    return fake_config(initial)
+end
+
+local function schema_v1_without_addon_version_is_incompatible()
+    local config = versioned_v1_config(nil)
+    local result = gamma_arena_migrations.migrate(config)
+    gamma_arena_test_assert.is_true(result.ok, "unversioned v1 settings are adopted fail-closed")
+    gamma_arena_test_assert.equals(config.data.addon_version, "0.1.0", "unversioned v1 records current addon")
+    gamma_arena_test_assert.equals(config.save_count, 1, "unversioned v1 writes exactly once")
+    assert_keys_absent(config, launch_keys, "unversioned v1 clears launch intent")
+    assert_keys_absent(config, resume_keys, "unversioned v1 clears resume intent")
+    gamma_arena_test_assert.equals(result.value.events[1].code, "GA_ADDON_VERSION_UNKNOWN", "unversioned v1 reports unknown addon")
+    gamma_arena_test_assert.is_false(result.value.events[1].active_fight_compatible, "unversioned v1 never claims active fight compatibility")
+end
+
+local function schema_v1_current_addon_preserves_transient_intents()
+    local config = versioned_v1_config("0.1.0")
+    local result = gamma_arena_migrations.migrate(config)
+    gamma_arena_test_assert.is_true(result.ok, "current v1 settings are idempotent")
+    gamma_arena_test_assert.equals(config.save_count, 0, "current v1 does not save")
+    gamma_arena_test_assert.equals(config.data.launch_pending, "stale_launch", "current addon does not clear launch intent")
+    gamma_arena_test_assert.equals(config.data.resume_pending, "stale_resume", "current addon does not clear resume intent")
+    gamma_arena_test_assert.equals(#result.value.events, 0, "current addon reports no migration event")
+end
+
+local function schema_v1_different_addon_clears_transient_intents()
+    local config = versioned_v1_config("0.0.9")
+    local result = gamma_arena_migrations.migrate(config)
+    gamma_arena_test_assert.is_true(result.ok, "different addon version migrates")
+    gamma_arena_test_assert.equals(config.data.addon_version, "0.1.0", "different addon records current version")
+    gamma_arena_test_assert.equals(config.save_count, 1, "different addon writes exactly once")
+    assert_keys_absent(config, launch_keys, "different addon clears launch intent")
+    assert_keys_absent(config, resume_keys, "different addon clears resume intent")
+    gamma_arena_test_assert.equals(result.value.events[1].code, "GA_ADDON_VERSION_CHANGED", "different addon reports version change")
+    gamma_arena_test_assert.is_false(result.value.events[1].active_fight_compatible, "different addon never claims active fight compatibility")
 end
 
 local function request_validation_is_total_and_fail_closed()
@@ -1034,6 +1075,9 @@ end
 
 local cases = {
     { name = "settings_migrations", fn = migrations_cover_absent_v0_v1_and_future },
+    { name = "settings_v1_unknown_addon", fn = schema_v1_without_addon_version_is_incompatible },
+    { name = "settings_v1_current_addon", fn = schema_v1_current_addon_preserves_transient_intents },
+    { name = "settings_v1_different_addon", fn = schema_v1_different_addon_clears_transient_intents },
     { name = "start_request_validation", fn = request_validation_is_total_and_fail_closed },
     { name = "random_seed_injection", fn = random_seed_uses_injected_generator },
     { name = "durable_preferences", fn = durable_preferences_are_exact },
