@@ -3333,6 +3333,8 @@ local function task8_environment(options)
             env.next_id = env.next_id + 1
             env.registry.npcs[index] = { id = env.next_id, dead = false, released = false }
         end
+        env.next_id = env.next_id + 1
+        env.registry.items[1] = { id = env.next_id, released = false }
         return gamma_arena_result.ok({ state = "COUNTDOWN" })
     end
     function entities:update()
@@ -3368,10 +3370,14 @@ local function task8_environment(options)
         env.victory_dialogs[#env.victory_dialogs + 1] = model
         return gamma_arena_result.ok(true)
     end
-    function result_ui:clear_result() return gamma_arena_result.ok(true) end
+    function result_ui:clear_result()
+        if options.clear_result_error then return gamma_arena_result.err("GA_TEST_RESULT_CLEAR", "injected result clear failure") end
+        return gamma_arena_result.ok(true)
+    end
     local store = fake_store()
     function store:clear_resume_if_matches()
         env.clear_intent = env.clear_intent + 1
+        if options.clear_intent_error then return gamma_arena_result.err("GA_TEST_INTENT_CLEAR", "injected intent clear failure") end
         self.intent_state.launch_pending = false
         self.intent_state.resume_pending = false
         return gamma_arena_result.ok(true)
@@ -3389,6 +3395,11 @@ local function task8_environment(options)
             return true
         end,
         teardown = function()
+            env.teardown_calls = (env.teardown_calls or 0) + 1
+            if options.teardown_pending_then_error and env.teardown_calls == 1 then return gamma_arena_result.ok({ pending = true }) end
+            if options.teardown_error or (options.teardown_pending_then_error and env.teardown_calls >= 2) then
+                return gamma_arena_result.err("GA_TEST_TEARDOWN", "injected teardown failure")
+            end
             entities:cleanup(); entities:update(); checkpoint:cleanup()
             return gamma_arena_result.ok(true)
         end,
@@ -3549,6 +3560,61 @@ local function runtime_task8_death_errors_defer_fatal_ui_to_update()
     gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "deferred death error enters ERROR")
 end
 
+local function runtime_task8_result_action_failures_route_to_fatal()
+    local cases = {
+        { options = { clear_result_error = true }, action = "on_next", label = "clear result" },
+        { options = { clear_intent_error = true }, action = "on_main_menu", label = "clear intent" },
+        { options = { teardown_error = true }, action = "on_main_menu", label = "initial teardown" }
+    }
+    for _, case in ipairs(cases) do
+        local env = task8_environment(case.options); task8_pump_to_active(env)
+        env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
+        local failed = env.victory_dialogs[1][case.action]()
+        gamma_arena_test_assert.is_false(failed.ok, case.label .. " failure remains observable")
+        gamma_arena_test_assert.equals(env.fatal_shown, 1, case.label .. " failure routes to fatal UI once")
+        gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.label .. " failure enters ERROR")
+    end
+    local env = task8_environment(); task8_pump_to_active(env)
+    env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
+    env.orchestrator.victory_next_action = function() error("injected result action exception") end
+    local failed = env.victory_dialogs[1].on_next()
+    gamma_arena_test_assert.is_false(failed.ok, "result action exception becomes a structured failure")
+    gamma_arena_test_assert.equals(env.fatal_shown, 1, "result action exception routes to fatal UI once")
+end
+
+local function runtime_task8_inactive_cleanup_failures_route_to_fatal()
+    local env = task8_environment({ teardown_pending_then_error = true }); task8_pump_to_active(env)
+    env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
+    local requested = env.victory_dialogs[1].on_main_menu()
+    gamma_arena_test_assert.is_true(requested.ok, "ordinary cross-frame cleanup pending remains a success Result")
+    gamma_arena_test_assert.equals(env.fatal_shown, 0, "pending cleanup never opens fatal UI")
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local failed = callbacks.actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "later inactive cleanup failure remains observable")
+    gamma_arena_test_assert.equals(env.fatal_shown, 1, "inactive Arena cleanup failure routes to fatal UI")
+    gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "inactive cleanup failure enters ERROR")
+end
+
+local function runtime_task8_clean_registry_requires_exact_empty_arrays()
+    local cases = {
+        { registry = { state = "CLEAN", npcs = { { id = 10 } }, items = {} }, label = "retained NPC" },
+        { registry = { state = "CLEAN", npcs = {}, items = { { id = 11 } } }, label = "retained item" },
+        { registry = { state = "CLEAN", items = {} }, label = "missing NPC array" },
+        { registry = { state = "CLEAN", npcs = {} }, label = "missing item array" }
+    }
+    for _, case in ipairs(cases) do
+        local env = task8_environment()
+        env.registry = clone(case.registry)
+        env.deps.checkpoint.current = "NONE"
+        env.orchestrator.cleanup_required = true
+        env.orchestrator.teardown_done = true
+        local rejected = env.orchestrator:cleanup_ready_for_disconnect()
+        gamma_arena_test_assert.is_false(rejected.ok, case.label .. " cannot prove exact cleanup")
+        gamma_arena_test_assert.equals(rejected.error.code, "GA_RUNTIME_CLEANUP_FAILED", case.label .. " fails closed deterministically")
+        gamma_arena_test_assert.is_true(env.orchestrator.cleanup_required, case.label .. " cannot open disconnect gate")
+    end
+end
+
 local function runtime_task8_duplicate_result_clicks_are_idempotent()
     local env = task8_environment(); task8_pump_to_active(env)
     env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
@@ -3560,11 +3626,19 @@ end
 
 local function runtime_task8_one_hundred_fights_leave_empty_registries()
     local env = task8_environment(); task8_pump_to_active(env)
-    local seen = {}
+    local seen, seen_entity_ids = {}, {}
     for fight = 1, 100 do
         local fight_id = env.orchestrator.fight_spec:fight_id()
         gamma_arena_test_assert.is_false(seen[fight_id], "fight_id must be unique across the simulated loop")
         seen[fight_id] = true
+        gamma_arena_test_assert.is_true(#env.registry.npcs > 0, "every simulated fight owns registered NPC ids")
+        gamma_arena_test_assert.is_true(#env.registry.items > 0, "every simulated fight owns registered item ids")
+        for _, collection in ipairs({ env.registry.npcs, env.registry.items }) do
+            for _, record in ipairs(collection) do
+                gamma_arena_test_assert.is_false(seen_entity_ids[record.id], "next fight cannot reuse an old NPC/item id")
+                seen_entity_ids[record.id] = true
+            end
+        end
         env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
         if fight < 100 then
             env.victory_dialogs[#env.victory_dialogs].on_next()
@@ -3716,6 +3790,9 @@ local cases = {
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }
     ,{ name = "runtime_task8_main_menu_disconnect_retries_after_failure", fn = runtime_task8_main_menu_disconnect_retries_after_failure }
     ,{ name = "runtime_task8_death_errors_defer_fatal_ui_to_update", fn = runtime_task8_death_errors_defer_fatal_ui_to_update }
+    ,{ name = "runtime_task8_result_action_failures_route_to_fatal", fn = runtime_task8_result_action_failures_route_to_fatal }
+    ,{ name = "runtime_task8_inactive_cleanup_failures_route_to_fatal", fn = runtime_task8_inactive_cleanup_failures_route_to_fatal }
+    ,{ name = "runtime_task8_clean_registry_requires_exact_empty_arrays", fn = runtime_task8_clean_registry_requires_exact_empty_arrays }
     ,{ name = "runtime_task8_duplicate_result_clicks_are_idempotent", fn = runtime_task8_duplicate_result_clicks_are_idempotent }
     ,{ name = "runtime_task8_one_hundred_fights_leave_empty_registries", fn = runtime_task8_one_hundred_fights_leave_empty_registries }
 }

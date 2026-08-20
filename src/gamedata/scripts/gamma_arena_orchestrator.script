@@ -44,6 +44,11 @@ local function clock_elapsed(started, current)
     return (UINT32_MOD - started) + current
 end
 
+local function cleanup_registry_empty(snapshot)
+    return type(snapshot) == "table" and type(snapshot.npcs) == "table" and next(snapshot.npcs) == nil
+        and type(snapshot.items) == "table" and next(snapshot.items) == nil
+end
+
 local function error_results(result)
     local values = {}
     if type(result) == "table" and result.error and result.error.code == "GA_PREFLIGHT_FAILED"
@@ -271,6 +276,9 @@ function Orchestrator:cleanup_ready_for_disconnect()
         if entity_snapshot.state ~= "CLEAN" then
             return fail("GA_RUNTIME_CLEANUP_PENDING", "Entity cleanup is still pending", { state = entity_snapshot.state })
         end
+        if not cleanup_registry_empty(entity_snapshot) then
+            return fail("GA_RUNTIME_CLEANUP_FAILED", "Clean entity registry must contain exact empty NPC and item arrays")
+        end
     end
     local checkpoint = self.deps.checkpoint
     local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
@@ -316,6 +324,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.pending_victory = false
     self.pending_callback_error = nil
     self.result_action_locked = true
+    self.pending_disconnect = false
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then errors[#errors + 1] = teardown end
     self.session = nil
@@ -357,7 +366,9 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
         return result
     end
     local cleanup_callback = callback_name == "actor_on_net_destroy" or callback_name == "on_before_level_changing"
-    if was_active == true or cleanup_callback then return self:enter_fatal(result, cleanup_callback) end
+    local inactive_cleanup_update = was_active ~= true and (callback_name == "actor_on_update" or callback_name == "actor_on_first_update")
+        and (self.cleanup_required or self.pending_disconnect or self.runtime_stage == "CLEANING")
+    if was_active == true or cleanup_callback or inactive_cleanup_update then return self:enter_fatal(result, cleanup_callback) end
     return result
 end
 
@@ -635,9 +646,31 @@ function Orchestrator:show_victory()
         fight_id = self.fight_spec and self.fight_spec.fight_id and self.fight_spec.fight_id() or nil,
         fight_index = self.session.fight_index,
         duration_ms = duration,
-        on_next = function() return self:victory_next_action() end,
-        on_main_menu = function() return self:request_main_menu_exit() end
+        on_next = function()
+            return self:route_result_action("victory_next", function() return self:victory_next_action() end)
+        end,
+        on_main_menu = function()
+            return self:route_result_action("main_menu", function() return self:request_main_menu_exit() end)
+        end
     })
+end
+
+function Orchestrator:route_result_action(action_name, action)
+    local was_active = self:is_active()
+    if type(action) ~= "function" then
+        local missing = fail("GA_RESULT_ACTION_FAILED", "Arena result action dependency is unavailable", { action = action_name })
+        return self:on_callback_result_error("result_action_" .. tostring(action_name), missing, was_active)
+    end
+    local called, result = pcall(action)
+    if not called then return self:on_callback_error("result_action_" .. tostring(action_name), result) end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        result = fail("GA_RESULT_ACTION_FAILED", "Arena result action returned an invalid Result", {
+            action = action_name,
+            result_type = type(result)
+        })
+    end
+    if not result.ok then return self:on_callback_result_error("result_action_" .. tostring(action_name), result, was_active) end
+    return result
 end
 
 function Orchestrator:queue_victory()
@@ -688,7 +721,7 @@ function Orchestrator:drive_next_fight()
         if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity cleanup registry snapshot failed safely") end
         if snapshot.state == "ERROR" then return fail("GA_ENTITY_CLEANUP_FAILED", "Entity cleanup entered ERROR", { error = snapshot.error }) end
         if snapshot.state ~= "CLEAN" then return gamma_arena_result.ok({ stage = "NEXT_CLEANUP", entity = snapshot.state }) end
-        if #(snapshot.npcs or {}) ~= 0 or #(snapshot.items or {}) ~= 0 then return fail("GA_ENTITY_CLEANUP_FAILED", "Clean entity registry retained prior fight ids") end
+        if not cleanup_registry_empty(snapshot) then return fail("GA_ENTITY_CLEANUP_FAILED", "Clean entity registry retained or omitted prior fight id arrays") end
         self.runtime_stage = "NEXT_RESET"
         return gamma_arena_result.ok({ stage = "NEXT_RESET" })
     end
