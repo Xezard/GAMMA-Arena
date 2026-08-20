@@ -394,6 +394,7 @@ end
 
 local runtime_actor_item_exists = new_runtime_entity_exists_port(function() return type(alife) == "function" and alife() or nil end)
 local runtime_arena_entity_exists = new_runtime_entity_exists_port(function() return type(alife) == "function" and alife() or nil end, "GA_ENTITY_EXISTENCE_FAILED")
+local ACTOR_LOADOUT_OWNER_KEY = "gamma_arena_actor_owner"
 
 local function actor_loadout_failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
@@ -410,21 +411,9 @@ end
 
 function new_actor_loadout_port(ports)
     ports = ports or {}
-    local owned_ids = {}
-    local release_submitted = {}
-    local function rollback(created, cause)
-        owned_ids = {}
-        for index, entry in ipairs(created) do owned_ids[index] = entry.id end
-        local errors = {}
-        for index = #created, 1, -1 do
-            local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, created[index].id)
-            if released.ok then release_submitted[created[index].id] = true else errors[#errors + 1] = released.error end
-        end
-        if #errors > 0 then
-            return actor_loadout_failure("GA_ACTOR_LOADOUT_ROLLBACK_FAILED", "Actor loadout failed and exact rollback also failed", { cause = cause.error, errors = errors })
-        end
-        return cause
-    end
+    local owned_records = {}
+    local token_sequence = 0
+    local cleanup
     local function normalize_entities(value)
         local single = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, value)
         if single.ok and type(single.value) == "number" then return { value } end
@@ -433,10 +422,82 @@ function new_actor_loadout_port(ports)
         for index = 1, #value do entities[index] = value[index] end
         return entities
     end
+    local function copy_records(records)
+        local values = {}
+        for index, record in ipairs(records) do
+            values[index] = {
+                id = record.id,
+                parent_id = record.parent_id,
+                section = record.section,
+                token = record.token,
+                authorized = record.authorized == true,
+                release_submitted = record.release_submitted == true
+            }
+        end
+        return values
+    end
+    local function rollback(created, cause)
+        owned_records = copy_records(created)
+        local cleaned = cleanup()
+        if not cleaned.ok then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_ROLLBACK_FAILED", "Actor loadout failed and reuse-safe rollback also failed", {
+                cause = cause.error,
+                cleanup = cleaned.error
+            })
+        end
+        return cause
+    end
+    local function save_and_verify_tag(record)
+        local saved = actor_loadout_call("GA_ACTOR_LOADOUT_TAG_WRITE_FAILED", ports.save_owner_tag, record.id, record.token)
+        if not saved.ok then return saved end
+        local loaded = actor_loadout_call("GA_ACTOR_LOADOUT_TAG_READ_FAILED", ports.load_owner_tag, record.id)
+        if not loaded.ok then return loaded end
+        if loaded.value ~= record.token then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_TAG_VERIFY_FAILED", "Actor item ownership token did not round-trip", { id = record.id })
+        end
+        return gamma_arena_result.ok(true)
+    end
+    local function current_identity(record, current)
+        local id = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", ports.entity_id, current)
+        if not id.ok then return id end
+        if type(id.value) ~= "number" or id.value ~= math.floor(id.value) or id.value < 0 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", "Current actor item id proof is malformed", { id = record.id })
+        end
+        if id.value ~= record.id then return gamma_arena_result.ok({ match = false, field = "id" }) end
+        local parent = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", ports.entity_parent_id, current)
+        if not parent.ok then return parent end
+        if type(parent.value) ~= "number" or parent.value ~= math.floor(parent.value) or parent.value < 0 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", "Current actor item parent proof is malformed", { id = record.id })
+        end
+        if parent.value ~= record.parent_id then return gamma_arena_result.ok({ match = false, field = "parent" }) end
+        local section = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", ports.entity_section, current)
+        if not section.ok then return section end
+        if type(section.value) ~= "string" or section.value == "" then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", "Current actor item section proof is malformed", { id = record.id })
+        end
+        if section.value ~= record.section then return gamma_arena_result.ok({ match = false, field = "section" }) end
+        return gamma_arena_result.ok({ match = true })
+    end
+    local function current_ownership(record, current)
+        local identity = current_identity(record, current)
+        if not identity.ok or identity.value.match ~= true then return identity end
+        local tag = actor_loadout_call("GA_ACTOR_LOADOUT_TAG_READ_FAILED", ports.load_owner_tag, record.id)
+        if not tag.ok then return tag end
+        if tag.value ~= nil and type(tag.value) ~= "string" then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", "Current actor item ownership token proof is malformed", { id = record.id })
+        end
+        if tag.value ~= record.token then return gamma_arena_result.ok({ match = false, field = "token" }) end
+        return identity
+    end
     local function apply(actor, loadout)
-        if #owned_ids > 0 then return actor_loadout_failure("GA_ACTOR_LOADOUT_BUSY", "Prior Arena actor items are still owned or pending cleanup") end
+        if #owned_records > 0 then return actor_loadout_failure("GA_ACTOR_LOADOUT_BUSY", "Prior Arena actor items are still owned or pending cleanup") end
         local actor_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTOR_INVALID", ports.actor_id, actor)
         if not actor_id.ok or type(actor_id.value) ~= "number" then return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Arena actor has no numeric id") or actor_id end
+        local ownership = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", ports.ownership_token, actor, actor_id.value)
+        if not ownership.ok then return ownership end
+        if type(ownership.value) ~= "string" or ownership.value == "" then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Arena actor loadout requires a non-empty session ownership token")
+        end
         if type(loadout) ~= "table" or type(loadout.consumables) ~= "table" then return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed") end
         local box_size = actor_loadout_call("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", ports.ammo_box_size, loadout.ammo)
         if not box_size.ok then return box_size end
@@ -463,62 +524,94 @@ function new_actor_loadout_port(ports)
             if not result.ok then return rollback(created, result) end
             local entities = normalize_entities(result.value)
             if entities == nil then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_CREATE_FAILED", "Actor item creation returned no server entities", { section = descriptor.section })) end
-            local descriptor_entries = {}
+            local descriptor_entries, descriptor_failure = {}, nil
             for index, entity in ipairs(entities) do
                 local id = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, entity)
-                if not id.ok or type(id.value) ~= "number" or seen[id.value] then return rollback(created, id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ENTITY_INVALID", "Actor item id is invalid or duplicated", { section = descriptor.section, index = index }) or id) end
-                seen[id.value] = true
-                local entry = { id = id.value, entity = entity }
-                created[#created + 1] = entry
-                descriptor_entries[#descriptor_entries + 1] = entry
+                if not id.ok or type(id.value) ~= "number" or id.value ~= math.floor(id.value) or id.value < 0 or seen[id.value] then
+                    descriptor_failure = descriptor_failure or (id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ENTITY_INVALID", "Actor item id is invalid or duplicated", { section = descriptor.section, index = index }) or id)
+                else
+                    seen[id.value] = true
+                    token_sequence = token_sequence + 1
+                    local entry = { id = id.value, parent_id = actor_id.value, section = descriptor.section, token = ownership.value .. ":" .. tostring(token_sequence) .. ":" .. tostring(id.value), authorized = false, release_submitted = false }
+                    created[#created + 1] = entry
+                    local tagged = save_and_verify_tag(entry)
+                    if tagged.ok then entry.authorized = true else descriptor_failure = descriptor_failure or tagged end
+                    local parent = actor_loadout_call("GA_ACTOR_LOADOUT_OWNER_INVALID", ports.entity_parent_id, entity)
+                    local section = actor_loadout_call("GA_ACTOR_LOADOUT_SECTION_INVALID", ports.entity_section, entity)
+                    local quantity = actor_loadout_call("GA_ACTOR_LOADOUT_QUANTITY_INVALID", ports.item_quantity, entity, descriptor.ammo)
+                    local proof_failure = not parent.ok and parent or (not section.ok and section or (not quantity.ok and quantity or nil))
+                    if proof_failure == nil and parent.value ~= actor_id.value then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_OWNER_INVALID", "Created actor item has a foreign parent", { id = id.value }) end
+                    if proof_failure == nil and section.value ~= descriptor.section then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_SECTION_INVALID", "Created actor item section differs from FightSpec", { id = id.value }) end
+                    if proof_failure == nil and (type(quantity.value) ~= "number" or quantity.value ~= math.floor(quantity.value) or quantity.value < 1) then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_INVALID", "Created actor item quantity is invalid", { id = id.value }) end
+                    if proof_failure ~= nil then
+                        descriptor_failure = descriptor_failure or proof_failure
+                    else
+                        descriptor_entries[#descriptor_entries + 1] = { record = entry, quantity = quantity.value }
+                    end
+                end
             end
+            if descriptor_failure ~= nil then return rollback(created, descriptor_failure) end
             local total = 0
-            for _, entry in ipairs(descriptor_entries) do
-                local parent = actor_loadout_call("GA_ACTOR_LOADOUT_OWNER_INVALID", ports.entity_parent_id, entry.entity)
-                local section = actor_loadout_call("GA_ACTOR_LOADOUT_SECTION_INVALID", ports.entity_section, entry.entity)
-                local quantity = actor_loadout_call("GA_ACTOR_LOADOUT_QUANTITY_INVALID", ports.item_quantity, entry.entity, descriptor.ammo)
-                if not parent.ok then return rollback(created, parent) end
-                if not section.ok then return rollback(created, section) end
-                if not quantity.ok then return rollback(created, quantity) end
-                if parent.value ~= actor_id.value then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_OWNER_INVALID", "Created actor item has a foreign parent", { id = entry.id })) end
-                if section.value ~= descriptor.section then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_SECTION_INVALID", "Created actor item section differs from FightSpec", { id = entry.id })) end
-                if type(quantity.value) ~= "number" or quantity.value ~= math.floor(quantity.value) or quantity.value < 1 then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_INVALID", "Created actor item quantity is invalid", { id = entry.id })) end
-                total = total + quantity.value
-            end
+            for _, entry in ipairs(descriptor_entries) do total = total + entry.quantity end
             if total ~= descriptor.count then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_MISMATCH", "Created actor item quantity differs from FightSpec", { section = descriptor.section, expected = descriptor.count, actual = total })) end
         end
-        owned_ids = (function() local ids = {}; for index, entry in ipairs(created) do ids[index] = entry.id end; return ids end)()
-        release_submitted = {}
-        return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, id in ipairs(owned_ids) do ids[index] = id end; return ids end)() })
+        owned_records = copy_records(created)
+        return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
     end
-    local function cleanup()
-        if #owned_ids == 0 then return gamma_arena_result.ok(false) end
-        local errors = {}
-        for index = #owned_ids, 1, -1 do
-            local id = owned_ids[index]
-            if release_submitted[id] ~= true then
-                local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, id)
-                if released.ok then release_submitted[id] = true else errors[#errors + 1] = released.error end
-            end
-        end
-        if #errors > 0 then
-            return actor_loadout_failure("GA_ACTOR_LOADOUT_ROLLBACK_FAILED", "Actor loadout cleanup submission failed", { errors = errors })
-        end
+    cleanup = function()
+        if #owned_records == 0 then return gamma_arena_result.ok(false) end
         local remaining = {}
-        for _, id in ipairs(owned_ids) do
-            local exists = actor_loadout_call("GA_ACTOR_LOADOUT_EXISTENCE_FAILED", ports.entity_exists, id)
-            if not exists.ok then return exists end
-            if type(exists.value) ~= "boolean" then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_EXISTENCE_INVALID", "Actor item existence proof must contain an exact boolean", { id = id })
+        local errors = {}
+        for index = #owned_records, 1, -1 do
+            local record = owned_records[index]
+            local resolved = actor_loadout_call("GA_ACTOR_LOADOUT_RESOLVE_FAILED", ports.resolve_entity, record.id)
+            if not resolved.ok then
+                errors[#errors + 1] = resolved.error
+                table.insert(remaining, 1, record)
+            elseif resolved.value == nil then
+                -- The authoritative current-id lookup proves the owned entity is gone.
+            else
+                local proof
+                if record.authorized == true then
+                    proof = current_ownership(record, resolved.value)
+                else
+                    proof = current_identity(record, resolved.value)
+                    if proof.ok and proof.value.match == true then
+                        local tagged = save_and_verify_tag(record)
+                        if tagged.ok then record.authorized = true else proof = tagged end
+                    end
+                end
+                if not proof.ok then
+                    errors[#errors + 1] = proof.error
+                    table.insert(remaining, 1, record)
+                elseif proof.value.match ~= true then
+                    if record.release_submitted ~= true or proof.value.field == "token" then
+                        errors[#errors + 1] = actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_MISMATCH", "Current object no longer matches the Arena actor item ownership record", { id = record.id, field = proof.value.field }).error
+                        table.insert(remaining, 1, record)
+                    end
+                    -- After an accepted release, a clear current-object identity
+                    -- mismatch is safe ID reuse: retire the old record and never
+                    -- submit release against the new object. Token-only loss stays
+                    -- tracked because it cannot prove whether the original remains.
+                elseif record.release_submitted == true then
+                    table.insert(remaining, 1, record)
+                else
+                    local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, record.id)
+                    if not released.ok then
+                        errors[#errors + 1] = released.error
+                    else
+                        record.release_submitted = true
+                    end
+                    table.insert(remaining, 1, record)
+                end
             end
-            if exists.value == true then remaining[#remaining + 1] = id else release_submitted[id] = nil end
         end
-        owned_ids = remaining
-        if #owned_ids > 0 then
-            local pending = {}; for index, id in ipairs(owned_ids) do pending[index] = id end
+        owned_records = remaining
+        if #errors > 0 then return gamma_arena_result.err(errors[1].code, errors[1].message, errors[1].context) end
+        if #owned_records > 0 then
+            local pending = {}; for index, record in ipairs(owned_records) do pending[index] = record.id end
             return gamma_arena_result.ok({ pending = true, remaining_ids = pending })
         end
-        release_submitted = {}
         return gamma_arena_result.ok(true)
     end
     return { apply = apply, cleanup = cleanup }
@@ -567,6 +660,15 @@ local function default_actor_adapter(active_instance)
     end
     local loadout = new_actor_loadout_port({
         actor_id = runtime_object_id,
+        ownership_token = function()
+            local instance = active_instance()
+            local session = instance and instance:session_snapshot() or nil
+            if type(session) ~= "table" or type(session.session_id) ~= "string" or session.session_id == ""
+                or type(session.session_nonce) ~= "string" or session.session_nonce == "" then
+                return gamma_arena_result.err("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Active Arena session identity is unavailable for actor item ownership")
+            end
+            return session.session_id .. ":" .. session.session_nonce
+        end,
         ammo_box_size = effective_ammo_box_size,
         create_item = function(section, actor, count, is_ammo)
             if is_ammo then return alife_create_item(section, actor, { ammo = count }) end
@@ -576,7 +678,19 @@ local function default_actor_adapter(active_instance)
         entity_parent_id = runtime_parent_id,
         entity_section = runtime_section_name,
         item_quantity = runtime_ammo_quantity,
-        entity_exists = runtime_actor_item_exists,
+        resolve_entity = function(id)
+            local service = type(alife) == "function" and alife() or nil
+            if service == nil or type(service.object) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_LOADOUT_RESOLVE_FAILED", "ALife current-object resolver is unavailable", { id = id })
+            end
+            local called, value = pcall(service.object, service, id)
+            if not called then
+                return gamma_arena_result.err("GA_ACTOR_LOADOUT_RESOLVE_FAILED", "ALife current-object resolver failed safely", { id = id, reason = tostring(value) })
+            end
+            return gamma_arena_result.ok(value)
+        end,
+        save_owner_tag = function(id, token) return se_save_var(id, nil, ACTOR_LOADOUT_OWNER_KEY, token) end,
+        load_owner_tag = function(id) return se_load_var(id, nil, ACTOR_LOADOUT_OWNER_KEY) end,
         release_item = function(id)
             if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then return gamma_arena_result.err("GA_ACTOR_LOADOUT_RELEASE_FAILED", "safe_release_manager.release is unavailable") end
             safe_release_manager.release({ id = id })

@@ -1033,7 +1033,8 @@ local function runtime_prepare_resume_legacy_mismatch_is_normalized()
     orchestrator:on_game_load()
     local failed = orchestrator:actor_on_first_update()
     gamma_arena_test_assert.is_false(failed.ok, "legacy preparation mismatch enters fatal routing")
-    gamma_arena_test_assert.equals(failed.error.code, "GA_CHECKPOINT_RECOVERY_MISMATCH", "orchestrator normalizes legacy store mismatch at the recovery boundary")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_CHECKPOINT_RESTORE_FAILED", "orchestrator exposes one restore-failure contract at the recovery boundary")
+    gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_RESUME_NONCE_MISMATCH", "normalized restore failure preserves the legacy mismatch cause")
 end
 
 local function fake_vector(x, y, z)
@@ -2566,7 +2567,7 @@ local function runtime_entity_active_defers_input_release_to_task8()
 end
 
 local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
-    local next_id, calls, released = 500, {}, {}
+    local next_id, calls, released, tags = 500, {}, {}, {}
     local function entity(section, parent_id, quantity)
         local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
         next_id = next_id + 1
@@ -2575,6 +2576,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     end
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
         actor_id = function(actor) return actor:id() end,
+        ownership_token = function() return "session-exact" end,
         ammo_box_size = function(section)
             gamma_arena_test_assert.equals(section, "ammo_9x18_fmj", "actor adapter resolves the exact effective ammo section")
             return 20
@@ -2588,6 +2590,9 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         entity_parent_id = function(value) return value.parent_id end,
         entity_section = function(value) return value.section_name end,
         item_quantity = function(value, is_ammo) return is_ammo and value.quantity or 1 end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        resolve_entity = function() return nil end,
         release_item = function(id) released[#released + 1] = id; return true end
     })
     local actor = { id = function() return 77 end }
@@ -2601,16 +2606,17 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
 
     local function partial_failure_port(release_failure_id)
         local partial_next_id, create_calls, rollback_ids = 600, 0, {}
-        local present, pending_release, failed_once = {}, {}, {}
+        local present, pending_release, failed_once, tags = {}, {}, {}, {}
         local function partial_entity(section, parent_id, quantity)
             local value = { runtime_id = partial_next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
-            present[partial_next_id] = true
+            present[partial_next_id] = value
             partial_next_id = partial_next_id + 1
             function value:id() return self.runtime_id end
             return value
         end
         local value = gamma_arena_bootstrap.new_actor_loadout_port({
             actor_id = function(target) return target:id() end,
+            ownership_token = function() return "session-partial" end,
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count, is_ammo)
                 create_calls = create_calls + 1
@@ -2622,13 +2628,15 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
             entity_parent_id = function(item) return item.parent_id end,
             entity_section = function(item) return item.section_name end,
             item_quantity = function(item, is_ammo) return is_ammo and item.quantity or 1 end,
+            save_owner_tag = function(id, token) tags[id] = token; return true end,
+            load_owner_tag = function(id) return tags[id] end,
+            resolve_entity = function(id) return present[id] end,
             release_item = function(id)
                 rollback_ids[#rollback_ids + 1] = id
                 if id == release_failure_id and failed_once[id] ~= true then failed_once[id] = true; return false end
                 pending_release[id] = true
                 return true
             end,
-            entity_exists = function(id) return present[id] == true end
         })
         local function advance_release_frame()
             for id in pairs(pending_release) do present[id] = nil; pending_release[id] = nil end
@@ -2661,24 +2669,29 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
 end
 
 local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
-    local present, pending_release, releases = { [700] = true }, {}, {}
+    local present, pending_release, releases, tags = {}, {}, {}, {}
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
         actor_id = function(target) return target:id() end,
+        ownership_token = function() return "session-blocking" end,
         ammo_box_size = function() return 20 end,
         create_item = (function()
             local calls = 0
             return function(section, target)
                 calls = calls + 1
                 if calls > 1 then return nil end
-                return { runtime_id = 700, section_name = section, parent_id = target:id(), quantity = 1, id = function(self) return self.runtime_id end }
+                local value = { runtime_id = 700, section_name = section, parent_id = target:id(), quantity = 1, id = function(self) return self.runtime_id end }
+                present[700] = value
+                return value
             end
         end)(),
         entity_id = function(item) return item:id() end,
         entity_parent_id = function(item) return item.parent_id end,
         entity_section = function(item) return item.section_name end,
         item_quantity = function() return 1 end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        resolve_entity = function(id) return present[id] end,
         release_item = function(id) releases[#releases + 1] = id; pending_release[id] = true; return true end,
-        entity_exists = function(id) return present[id] == true end
     })
     local actor_object = { id = function() return 77 end }
     gamma_arena_test_assert.is_false(port.apply(actor_object, entity_spec(1).actor().loadout).ok, "fixture leaves one actor item in deferred rollback")
@@ -2716,10 +2729,10 @@ end
 
 local function runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect()
     for _, case in ipairs({
-        { label = "Result.ok(nil)", result = function() return gamma_arena_result.ok(nil) end },
-        { label = "Result.ok(non-boolean)", result = function() return gamma_arena_result.ok("present") end }
+        { label = "Result.ok(string)", result = function() return gamma_arena_result.ok("present") end },
+        { label = "Result.ok(empty table)", result = function() return gamma_arena_result.ok({}) end }
     }) do
-        local next_id, releases = 800, {}
+        local next_id, releases, tags = 800, {}, {}
         local function entity(section, parent_id, quantity)
             local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
             next_id = next_id + 1
@@ -2728,14 +2741,17 @@ local function runtime_actor_loadout_malformed_existence_blocks_teardown_disconn
         end
         local port = gamma_arena_bootstrap.new_actor_loadout_port({
             actor_id = function(target) return target:id() end,
+            ownership_token = function() return "session-malformed" end,
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count) return entity(section, target:id(), count) end,
             entity_id = function(item) return item:id() end,
             entity_parent_id = function(item) return item.parent_id end,
             entity_section = function(item) return item.section_name end,
             item_quantity = function(item) return item.quantity end,
+            save_owner_tag = function(id, token) tags[id] = token; return true end,
+            load_owner_tag = function(id) return tags[id] end,
+            resolve_entity = case.result,
             release_item = function(id) releases[#releases + 1] = id; return true end,
-            entity_exists = case.result
         })
         local actor_object = { id = function() return 77 end }
         gamma_arena_test_assert.is_true(port.apply(actor_object, entity_spec(1).actor().loadout).ok, case.label .. " fixture owns a complete actor loadout")
@@ -2759,11 +2775,11 @@ local function runtime_actor_loadout_malformed_existence_blocks_teardown_disconn
         orchestrator.session = valid_session()
         local teardown = orchestrator:on_before_level_changing()
         gamma_arena_test_assert.is_false(teardown.ok, case.label .. " cannot prove actor item absence during teardown")
-        gamma_arena_test_assert.equals(teardown.error.code, "GA_ACTOR_LOADOUT_EXISTENCE_INVALID", case.label .. " has a deterministic error")
+        gamma_arena_test_assert.equals(teardown.error.code, "GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID", case.label .. " has a deterministic error")
         gamma_arena_test_assert.is_false(orchestrator.teardown_done, case.label .. " keeps lifecycle teardown retryable")
         gamma_arena_test_assert.is_false(orchestrator:main_menu_action().ok, case.label .. " keeps disconnect gated without exact absence")
         gamma_arena_test_assert.equals(disconnects, 0, case.label .. " never permits disconnect")
-        gamma_arena_test_assert.equals(#releases, 4, case.label .. " submits owned actor items once before absence polling fails closed")
+        gamma_arena_test_assert.equals(#releases, 0, case.label .. " never releases without a readable current-object proof")
     end
 end
 
@@ -2793,6 +2809,170 @@ local function runtime_bootstrap_actor_existence_lookup_fails_closed()
         return { object = function() return nil end }
     end, "GA_ENTITY_EXISTENCE_FAILED")(800)
     gamma_arena_test_assert.is_true(entity_absent.ok and entity_absent.value == false, "only authoritative ALife nil proves registered entity absence")
+end
+
+local function actor_loadout_ownership_fixture(options)
+    options = options or {}
+    local env = { current = {}, tags = {}, releases = {}, tag_writes = 0, tag_reads = 0, next_id = options.next_id or 900, phase = "apply" }
+    local first_id = env.next_id
+    local actor = { id = function() return 77 end }
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = env.next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
+        if env.next_id == first_id and options.apply_parent_mismatch then value.parent_id = 999 end
+        if env.next_id == first_id and options.apply_section_mismatch then value.section_name = "foreign_section" end
+        if env.next_id == first_id and options.apply_quantity_invalid then value.quantity = 0 end
+        env.next_id = env.next_id + 1
+        function value:id() return self.runtime_id end
+        env.current[value.runtime_id] = value
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        actor_id = function(target) return target:id() end,
+        ownership_token = function() return "ga-session:nonce" end,
+        ammo_box_size = function() return 20 end,
+        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        entity_id = function(item) return item:id() end,
+        entity_parent_id = function(item) return item.parent_id end,
+        entity_section = function(item) return item.section_name end,
+        item_quantity = function(item) return item.quantity end,
+        resolve_entity = function(id)
+            if options.resolve_error_id == id then error("injected current-object lookup failure") end
+            return env.current[id]
+        end,
+        save_owner_tag = function(id, token)
+            env.tag_writes = env.tag_writes + 1
+            if env.phase == "apply" and options.apply_tag_write_failure_once and not env.tag_write_failed then env.tag_write_failed = true; return false end
+            env.tags[id] = env.phase == "apply" and options.apply_tag_roundtrip_mismatch_once and not env.tag_mismatched and "wrong-token" or token
+            if env.tags[id] == "wrong-token" then env.tag_mismatched = true end
+            return true
+        end,
+        load_owner_tag = function(id)
+            env.tag_reads = env.tag_reads + 1
+            if env.phase == "apply" and options.apply_tag_read_failure_once and not env.tag_read_failed then env.tag_read_failed = true; error("injected apply owner-tag read failure") end
+            if env.phase == "cleanup" and options.tag_read_error_id == id then error("injected cleanup owner-tag read failure") end
+            return env.tags[id]
+        end,
+        release_item = function(id)
+            env.releases[#env.releases + 1] = id
+            return true
+        end
+    })
+    env.port = port
+    env.actor = actor
+    env.applied = port.apply(actor, entity_spec(1).actor().loadout)
+    env.phase = "cleanup"
+    return env
+end
+
+local function actor_loadout_keep_only(env, id)
+    for current_id in pairs(env.current) do if current_id ~= id then env.current[current_id] = nil end end
+end
+
+local function runtime_actor_loadout_consumed_absent_id_retires_without_release()
+    local env = actor_loadout_ownership_fixture()
+    gamma_arena_test_assert.is_true(env.applied.ok and #env.applied.value.created_ids > 0, "fixture owns a non-empty actor loadout")
+    for id in pairs(env.current) do env.current[id] = nil end
+    local cleanup = env.port.cleanup()
+    gamma_arena_test_assert.is_true(cleanup.ok and cleanup.value == true, "consumed actor items retire from the owned registry as authoritative absence")
+    gamma_arena_test_assert.equals(#env.releases, 0, "already absent actor item ids are never submitted for release")
+end
+
+local function runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released()
+    for _, case in ipairs({
+        { label = "tag", mutate = function(env, id) env.tags[id] = "foreign-token" end },
+        { label = "parent", mutate = function(env, id) env.current[id].parent_id = 999 end },
+        { label = "section", mutate = function(env, id) env.current[id].section_name = "foreign_section" end }
+    }) do
+        local env = actor_loadout_ownership_fixture()
+        local id = env.applied.value.created_ids[1]
+        actor_loadout_keep_only(env, id)
+        case.mutate(env, id)
+        local cleanup = env.port.cleanup()
+        gamma_arena_test_assert.is_false(cleanup.ok, case.label .. " mismatch fails closed before release")
+        gamma_arena_test_assert.equals(cleanup.error.code, "GA_ACTOR_LOADOUT_OWNERSHIP_MISMATCH", case.label .. " mismatch uses the deterministic ownership code")
+        gamma_arena_test_assert.equals(#env.releases, 0, case.label .. " mismatch never releases a foreign/reused id")
+    end
+end
+
+local function runtime_actor_loadout_post_submit_reuse_is_never_released_twice()
+    local env = actor_loadout_ownership_fixture()
+    local first = env.port.cleanup()
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending == true, "exact owned matches enter deferred release polling")
+    local submitted = #env.releases
+    gamma_arena_test_assert.is_true(submitted > 0, "exact ownership proof submits a non-empty release set")
+    local reused_id = env.applied.value.created_ids[1]
+    for id in pairs(env.current) do env.current[id] = nil end
+    env.current[reused_id] = { runtime_id = reused_id, section_name = "foreign_section", parent_id = 999, quantity = 1, id = function(self) return self.runtime_id end }
+    env.tags[reused_id] = "foreign-token"
+    local retired = env.port.cleanup()
+    gamma_arena_test_assert.is_true(retired.ok and retired.value == true, "post-submit id reuse retires the old owned record safely")
+    gamma_arena_test_assert.equals(#env.releases, submitted, "post-submit reuse never resubmits release against the new foreign object")
+
+    local tag_loss = actor_loadout_ownership_fixture()
+    gamma_arena_test_assert.is_true(tag_loss.port.cleanup().ok, "tag-loss fixture submits exact owned releases")
+    local tag_loss_submitted = #tag_loss.releases
+    local tag_loss_id = tag_loss.applied.value.created_ids[1]
+    actor_loadout_keep_only(tag_loss, tag_loss_id)
+    tag_loss.tags[tag_loss_id] = nil
+    local blocked = tag_loss.port.cleanup()
+    gamma_arena_test_assert.is_false(blocked.ok, "post-submit token loss stays tracked because identity reuse is not proven")
+    gamma_arena_test_assert.equals(#tag_loss.releases, tag_loss_submitted, "post-submit token loss never resubmits release")
+end
+
+local function runtime_actor_loadout_malformed_ownership_proof_fails_closed()
+    for _, case in ipairs({
+        { label = "malformed parent", mutate = function(env, id) env.current[id].parent_id = {} end },
+        { label = "malformed section", mutate = function(env, id) env.current[id].section_name = {} end },
+        { label = "malformed id", mutate = function(env, id) env.current[id].runtime_id = "bad" end },
+        { label = "unreadable tag", options = { tag_read_error_id = 900 } },
+        { label = "unreadable resolver", options = { resolve_error_id = 900 } }
+    }) do
+        local env = actor_loadout_ownership_fixture(case.options)
+        local id = env.applied.value.created_ids[1]
+        actor_loadout_keep_only(env, id)
+        if case.mutate then case.mutate(env, id) end
+        local cleanup = env.port.cleanup()
+        gamma_arena_test_assert.is_false(cleanup.ok, case.label .. " cannot authorize release")
+        gamma_arena_test_assert.equals(#env.releases, 0, case.label .. " fails closed without releasing any unproven current object")
+    end
+end
+
+local function runtime_actor_loadout_exact_owned_match_releases_once()
+    local env = actor_loadout_ownership_fixture()
+    gamma_arena_test_assert.is_true(env.applied.ok, "exact-owned fixture applies")
+    gamma_arena_test_assert.equals(env.tag_writes, #env.applied.value.created_ids, "every created actor entity receives its own durable ownership token")
+    local first = env.port.cleanup()
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending == true, "exact current ownership submits release and awaits absence")
+    gamma_arena_test_assert.equals(#env.releases, #env.applied.value.created_ids, "every exact owned actor entity is released once")
+    env.port.cleanup()
+    gamma_arena_test_assert.equals(#env.releases, #env.applied.value.created_ids, "pending exact owned ids are polled without duplicate release")
+    for id in pairs(env.current) do env.current[id] = nil end
+    gamma_arena_test_assert.is_true(env.port.cleanup().ok, "later authoritative absence completes cleanup")
+end
+
+local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids()
+    for _, case in ipairs({
+        { label = "parent mismatch", options = { apply_parent_mismatch = true }, cleanable = false },
+        { label = "section mismatch", options = { apply_section_mismatch = true }, cleanable = false },
+        { label = "quantity invalid", options = { apply_quantity_invalid = true }, cleanable = true },
+        { label = "tag write failure", options = { apply_tag_write_failure_once = true }, cleanable = true },
+        { label = "tag read failure", options = { apply_tag_read_failure_once = true }, cleanable = true },
+        { label = "tag roundtrip mismatch", options = { apply_tag_roundtrip_mismatch_once = true }, cleanable = true }
+    }) do
+        local env = actor_loadout_ownership_fixture(case.options)
+        gamma_arena_test_assert.is_false(env.applied.ok, case.label .. " remains an observable transactional apply failure")
+        local reapplied = env.port.apply(env.actor, entity_spec(1).actor().loadout)
+        gamma_arena_test_assert.is_false(reapplied.ok, case.label .. " cannot start another apply while the valid created id remains tracked")
+        gamma_arena_test_assert.equals(reapplied.error.code, "GA_ACTOR_LOADOUT_BUSY", case.label .. " proves the valid id was not dropped from rollback ownership")
+        local cleanup = env.port.cleanup()
+        if case.cleanable then
+            gamma_arena_test_assert.is_true(cleanup.ok and cleanup.value.pending == true, case.label .. " is safely authorized/released and awaits exact absence")
+            gamma_arena_test_assert.is_true(#env.releases > 0, case.label .. " cleanup releases the tracked exact current object")
+        else
+            gamma_arena_test_assert.is_false(cleanup.ok, case.label .. " remains tracked and fails closed while current identity mismatches")
+            gamma_arena_test_assert.equals(#env.releases, 0, case.label .. " never releases a mismatched current object")
+        end
+    end
 end
 
 local function runtime_entity_ammo_box_size_failure_precedes_actor_mutation()
@@ -3329,6 +3509,7 @@ local function task8_environment(options)
         logs = {},
         events = {},
         countdown = {},
+        countdown_models = {},
         victory_dialogs = {},
         defeat_dialogs = {},
         death_holds = 0,
@@ -3437,8 +3618,16 @@ local function task8_environment(options)
         return gamma_arena_result.ok(true)
     end
     local result_ui = {}
-    function result_ui:show_countdown(value) env.countdown[#env.countdown + 1] = tostring(value); return gamma_arena_result.ok(true) end
-    function result_ui:clear_countdown() env.countdown[#env.countdown + 1] = "clear"; return gamma_arena_result.ok(true) end
+    function result_ui:show_countdown(model)
+        env.countdown_models[#env.countdown_models + 1] = model
+        env.countdown[#env.countdown + 1] = tostring(model.value)
+        return gamma_arena_result.ok(true)
+    end
+    function result_ui:clear_countdown()
+        if options.clear_countdown_error then return gamma_arena_result.err("GA_TEST_COUNTDOWN_CLEAR", "injected countdown clear failure") end
+        env.countdown[#env.countdown + 1] = "clear"
+        return gamma_arena_result.ok(true)
+    end
     function result_ui:show_victory(model)
         env.victory_dialogs[#env.victory_dialogs + 1] = model
         return gamma_arena_result.ok(true)
@@ -3782,6 +3971,76 @@ local function runtime_task9_single_result_contract_maps_both_kinds()
     gamma_arena_test_assert.is_true(type(victory.victory_dialogs[1].on_main_menu) == "function", "victory exposes the shared main-menu action")
 end
 
+local function runtime_task9_countdown_escape_model_routes_main_menu_cleanup()
+    local env = task8_environment(); task8_pump_to_countdown(env)
+    local model = env.countdown_models[1]
+    gamma_arena_test_assert.is_true(type(model) == "table" and model.value == 3, "countdown seam receives a structured model")
+    gamma_arena_test_assert.is_true(type(model.on_main_menu) == "function", "countdown model exposes the common Arena main-menu action")
+    local requested = model.on_main_menu()
+    gamma_arena_test_assert.is_true(requested.ok, "countdown Escape action enters ordinary Arena main-menu cleanup")
+    gamma_arena_test_assert.equals(env.clear_intent, 1, "countdown Escape clears only the matching Arena intent")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "CLEANING", "countdown Escape never silently closes the shared window")
+    gamma_arena_test_assert.is_false(env.orchestrator:is_active(), "countdown Escape deactivates Arena before disconnect")
+    env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(env.disconnected, 1, "countdown Escape disconnects only after common cleanup proof")
+
+    local failed = task8_environment({ clear_countdown_error = true }); task8_pump_to_countdown(failed)
+    local routed = failed.countdown_models[1].on_main_menu()
+    gamma_arena_test_assert.is_false(routed.ok, "countdown Escape cleanup failure remains observable")
+    gamma_arena_test_assert.equals(failed.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "countdown Escape cleanup errors route through the common fatal boundary")
+    gamma_arena_test_assert.equals(failed.fatal_shown, 1, "countdown Escape cleanup error opens fatal UI once")
+end
+
+local function runtime_task9_resume_failures_normalize_to_restore_failed()
+    local function resume_environment()
+        local session = valid_session()
+        local store = fake_store({ launch_pending = false, resume_pending = true })
+        store.resume_result = gamma_arena_result.ok({ schema_version = 1, session_id = session.session_id, session_nonce = session.session_nonce, next_fight_index = 1, checkpoint_name = session.checkpoint_name })
+        local deps = fake_orchestrator_deps(store)
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:load_state({ gamma_arena_session = session })
+        orchestrator:on_game_load()
+        return orchestrator, deps, store
+    end
+    local function assert_restore_failure(result, cause_code, label)
+        gamma_arena_test_assert.is_false(result.ok, label .. " enters fatal routing")
+        gamma_arena_test_assert.equals(result.error.code, "GA_CHECKPOINT_RESTORE_FAILED", label .. " exposes one top-level recovery contract")
+        gamma_arena_test_assert.equals(result.error.context.cause.code, cause_code, label .. " preserves its exact cause code")
+    end
+
+    local missing, missing_deps = resume_environment()
+    missing.loaded_session = nil
+    assert_restore_failure(missing:actor_on_first_update(), "GA_RESUME_SESSION_MISSING", "missing embedded session")
+
+    local preparation, preparation_deps, preparation_store = resume_environment()
+    preparation_store.resume_result = gamma_arena_result.err("GA_RESUME_NONCE_MISMATCH", "injected preparation mismatch")
+    assert_restore_failure(preparation:actor_on_first_update(), "GA_RESUME_NONCE_MISMATCH", "prepared intent mismatch")
+
+    local malformed, malformed_deps, malformed_store = resume_environment()
+    malformed_store.resume_result = gamma_arena_result.ok("not-an-intent")
+    assert_restore_failure(malformed:actor_on_first_update(), "GA_RESUME_INVALID", "malformed prepared intent")
+
+    local binding, binding_deps = resume_environment()
+    binding_deps.checkpoint.begin_resume_recovery = function() return gamma_arena_result.err("GA_CHECKPOINT_RECOVERY_MISSING", "injected checkpoint binding failure") end
+    assert_restore_failure(binding:actor_on_first_update(), "GA_CHECKPOINT_RECOVERY_MISSING", "checkpoint binding failure")
+
+    local refused, refused_deps = resume_environment()
+    refused_deps.checkpoint.begin_resume_recovery = function() return gamma_arena_result.ok(false) end
+    assert_restore_failure(refused:actor_on_first_update(), "GA_CHECKPOINT_RECOVERY_FAILED", "checkpoint binding refusal")
+
+    local missing_resume, missing_resume_deps = resume_environment()
+    missing_resume_deps.checkpoint.take_resume = function() return gamma_arena_result.err("GA_CHECKPOINT_RESUME_MISSING", "injected missing resume") end
+    gamma_arena_test_assert.is_true(missing_resume:actor_on_first_update().ok, "missing resume fixture enters re-hide")
+    missing_resume:actor_on_update()
+    assert_restore_failure(missing_resume:actor_on_update(), "GA_CHECKPOINT_RESUME_MISSING", "missing completed resume")
+
+    local mismatched, mismatched_deps = resume_environment()
+    mismatched_deps.checkpoint.take_resume = function() return gamma_arena_result.ok({ next_fight_index = 99 }) end
+    gamma_arena_test_assert.is_true(mismatched:actor_on_first_update().ok, "mismatch fixture enters re-hide")
+    mismatched:actor_on_update()
+    assert_restore_failure(mismatched:actor_on_update(), "GA_CHECKPOINT_RECOVERY_MISMATCH", "completed resume mismatch")
+end
+
 local function runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec()
     local env = task8_environment(); task8_pump_to_active(env)
     local generated_before = env.generated
@@ -3800,6 +4059,16 @@ end
 
 local function runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active()
     local env = task8_environment(); task8_pump_to_active(env)
+    local owned = actor_loadout_ownership_fixture({ next_id = 1200 })
+    gamma_arena_test_assert.is_true(owned.applied.ok and #owned.applied.value.created_ids > 0, "integrated defeat fixture owns a non-empty tagged actor loadout")
+    for id in pairs(owned.current) do owned.current[id] = nil end
+    env.deps.actor.cleanup_loadout_for_restore = function()
+        env.actor_loadout_cleanup = env.actor_loadout_cleanup + 1
+        env.events[#env.events + 1] = "actor_cleanup"
+        local cleaned = owned.port.cleanup()
+        if cleaned.ok and not (type(cleaned.value) == "table" and cleaned.value.pending == true) then env.actor_loadout_owned = false end
+        return cleaned
+    end
     local saved = env.orchestrator:session_snapshot()
     local flags = { ret_value = true }
     env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
@@ -3817,6 +4086,7 @@ local function runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_acti
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "defeat-next reaches a new ACTIVE fight")
     gamma_arena_test_assert.equals(env.death_hold_releases, 1, "restored actor releases only logical-death invulnerability")
     gamma_arena_test_assert.is_true(env.actor_loadout_owned, "new ACTIVE fight owns only its newly applied actor loadout")
+    gamma_arena_test_assert.equals(#owned.releases, 0, "defeat recovery retires consumed absent actor ids without submitting a release")
 end
 
 local function runtime_task9_defeat_and_victory_share_main_menu_cleanup()
@@ -3938,6 +4208,12 @@ local cases = {
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
     ,{ name = "runtime_bootstrap_actor_existence_lookup_fails_closed", fn = runtime_bootstrap_actor_existence_lookup_fails_closed }
+    ,{ name = "runtime_actor_loadout_consumed_absent_id_retires_without_release", fn = runtime_actor_loadout_consumed_absent_id_retires_without_release }
+    ,{ name = "runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released", fn = runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released }
+    ,{ name = "runtime_actor_loadout_post_submit_reuse_is_never_released_twice", fn = runtime_actor_loadout_post_submit_reuse_is_never_released_twice }
+    ,{ name = "runtime_actor_loadout_malformed_ownership_proof_fails_closed", fn = runtime_actor_loadout_malformed_ownership_proof_fails_closed }
+    ,{ name = "runtime_actor_loadout_exact_owned_match_releases_once", fn = runtime_actor_loadout_exact_owned_match_releases_once }
+    ,{ name = "runtime_actor_loadout_apply_failures_never_drop_valid_created_ids", fn = runtime_actor_loadout_apply_failures_never_drop_valid_created_ids }
     ,{ name = "runtime_bootstrap_hostility_port_is_feature_probed", fn = runtime_bootstrap_hostility_port_is_feature_probed }
     ,{ name = "runtime_entity_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_ammo_box_size_failure_precedes_actor_mutation }
     ,{ name = "runtime_entity_partial_failures_rollback_in_reverse", fn = runtime_entity_partial_failures_rollback_in_reverse }
@@ -3987,6 +4263,8 @@ local cases = {
     ,{ name = "runtime_task9_active_death_latches_and_defers_defeat", fn = runtime_task9_active_death_latches_and_defers_defeat }
     ,{ name = "runtime_task9_death_outside_active_is_not_a_defeat", fn = runtime_task9_death_outside_active_is_not_a_defeat }
     ,{ name = "runtime_task9_single_result_contract_maps_both_kinds", fn = runtime_task9_single_result_contract_maps_both_kinds }
+    ,{ name = "runtime_task9_countdown_escape_model_routes_main_menu_cleanup", fn = runtime_task9_countdown_escape_model_routes_main_menu_cleanup }
+    ,{ name = "runtime_task9_resume_failures_normalize_to_restore_failed", fn = runtime_task9_resume_failures_normalize_to_restore_failed }
     ,{ name = "runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec", fn = runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec }
     ,{ name = "runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active", fn = runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active }
     ,{ name = "runtime_task9_defeat_and_victory_share_main_menu_cleanup", fn = runtime_task9_defeat_and_victory_share_main_menu_cleanup }

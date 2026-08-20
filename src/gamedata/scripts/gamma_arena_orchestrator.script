@@ -70,14 +70,14 @@ local resume_preparation_mismatch_codes = {
     GA_RESUME_FIGHT_INDEX_MISMATCH = true
 }
 
+local checkpoint_restore_failure
+
 local function normalize_resume_preparation(result)
     local detail = type(result) == "table" and result.error or nil
-    if detail and resume_preparation_mismatch_codes[detail.code] then
-        return fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "ResumeIntent does not match the loaded ArenaSession", {
-            cause_code = detail.code
-        })
-    end
-    return result
+    local message = detail and resume_preparation_mismatch_codes[detail.code]
+        and "ResumeIntent does not match the loaded ArenaSession"
+        or "ResumeIntent validation failed before checkpoint recovery"
+    return checkpoint_restore_failure(result, message)
 end
 
 local function find_flags(...)
@@ -109,7 +109,7 @@ local function find_death_flags(...)
     return nil
 end
 
-local function checkpoint_restore_failure(result, message)
+checkpoint_restore_failure = function(result, message)
     if type(result) == "table" and result.ok == false and result.error and result.error.code == "GA_CHECKPOINT_RESTORE_FAILED" then
         return result
     end
@@ -408,7 +408,7 @@ function Orchestrator:on_game_load()
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
     local checkpoint_load = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "on_game_load")
-    if not checkpoint_load.ok then return self:enter_fatal(checkpoint_load) end
+    if not checkpoint_load.ok then return self:enter_fatal(checkpoint_restore_failure(checkpoint_load, "Checkpoint load boundary failed during Arena recovery")) end
     self.game_load_seen = true
     self.active = false
     self.session = nil
@@ -568,10 +568,13 @@ function Orchestrator:activate_once()
     end
 
     if not self.load_state_seen or self.loaded_session == nil then
-        return self:enter_fatal(fail("GA_RESUME_SESSION_MISSING", "ResumeIntent requires an embedded ArenaSession"))
+        return self:enter_fatal(checkpoint_restore_failure(fail("GA_RESUME_SESSION_MISSING", "ResumeIntent requires an embedded ArenaSession")))
     end
     local prepared = call_method("GA_RESUME_INVALID", self.deps.store, "prepare_resume", self.deps.config, self.loaded_session)
     if not prepared.ok then return self:enter_fatal(normalize_resume_preparation(prepared), true) end
+    if type(prepared.value) ~= "table" then
+        return self:enter_fatal(checkpoint_restore_failure(fail("GA_RESUME_INVALID", "Validated ResumeIntent payload is malformed")), true)
+    end
     local preflight = self:run_preflight()
     if not preflight.ok then return self:enter_fatal(preflight) end
     local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
@@ -579,9 +582,9 @@ function Orchestrator:activate_once()
     self.session = self.loaded_session
     self.pending_resume = prepared.value
     local recovery = call_method("GA_CHECKPOINT_RECOVERY_FAILED", self.deps.checkpoint, "begin_resume_recovery", self.session, self.pending_resume)
-    if not recovery.ok then return self:enter_fatal(recovery) end
+    if not recovery.ok then return self:enter_fatal(checkpoint_restore_failure(recovery, "Checkpoint adapter could not bind the loaded recovery state")) end
     if recovery.value ~= true then
-        return self:enter_fatal(fail("GA_CHECKPOINT_RECOVERY_FAILED", "Checkpoint adapter did not bind the loaded recovery state"))
+        return self:enter_fatal(checkpoint_restore_failure(fail("GA_CHECKPOINT_RECOVERY_FAILED", "Checkpoint adapter did not bind the loaded recovery state")))
     end
     self.active = true
     self.runtime_stage = "RESUME_REHIDING"
@@ -638,7 +641,12 @@ function Orchestrator:update_countdown()
     end
     local value = 3 - math.floor(elapsed / 1000)
     if value ~= self.countdown_value then
-        local shown = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "show_countdown", value)
+        local shown = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "show_countdown", {
+            value = value,
+            on_main_menu = function()
+                return self:route_result_action("main_menu", function() return self:request_main_menu_exit() end)
+            end
+        })
         if not shown.ok then return shown end
         self.countdown_value = value
     end
@@ -793,7 +801,7 @@ function Orchestrator:defeat_next_action()
 end
 
 function Orchestrator:request_main_menu_exit()
-    if not self:is_active() or self.runtime_stage ~= "RESULT" or self.result_action_locked then return gamma_arena_result.ok(false) end
+    if not self:is_active() or (self.runtime_stage ~= "RESULT" and self.runtime_stage ~= "COUNTDOWN") or self.result_action_locked then return gamma_arena_result.ok(false) end
     self.result_action_locked = true
     local cleared_ui = self:clear_runtime_ui()
     if not cleared_ui.ok then self.result_action_locked = false; return cleared_ui end
@@ -957,14 +965,14 @@ function Orchestrator:drive_runtime()
         local updated = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "update")
         if not updated.ok then return checkpoint_restore_failure(updated) end
         local state_ok, checkpoint_state = pcall(function() return self.deps.checkpoint:state() end)
-        if not state_ok then return fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely") end
+        if not state_ok then return checkpoint_restore_failure(fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely")) end
         if checkpoint_state == "READY" then
             local released = call_method("GA_ACTOR_DEATH_HOLD_RELEASE_FAILED", self.deps.actor, "release_logical_death_hold")
             if not released.ok then return checkpoint_restore_failure(released, "Loaded actor could not leave the logical-death hold safely") end
             local resume = call_method("GA_CHECKPOINT_RESUME_MISSING", self.deps.checkpoint, "take_resume")
-            if not resume.ok then return resume end
+            if not resume.ok then return checkpoint_restore_failure(resume, "Completed checkpoint resume is unavailable") end
             if type(resume.value) ~= "table" or resume.value.next_fight_index ~= self.pending_resume.next_fight_index then
-                return fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Checkpoint continuation does not match the prepared ResumeIntent")
+                return checkpoint_restore_failure(fail("GA_CHECKPOINT_RECOVERY_MISMATCH", "Checkpoint continuation does not match the prepared ResumeIntent"))
             end
             self.session.fight_index = resume.value.next_fight_index
             self.pending_resume = nil

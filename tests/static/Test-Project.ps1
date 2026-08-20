@@ -461,6 +461,8 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
     }
     Assert-True ($Task9UiContent -notmatch 'AddCustomStatic') 'Task 9 UI must never reference an undefined custom-static id'
     Assert-True ($Task9UiContent -match 'OnKeyboard[\s\S]{0,500}self:OnMainMenu\(\)[\s\S]{0,120}return\s+true') 'Task 9 Escape handler must route cleanup and return an engine boolean'
+    Assert-True ($Task9UiContent -match 'ShowCountdown[\s\S]{0,900}model\.on_main_menu[\s\S]{0,900}self\.on_main_menu') 'Task 9 countdown UI must retain the common Arena main-menu callback'
+    Assert-True ($Task9UiContent -notmatch 'OnMainMenu[\s\S]{0,240}kind\s*==\s*["'']countdown["'']') 'Task 9 main-menu action must not reject countdown Escape'
 }
 if (Test-Path -LiteralPath $Task9UiXmlPath) {
     try {
@@ -475,6 +477,10 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     foreach ($Marker in @('death_latched','pending_result','ret_value','hold_after_logical_death','cleanup_loadout_for_restore','MAX_DEFEAT_RECOVERY_UPDATES','show_defeat','defeat_next_action','NEXT_AFTER_DEFEAT','GA_CHECKPOINT_RESTORE_FAILED')) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 9 orchestrator must cover $Marker"
     }
+    Assert-True ($Task5OrchestratorContent -match 'show_countdown["'']\s*,\s*\{[\s\S]{0,500}on_main_menu') 'Task 9 countdown model must route the common Arena main-menu cleanup'
+    Assert-True ($Task5OrchestratorContent -match 'local function normalize_resume_preparation[\s\S]{0,700}checkpoint_restore_failure') 'Task 9 prepared-intent normalization must produce GA_CHECKPOINT_RESTORE_FAILED'
+    Assert-True ($Task5OrchestratorContent -match 'normalize_resume_preparation\(prepared\)') 'Task 9 prepared-intent errors must use the restore-failure normalizer'
+    Assert-True ($Task5OrchestratorContent -match 'checkpoint_restore_failure\(resume') 'Task 9 completed-resume errors must normalize to GA_CHECKPOINT_RESTORE_FAILED'
 }
 $Task9ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
 if (Test-Path -LiteralPath $Task9ActorPath) {
@@ -482,7 +488,7 @@ if (Test-Path -LiteralPath $Task9ActorPath) {
     Assert-True ($Task9ActorContent -match [regex]::Escape('cleanup_loadout_for_restore')) 'Task 9 actor adapter must expose owned-loadout-only cleanup before restore'
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec','runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only')) {
+    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_countdown_escape_model_routes_main_menu_cleanup','runtime_task9_resume_failures_normalize_to_restore_failed','runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec','runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only','runtime_actor_loadout_consumed_absent_id_retires_without_release','runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released','runtime_actor_loadout_post_submit_reuse_is_never_released_twice','runtime_actor_loadout_malformed_ownership_proof_fails_closed','runtime_actor_loadout_exact_owned_match_releases_once','runtime_actor_loadout_apply_failures_never_drop_valid_created_ids')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 9 Dev tests must cover $Marker"
     }
 }
@@ -492,6 +498,10 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($Task5BootstrapContent -match 'actor\.set_invulnerable') 'Task 9 bootstrap must bind the proven actor logical-death hold API'
     Assert-True ($Task5BootstrapContent -match 'gamma_arena_ui_result\.new\s*\(') 'Task 9 bootstrap must replace the Task 8 UI placeholder with the real adapter'
+    foreach ($Marker in @('ownership_token','save_owner_tag','load_owner_tag','resolve_entity','GA_ACTOR_LOADOUT_OWNERSHIP_MISMATCH')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 9 actor loadout cleanup must cover reuse-safe ownership proof: $Marker"
+    }
+    Assert-True ($Task5BootstrapContent -match 'created\[#created\s*\+\s*1\]\s*=\s*entry[\s\S]{0,500}save_and_verify_tag\(entry\)') 'Task 9 rollback registry must retain every valid unique created id before later proof/tag failure'
 }
 
 $Task6RuntimeFiles = @(
@@ -635,12 +645,12 @@ if (Test-Path -LiteralPath $Task7NpcPath) {
 }
 
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
-    foreach ($Marker in @('gamma_arena_entity_adapter.new','se_load_var','se_save_var(id, nil, "death_dropped", value)','force_set_goodwill','game_object.enemy','game_object.friend','step_entity_cleanup','step_actor_cleanup','last_update_at','pending = true','entity_teardown_max_updates','actor_teardown_max_updates','MAX_TEARDOWN_UPDATES','new_actor_loadout_port','new_runtime_entity_exists_port','GA_ACTOR_LOADOUT_EXISTENCE_INVALID','entity_exists','hold_entity_offline','request_entity_online','set_switch_online','set_switch_offline','switch_online','level.object_by_id','apply_actor_activation_hold','set_enemy','make_item_active','active_item','apply_actor_hostility','effective_ammo_box_size','system.r_u32','ammo_box_size','box_size')) {
+    foreach ($Marker in @('gamma_arena_entity_adapter.new','se_load_var','se_save_var(id, nil, "death_dropped", value)','force_set_goodwill','game_object.enemy','game_object.friend','step_entity_cleanup','step_actor_cleanup','last_update_at','pending = true','entity_teardown_max_updates','actor_teardown_max_updates','MAX_TEARDOWN_UPDATES','new_actor_loadout_port','new_runtime_entity_exists_port','GA_ACTOR_LOADOUT_OWNERSHIP_PROOF_INVALID','entity_exists','hold_entity_offline','request_entity_online','set_switch_online','set_switch_offline','switch_online','level.object_by_id','apply_actor_activation_hold','set_enemy','make_item_active','active_item','apply_actor_hostility','effective_ammo_box_size','system.r_u32','ammo_box_size','box_size')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 7 bootstrap composition must cover $Marker"
     }
     Assert-True ($Task5BootstrapContent -notmatch 'relation_registry\.set_goodwill') 'Task 7 must not require the nonexistent installed-GAMMA relation_registry.set_goodwill API'
     Assert-True ($Task5BootstrapContent -notmatch 'function\s+drain_entity_cleanup') 'Task 7 entity cleanup must be frame-driven rather than a same-callback drain loop'
-    Assert-True ($Task5BootstrapContent -match 'type\(exists\.value\)\s*~=\s*"boolean"[\s\S]{0,500}if\s+exists\.value\s*==\s*true') 'Actor cleanup must reject malformed existence Results before interpreting presence or absence'
+    Assert-True ($Task5BootstrapContent -match 'Current actor item parent proof is malformed[\s\S]{0,1200}Current actor item section proof is malformed') 'Actor cleanup must reject malformed current-object ownership proofs before release'
     Assert-True ($Task5BootstrapContent -match 'alife_create_item\(section,\s*parent,\s*\{\s*ammo\s*=\s*count\s*\}\)') 'Task 7 must pass exact ammo rounds through the GAMMA alife_create_item property table'
     Assert-True ($Task5BootstrapContent -match 'return\s+alife_create_item\(section,\s*parent\)') 'Task 7 must create ordinary inventory items without a numeric third argument'
 }
