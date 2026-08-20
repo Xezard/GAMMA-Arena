@@ -544,7 +544,10 @@ function Orchestrator:activate_once()
         end
         return gamma_arena_result.ok(false)
     end
-    if self.load_state_error then return self:enter_fatal(self.load_state_error) end
+    if self.load_state_error then
+        local load_failure = state.resume_pending and checkpoint_restore_failure(self.load_state_error, "Loaded ArenaSession is invalid for the pending ResumeIntent") or self.load_state_error
+        return self:enter_fatal(load_failure)
+    end
 
     local started = self:advance(gamma_arena_state_machine.events.START)
     if not started.ok then return self:enter_fatal(started) end
@@ -951,7 +954,11 @@ function Orchestrator:drive_runtime()
         if not updated.ok and self.runtime_stage == "RESTORING" then return checkpoint_restore_failure(updated) end
         if not updated.ok then return updated end
         local state_ok, checkpoint_state = pcall(function() return self.deps.checkpoint:state() end)
-        if not state_ok then return fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely") end
+        if not state_ok then
+            local state_failure = fail("GA_CHECKPOINT_STATE_FAILED", "Checkpoint state could not be read safely")
+            if self.runtime_stage == "RESTORING" then return checkpoint_restore_failure(state_failure) end
+            return state_failure
+        end
         if checkpoint_state == "READY" and self.runtime_stage == "CHECKPOINTING" then
             local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
             if not advanced.ok then return advanced end
@@ -977,7 +984,7 @@ function Orchestrator:drive_runtime()
             self.session.fight_index = resume.value.next_fight_index
             self.pending_resume = nil
             local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
-            if not advanced.ok then return advanced end
+            if not advanced.ok then return checkpoint_restore_failure(advanced) end
             self.checkpoint_ready = true
             self.runtime_stage = "READY"
         end

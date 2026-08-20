@@ -2841,7 +2841,20 @@ local function actor_loadout_ownership_fixture(options)
         end,
         save_owner_tag = function(id, token)
             env.tag_writes = env.tag_writes + 1
-            if env.phase == "apply" and options.apply_tag_write_failure_once and not env.tag_write_failed then env.tag_write_failed = true; return false end
+            if env.phase == "apply" and (options.apply_tag_write_failure_once or options.apply_tag_write_failure_reuses_same_shape) and not env.tag_write_failed then
+                env.tag_write_failed = true
+                if options.apply_tag_write_failure_reuses_same_shape then
+                    local original = env.current[id]
+                    env.current[id] = {
+                        runtime_id = id,
+                        section_name = original.section_name,
+                        parent_id = original.parent_id,
+                        quantity = original.quantity,
+                        id = function(self) return self.runtime_id end
+                    }
+                end
+                return false
+            end
             env.tags[id] = env.phase == "apply" and options.apply_tag_roundtrip_mismatch_once and not env.tag_mismatched and "wrong-token" or token
             if env.tags[id] == "wrong-token" then env.tag_mismatched = true end
             return true
@@ -2955,9 +2968,9 @@ local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids
         { label = "parent mismatch", options = { apply_parent_mismatch = true }, cleanable = false },
         { label = "section mismatch", options = { apply_section_mismatch = true }, cleanable = false },
         { label = "quantity invalid", options = { apply_quantity_invalid = true }, cleanable = true },
-        { label = "tag write failure", options = { apply_tag_write_failure_once = true }, cleanable = true },
+        { label = "tag write failure", options = { apply_tag_write_failure_once = true }, cleanable = false },
         { label = "tag read failure", options = { apply_tag_read_failure_once = true }, cleanable = true },
-        { label = "tag roundtrip mismatch", options = { apply_tag_roundtrip_mismatch_once = true }, cleanable = true }
+        { label = "tag roundtrip mismatch", options = { apply_tag_roundtrip_mismatch_once = true }, cleanable = false }
     }) do
         local env = actor_loadout_ownership_fixture(case.options)
         gamma_arena_test_assert.is_false(env.applied.ok, case.label .. " remains an observable transactional apply failure")
@@ -2968,11 +2981,26 @@ local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids
         if case.cleanable then
             gamma_arena_test_assert.is_true(cleanup.ok and cleanup.value.pending == true, case.label .. " is safely authorized/released and awaits exact absence")
             gamma_arena_test_assert.is_true(#env.releases > 0, case.label .. " cleanup releases the tracked exact current object")
+            if case.options.apply_tag_read_failure_once then
+                gamma_arena_test_assert.equals(env.tag_writes, 1, case.label .. " recovers only from the exact token persisted by the creation-time write")
+            end
         else
             gamma_arena_test_assert.is_false(cleanup.ok, case.label .. " remains tracked and fails closed while current identity mismatches")
             gamma_arena_test_assert.equals(#env.releases, 0, case.label .. " never releases a mismatched current object")
         end
     end
+end
+
+local function runtime_actor_loadout_failed_tag_write_never_manufactures_ownership()
+    local env = actor_loadout_ownership_fixture({ apply_tag_write_failure_reuses_same_shape = true })
+    gamma_arena_test_assert.is_false(env.applied.ok, "creation-time tag write failure remains observable")
+    gamma_arena_test_assert.equals(env.tag_writes, 1, "only the creation path may attempt the ownership-tag write")
+    gamma_arena_test_assert.equals(#env.releases, 0, "rollback never releases a same-shape foreign replacement without its persisted token")
+    local retried = env.port.cleanup()
+    gamma_arena_test_assert.is_false(retried.ok, "missing persisted ownership token keeps the foreign replacement tracked and fails closed")
+    gamma_arena_test_assert.equals(retried.error.code, "GA_ACTOR_LOADOUT_OWNERSHIP_MISMATCH", "foreign same-shape reuse exposes the deterministic ownership mismatch")
+    gamma_arena_test_assert.equals(env.tag_writes, 1, "cleanup retry never writes or rewrites an ownership tag")
+    gamma_arena_test_assert.equals(#env.releases, 0, "cleanup retry never releases the unowned replacement")
 end
 
 local function runtime_entity_ammo_box_size_failure_precedes_actor_mutation()
@@ -4041,6 +4069,69 @@ local function runtime_task9_resume_failures_normalize_to_restore_failed()
     assert_restore_failure(mismatched:actor_on_update(), "GA_CHECKPOINT_RECOVERY_MISMATCH", "completed resume mismatch")
 end
 
+local function runtime_task9_resume_pending_invalid_loaded_session_normalizes()
+    local invalid_payload = { schema_version = 99 }
+    local resume_store = fake_store({ launch_pending = false, resume_pending = true })
+    local resume_orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(resume_store))
+    local decoded = resume_orchestrator:load_state({ gamma_arena_session = invalid_payload })
+    gamma_arena_test_assert.is_false(decoded.ok, "malformed loaded ArenaSession is captured before activation")
+    gamma_arena_test_assert.equals(decoded.error.code, "GA_SESSION_SCHEMA_INVALID", "malformed fixture has the exact validation cause")
+    resume_orchestrator:on_game_load()
+    local resume_failed = resume_orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(resume_failed.ok, "pending ResumeIntent rejects malformed loaded ArenaSession")
+    gamma_arena_test_assert.equals(resume_failed.error.code, "GA_CHECKPOINT_RESTORE_FAILED", "pending resume exposes the stable checkpoint recovery boundary")
+    gamma_arena_test_assert.equals(resume_failed.error.context.cause.code, "GA_SESSION_SCHEMA_INVALID", "pending resume preserves the loaded-session validation cause")
+
+    local launch_store = fake_store({ launch_pending = true, resume_pending = false })
+    local launch_orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(launch_store))
+    launch_orchestrator:load_state({ gamma_arena_session = invalid_payload })
+    launch_orchestrator:on_game_load()
+    local launch_failed = launch_orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(launch_failed.ok, "ordinary launch still rejects malformed loaded metadata")
+    gamma_arena_test_assert.equals(launch_failed.error.code, "GA_SESSION_SCHEMA_INVALID", "non-resume activation retains its original validation code")
+end
+
+local function runtime_task9_restoring_state_read_failure_normalizes()
+    local session = valid_session()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.ok({ schema_version = 1, session_id = session.session_id, session_nonce = session.session_nonce, next_fight_index = 1, checkpoint_name = session.checkpoint_name })
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:load_state({ gamma_arena_session = session })
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "RESTORING fault fixture activates a pending resume")
+    orchestrator.runtime_stage = "RESTORING"
+    deps.checkpoint.current = "LOADING"
+    deps.checkpoint.state = function() error("injected RESTORING state read failure") end
+    local failed = orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "RESTORING state-read exception remains observable")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_CHECKPOINT_RESTORE_FAILED", "RESTORING state-read exception uses the stable recovery boundary")
+    gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_CHECKPOINT_STATE_FAILED", "RESTORING state-read exception preserves its exact cause")
+end
+
+local function runtime_task9_resume_completion_transition_failure_normalizes()
+    local session = valid_session()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.ok({ schema_version = 1, session_id = session.session_id, session_nonce = session.session_nonce, next_fight_index = 1, checkpoint_name = session.checkpoint_name })
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:load_state({ gamma_arena_session = session })
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "transition fault fixture enters resume re-hide")
+    local original_advance = orchestrator.advance
+    orchestrator.advance = function(self, event)
+        if self.runtime_stage == "RESUME_REHIDING" and event == gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED then
+            return gamma_arena_result.err("GA_TEST_RESUME_TRANSITION", "injected resume completion transition failure")
+        end
+        return original_advance(self, event)
+    end
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "first re-hide poll remains pending")
+    local failed = orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "resume completion transition failure remains observable")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_CHECKPOINT_RESTORE_FAILED", "resume completion transition uses the stable recovery boundary")
+    gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_TEST_RESUME_TRANSITION", "resume completion transition preserves its exact cause")
+end
+
 local function runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec()
     local env = task8_environment(); task8_pump_to_active(env)
     local generated_before = env.generated
@@ -4214,6 +4305,7 @@ local cases = {
     ,{ name = "runtime_actor_loadout_malformed_ownership_proof_fails_closed", fn = runtime_actor_loadout_malformed_ownership_proof_fails_closed }
     ,{ name = "runtime_actor_loadout_exact_owned_match_releases_once", fn = runtime_actor_loadout_exact_owned_match_releases_once }
     ,{ name = "runtime_actor_loadout_apply_failures_never_drop_valid_created_ids", fn = runtime_actor_loadout_apply_failures_never_drop_valid_created_ids }
+    ,{ name = "runtime_actor_loadout_failed_tag_write_never_manufactures_ownership", fn = runtime_actor_loadout_failed_tag_write_never_manufactures_ownership }
     ,{ name = "runtime_bootstrap_hostility_port_is_feature_probed", fn = runtime_bootstrap_hostility_port_is_feature_probed }
     ,{ name = "runtime_entity_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_ammo_box_size_failure_precedes_actor_mutation }
     ,{ name = "runtime_entity_partial_failures_rollback_in_reverse", fn = runtime_entity_partial_failures_rollback_in_reverse }
@@ -4265,6 +4357,9 @@ local cases = {
     ,{ name = "runtime_task9_single_result_contract_maps_both_kinds", fn = runtime_task9_single_result_contract_maps_both_kinds }
     ,{ name = "runtime_task9_countdown_escape_model_routes_main_menu_cleanup", fn = runtime_task9_countdown_escape_model_routes_main_menu_cleanup }
     ,{ name = "runtime_task9_resume_failures_normalize_to_restore_failed", fn = runtime_task9_resume_failures_normalize_to_restore_failed }
+    ,{ name = "runtime_task9_resume_pending_invalid_loaded_session_normalizes", fn = runtime_task9_resume_pending_invalid_loaded_session_normalizes }
+    ,{ name = "runtime_task9_restoring_state_read_failure_normalizes", fn = runtime_task9_restoring_state_read_failure_normalizes }
+    ,{ name = "runtime_task9_resume_completion_transition_failure_normalizes", fn = runtime_task9_resume_completion_transition_failure_normalizes }
     ,{ name = "runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec", fn = runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec }
     ,{ name = "runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active", fn = runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active }
     ,{ name = "runtime_task9_defeat_and_victory_share_main_menu_cleanup", fn = runtime_task9_defeat_and_victory_share_main_menu_cleanup }

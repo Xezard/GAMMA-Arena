@@ -481,6 +481,9 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($Task5OrchestratorContent -match 'local function normalize_resume_preparation[\s\S]{0,700}checkpoint_restore_failure') 'Task 9 prepared-intent normalization must produce GA_CHECKPOINT_RESTORE_FAILED'
     Assert-True ($Task5OrchestratorContent -match 'normalize_resume_preparation\(prepared\)') 'Task 9 prepared-intent errors must use the restore-failure normalizer'
     Assert-True ($Task5OrchestratorContent -match 'checkpoint_restore_failure\(resume') 'Task 9 completed-resume errors must normalize to GA_CHECKPOINT_RESTORE_FAILED'
+    Assert-True ($Task5OrchestratorContent -match 'state\.resume_pending\s+and\s+checkpoint_restore_failure\(self\.load_state_error') 'Task 9 malformed loaded ArenaSession must normalize only when ResumeIntent is pending'
+    Assert-True ($Task5OrchestratorContent -match 'if\s+not\s+state_ok\s+then[\s\S]{0,260}runtime_stage\s*==\s*"RESTORING"[\s\S]{0,180}checkpoint_restore_failure') 'Task 9 RESTORING checkpoint state-read failures must normalize to GA_CHECKPOINT_RESTORE_FAILED'
+    Assert-True ($Task5OrchestratorContent -match 'runtime_stage\s*==\s*"RESUME_REHIDING"[\s\S]{0,1800}if\s+not\s+advanced\.ok\s+then\s+return\s+checkpoint_restore_failure\(advanced') 'Task 9 resume-completion transition failures must normalize to GA_CHECKPOINT_RESTORE_FAILED'
 }
 $Task9ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
 if (Test-Path -LiteralPath $Task9ActorPath) {
@@ -488,7 +491,7 @@ if (Test-Path -LiteralPath $Task9ActorPath) {
     Assert-True ($Task9ActorContent -match [regex]::Escape('cleanup_loadout_for_restore')) 'Task 9 actor adapter must expose owned-loadout-only cleanup before restore'
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_countdown_escape_model_routes_main_menu_cleanup','runtime_task9_resume_failures_normalize_to_restore_failed','runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec','runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only','runtime_actor_loadout_consumed_absent_id_retires_without_release','runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released','runtime_actor_loadout_post_submit_reuse_is_never_released_twice','runtime_actor_loadout_malformed_ownership_proof_fails_closed','runtime_actor_loadout_exact_owned_match_releases_once','runtime_actor_loadout_apply_failures_never_drop_valid_created_ids')) {
+    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_countdown_escape_model_routes_main_menu_cleanup','runtime_task9_resume_failures_normalize_to_restore_failed','runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec','runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only','runtime_actor_loadout_consumed_absent_id_retires_without_release','runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released','runtime_actor_loadout_post_submit_reuse_is_never_released_twice','runtime_actor_loadout_malformed_ownership_proof_fails_closed','runtime_actor_loadout_exact_owned_match_releases_once','runtime_actor_loadout_apply_failures_never_drop_valid_created_ids','runtime_actor_loadout_failed_tag_write_never_manufactures_ownership','runtime_task9_resume_pending_invalid_loaded_session_normalizes','runtime_task9_restoring_state_read_failure_normalizes','runtime_task9_resume_completion_transition_failure_normalizes')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 9 Dev tests must cover $Marker"
     }
 }
@@ -502,6 +505,8 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 9 actor loadout cleanup must cover reuse-safe ownership proof: $Marker"
     }
     Assert-True ($Task5BootstrapContent -match 'created\[#created\s*\+\s*1\]\s*=\s*entry[\s\S]{0,500}save_and_verify_tag\(entry\)') 'Task 9 rollback registry must retain every valid unique created id before later proof/tag failure'
+    Assert-True (([regex]::Matches($Task5BootstrapContent, 'save_and_verify_tag\(record\)')).Count -eq 1) 'Task 9 ownership tags may be written only during creation, never during cleanup'
+    Assert-True ($Task5BootstrapContent -notmatch 'cleanup\s*=\s*function\(\)[\s\S]{0,2600}save_and_verify_tag\(record\)') 'Task 9 cleanup must never write or rewrite an ownership tag'
 }
 
 $Task6RuntimeFiles = @(
