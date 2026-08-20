@@ -483,7 +483,8 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Fatal checkpoint cleanup routing must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'self\.cleanup_required\s*=\s*true') 'Fatal routing must gate disconnect on actual checkpoint cleanup even before session assignment'
-    Assert-True ($Task5OrchestratorContent -match 'if\s+result\.ok\s+then\s+self\.teardown_done\s*=\s*true\s+end') 'Failed teardown must remain retryable instead of latching completion'
+    Assert-True ($Task5OrchestratorContent -match 'result\.ok\s+and\s+not\s+pending') 'Failed or frame-pending teardown must remain retryable instead of latching completion'
+    Assert-True ($Task5OrchestratorContent -match 'self\.teardown_cycle\s*=\s*self\.teardown_cycle\s*\+\s*1') 'A new loaded-game lifecycle must create a fresh teardown cycle'
 }
 
 if (Test-Path -LiteralPath $Task5DevTestPath) {
@@ -499,13 +500,78 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     Assert-True ($Task5DevTestContent -match 'runtime_checkpoint_zero_required_target_waits_for_timeout') 'Task 6 checkpoint tests must cover a source-absent zero-byte required target'
     Assert-True ($Task5DevTestContent -match 'runtime_pre_session_fatal_waits_for_cleanup_before_disconnect') 'Fatal cleanup tests must cover failures before ArenaSession assignment'
     Assert-True ($Task5DevTestContent -match 'runtime_prepare_resume_legacy_mismatch_is_normalized') 'Resume routing tests must normalize legacy store mismatch codes'
-    foreach ($Marker in @('runtime_checkpoint_late_dds_retries_throw_then_succeeds','runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe','runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently','runtime_bootstrap_teardown_permanent_failures_are_bounded','runtime_bootstrap_teardown_rejects_unbounded_update_limits','runtime_failed_teardown_retries_then_latches_success')) {
+    foreach ($Marker in @('runtime_checkpoint_late_dds_retries_throw_then_succeeds','runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe','runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently','runtime_bootstrap_teardown_resets_across_sessions','runtime_completed_teardown_allows_next_loaded_launch_activation','runtime_bootstrap_teardown_permanent_failures_are_bounded','runtime_bootstrap_teardown_rejects_unbounded_update_limits','runtime_bootstrap_teardown_override_budgets_route_exactly','runtime_failed_teardown_retries_then_latches_success')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 final lifecycle hardening tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_checkpoint_fresh_process_recovers_all_exact_layouts','runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch','runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 fresh-process recovery tests must cover $Marker"
     }
     Assert-True ($Task5DevTestContent -match 'runtime_fatal_recovery_waits_for_cleanup_before_disconnect') 'Fatal recovery tests must gate disconnect on exact cleanup'
+}
+
+$Task7EntityPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+Assert-True (Test-Path -LiteralPath $Task7EntityPath) 'Task 7 entity adapter is missing'
+if (Test-Path -LiteralPath $Task5CompatPath) {
+    foreach ($Marker in @('alife().get_children','alife().object','alife().set_switch_online','alife().set_switch_offline','se_load_var','level.object_by_id','game_object.friend','game_object.enemy','system_ini.r_u32','GA_AMMO_BOX_SIZE_INVALID')) {
+        Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "Task 7 compatibility preflight must cover $Marker"
+    }
+}
+if (Test-Path -LiteralPath $Task7EntityPath) {
+    $Task7EntityContent = Get-Content -LiteralPath $Task7EntityPath -Raw
+    foreach ($Marker in @('begin_apply','update','on_npc_death','living_opponent_count','cleanup','registry_snapshot','gamma_arena_owner','se_load_var','get_children','parent_id','safe_release_manager','set_relation','game_object.enemy','game_object.friend','-5000','AI_STL_S','bandit','persist_death_dropped','GA_ENTITY_DEATH_DROPPED_VERIFY_FAILED','hold_offline','request_online','online_requested','held_offline','staged_friendly','set_actor_hold','GA_ENTITY_ACTIVATION_HOLD_FAILED','GA_ENTITY_ONLINE_REQUEST_FAILED','GA_ENTITY_ONLINE_TIMEOUT','GA_ENTITY_RELEASE_TIMEOUT','GA_ENTITY_PARENT_RELEASE_BLOCKED','ensure_weapon_equipped','profile_runtime','ammo_box_size','ammo_rounds')) {
+        Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Task 7 entity adapter must cover $Marker"
+    }
+    Assert-True ($Task7EntityContent -match 'type\([^\r\n]*\)\s*==\s*"function"') 'Task 7 child snapshots must support the real GAMMA iterator contract'
+    Assert-True ($Task7EntityContent -notmatch '\balife_release_id\s*\(') 'Entity adapter must never directly release a standalone stalker'
+    Assert-True ($Task7EntityContent -notmatch '\bmath\.(random|randomseed)\b') 'Entity adapter must not consume global randomness'
+}
+
+$Task7ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
+if (Test-Path -LiteralPath $Task7ValidatorPath) {
+    $Task7ValidatorContent = Get-Content -LiteralPath $Task7ValidatorPath -Raw
+    foreach ($Marker in @('effective_profile','validate_runtime','AI_STL_S','bandit','GA_ENEMY_EFFECTIVE_CLASS_INVALID','GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID','GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING')) {
+        Assert-True ($Task7ValidatorContent -match [regex]::Escape($Marker)) "Task 7 validator must cover $Marker"
+    }
+}
+
+$Task7FixturePath = Join-Path $RepoRoot 'tests\fixtures\effective-arena-npcs-v1.ini'
+Assert-True (Test-Path -LiteralPath $Task7FixturePath) 'Task 7 effective NPC fixture is missing'
+if (Test-Path -LiteralPath $Task7FixturePath) {
+    $Task7FixtureContent = Get-Content -LiteralPath $Task7FixturePath -Raw
+    Assert-True (([regex]::Matches($Task7FixtureContent, '(?m)^section\s*=\s*gamma_arena_bandit_(novice|trainee|experienced|veteran)\s*$')).Count -eq 4) 'Effective NPC fixture must contain exactly four Arena sections'
+    Assert-True (([regex]::Matches($Task7FixtureContent, '(?m)^class\s*=\s*AI_STL_S\s*$')).Count -eq 4) 'Every effective Arena NPC must resolve to AI_STL_S'
+    Assert-True (([regex]::Matches($Task7FixtureContent, '(?m)^community\s*=\s*bandit\s*$')).Count -eq 4) 'Every effective Arena NPC must resolve to bandit'
+    Assert-True ($Task7FixtureContent -notmatch '(?m)^death_dropped\s*=') 'Effective-profile fixture must not pretend the runtime death-manager save-var is an LTX property'
+}
+
+$Task7NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
+if (Test-Path -LiteralPath $Task7NpcPath) {
+    $Task7NpcContent = Get-Content -LiteralPath $Task7NpcPath -Raw
+    Assert-True ($Task7NpcContent -notmatch '(?m)^death_dropped\s*=') 'Arena NPC LTX must not treat death_dropped as an inert section property'
+}
+
+if (Test-Path -LiteralPath $Task5BootstrapPath) {
+    foreach ($Marker in @('gamma_arena_entity_adapter.new','se_load_var','se_save_var(id, nil, "death_dropped", value)','force_set_goodwill','game_object.enemy','game_object.friend','step_entity_cleanup','step_actor_cleanup','last_update_at','pending = true','entity_teardown_max_updates','actor_teardown_max_updates','MAX_TEARDOWN_UPDATES','new_actor_loadout_port','new_runtime_entity_exists_port','entity_exists','hold_entity_offline','request_entity_online','set_switch_online','set_switch_offline','switch_online','level.object_by_id','apply_actor_activation_hold','set_enemy','make_item_active','active_item','apply_actor_hostility','effective_ammo_box_size','system.r_u32','ammo_box_size','box_size')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 7 bootstrap composition must cover $Marker"
+    }
+    Assert-True ($Task5BootstrapContent -notmatch 'relation_registry\.set_goodwill') 'Task 7 must not require the nonexistent installed-GAMMA relation_registry.set_goodwill API'
+    Assert-True ($Task5BootstrapContent -notmatch 'function\s+drain_entity_cleanup') 'Task 7 entity cleanup must be frame-driven rather than a same-callback drain loop'
+    Assert-True ($Task5BootstrapContent -match 'alife_create_item\(section,\s*parent,\s*\{\s*ammo\s*=\s*count\s*\}\)') 'Task 7 must pass exact ammo rounds through the GAMMA alife_create_item property table'
+    Assert-True ($Task5BootstrapContent -match 'return\s+alife_create_item\(section,\s*parent\)') 'Task 7 must create ordinary inventory items without a numeric third argument'
+}
+
+if (Test-Path -LiteralPath $Task5OrchestratorPath) {
+    foreach ($Marker in @('entities','on_npc_death','living_opponent_count','GA_ENTITY_COUNT_UNAVAILABLE','GA_ENTITY_COUNT_STATE_INVALID')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 7 orchestration integration must cover $Marker"
+    }
+    Assert-True ($Task5OrchestratorContent -match 'if\s+not\s+self:is_active\(\)\s+and\s+self\.cleanup_required\s+then\s+return\s+self:drive_runtime\(\)\s+end') 'Inactive cleanup polling must not bypass launch/resume activation while awaiting_activation is set'
+    Assert-True ($Task5OrchestratorContent -match 'if\s+self\.cleanup_required\s+then[\s\S]{0,500}self:cleanup_ready_for_disconnect\(\)') 'A later loaded Arena must consume exact cleanup readiness before launch/resume activation'
+}
+
+if (Test-Path -LiteralPath $Task5DevTestPath) {
+    foreach ($Marker in @('runtime_preflight_requires_task7_entity_ports_and_ammo_metadata','runtime_entity_actor_loadout_precedes_spawn','runtime_entity_npcs_are_offline_until_atomic_activation','runtime_entity_online_wait_is_bounded_and_wrap_safe','runtime_entity_active_defers_input_release_to_task8','runtime_bootstrap_actor_loadout_port_is_bound_and_exact','runtime_actor_loadout_rollback_blocks_disconnect_until_absent','runtime_bootstrap_actor_existence_lookup_fails_closed','runtime_bootstrap_hostility_port_is_feature_probed','runtime_entity_ammo_box_size_failure_precedes_actor_mutation','runtime_entity_partial_failures_rollback_in_reverse','runtime_entity_purges_only_snapshot_children_still_parented','runtime_entity_supports_real_get_children_iterator','runtime_entity_multi_return_ammo_is_exact','runtime_entity_death_dropped_is_persisted_and_round_tripped','runtime_entity_multi_return_late_failure_is_fully_registered','runtime_entity_registry_is_plain_ids_only','runtime_entity_cleanup_requires_registry_and_tag','runtime_entity_forged_tag_is_ignored','runtime_entity_tag_loss_fails_safe','runtime_entity_parent_release_blocks_unproven_children','runtime_entity_cleanup_is_idempotent','runtime_entity_lifecycle_cleanup_takes_over_mid_rollback','runtime_entity_existence_result_must_be_boolean','runtime_entity_duplicate_death_is_idempotent','runtime_entity_unregistered_death_is_ignored','runtime_entity_object_death_signature_is_normalized','runtime_entity_numeric_death_requires_test_injection','runtime_entity_release_is_async_and_never_direct','runtime_entity_release_timeout_is_wrap_safe','runtime_entity_max_cardinality_cleanup_fits_default_budget','runtime_entity_relations_friend_first_then_actor_hostile','runtime_entity_equipment_delays_active_and_times_out','runtime_entity_callbacks_fail_closed','runtime_validator_rejects_effective_nonhuman_profile','runtime_entity_runtime_profile_check_precedes_actor_mutation','runtime_orchestrator_living_count_fails_closed','runtime_entity_does_not_spawn_before_begin_apply')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 7 Dev tests must cover $Marker"
+    }
 }
 
 $Task3DataFiles = @(

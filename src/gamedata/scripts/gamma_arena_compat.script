@@ -9,12 +9,34 @@ local function fs_method_present(probes, method_name)
     return ok and fs ~= nil and method_present(fs, method_name)
 end
 
+local function alife_method_present(probes, method_name)
+    if type(probes.alife) ~= "function" then return false end
+    local ok, service = pcall(probes.alife)
+    return ok and service ~= nil and method_present(service, method_name)
+end
+
+local function system_method_present(probes, method_name)
+    if type(probes.system_ini) ~= "function" then return false end
+    local ok, system = pcall(probes.system_ini)
+    return ok and system ~= nil and method_present(system, method_name)
+end
+
+local function field_present(object, field_name)
+    local ok, value = pcall(function() return object and object[field_name] end)
+    return ok and value ~= nil
+end
+
 local required_capabilities = {
     { name = "RegisterScriptCallback", present = function(p) return type(p.RegisterScriptCallback) == "function" end },
     { name = "UnregisterScriptCallback", present = function(p) return type(p.UnregisterScriptCallback) == "function" end },
     { name = "ini_file", present = function(p) return type(p.ini_file) == "function" end },
     { name = "system_ini", present = function(p) return type(p.system_ini) == "function" end },
+    { name = "system_ini.r_u32", present = function(p) return system_method_present(p, "r_u32") end },
     { name = "alife", present = function(p) return type(p.alife) == "function" end },
+    { name = "alife().get_children", present = function(p) return alife_method_present(p, "get_children") end },
+    { name = "alife().object", present = function(p) return alife_method_present(p, "object") end },
+    { name = "alife().set_switch_online", present = function(p) return alife_method_present(p, "set_switch_online") end },
+    { name = "alife().set_switch_offline", present = function(p) return alife_method_present(p, "set_switch_offline") end },
     { name = "alife_create", present = function(p) return type(p.alife_create) == "function" end },
     { name = "alife_create_item", present = function(p) return type(p.alife_create_item) == "function" end },
     { name = "alife_release_id", present = function(p) return type(p.alife_release_id) == "function" end },
@@ -26,7 +48,9 @@ local required_capabilities = {
     { name = "exec_console_cmd", present = function(p) return type(p.exec_console_cmd) == "function" end },
     { name = "time_global", present = function(p) return type(p.time_global) == "function" end },
     { name = "se_save_var", present = function(p) return type(p.se_save_var) == "function" end },
+    { name = "se_load_var", present = function(p) return type(p.se_load_var) == "function" end },
     { name = "level.patrol_path_exists", present = function(p) return type(p.level) == "table" and type(p.level.patrol_path_exists) == "function" end },
+    { name = "level.object_by_id", present = function(p) return type(p.level) == "table" and type(p.level.object_by_id) == "function" end },
     { name = "level.disable_input", present = function(p) return type(p.level) == "table" and type(p.level.disable_input) == "function" end },
     { name = "level.enable_input", present = function(p) return type(p.level) == "table" and type(p.level.enable_input) == "function" end },
     { name = "patrol", present = function(p) return type(p.patrol) == "function" end },
@@ -42,6 +66,8 @@ local required_capabilities = {
     { name = "db.actor.set_psy_health", present = function(p) return type(p.db) == "table" and method_present(p.db.actor, "set_psy_health") end },
     { name = "db.actor.set_actor_position", present = function(p) return type(p.db) == "table" and method_present(p.db.actor, "set_actor_position") end },
     { name = "db.actor.set_actor_direction", present = function(p) return type(p.db) == "table" and method_present(p.db.actor, "set_actor_direction") end },
+    { name = "game_object.friend", present = function(p) return field_present(p.game_object, "friend") end },
+    { name = "game_object.enemy", present = function(p) return field_present(p.game_object, "enemy") end },
     { name = "axr_main.config", present = function(p) return type(p.axr_main) == "table" and p.axr_main.config ~= nil end },
     { name = "safe_release_manager.release", present = function(p) return type(p.safe_release_manager) == "table" and type(p.safe_release_manager.release) == "function" end }
 }
@@ -120,13 +146,31 @@ local function ordered_sections(catalogs)
     local ammo = {}
     for _, item in pairs(catalogs.ammo or {}) do ammo[#ammo + 1] = item.section end
     table.sort(ammo)
-    for _, section in ipairs(ammo) do append_unique(result, seen, section, "item") end
+    for _, section in ipairs(ammo) do append_unique(result, seen, section, "ammo") end
     for _, outfit in ipairs(catalogs.outfit_list or {}) do append_unique(result, seen, outfit.section, "item") end
     local consumables = {}
     for _, item in pairs(catalogs.consumables or {}) do consumables[#consumables + 1] = item.section end
     table.sort(consumables)
     for _, section in ipairs(consumables) do append_unique(result, seen, section, "item") end
     return result
+end
+
+local function validate_ammo_box_size(system, section, accessors, errors)
+    if type(accessors.line_exist) ~= "function" or type(accessors.r_u32) ~= "function" then
+        add_error(errors, "GA_AMMO_BOX_SIZE_API_MISSING", "Effective ammo box_size lookup is unavailable", { section = section })
+        return
+    end
+    local present_ok, present = safe_call(accessors.line_exist, system, section, "box_size")
+    if not present_ok or present ~= true then
+        add_error(errors, present_ok and "GA_AMMO_BOX_SIZE_MISSING" or "GA_AMMO_BOX_SIZE_READ_FAILED", "Effective ammo box_size is unavailable", { section = section })
+        return
+    end
+    local read_ok, value = safe_call(accessors.r_u32, system, section, "box_size")
+    if not read_ok then
+        add_error(errors, "GA_AMMO_BOX_SIZE_READ_FAILED", "Effective ammo box_size could not be read", { section = section, reason = tostring(value) })
+    elseif not finite_integer(value) or value < 1 or value >= 4294967296 then
+        add_error(errors, "GA_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size must be a positive bounded integer", { section = section, value = value })
+    end
 end
 
 local function normalized_community(value)
@@ -204,14 +248,14 @@ local function validate_profile_value(system, section, key, expected, codes, nor
 end
 
 local function validate_sections(system, catalogs, errors)
-    local methods_ok, section_exist, r_string_ex, line_exist = pcall(function()
-        return system.section_exist, system.r_string_ex, system.line_exist
+    local methods_ok, section_exist, r_string_ex, line_exist, r_u32 = pcall(function()
+        return system.section_exist, system.r_string_ex, system.line_exist, system.r_u32
     end)
     if not methods_ok or type(section_exist) ~= "function" then
         add_error(errors, "GA_PREFLIGHT_SYSTEM_INI_INVALID", "Effective system_ini lacks a section accessor")
         return
     end
-    local accessors = { r_string_ex = r_string_ex, line_exist = line_exist }
+    local accessors = { r_string_ex = r_string_ex, line_exist = line_exist, r_u32 = r_u32 }
     for _, entry in ipairs(ordered_sections(catalogs)) do
         local exists_ok, exists = safe_call(section_exist, system, entry.section)
         if not exists_ok or exists ~= true then
@@ -222,6 +266,8 @@ local function validate_sections(system, catalogs, errors)
         elseif entry.kind == "profile" then
             validate_profile_value(system, entry.section, "class", "AI_STL_S", profile_error_codes.class, nil, accessors, errors)
             validate_profile_value(system, entry.section, "community", "bandit", profile_error_codes.community, normalized_community, accessors, errors)
+        elseif entry.kind == "ammo" then
+            validate_ammo_box_size(system, entry.section, accessors, errors)
         end
     end
 end

@@ -66,7 +66,40 @@ local function copy_participant(participant)
     return { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost }
 end
 
-local function validate_impl(spec, catalogs)
+local function normalized_community(value)
+    if type(value) ~= "string" then return nil end
+    return string.lower((string.gsub(value, "^%s*(.-)%s*$", "%1")))
+end
+
+function validate_effective_profile(section, slot, runtime)
+    if type(runtime) ~= "table" then
+        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section })
+    end
+    local resolver_ok, resolver = pcall(function() return runtime.effective_profile end)
+    if not resolver_ok or type(resolver) ~= "function" then
+        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section })
+    end
+    local called, value = pcall(resolver, section)
+    if not called then
+        return failure("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective NPC profile could not be read safely", { slot = slot, section = section, reason = tostring(value) })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        value = value.value
+    end
+    if type(value) ~= "table" then
+        return failure("GA_ENEMY_EFFECTIVE_PROFILE_INVALID", "Effective NPC profile must contain class and community", { slot = slot, section = section })
+    end
+    if value.class ~= "AI_STL_S" then
+        return failure("GA_ENEMY_EFFECTIVE_CLASS_INVALID", "Effective Arena opponent class must be human AI_STL_S", { slot = slot, section = section, class = value.class })
+    end
+    if normalized_community(value.community) ~= "bandit" then
+        return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community must be bandit", { slot = slot, section = section, community = value.community })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_impl(spec, catalogs, runtime)
     if type(spec) ~= "table" or type(catalogs) ~= "table" or type(catalogs.layouts) ~= "table" or type(catalogs.difficulties) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec and normalized catalogs are required", {}) end
     if spec.mode_id ~= "skirmish" then return failure("GA_MODE_INVALID", "FightSpec mode must be skirmish", { mode_id = spec.mode_id }) end
     if type(spec.layout_id) ~= "string" or type(catalogs.layouts[spec.layout_id]) ~= "table" then return failure("GA_LAYOUT_UNKNOWN", "FightSpec layout is unknown", { layout_id = spec.layout_id }) end
@@ -97,6 +130,10 @@ local function validate_impl(spec, catalogs)
         end
         local profile = item_exists(catalogs.profiles, opponent.profile)
         if not profile then return failure("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
+        if runtime ~= nil then
+            local effective = validate_effective_profile(opponent.profile, index, runtime)
+            if not effective.ok then return effective end
+        end
         if not valid_paths[opponent.spawn_path] then return failure("GA_SPAWN_PATH_INVALID", "Opponent spawn path is not in the selected layout", { path = opponent.spawn_path }) end
         if seen[opponent.spawn_path] then return failure("GA_SPAWN_PATH_DUPLICATE", "Opponent spawn paths must be unique", { path = opponent.spawn_path }) end
         seen[opponent.spawn_path] = true
@@ -113,7 +150,16 @@ local function validate_impl(spec, catalogs)
 end
 
 function validate(spec, catalogs)
-    local succeeded, result = pcall(validate_impl, spec, catalogs)
+    local succeeded, result = pcall(validate_impl, spec, catalogs, nil)
     if succeeded then return result end
     return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec validation failed safely", { reason = tostring(result) })
+end
+
+function validate_runtime(spec, catalogs, runtime)
+    if type(runtime) ~= "table" then
+        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Runtime FightSpec validation requires an effective profile resolver", {})
+    end
+    local succeeded, result = pcall(validate_impl, spec, catalogs, runtime)
+    if succeeded then return result end
+    return failure("GA_FIGHTSPEC_TYPE_INVALID", "Runtime FightSpec validation failed safely", { reason = tostring(result) })
 end

@@ -99,6 +99,7 @@ function Orchestrator:__init(deps)
     self.runtime_stage = "INACTIVE"
     self.checkpoint_ready = false
     self.teardown_done = false
+    self.teardown_cycle = 0
     self.fatal_shown = false
     self.fatal_dialog = nil
     self.main_menu_executed = false
@@ -130,6 +131,29 @@ function Orchestrator:is_checkpoint_ready()
     return self:is_active() and self.checkpoint_ready == true and self.runtime_stage == "READY"
 end
 
+function Orchestrator:is_opponent_activation_allowed()
+    -- Task 7 keeps this gate closed. Task 8 may open it only after the
+    -- countdown deadline and while input remains owned by the Arena runtime.
+    return self:is_active() and self.runtime_stage == "SPAWNING"
+end
+
+function Orchestrator:living_opponent_count()
+    local entities = self.deps.entities
+    local ok, snapshot_method, count_method = pcall(function() return entities and entities.registry_snapshot, entities and entities.living_opponent_count end)
+    if not ok or type(snapshot_method) ~= "function" or type(count_method) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_COUNT_UNAVAILABLE", "Opponent registry/count dependencies are unavailable")
+    end
+    local snapshot_ok, snapshot = pcall(snapshot_method, entities)
+    if not snapshot_ok or type(snapshot) ~= "table" or snapshot.state ~= "ACTIVE" then
+        return gamma_arena_result.err("GA_ENTITY_COUNT_STATE_INVALID", "Opponent count is valid only for an ACTIVE entity transaction")
+    end
+    local called, value = pcall(count_method, entities)
+    if not called or type(value) ~= "number" or value ~= math.floor(value) or value < 0 then
+        return gamma_arena_result.err("GA_ENTITY_COUNT_UNAVAILABLE", "Opponent count failed or returned an invalid value")
+    end
+    return gamma_arena_result.ok(value)
+end
+
 function Orchestrator:advance(event)
     local transition = gamma_arena_state_machine.transition(self.machine_state, event)
     if transition.ok then self.machine_state = transition.value end
@@ -142,8 +166,9 @@ function Orchestrator:teardown_once(reason, preserve_session)
         self.teardown_done = true
         return gamma_arena_result.ok(true)
     end
-    local result = safe_result_call("GA_RUNTIME_TEARDOWN_FAILED", self.deps.teardown, reason, preserve_session == true)
-    if result.ok then self.teardown_done = true end
+    local result = safe_result_call("GA_RUNTIME_TEARDOWN_FAILED", self.deps.teardown, reason, preserve_session == true, self.teardown_cycle)
+    local pending = result.ok and type(result.value) == "table" and result.value.pending == true
+    if result.ok and not pending then self.teardown_done = true end
     return result
 end
 
@@ -176,6 +201,21 @@ end
 
 function Orchestrator:cleanup_ready_for_disconnect()
     if not self.cleanup_required then return gamma_arena_result.ok(true) end
+    if not self.teardown_done then
+        local teardown = self:teardown_once("cleanup_poll", false)
+        if not teardown.ok then return teardown end
+        if not self.teardown_done then return fail("GA_RUNTIME_CLEANUP_PENDING", "Entity cleanup is still pending across engine frames") end
+    end
+    local entities = self.deps.entities
+    if entities ~= nil then
+        local entity_ok, entity_snapshot = pcall(function() return entities:registry_snapshot() end)
+        if not entity_ok or type(entity_snapshot) ~= "table" or type(entity_snapshot.state) ~= "string" then
+            return fail("GA_RUNTIME_CLEANUP_FAILED", "Entity cleanup state is unavailable")
+        end
+        if entity_snapshot.state ~= "CLEAN" then
+            return fail("GA_RUNTIME_CLEANUP_PENDING", "Entity cleanup is still pending", { state = entity_snapshot.state })
+        end
+    end
     local checkpoint = self.deps.checkpoint
     local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
     if not state_ok or type(state) ~= "string" then
@@ -276,6 +316,7 @@ function Orchestrator:on_game_load()
     self.pending_load_state_seen = false
     self.pending_load_state_error = nil
     self.awaiting_activation = true
+    self.teardown_cycle = self.teardown_cycle + 1
     self.teardown_done = false
     self.fatal_shown = false
     self.main_menu_executed = false
@@ -422,6 +463,18 @@ end
 
 function Orchestrator:drive_runtime()
     if not self:is_active() then
+        if self.cleanup_required then
+            local cleanup = self:cleanup_ready_for_disconnect()
+            if not cleanup.ok then
+                if cleanup.error and cleanup.error.code == "GA_RUNTIME_CLEANUP_PENDING" then
+                    return gamma_arena_result.ok({ stage = "CLEANING", pending = true })
+                end
+                return cleanup
+            end
+            -- This callback proved entity/checkpoint/actor teardown complete.
+            -- Activation of a newly loaded intent begins on the next update.
+            return gamma_arena_result.ok({ stage = "CLEANING", pending = false })
+        end
         local checkpoint = self.deps.checkpoint
         local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
         if state_ok and state == "CLEANING" then return call_method("GA_CHECKPOINT_CLEANUP_FAILED", checkpoint, "update") end
@@ -491,11 +544,19 @@ function Orchestrator:drive_runtime()
 end
 
 function Orchestrator:update_runtime()
+    if not self:is_active() and self.cleanup_required then return self:drive_runtime() end
     local began = call_method("GA_ACTOR_UPDATE_FAILED", self.deps.actor, "begin_update")
     if not began.ok then return began end
     local activated = self:activate_once()
     if not activated.ok then return activated end
-    return self:drive_runtime()
+    local runtime = self:drive_runtime()
+    if not runtime.ok then return runtime end
+    local entities = self.deps.entities
+    if entities ~= nil then
+        local updated = call_method("GA_ENTITY_UPDATE_FAILED", entities, "update")
+        if not updated.ok then return updated end
+    end
+    return runtime
 end
 
 function Orchestrator:actor_on_first_update()
@@ -511,9 +572,11 @@ function Orchestrator:actor_on_before_death()
     return gamma_arena_result.ok(false)
 end
 
-function Orchestrator:npc_on_death_callback()
+function Orchestrator:npc_on_death_callback(victim, killer)
     if not self:is_active() then return gamma_arena_result.ok(false) end
-    return gamma_arena_result.ok(false)
+    local entities = self.deps.entities
+    if entities == nil then return gamma_arena_result.ok(false) end
+    return call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim)
 end
 
 function Orchestrator:block_manual_input(...)
@@ -556,6 +619,7 @@ function Orchestrator:actor_on_net_destroy()
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local preserve = self.checkpoint_reload_expected == true
     self.checkpoint_reload_expected = false
+    if not preserve then self.cleanup_required = true end
     local result = self:teardown_once(preserve and "checkpoint_reload" or "actor_destroyed", preserve)
     if not preserve then
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
@@ -573,6 +637,7 @@ end
 
 function Orchestrator:on_before_level_changing()
     if not self:is_active() then return gamma_arena_result.ok(false) end
+    self.cleanup_required = true
     local result = self:teardown_once("level_change", false)
     local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
     if not cleared.ok then result = cleared end

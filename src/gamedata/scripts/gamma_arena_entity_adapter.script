@@ -1,0 +1,906 @@
+local EntityAdapter = {}
+EntityAdapter.__index = EntityAdapter
+
+local OWNER_KEY = "gamma_arena_owner"
+local UINT32_MOD = 4294967296
+local DEFAULT_RELEASE_TIMEOUT_MS = 10000
+local DEFAULT_ONLINE_TIMEOUT_MS = 10000
+local EXPECTED_HUMAN_CLASS = "AI_STL_S"
+local EXPECTED_COMMUNITY = "bandit"
+local ACTOR_GOODWILL = -5000
+
+-- Production composition binds safe_release_manager.release and the exact
+-- game_object.friend/game_object.enemy set_relation calls. The runtime
+-- death_dropped save-var suppresses death_manager; registry + owner tag remain
+-- the independent cleanup authority.
+local SAFE_RELEASE_CONTRACT = "safe_release_manager"
+local TAG_READ_CONTRACT = "se_load_var"
+local RELATION_CONTRACT = { friend = "game_object.friend", enemy = "game_object.enemy" }
+local RANDOM_LOOT_CONTRACT = "death_dropped"
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value)
+end
+
+local function valid_id(value)
+    return finite_integer(value) and value >= 0
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function copy_plain(value, seen)
+    local kind = type(value)
+    if kind == "nil" or kind == "string" or kind == "boolean" or kind == "number" then return value end
+    if kind ~= "table" then error("non-plain registry value: " .. kind) end
+    seen = seen or {}
+    if seen[value] then error("cyclic registry value") end
+    seen[value] = true
+    local copy = {}
+    for key, item in pairs(value) do copy[copy_plain(key, seen)] = copy_plain(item, seen) end
+    seen[value] = nil
+    return copy
+end
+
+local function result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Arena entity dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Arena entity dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return fail(code, "Arena entity dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
+local function boolean_query(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Arena boolean dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Arena boolean dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        if type(value.value) ~= "boolean" then return fail(code, "Arena boolean Result returned a non-boolean value") end
+        return value
+    end
+    if type(value) ~= "boolean" then return fail(code, "Arena boolean dependency returned a non-boolean value") end
+    return gamma_arena_result.ok(value)
+end
+
+local function method_result(code, object, name, ...)
+    local lookup_ok, method = pcall(function() return object and object[name] end)
+    if not lookup_ok or type(method) ~= "function" then
+        return fail(code, "Required Arena entity method is unavailable", { method = name })
+    end
+    return result_call(code, method, object, ...)
+end
+
+local function read_entity_id(entity)
+    if entity == nil then return nil end
+    local method_ok, method = pcall(function() return entity.id end)
+    if method_ok and type(method) == "function" then
+        local called, value = pcall(method, entity)
+        if called and valid_id(value) then return value end
+    elseif method_ok and valid_id(method) then
+        return method
+    end
+    local field_ok, value = pcall(function() return entity.runtime_id end)
+    if field_ok and valid_id(value) then return value end
+    return nil
+end
+
+local function read_parent_id(entity)
+    if entity == nil then return nil end
+    local ok, value = pcall(function() return entity.parent_id end)
+    if ok and valid_id(value) then return value end
+    local method_ok, method = pcall(function() return entity.parent_id end)
+    if method_ok and type(method) == "function" then
+        local called, result = pcall(method, entity)
+        if called and valid_id(result) then return result end
+    end
+    return nil
+end
+
+local function normalized_entities(value)
+    if value == nil then return nil end
+    if read_entity_id(value) ~= nil then return { value } end
+    if type(value) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+        if not finite_integer(key) or key < 1 then return nil end
+        count = count + 1
+        maximum = math.max(maximum, key)
+    end
+    if maximum ~= count or count == 0 then return nil end
+    local entities = {}
+    for index = 1, count do
+        entities[index] = value[index]
+    end
+    return entities
+end
+
+local function copy_loadout(loadout)
+    if type(loadout) ~= "table" then return nil end
+    local consumables = {}
+    if type(loadout.consumables) ~= "table" then return nil end
+    for index, section in ipairs(loadout.consumables) do
+        if type(section) ~= "string" or section == "" then return nil end
+        consumables[index] = section
+    end
+    if type(loadout.weapon) ~= "string" or loadout.weapon == ""
+        or type(loadout.ammo) ~= "string" or loadout.ammo == ""
+        or type(loadout.outfit) ~= "string" or loadout.outfit == ""
+        or not finite_integer(loadout.ammo_boxes) or loadout.ammo_boxes < 1 then return nil end
+    return {
+        weapon = loadout.weapon,
+        ammo = loadout.ammo,
+        ammo_boxes = loadout.ammo_boxes,
+        outfit = loadout.outfit,
+        consumables = consumables,
+        cost = loadout.cost
+    }
+end
+
+local function copy_participant(participant, expected_slot)
+    if type(participant) ~= "table" or type(participant.spawn_path) ~= "string" or participant.spawn_path == ""
+        or (expected_slot ~= 0 and (type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
+    local loadout = copy_loadout(participant.loadout)
+    if loadout == nil then return nil end
+    return {
+        slot = expected_slot,
+        spawn_path = participant.spawn_path,
+        look_path = participant.look_path,
+        profile = participant.profile,
+        loadout = loadout
+    }
+end
+
+local function resolve_ammo_rounds(loadout, slot, ammo_box_size)
+    local resolved = result_call("GA_ENTITY_AMMO_BOX_SIZE_INVALID", ammo_box_size, loadout.ammo)
+    if not resolved.ok then return resolved end
+    local box_size = resolved.value
+    if not finite_integer(box_size) or box_size < 1 or box_size >= UINT32_MOD then
+        return fail("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size must be a positive bounded integer", {
+            slot = slot,
+            section = loadout.ammo,
+            box_size = box_size
+        })
+    end
+    local rounds = loadout.ammo_boxes * box_size
+    if not finite_integer(rounds) or rounds < 1 or rounds >= UINT32_MOD then
+        return fail("GA_ENTITY_AMMO_ROUNDS_INVALID", "Ammo boxes cannot be translated to a bounded exact round count", {
+            slot = slot,
+            section = loadout.ammo,
+            ammo_boxes = loadout.ammo_boxes,
+            box_size = box_size
+        })
+    end
+    loadout.ammo_rounds = rounds
+    return gamma_arena_result.ok(rounds)
+end
+
+local function build_descriptors(loadout)
+    local result = {
+        { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
+        { section = loadout.ammo, count = loadout.ammo_rounds, ammo = true, role = "ammo" },
+        { section = loadout.outfit, count = 1, ammo = false, role = "outfit" }
+    }
+    for index, section in ipairs(loadout.consumables) do
+        result[#result + 1] = { section = section, count = 1, ammo = false, role = "consumable", ordinal = index }
+    end
+    return result
+end
+
+function EntityAdapter:__init(deps)
+    self.deps = deps
+    self.state_value = "IDLE"
+    self.session_id = nil
+    self.actor_spec = nil
+    self.opponents = nil
+    self.opponent_index = 1
+    self.current = nil
+    self.creation_stack = {}
+    self.registry = { state = "IDLE", session_id = nil, npcs = {}, items = {}, error = nil }
+    self.npc_by_id = {}
+    self.record_by_id = {}
+    self.pending_release = nil
+    self.release_index = nil
+    self.cleanup_errors = nil
+    self.cleanup_mode = nil
+    self.original_error = nil
+    self.online_started = nil
+    self.pairs_staged = false
+    self.terminal_error = nil
+end
+
+function EntityAdapter:set_state(value)
+    self.state_value = value
+    self.registry.state = value
+end
+
+function EntityAdapter:clock()
+    local result = result_call("GA_ENTITY_CLOCK_FAILED", self.deps.clock)
+    if not result.ok then return result end
+    if not finite_integer(result.value) or result.value < 0 or result.value >= UINT32_MOD then
+        return fail("GA_ENTITY_CLOCK_FAILED", "Entity clock must return uint32 milliseconds")
+    end
+    return result
+end
+
+function EntityAdapter:entity_exists(id)
+    if type(self.deps.entity_exists) ~= "function" then return fail("GA_ENTITY_EXISTENCE_FAILED", "Entity existence dependency is unavailable", { id = id }) end
+    local called, value = pcall(self.deps.entity_exists, id)
+    if not called then return fail("GA_ENTITY_EXISTENCE_FAILED", "Entity existence lookup failed safely", { id = id, reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        if type(value.value) ~= "boolean" then return fail("GA_ENTITY_EXISTENCE_FAILED", "Entity existence Result must contain a boolean", { id = id }) end
+        return value
+    end
+    if type(value) ~= "boolean" then return fail("GA_ENTITY_EXISTENCE_FAILED", "Entity existence lookup must return a boolean", { id = id }) end
+    return gamma_arena_result.ok(value)
+end
+
+function EntityAdapter:load_owner_tag(id)
+    local result = result_call("GA_ENTITY_TAG_READ_FAILED", self.deps.load_tag, id, nil, OWNER_KEY)
+    if not result.ok then return result end
+    return gamma_arena_result.ok(result.value)
+end
+
+function EntityAdapter:tag_record(record)
+    local saved = result_call("GA_ENTITY_TAG_WRITE_FAILED", self.deps.save_tag, record.id, nil, OWNER_KEY, self.session_id)
+    if not saved.ok then return saved end
+    local loaded = self:load_owner_tag(record.id)
+    if not loaded.ok then return loaded end
+    if loaded.value ~= self.session_id then
+        return fail("GA_ENTITY_TAG_VERIFY_FAILED", "Arena ownership tag did not round-trip", { id = record.id })
+    end
+    record.tagged = true
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:register_record(kind, id, values)
+    if not valid_id(id) or self.record_by_id[id] ~= nil then
+        return fail("GA_ENTITY_ID_INVALID", "Arena entity id is invalid or duplicated", { id = id })
+    end
+    local record = {
+        kind = kind,
+        id = id,
+        slot = values.slot,
+        section = values.section,
+        parent_id = values.parent_id,
+        quantity = values.quantity or 1,
+        role = values.role,
+        source = values.source or "assigned",
+        tagged = false,
+        dead = false,
+        equipped = false,
+        held_offline = false,
+        online_requested = false,
+        staged_friendly = false,
+        death_dropped = false,
+        released = false,
+        protected = false
+    }
+    self.record_by_id[id] = record
+    self.creation_stack[#self.creation_stack + 1] = record
+    if kind == "npc" then
+        self.registry.npcs[#self.registry.npcs + 1] = record
+        self.npc_by_id[id] = record
+    else
+        self.registry.items[#self.registry.items + 1] = record
+    end
+    return gamma_arena_result.ok(record)
+end
+
+function EntityAdapter:persist_death_dropped(record)
+    local saved = result_call("GA_ENTITY_DEATH_DROPPED_WRITE_FAILED", self.deps.save_death_dropped, record.id, true)
+    if not saved.ok then return saved end
+    local loaded = boolean_query("GA_ENTITY_DEATH_DROPPED_READ_FAILED", self.deps.load_death_dropped, record.id)
+    if not loaded.ok then return loaded end
+    if loaded.value ~= true then
+        return fail("GA_ENTITY_DEATH_DROPPED_VERIFY_FAILED", "Arena death_dropped runtime flag did not round-trip", { id = record.id })
+    end
+    record.death_dropped = true
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:begin_apply(validated_spec, session_id)
+    if self.state_value ~= "IDLE" and self.state_value ~= "CLEAN" then
+        return fail("GA_ENTITY_TRANSACTION_BUSY", "Arena entity transaction is already in progress", { state = self.state_value })
+    end
+    if type(validated_spec) ~= "table" or type(session_id) ~= "string" or session_id == "" then
+        return fail("GA_ENTITY_TRANSACTION_INVALID", "Validated FightSpec and session id are required")
+    end
+    local actor_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.actor)
+    local opponents_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.opponents)
+    if not actor_result.ok then return actor_result end
+    if not opponents_result.ok then return opponents_result end
+    local actor_spec = copy_participant(actor_result.value, 0)
+    if actor_spec == nil or type(opponents_result.value) ~= "table" or #opponents_result.value < 1 then
+        return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec accessors returned invalid participants")
+    end
+    local opponents = {}
+    for index, participant in ipairs(opponents_result.value) do
+        opponents[index] = copy_participant(participant, index)
+        if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
+        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime)
+        if not effective.ok then return effective end
+    end
+    local actor_ammo = resolve_ammo_rounds(actor_spec.loadout, 0, self.deps.ammo_box_size)
+    if not actor_ammo.ok then return actor_ammo end
+    for index, opponent in ipairs(opponents) do
+        local opponent_ammo = resolve_ammo_rounds(opponent.loadout, index, self.deps.ammo_box_size)
+        if not opponent_ammo.ok then return opponent_ammo end
+    end
+
+    self:__init(self.deps)
+    self.session_id = session_id
+    self.actor_spec = actor_spec
+    self.opponents = opponents
+    self.registry.session_id = session_id
+    local loadout = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "apply_loadout", actor_spec.loadout)
+    if not loadout.ok then
+        self.terminal_error = loadout
+        self.registry.error = copy_plain(loadout.error)
+        self:set_state("ERROR")
+        return loadout
+    end
+    -- begin_apply intentionally stages in COUNTDOWN. Ordinary update ticks do
+    -- not create NPCs until the injected opponent_gate is explicitly opened.
+    self:set_state("COUNTDOWN")
+    return gamma_arena_result.ok({ state = "COUNTDOWN" })
+end
+
+function EntityAdapter:opponent_gate_open()
+    local result = boolean_query("GA_ENTITY_ACTIVATION_GATE_FAILED", self.deps.opponent_gate)
+    if not result.ok then return result end
+    return gamma_arena_result.ok(result.value == true)
+end
+
+function EntityAdapter:resolve_spawn(opponent)
+    local resolved = result_call("GA_ENTITY_PATROL_FAILED", self.deps.resolve_spawn, opponent.spawn_path)
+    if not resolved.ok then return resolved end
+    local value = resolved.value
+    if type(value) ~= "table" or value.position == nil or not valid_id(value.level_vertex_id) or not valid_id(value.game_vertex_id) then
+        return fail("GA_ENTITY_PATROL_INVALID", "Opponent patrol did not resolve position/lvid/gvid", { slot = opponent.slot })
+    end
+    return resolved
+end
+
+function EntityAdapter:spawn_current()
+    local opponent = self.opponents[self.opponent_index]
+    if opponent == nil then
+        self.online_started = nil
+        self:set_state("WAIT_ONLINE")
+        return gamma_arena_result.ok(true)
+    end
+    local resolved = self:resolve_spawn(opponent)
+    if not resolved.ok then return resolved end
+    local created = result_call("GA_ENTITY_NPC_CREATE_FAILED", self.deps.create_npc, opponent.profile,
+        resolved.value.position, resolved.value.level_vertex_id, resolved.value.game_vertex_id)
+    if not created.ok or created.value == nil then
+        return created.ok and fail("GA_ENTITY_NPC_CREATE_FAILED", "alife_create did not return a server entity", { slot = opponent.slot }) or created
+    end
+    local id = read_entity_id(created.value)
+    if id == nil then return fail("GA_ENTITY_NPC_CREATE_FAILED", "alife_create returned an invalid server entity", { slot = opponent.slot }) end
+    local registered = self:register_record("npc", id, { slot = opponent.slot, section = opponent.profile, quantity = 1, role = "opponent" })
+    if not registered.ok then return registered end
+    local held = result_call("GA_ENTITY_OFFLINE_HOLD_FAILED", self.deps.hold_offline, created.value)
+    if not held.ok then
+        local tagged = self:tag_record(registered.value)
+        if tagged.ok then self:persist_death_dropped(registered.value) end
+        local quarantined = self:quarantine_live_records()
+        if not quarantined.ok then
+            return fail("GA_ENTITY_OFFLINE_HOLD_FAILED", "NPC staging hold and synchronous quarantine both failed", { cause = held.error, tag = tagged.error, quarantine = quarantined.error })
+        end
+        return tagged.ok and held or fail("GA_ENTITY_OFFLINE_HOLD_FAILED", "NPC staging hold failed but the untagged object was quarantined offline", { cause = held.error, tag = tagged.error })
+    end
+    registered.value.held_offline = true
+    local tagged = self:tag_record(registered.value)
+    if not tagged.ok then return tagged end
+    local death_dropped = self:persist_death_dropped(registered.value)
+    if not death_dropped.ok then return death_dropped end
+    self.current = { slot = opponent.slot, npc_id = id, phase = "snapshot", purge_ids = {}, purge_index = 1, descriptors = build_descriptors(opponent.loadout), descriptor_index = 1 }
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:snapshot_child_ids(npc_id)
+    local service_result = result_call("GA_ENTITY_ALIFE_FAILED", self.deps.alife)
+    if not service_result.ok or service_result.value == nil then return service_result.ok and fail("GA_ENTITY_ALIFE_FAILED", "ALife service is unavailable") or service_result end
+    local npc_result = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, npc_id)
+    if not npc_result.ok or npc_result.value == nil then return npc_result.ok and fail("GA_ENTITY_NPC_MISSING", "New Arena NPC disappeared before inventory purge") or npc_result end
+    local ids, seen = {}, {}
+    local function append(value)
+        local id = valid_id(value) and value or read_entity_id(value)
+        if id == nil then error("ALife child snapshot contains an invalid id") end
+        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
+    local lookup_ok, method = pcall(function() return service_result.value.get_children end)
+    if not lookup_ok or type(method) ~= "function" then return fail("GA_ENTITY_CHILDREN_FAILED", "ALife get_children is unavailable") end
+    local called, first, state, control = pcall(method, service_result.value, npc_result.value)
+    if not called then return fail("GA_ENTITY_CHILDREN_FAILED", "ALife child snapshot failed safely", { reason = tostring(first) }) end
+    local iterated, reason = pcall(function()
+        if type(first) == "function" then
+            for value in first, state, control do append(value) end
+        elseif type(first) == "table" then
+            for _, value in pairs(first) do append(value) end
+        else
+            error("ALife get_children returned neither iterator nor table")
+        end
+    end)
+    if not iterated then return fail("GA_ENTITY_CHILDREN_FAILED", "ALife child iterator failed safely", { reason = tostring(reason) }) end
+    table.sort(ids)
+    return gamma_arena_result.ok(ids)
+end
+
+function EntityAdapter:snapshot_current_children()
+    local children = self:snapshot_child_ids(self.current.npc_id)
+    if not children.ok then return children end
+    self.current.purge_ids = children.value
+    self.current.purge_index = 1
+    self.current.phase = "purge"
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:verify_npc_has_no_current_children(record)
+    local children = self:snapshot_child_ids(record.id)
+    if not children.ok then return children end
+    for _, id in ipairs(children.value) do
+        local entity = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, id)
+        if not entity.ok then return entity end
+        if entity.value ~= nil and read_parent_id(entity.value) == record.id then
+            return fail("GA_ENTITY_PARENT_RELEASE_BLOCKED", "Arena NPC release is blocked by an extant child that must not be deleted indirectly", { npc_id = record.id, child_id = id })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:entity_section(entity)
+    local result = result_call("GA_ENTITY_SECTION_FAILED", self.deps.entity_section, entity)
+    if not result.ok then return result end
+    if type(result.value) ~= "string" or result.value == "" then return fail("GA_ENTITY_SECTION_FAILED", "Server entity section is unavailable") end
+    return result
+end
+
+function EntityAdapter:begin_release(record)
+    if self.record_by_id[record.id] ~= record then
+        return fail("GA_ENTITY_RELEASE_UNREGISTERED", "Registry is the primary Arena ownership allowlist", { id = record.id })
+    end
+    if record.kind == "npc" then
+        local children = self:verify_npc_has_no_current_children(record)
+        if not children.ok then return children end
+    end
+    local owner = self:load_owner_tag(record.id)
+    if not owner.ok then return owner end
+    if owner.value ~= self.session_id or record.tagged ~= true then
+        return fail("GA_ENTITY_RELEASE_TAG_MISMATCH", "Arena ownership tag is missing or mismatched", { id = record.id })
+    end
+    local released = result_call("GA_ENTITY_SAFE_RELEASE_FAILED", self.deps.release, { id = record.id })
+    if not released.ok then return released end
+    local clock = self:clock()
+    if not clock.ok then return clock end
+    self.pending_release = { record = record, started = clock.value }
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:poll_release()
+    if self.pending_release == nil then return gamma_arena_result.ok(true) end
+    local pending = self.pending_release
+    local exists = self:entity_exists(pending.record.id)
+    if not exists.ok then return exists end
+    if not exists.value then
+        pending.record.released = true
+        self.pending_release = nil
+        return gamma_arena_result.ok(true)
+    end
+    local clock = self:clock()
+    if not clock.ok then return clock end
+    local timeout = self.deps.release_timeout_ms or DEFAULT_RELEASE_TIMEOUT_MS
+    if not finite_integer(timeout) or timeout < 0 or timeout >= UINT32_MOD then
+        return fail("GA_ENTITY_RELEASE_TIMEOUT_INVALID", "Entity release timeout must be a bounded uint32 duration")
+    end
+    if elapsed_ms(pending.started, clock.value) > timeout then
+        self.pending_release = nil
+        return fail("GA_ENTITY_RELEASE_TIMEOUT", "Safe release manager did not remove the entity before the wrap-safe deadline", { id = pending.record.id, timeout_ms = timeout })
+    end
+    return gamma_arena_result.ok(false)
+end
+
+function EntityAdapter:purge_current_child()
+    if self.pending_release ~= nil then
+        local polled = self:poll_release()
+        if not polled.ok or polled.value ~= true then return polled end
+        self.current.purge_index = self.current.purge_index + 1
+    end
+    local id = self.current.purge_ids[self.current.purge_index]
+    if id == nil then self.current.phase = "items"; return gamma_arena_result.ok(true) end
+    local entity_result = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, id)
+    if not entity_result.ok then return entity_result end
+    local entity = entity_result.value
+    if entity == nil or read_parent_id(entity) ~= self.current.npc_id then
+        self.current.purge_index = self.current.purge_index + 1
+        return gamma_arena_result.ok(true)
+    end
+    local section = self:entity_section(entity)
+    if not section.ok then return section end
+    local registered = self:register_record("item", id, { slot = self.current.slot, section = section.value, parent_id = self.current.npc_id, quantity = 1, role = "default_inventory", source = "purged_default" })
+    if not registered.ok then return registered end
+    local tagged = self:tag_record(registered.value)
+    if not tagged.ok then return tagged end
+    return self:begin_release(registered.value)
+end
+
+function EntityAdapter:create_descriptor(descriptor)
+    local parent_result = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, self.current.npc_id)
+    if not parent_result.ok or parent_result.value == nil then return parent_result.ok and fail("GA_ENTITY_NPC_MISSING", "Arena NPC disappeared before item creation") or parent_result end
+    local created = result_call("GA_ENTITY_ITEM_CREATE_FAILED", self.deps.create_item, descriptor.section, parent_result.value, descriptor.count, descriptor.ammo == true)
+    if not created.ok then return created end
+    local entities = normalized_entities(created.value)
+    if entities == nil then return fail("GA_ENTITY_ITEM_CREATE_FAILED", "alife_create_item did not return server entity/entities", { section = descriptor.section }) end
+    local records, total = {}, 0
+    for index, entity in ipairs(entities) do
+        local id = read_entity_id(entity)
+        if id == nil then return fail("GA_ENTITY_ITEM_CREATE_FAILED", "alife_create_item returned an entity without a valid id", { section = descriptor.section, index = index }) end
+        local registered = self:register_record("item", id, { slot = self.current.slot, section = descriptor.section, parent_id = self.current.npc_id, quantity = 1, role = descriptor.role, source = "assigned" })
+        if not registered.ok then return registered end
+        records[index] = { record = registered.value, entity = entity }
+    end
+    for _, entry in ipairs(records) do
+        local tagged = self:tag_record(entry.record)
+        if not tagged.ok then return tagged end
+    end
+    for index, entry in ipairs(records) do
+        local entity = entry.entity
+        local record = entry.record
+        local section = self:entity_section(entity)
+        if not section.ok then return section end
+        if section.value ~= descriptor.section then
+            return fail("GA_ENTITY_ITEM_SECTION_MISMATCH", "Created item section differs from validated FightSpec", { expected = descriptor.section, actual = section.value })
+        end
+        if read_parent_id(entity) ~= self.current.npc_id then
+            return fail("GA_ENTITY_ITEM_PARENT_MISMATCH", "Created item is not owned by its Arena opponent", { id = record.id, expected_parent_id = self.current.npc_id })
+        end
+        local quantity = result_call("GA_ENTITY_ITEM_QUANTITY_FAILED", self.deps.item_quantity, entity, descriptor.ammo == true)
+        if not quantity.ok or not finite_integer(quantity.value) or quantity.value < 1 then
+            return quantity.ok and fail("GA_ENTITY_ITEM_QUANTITY_FAILED", "Created item quantity is invalid", { section = descriptor.section }) or quantity
+        end
+        record.quantity = quantity.value
+        total = total + quantity.value
+    end
+    if total ~= descriptor.count then
+        return fail("GA_ENTITY_ITEM_QUANTITY_MISMATCH", "Created item quantity differs from validated FightSpec", { section = descriptor.section, expected = descriptor.count, actual = total })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:drive_spawning()
+    if self.current == nil then return self:spawn_current() end
+    if self.current.phase == "snapshot" then return self:snapshot_current_children() end
+    if self.current.phase == "purge" then return self:purge_current_child() end
+    if self.current.phase == "items" then
+        local descriptor = self.current.descriptors[self.current.descriptor_index]
+        if descriptor == nil then
+            self.opponent_index = self.opponent_index + 1
+            self.current = nil
+            return gamma_arena_result.ok(true)
+        end
+        local created = self:create_descriptor(descriptor)
+        if not created.ok then return created end
+        self.current.descriptor_index = self.current.descriptor_index + 1
+        return gamma_arena_result.ok(true)
+    end
+    return fail("GA_ENTITY_TRANSACTION_INVALID", "Unknown entity transaction phase", { phase = self.current.phase })
+end
+
+function EntityAdapter:verify_item_ownership()
+    for _, record in ipairs(self.registry.items) do
+        if record.source == "assigned" and not record.released then
+            local entity = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
+            if not entity.ok or entity.value == nil then return entity.ok and fail("GA_ENTITY_ITEM_MISSING", "Assigned Arena item is absent", { id = record.id }) or entity end
+            if read_parent_id(entity.value) ~= record.parent_id then return fail("GA_ENTITY_ITEM_PARENT_MISMATCH", "Assigned Arena item is not equipped by its opponent", { id = record.id }) end
+            local owner = self:load_owner_tag(record.id)
+            if not owner.ok then return owner end
+            if owner.value ~= self.session_id then return fail("GA_ENTITY_TAG_VERIFY_FAILED", "Assigned Arena item lost its ownership tag", { id = record.id }) end
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:is_alive(object)
+    if type(self.deps.is_alive) == "function" then
+        local result = boolean_query("GA_ENTITY_ALIVE_CHECK_FAILED", self.deps.is_alive, object)
+        if not result.ok then return result end
+        return result
+    end
+    local lookup_ok, method = pcall(function() return object and object.alive end)
+    if not lookup_ok or type(method) ~= "function" then return fail("GA_ENTITY_ALIVE_CHECK_FAILED", "Required Arena alive method is unavailable") end
+    return boolean_query("GA_ENTITY_ALIVE_CHECK_FAILED", method, object)
+end
+
+function EntityAdapter:drive_online()
+    if self.online_started == nil then
+        local clock = self:clock()
+        if not clock.ok then return clock end
+        self.online_started = clock.value
+    end
+    local actor = result_call("GA_ENTITY_ACTOR_MISSING", self.deps.actor_object)
+    if not actor.ok or actor.value == nil then return actor.ok and fail("GA_ENTITY_ACTOR_MISSING", "Arena actor is unavailable during staged activation") or actor end
+    -- Submit every transition once before polling. A later update may expose
+    -- each game_object independently; no request assumes same-callback online
+    -- availability.
+    for _, record in ipairs(self.registry.npcs) do
+        if record.held_offline then
+            local server = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
+            if not server.ok or server.value == nil then return server.ok and fail("GA_ENTITY_NPC_MISSING", "Arena opponent disappeared before atomic activation", { id = record.id }) or server end
+            local requested = result_call("GA_ENTITY_ONLINE_REQUEST_FAILED", self.deps.request_online, server.value, record.id)
+            if not requested.ok then return requested end
+            record.held_offline = false
+            record.online_requested = true
+        end
+    end
+
+    local objects, pending_id = {}, nil
+    for index, record in ipairs(self.registry.npcs) do
+        local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
+        if not object.ok then return object end
+        if object.value == nil then
+            pending_id = pending_id or record.id
+        else
+            local alive = self:is_alive(object.value)
+            if not alive.ok then return alive end
+            if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "Arena opponent is not alive before activation", { id = record.id }) end
+            objects[index] = object.value
+            if not record.staged_friendly then
+                local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
+                if not held.ok then return held end
+                record.staged_friendly = true
+            end
+        end
+    end
+    if pending_id ~= nil then
+        local clock = self:clock()
+        if not clock.ok then return clock end
+        local timeout = self.deps.online_timeout_ms or DEFAULT_ONLINE_TIMEOUT_MS
+        if not finite_integer(timeout) or timeout < 0 or timeout >= UINT32_MOD then return fail("GA_ENTITY_ONLINE_TIMEOUT_INVALID", "Online timeout must be bounded") end
+        if elapsed_ms(self.online_started, clock.value) > timeout then
+            return fail("GA_ENTITY_ONLINE_TIMEOUT", "Arena opponent did not become online before the bounded activation deadline", { id = pending_id })
+        end
+        return gamma_arena_result.ok(false)
+    end
+    if not self.pairs_staged then
+        for index = 1, #objects do
+            for prior = 1, index - 1 do
+                local related = result_call("GA_ENTITY_FRIEND_RELATION_FAILED", self.deps.set_pair_friends, objects[prior], objects[index])
+                if not related.ok then return related end
+            end
+        end
+        self.pairs_staged = true
+    end
+    local equipped = self:verify_item_ownership()
+    if not equipped.ok then return equipped end
+    for index, npc_record in ipairs(self.registry.npcs) do
+        local weapon_record = nil
+        for _, item_record in ipairs(self.registry.items) do
+            if item_record.parent_id == npc_record.id and item_record.source == "assigned" and item_record.role == "weapon" and not item_record.released then
+                if weapon_record ~= nil then return fail("GA_ENTITY_WEAPON_INVALID", "Arena opponent has multiple registered weapon descriptors", { id = npc_record.id }) end
+                weapon_record = item_record
+            end
+        end
+        if weapon_record == nil then return fail("GA_ENTITY_WEAPON_MISSING", "Arena opponent has no registered validated weapon", { id = npc_record.id }) end
+        local activated = boolean_query("GA_ENTITY_EQUIP_FAILED", self.deps.ensure_weapon_equipped, objects[index], weapon_record.id)
+        if not activated.ok then return activated end
+        if activated.value ~= true then
+            local clock = self:clock()
+            if not clock.ok then return clock end
+            local timeout = self.deps.online_timeout_ms or DEFAULT_ONLINE_TIMEOUT_MS
+            if not finite_integer(timeout) or timeout < 0 or timeout >= UINT32_MOD then return fail("GA_ENTITY_ONLINE_TIMEOUT_INVALID", "Online timeout must be bounded") end
+            if elapsed_ms(self.online_started, clock.value) > timeout then return fail("GA_ENTITY_EQUIP_TIMEOUT", "Arena opponent did not equip its validated weapon before deadline", { id = npc_record.id, weapon_id = weapon_record.id }) end
+            return gamma_arena_result.ok(false)
+        end
+        npc_record.equipped = true
+    end
+    for _, object in ipairs(objects) do
+        local hostile = result_call("GA_ENTITY_HOSTILE_RELATION_FAILED", self.deps.set_actor_hostile, object, actor.value, ACTOR_GOODWILL)
+        if not hostile.ok then return hostile end
+    end
+    self:set_state("ACTIVE")
+    return gamma_arena_result.ok({ state = "ACTIVE" })
+end
+
+function EntityAdapter:add_cleanup_error(result)
+    local error_value = type(result) == "table" and result.error or nil
+    self.cleanup_errors[#self.cleanup_errors + 1] = error_value or { code = "GA_ENTITY_CLEANUP_FAILED", message = "Unknown entity cleanup error", context = {} }
+end
+
+function EntityAdapter:quarantine_live_records()
+    local errors = {}
+    local actor = result_call("GA_ENTITY_ACTOR_MISSING", self.deps.actor_object)
+    for _, record in ipairs(self.registry.npcs) do
+        if not record.released then
+            local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
+            if object.ok and object.value ~= nil and actor.ok and actor.value ~= nil then
+                local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
+                if held.ok then record.staged_friendly = true else errors[#errors + 1] = held.error end
+            elseif not object.ok then
+                errors[#errors + 1] = object.error
+            elseif not actor.ok then
+                errors[#errors + 1] = actor.error
+            end
+            local server = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
+            if server.ok and server.value ~= nil then
+                local offline = result_call("GA_ENTITY_OFFLINE_HOLD_FAILED", self.deps.hold_offline, server.value)
+                if offline.ok then record.held_offline = true else errors[#errors + 1] = offline.error end
+            elseif not server.ok then
+                errors[#errors + 1] = server.error
+            end
+        end
+    end
+    if #errors > 0 then return fail("GA_ENTITY_ACTIVATION_QUARANTINE_FAILED", "Arena NPC activation could not be synchronously quarantined", { errors = errors }) end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:finish_cleanup()
+    if #self.cleanup_errors > 0 then
+        local code = self.cleanup_mode == "rollback" and "GA_ENTITY_ROLLBACK_FAILED" or "GA_ENTITY_CLEANUP_FAILED"
+        self.terminal_error = fail(code, "Arena entity cleanup could not prove every release", { cause = self.original_error and self.original_error.error or nil, errors = copy_plain(self.cleanup_errors) })
+        self.registry.error = copy_plain(self.terminal_error.error)
+        self:set_state("ERROR")
+        return self.terminal_error
+    end
+    if self.cleanup_mode == "rollback" then
+        self.terminal_error = self.original_error or fail("GA_ENTITY_TRANSACTION_FAILED", "Arena entity transaction rolled back")
+        self.registry.error = copy_plain(self.terminal_error.error)
+        self:set_state("ERROR")
+        return self.terminal_error
+    end
+    self.creation_stack = {}
+    self.registry.npcs = {}
+    self.registry.items = {}
+    self.npc_by_id = {}
+    self.record_by_id = {}
+    self:set_state("CLEAN")
+    return gamma_arena_result.ok({ state = "CLEAN" })
+end
+
+function EntityAdapter:drive_cleanup()
+    if self.pending_release ~= nil then
+        local polled = self:poll_release()
+        if not polled.ok then
+            self:add_cleanup_error(polled)
+            if self.pending_release then self.pending_release.record.protected = true end
+            self.pending_release = nil
+            self.release_index = self.release_index - 1
+        elseif polled.value == true then
+            self.release_index = self.release_index - 1
+        else
+            return polled
+        end
+    end
+    while self.release_index and self.release_index >= 1 do
+        local record = self.creation_stack[self.release_index]
+        if record.released then
+            self.release_index = self.release_index - 1
+        else
+            local exists = self:entity_exists(record.id)
+            if not exists.ok then
+                self:add_cleanup_error(exists); record.protected = true; self.release_index = self.release_index - 1
+            elseif not exists.value then
+                record.released = true; self.release_index = self.release_index - 1
+            else
+                local release = self:begin_release(record)
+                if not release.ok then
+                    self:add_cleanup_error(release); record.protected = true; self.release_index = self.release_index - 1
+                else
+                    return gamma_arena_result.ok(false)
+                end
+            end
+        end
+    end
+    return self:finish_cleanup()
+end
+
+function EntityAdapter:fail_and_rollback(result)
+    self.original_error = result
+    self.cleanup_errors = {}
+    self.cleanup_mode = "rollback"
+    self.release_index = #self.creation_stack
+    self.pending_release = nil
+    self:set_state("ROLLING_BACK")
+    -- Submit the first authorized safe release in the same callback. Further
+    -- absence polling remains frame-driven.
+    local driven = self:drive_cleanup()
+    if not driven.ok then return driven end
+    return gamma_arena_result.ok({ state = self.state_value })
+end
+
+function EntityAdapter:update()
+    if self.state_value == "IDLE" or self.state_value == "CLEAN" then return gamma_arena_result.ok({ state = self.state_value }) end
+    if self.state_value == "ERROR" then return self.terminal_error or fail("GA_ENTITY_TRANSACTION_FAILED", "Arena entity transaction is in ERROR") end
+    if self.state_value == "CLEANING" or self.state_value == "ROLLING_BACK" then return self:drive_cleanup() end
+    if self.state_value == "COUNTDOWN" then
+        local gate = self:opponent_gate_open()
+        if not gate.ok then return self:fail_and_rollback(gate) end
+        if not gate.value then return gamma_arena_result.ok({ state = "COUNTDOWN" }) end
+        self:set_state("SPAWNING")
+    end
+    local result
+    if self.state_value == "SPAWNING" then result = self:drive_spawning()
+    elseif self.state_value == "WAIT_ONLINE" then result = self:drive_online()
+    elseif self.state_value == "ACTIVE" then return gamma_arena_result.ok({ state = "ACTIVE" })
+    else result = fail("GA_ENTITY_TRANSACTION_INVALID", "Unknown Arena entity adapter state", { state = self.state_value }) end
+    if not result.ok then
+        if self.state_value == "WAIT_ONLINE" then
+            local quarantined = self:quarantine_live_records()
+            if not quarantined.ok then
+                result = fail("GA_ENTITY_ACTIVATION_QUARANTINE_FAILED", "Activation failed and live opponents could not be synchronously re-held", { cause = result.error, quarantine = quarantined.error })
+            end
+        end
+        return self:fail_and_rollback(result)
+    end
+    return result
+end
+
+function EntityAdapter:on_npc_death(victim_or_id)
+    local function normalize()
+        if type(victim_or_id) == "number" then
+            if self.deps.allow_numeric_death == true and valid_id(victim_or_id) then return victim_or_id end
+            return nil
+        end
+        return read_entity_id(victim_or_id)
+    end
+    local called, id = pcall(normalize)
+    if not called or id == nil or self.state_value ~= "ACTIVE" then return gamma_arena_result.ok(false) end
+    local record = self.npc_by_id[id]
+    if record == nil or record.dead then return gamma_arena_result.ok(false) end
+    local owner = self:load_owner_tag(id)
+    if not owner.ok or owner.value ~= self.session_id then return gamma_arena_result.ok(false) end
+    record.dead = true
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:living_opponent_count()
+    local count = 0
+    for _, record in ipairs(self.registry.npcs) do if not record.dead and not record.released then count = count + 1 end end
+    return count
+end
+
+function EntityAdapter:cleanup()
+    if self.state_value == "CLEAN" then return gamma_arena_result.ok(false) end
+    if self.state_value == "CLEANING" then return gamma_arena_result.ok(false) end
+    if self.state_value == "ROLLING_BACK" then
+        -- A level transition/fatal teardown owns every remaining release. Keep
+        -- the in-flight poll, but finish toward CLEAN instead of resurfacing
+        -- the superseded transaction error after resources are absent.
+        self.cleanup_mode = "cleanup"
+        self.original_error = nil
+        self.terminal_error = nil
+        self.registry.error = nil
+        return gamma_arena_result.ok(true)
+    end
+    if self.state_value == "IDLE" then self:set_state("CLEAN"); return gamma_arena_result.ok(true) end
+    self.cleanup_errors = {}
+    self.cleanup_mode = "cleanup"
+    self.original_error = nil
+    self.terminal_error = nil
+    self.release_index = #self.creation_stack
+    self.pending_release = nil
+    self:set_state("CLEANING")
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:registry_snapshot()
+    local ok, snapshot = pcall(copy_plain, self.registry)
+    if ok then return snapshot end
+    return { state = "ERROR", session_id = self.session_id, npcs = {}, items = {}, error = { code = "GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", message = tostring(snapshot), context = {} } }
+end
+
+function new(deps)
+    if type(deps) ~= "table" then return nil end
+    local value = setmetatable({}, EntityAdapter)
+    value:__init(deps)
+    return value
+end

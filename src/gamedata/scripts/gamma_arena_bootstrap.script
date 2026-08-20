@@ -65,9 +65,11 @@ local function runtime_probes(catalogs)
         exec_console_cmd = exec_console_cmd,
         time_global = time_global,
         se_save_var = se_save_var,
+        se_load_var = se_load_var,
         level = level,
         patrol = patrol,
         db = db,
+        game_object = game_object,
         axr_main = axr_main,
         safe_release_manager = safe_release_manager,
         catalogs = catalogs
@@ -231,12 +233,288 @@ function drain_checkpoint_cleanup(checkpoint_adapter, session, options)
     end
 end
 
+function step_entity_cleanup(entity_adapter, context, options)
+    context = context or {}
+    options = options or {}
+    local timeout_ms = options.timeout_ms or 10000
+    local max_updates = options.max_updates or 64
+    if type(timeout_ms) ~= "number" or timeout_ms ~= math.floor(timeout_ms) or timeout_ms < 0 or timeout_ms >= UINT32_MOD
+        or type(max_updates) ~= "number" or max_updates ~= math.floor(max_updates) or max_updates < 1
+        or max_updates > MAX_TEARDOWN_UPDATES then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_INVALID", "Entity teardown bounds are invalid")
+    end
+    if context.started ~= true then
+        local cleanup = teardown_method(entity_adapter, "cleanup")
+        if not cleanup.ok then return cleanup end
+        local started = teardown_clock_value(options.clock)
+        if not started.ok then return started end
+        context.started = true
+        context.started_at = started.value
+        context.updates = 0
+    end
+    local snapshot_ok, snapshot = pcall(function() return entity_adapter:registry_snapshot() end)
+    if not snapshot_ok or type(snapshot) ~= "table" or type(snapshot.state) ~= "string" then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_FAILED", "Entity cleanup state is unavailable")
+    end
+    if snapshot.state == "CLEAN" then return gamma_arena_result.ok({ state = "CLEAN", updates = context.updates, pending = false }) end
+    if snapshot.state == "ERROR" then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_FAILED", "Entity cleanup terminated in ERROR", { updates = context.updates })
+    end
+    if snapshot.state ~= "CLEANING" and snapshot.state ~= "ROLLING_BACK" then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_FAILED", "Entity cleanup entered an unexpected state", { state = snapshot.state, updates = context.updates })
+    end
+    if context.updates >= max_updates then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_EXHAUSTED", "Entity cleanup exhausted its cross-frame update budget", { updates = context.updates, max_updates = max_updates })
+    end
+    local current = teardown_clock_value(options.clock)
+    if not current.ok then return current end
+    if teardown_elapsed(context.started_at, current.value) > timeout_ms then
+        return gamma_arena_result.err("GA_ENTITY_TEARDOWN_TIMEOUT", "Entity cleanup exceeded its cross-frame wrap-safe deadline", { updates = context.updates, timeout_ms = timeout_ms })
+    end
+    if context.last_update_at == current.value then
+        return gamma_arena_result.ok({ state = snapshot.state, updates = context.updates, pending = true })
+    end
+    -- safe_release_manager advances on later engine frames. Exactly one entity
+    -- update is permitted per callback; the composition retains this context.
+    local updated = teardown_method(entity_adapter, "update")
+    if not updated.ok then return updated end
+    context.updates = context.updates + 1
+    context.last_update_at = current.value
+    return gamma_arena_result.ok({ state = snapshot.state, updates = context.updates, pending = true })
+end
+
+function step_actor_cleanup(actor_adapter, context, options)
+    context = context or {}
+    options = options or {}
+    local timeout_ms = options.timeout_ms or 10000
+    local max_updates = options.max_updates or 64
+    if type(timeout_ms) ~= "number" or timeout_ms ~= math.floor(timeout_ms) or timeout_ms < 0 or timeout_ms >= UINT32_MOD
+        or type(max_updates) ~= "number" or max_updates ~= math.floor(max_updates) or max_updates < 1
+        or max_updates > MAX_TEARDOWN_UPDATES then
+        return gamma_arena_result.err("GA_ACTOR_TEARDOWN_INVALID", "Actor teardown bounds are invalid")
+    end
+    local current = teardown_clock_value(options.clock)
+    if not current.ok then return current end
+    if context.started ~= true then
+        context.started = true
+        context.started_at = current.value
+        context.updates = 0
+    end
+    if teardown_elapsed(context.started_at, current.value) > timeout_ms then
+        return gamma_arena_result.err("GA_ACTOR_TEARDOWN_TIMEOUT", "Actor loadout cleanup exceeded its cross-frame wrap-safe deadline", { updates = context.updates, timeout_ms = timeout_ms })
+    end
+    if context.updates >= max_updates then
+        return gamma_arena_result.err("GA_ACTOR_TEARDOWN_EXHAUSTED", "Actor loadout cleanup exhausted its cross-frame update budget", { updates = context.updates, max_updates = max_updates })
+    end
+    if context.last_update_at == current.value then
+        return gamma_arena_result.ok({ pending = true, stage = "actor", updates = context.updates })
+    end
+    local actor = teardown_method(actor_adapter, "cleanup")
+    if not actor.ok then return actor end
+    context.updates = context.updates + 1
+    context.last_update_at = current.value
+    if type(actor.value) == "table" and actor.value.pending == true then
+        return gamma_arena_result.ok({ pending = true, stage = "actor", updates = context.updates })
+    end
+    return gamma_arena_result.ok({ pending = false, stage = "actor", updates = context.updates })
+end
+
 local function default_layout()
     local catalogs = gamma_arena_catalog.load()
     if not catalogs.ok then return catalogs end
     local layout = catalogs.value and catalogs.value.layouts and catalogs.value.layouts.rostok_arena_v1
     if type(layout) ~= "table" then return gamma_arena_result.err("GA_ACTOR_LAYOUT_INVALID", "Rostok Arena layout is unavailable") end
     return gamma_arena_result.ok(layout)
+end
+
+local function runtime_object_id(object)
+    local ok, value = pcall(function() return object and object.id end)
+    if ok and type(value) == "function" then
+        local called, id = pcall(value, object)
+        if called and type(id) == "number" and id == math.floor(id) and id >= 0 then return id end
+    elseif ok and type(value) == "number" and value == math.floor(value) and value >= 0 then
+        return value
+    end
+    return nil
+end
+
+local function runtime_parent_id(object)
+    local ok, value = pcall(function() return object and object.parent_id end)
+    if ok and type(value) == "function" then
+        local called, id = pcall(value, object)
+        if called and type(id) == "number" and id == math.floor(id) and id >= 0 then return id end
+    elseif ok and type(value) == "number" and value == math.floor(value) and value >= 0 then
+        return value
+    end
+    return nil
+end
+
+local function runtime_section_name(object)
+    local ok, value = pcall(function() return object and object.section_name end)
+    if ok and type(value) == "function" then
+        local called, section = pcall(value, object)
+        if called and type(section) == "string" then return section end
+    elseif ok and type(value) == "string" then
+        return value
+    end
+    return nil
+end
+
+local function runtime_ammo_quantity(object, is_ammo)
+    if not is_ammo then return 1 end
+    for _, field in ipairs({ "a_elapsed", "ammo_elapsed", "count", "quantity" }) do
+        local ok, value = pcall(function() return object and object[field] end)
+        if ok and type(value) == "function" then
+            local called, quantity = pcall(value, object)
+            if called and type(quantity) == "number" then return quantity end
+        elseif ok and type(value) == "number" then
+            return value
+        end
+    end
+    return nil
+end
+
+function new_runtime_entity_exists_port(provider, error_code)
+    local code = error_code or "GA_ACTOR_LOADOUT_EXISTENCE_FAILED"
+    return function(id)
+        if type(provider) ~= "function" then return gamma_arena_result.err(code, "ALife provider is unavailable", { id = id }) end
+        local service_ok, service = pcall(provider)
+        if not service_ok or service == nil then return gamma_arena_result.err(code, "ALife service lookup failed", { id = id }) end
+        local method_ok, method = pcall(function() return service.object end)
+        if not method_ok or type(method) ~= "function" then return gamma_arena_result.err(code, "ALife object lookup API is unavailable", { id = id }) end
+        local called, value = pcall(method, service, id)
+        if not called then return gamma_arena_result.err(code, "ALife object lookup failed safely", { id = id, reason = tostring(value) }) end
+        return gamma_arena_result.ok(value ~= nil)
+    end
+end
+
+local runtime_actor_item_exists = new_runtime_entity_exists_port(function() return type(alife) == "function" and alife() or nil end)
+local runtime_arena_entity_exists = new_runtime_entity_exists_port(function() return type(alife) == "function" and alife() or nil end, "GA_ENTITY_EXISTENCE_FAILED")
+
+local function actor_loadout_failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function actor_loadout_call(code, fn, ...)
+    if type(fn) ~= "function" then return actor_loadout_failure(code, "Actor loadout dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return actor_loadout_failure(code, "Actor loadout dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return actor_loadout_failure(code, "Actor loadout dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
+function new_actor_loadout_port(ports)
+    ports = ports or {}
+    local owned_ids = {}
+    local release_submitted = {}
+    local function rollback(created, cause)
+        owned_ids = {}
+        for index, entry in ipairs(created) do owned_ids[index] = entry.id end
+        local errors = {}
+        for index = #created, 1, -1 do
+            local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, created[index].id)
+            if released.ok then release_submitted[created[index].id] = true else errors[#errors + 1] = released.error end
+        end
+        if #errors > 0 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_ROLLBACK_FAILED", "Actor loadout failed and exact rollback also failed", { cause = cause.error, errors = errors })
+        end
+        return cause
+    end
+    local function normalize_entities(value)
+        local single = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, value)
+        if single.ok and type(single.value) == "number" then return { value } end
+        if type(value) ~= "table" or #value < 1 then return nil end
+        local entities = {}
+        for index = 1, #value do entities[index] = value[index] end
+        return entities
+    end
+    local function apply(actor, loadout)
+        if #owned_ids > 0 then return actor_loadout_failure("GA_ACTOR_LOADOUT_BUSY", "Prior Arena actor items are still owned or pending cleanup") end
+        local actor_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTOR_INVALID", ports.actor_id, actor)
+        if not actor_id.ok or type(actor_id.value) ~= "number" then return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Arena actor has no numeric id") or actor_id end
+        if type(loadout) ~= "table" or type(loadout.consumables) ~= "table" then return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed") end
+        local box_size = actor_loadout_call("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", ports.ammo_box_size, loadout.ammo)
+        if not box_size.ok then return box_size end
+        if type(box_size.value) ~= "number" or box_size.value ~= math.floor(box_size.value) or box_size.value < 1 or box_size.value >= UINT32_MOD
+            or type(loadout.ammo_boxes) ~= "number" or loadout.ammo_boxes ~= math.floor(loadout.ammo_boxes) or loadout.ammo_boxes < 1 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", "Validated ammo boxes and effective box_size must be positive bounded integers", { section = loadout.ammo })
+        end
+        local ammo_rounds = loadout.ammo_boxes * box_size.value
+        if ammo_rounds ~= math.floor(ammo_rounds) or ammo_rounds < 1 or ammo_rounds >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor ammo boxes cannot be translated to a bounded exact round count", { section = loadout.ammo, ammo_boxes = loadout.ammo_boxes, box_size = box_size.value })
+        end
+        local descriptors = {
+            { section = loadout.weapon, count = 1, ammo = false },
+            { section = loadout.ammo, count = ammo_rounds, ammo = true },
+            { section = loadout.outfit, count = 1, ammo = false }
+        }
+        for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false } end
+        local created, seen = {}, {}
+        for _, descriptor in ipairs(descriptors) do
+            if type(descriptor.section) ~= "string" or descriptor.section == "" or type(descriptor.count) ~= "number" or descriptor.count ~= math.floor(descriptor.count) or descriptor.count < 1 then
+                return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor descriptor is malformed"))
+            end
+            local result = actor_loadout_call("GA_ACTOR_LOADOUT_CREATE_FAILED", ports.create_item, descriptor.section, actor, descriptor.count, descriptor.ammo)
+            if not result.ok then return rollback(created, result) end
+            local entities = normalize_entities(result.value)
+            if entities == nil then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_CREATE_FAILED", "Actor item creation returned no server entities", { section = descriptor.section })) end
+            local descriptor_entries = {}
+            for index, entity in ipairs(entities) do
+                local id = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, entity)
+                if not id.ok or type(id.value) ~= "number" or seen[id.value] then return rollback(created, id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ENTITY_INVALID", "Actor item id is invalid or duplicated", { section = descriptor.section, index = index }) or id) end
+                seen[id.value] = true
+                local entry = { id = id.value, entity = entity }
+                created[#created + 1] = entry
+                descriptor_entries[#descriptor_entries + 1] = entry
+            end
+            local total = 0
+            for _, entry in ipairs(descriptor_entries) do
+                local parent = actor_loadout_call("GA_ACTOR_LOADOUT_OWNER_INVALID", ports.entity_parent_id, entry.entity)
+                local section = actor_loadout_call("GA_ACTOR_LOADOUT_SECTION_INVALID", ports.entity_section, entry.entity)
+                local quantity = actor_loadout_call("GA_ACTOR_LOADOUT_QUANTITY_INVALID", ports.item_quantity, entry.entity, descriptor.ammo)
+                if not parent.ok then return rollback(created, parent) end
+                if not section.ok then return rollback(created, section) end
+                if not quantity.ok then return rollback(created, quantity) end
+                if parent.value ~= actor_id.value then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_OWNER_INVALID", "Created actor item has a foreign parent", { id = entry.id })) end
+                if section.value ~= descriptor.section then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_SECTION_INVALID", "Created actor item section differs from FightSpec", { id = entry.id })) end
+                if type(quantity.value) ~= "number" or quantity.value ~= math.floor(quantity.value) or quantity.value < 1 then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_INVALID", "Created actor item quantity is invalid", { id = entry.id })) end
+                total = total + quantity.value
+            end
+            if total ~= descriptor.count then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_MISMATCH", "Created actor item quantity differs from FightSpec", { section = descriptor.section, expected = descriptor.count, actual = total })) end
+        end
+        owned_ids = (function() local ids = {}; for index, entry in ipairs(created) do ids[index] = entry.id end; return ids end)()
+        release_submitted = {}
+        return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, id in ipairs(owned_ids) do ids[index] = id end; return ids end)() })
+    end
+    local function cleanup()
+        if #owned_ids == 0 then return gamma_arena_result.ok(false) end
+        local errors = {}
+        for index = #owned_ids, 1, -1 do
+            local id = owned_ids[index]
+            if release_submitted[id] ~= true then
+                local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, id)
+                if released.ok then release_submitted[id] = true else errors[#errors + 1] = released.error end
+            end
+        end
+        if #errors > 0 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_ROLLBACK_FAILED", "Actor loadout cleanup submission failed", { errors = errors })
+        end
+        local remaining = {}
+        for _, id in ipairs(owned_ids) do
+            local exists = actor_loadout_call("GA_ACTOR_LOADOUT_EXISTENCE_FAILED", ports.entity_exists, id)
+            if not exists.ok then return exists end
+            if exists.value == true then remaining[#remaining + 1] = id else release_submitted[id] = nil end
+        end
+        owned_ids = remaining
+        if #owned_ids > 0 then
+            local pending = {}; for index, id in ipairs(owned_ids) do pending[index] = id end
+            return gamma_arena_result.ok({ pending = true, remaining_ids = pending })
+        end
+        release_submitted = {}
+        return gamma_arena_result.ok(true)
+    end
+    return { apply = apply, cleanup = cleanup }
 end
 
 local function default_actor_adapter(active_instance)
@@ -261,6 +539,24 @@ local function default_actor_adapter(active_instance)
         level.enable_input()
         return gamma_arena_result.ok(true)
     end
+    local loadout = new_actor_loadout_port({
+        actor_id = runtime_object_id,
+        ammo_box_size = effective_ammo_box_size,
+        create_item = function(section, actor, count, is_ammo)
+            if is_ammo then return alife_create_item(section, actor, { ammo = count }) end
+            return alife_create_item(section, actor)
+        end,
+        entity_id = runtime_object_id,
+        entity_parent_id = runtime_parent_id,
+        entity_section = runtime_section_name,
+        item_quantity = runtime_ammo_quantity,
+        entity_exists = runtime_actor_item_exists,
+        release_item = function(id)
+            if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then return gamma_arena_result.err("GA_ACTOR_LOADOUT_RELEASE_FAILED", "safe_release_manager.release is unavailable") end
+            safe_release_manager.release({ id = id })
+            return gamma_arena_result.ok(true)
+        end
+    })
     return gamma_arena_actor_adapter.new({
         actor = function() return db and db.actor end,
         is_session_active = function() return active_instance() and active_instance():is_active() end,
@@ -281,7 +577,268 @@ local function default_actor_adapter(active_instance)
         mod_psy_reset = function()
             if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
         end,
-        input = input
+        input = input,
+        loadout = loadout
+    })
+end
+
+local function entity_server_object(id)
+    local service = alife()
+    if service == nil or type(service.object) ~= "function" then return nil end
+    return service:object(id)
+end
+
+local function entity_section_name(entity)
+    local ok, value = pcall(function() return entity and entity.section_name end)
+    if ok and type(value) == "function" then
+        local called, section = pcall(value, entity)
+        if called then return section end
+    elseif ok and type(value) == "string" then
+        return value
+    end
+    return nil
+end
+
+local function entity_ammo_quantity(entity, is_ammo)
+    if not is_ammo then return 1 end
+    for _, field in ipairs({ "a_elapsed", "ammo_elapsed", "count" }) do
+        local ok, value = pcall(function() return entity and entity[field] end)
+        if ok and type(value) == "function" then
+            local called, quantity = pcall(value, entity)
+            if called and type(quantity) == "number" then return quantity end
+        elseif ok and type(value) == "number" then
+            return value
+        end
+    end
+    return gamma_arena_result.err("GA_ENTITY_ITEM_QUANTITY_FAILED", "Ammo server entity does not expose its exact round count")
+end
+
+local function entity_online_lookup(id)
+    local storage_ok, object = pcall(function() return db and db.storage and db.storage[id] and db.storage[id].object end)
+    if not storage_ok then return gamma_arena_result.err("GA_ENTITY_ONLINE_LOOKUP_FAILED", "db.storage online lookup failed", { id = id }) end
+    if object ~= nil then return gamma_arena_result.ok(object) end
+    local lookup_ok, lookup = pcall(function() return level and level.object_by_id end)
+    if not lookup_ok or type(lookup) ~= "function" then return gamma_arena_result.err("GA_ENTITY_ONLINE_LOOKUP_FAILED", "level.object_by_id is unavailable", { id = id }) end
+    local called, value = pcall(lookup, id)
+    if not called then return gamma_arena_result.err("GA_ENTITY_ONLINE_LOOKUP_FAILED", "level.object_by_id failed safely", { id = id }) end
+    return gamma_arena_result.ok(value)
+end
+
+local function hold_entity_offline(entity)
+    local id = runtime_object_id(entity)
+    local service_ok, service = pcall(function() return type(alife) == "function" and alife() or nil end)
+    local online_ok, online_method = pcall(function() return service and service.set_switch_online end)
+    local offline_ok, offline_method = pcall(function() return service and service.set_switch_offline end)
+    if id == nil or not service_ok or service == nil or not online_ok or type(online_method) ~= "function"
+        or not offline_ok or type(offline_method) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_OFFLINE_HOLD_API_MISSING", "ALife NPC switch controls are unavailable", { id = id })
+    end
+    local held, hold_result = pcall(online_method, service, id, false)
+    local retained, retain_result = pcall(offline_method, service, id, true)
+    if not held or hold_result == false or not retained or retain_result == false then
+        return gamma_arena_result.err("GA_ENTITY_OFFLINE_HOLD_FAILED", "NPC could not be held offline before inventory application")
+    end
+    local flag_ok, online = pcall(function() return entity.online end)
+    if not flag_ok or type(online) ~= "boolean" then
+        return gamma_arena_result.err("GA_ENTITY_OFFLINE_HOLD_API_MISSING", "NPC server online flag is unavailable", { id = id })
+    end
+    if online then
+        local switch_ok, switch_method = pcall(function() return entity.switch_offline end)
+        if not switch_ok or type(switch_method) ~= "function" then
+            return gamma_arena_result.err("GA_ENTITY_OFFLINE_HOLD_API_MISSING", "Online NPC cannot be switched offline synchronously", { id = id })
+        end
+        local switched, switched_result = pcall(switch_method, entity)
+        local verified, still_online = pcall(function() return entity.online end)
+        if not switched or switched_result == false or not verified or still_online ~= false then
+            return gamma_arena_result.err("GA_ENTITY_OFFLINE_HOLD_FAILED", "NPC remained online after the staging hold", { id = id })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function request_entity_online(entity, id)
+    local service_ok, service = pcall(function() return type(alife) == "function" and alife() or nil end)
+    local online_ok, online_method = pcall(function() return service and service.set_switch_online end)
+    local offline_ok, offline_method = pcall(function() return service and service.set_switch_offline end)
+    local switch_ok, switch_method = pcall(function() return entity and entity.switch_online end)
+    if not service_ok or service == nil or not online_ok or type(online_method) ~= "function" or not offline_ok or type(offline_method) ~= "function"
+        or not switch_ok or type(switch_method) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_ONLINE_REQUEST_API_MISSING", "NPC online request controls are unavailable", { id = id })
+    end
+    local enabled, enabled_result = pcall(online_method, service, id, true)
+    local pinned, pinned_result = pcall(offline_method, service, id, false)
+    local switched, switched_result = pcall(switch_method, entity)
+    if not enabled or enabled_result == false or not pinned or pinned_result == false or not switched or switched_result == false then
+        return gamma_arena_result.err("GA_ENTITY_ONLINE_REQUEST_FAILED", "NPC online request failed", { id = id })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function entity_effective_profile(section)
+    if type(system_ini) ~= "function" then return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "system_ini is unavailable") end
+    local opened, system = pcall(system_ini)
+    if not opened or system == nil then return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective system.ini is unavailable") end
+    local line_ok, line_exist = pcall(function() return system.line_exist end)
+    local read_ok, read = pcall(function() return system.r_string_ex end)
+    if not line_ok or type(line_exist) ~= "function" or not read_ok or type(read) ~= "function" then
+        return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective profile value APIs are unavailable", { section = section })
+    end
+    for _, key in ipairs({ "class", "community" }) do
+        local called, present = pcall(line_exist, system, section, key)
+        if not called or present ~= true then return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective profile value is missing", { section = section, key = key }) end
+    end
+    local class_ok, class = pcall(read, system, section, "class")
+    local community_ok, community = pcall(read, system, section, "community")
+    if not class_ok or not community_ok then return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective profile value could not be read", { section = section }) end
+    return gamma_arena_result.ok({ class = class, community = community })
+end
+
+function effective_ammo_box_size(section)
+    if type(section) ~= "string" or section == "" or type(system_ini) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo section/system_ini is unavailable", { section = section })
+    end
+    local opened, system = pcall(system_ini)
+    if not opened or system == nil then
+        return gamma_arena_result.err("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective system.ini is unavailable", { section = section })
+    end
+    local line_ok, line_exist = pcall(function() return system.line_exist end)
+    local read_ok, read = pcall(function() return system.r_u32 end)
+    if not line_ok or type(line_exist) ~= "function" or not read_ok or type(read) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective box_size APIs are unavailable", { section = section })
+    end
+    local present_ok, present = pcall(line_exist, system, section, "box_size")
+    if not present_ok or present ~= true then
+        return gamma_arena_result.err("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size is missing", { section = section })
+    end
+    local value_ok, value = pcall(read, system, section, "box_size")
+    if not value_ok or type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value >= UINT32_MOD then
+        return gamma_arena_result.err("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size is invalid", { section = section })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function ensure_entity_weapon_equipped(npc, weapon_id)
+    local active_ok, active_method = pcall(function() return npc and npc.active_item end)
+    local equip_ok, equip_method = pcall(function() return npc and npc.make_item_active end)
+    if not active_ok or type(active_method) ~= "function" or not equip_ok or type(equip_method) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_EQUIP_API_MISSING", "NPC weapon equip/verification methods are unavailable", { weapon_id = weapon_id })
+    end
+    local inspected, active = pcall(active_method, npc)
+    if not inspected then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC active weapon lookup failed", { weapon_id = weapon_id }) end
+    if runtime_object_id(active) == weapon_id then return gamma_arena_result.ok(true) end
+    local weapon_lookup = entity_online_lookup(weapon_id)
+    if not weapon_lookup.ok then return weapon_lookup end
+    local weapon = weapon_lookup.value
+    if weapon == nil then return gamma_arena_result.ok(false) end
+    local activated, reason = pcall(equip_method, npc, weapon)
+    if not activated then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC weapon activation failed", { weapon_id = weapon_id, reason = tostring(reason) }) end
+    local verified, current = pcall(active_method, npc)
+    if not verified then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC active weapon verification failed", { weapon_id = weapon_id }) end
+    return gamma_arena_result.ok(runtime_object_id(current) == weapon_id)
+end
+
+function apply_actor_hostility(npc, actor, goodwill, enemy_relation)
+    if enemy_relation == nil then
+        local relation_ok, relation = pcall(function() return game_object and game_object.enemy end)
+        if relation_ok then enemy_relation = relation end
+    end
+    local relation_ok, relation_method = pcall(function() return npc and npc.set_relation end)
+    local goodwill_ok, goodwill_method = pcall(function() return npc and npc.force_set_goodwill end)
+    if enemy_relation == nil or not relation_ok or type(relation_method) ~= "function" or not goodwill_ok or type(goodwill_method) ~= "function" then
+        return gamma_arena_result.err("GA_ENTITY_HOSTILE_API_MISSING", "NPC set_relation/force_set_goodwill hostility APIs are unavailable")
+    end
+    local related, relation_result = pcall(relation_method, npc, enemy_relation, actor)
+    if not related or relation_result == false then
+        return gamma_arena_result.err("GA_ENTITY_HOSTILE_RELATION_FAILED", "NPC enemy relation failed", { reason = related and "explicit false" or tostring(relation_result) })
+    end
+    local forced, goodwill_result = pcall(goodwill_method, npc, goodwill, actor)
+    if not forced or goodwill_result == false then
+        return gamma_arena_result.err("GA_ENTITY_HOSTILE_GOODWILL_FAILED", "NPC forced goodwill failed", { reason = forced and "explicit false" or tostring(goodwill_result) })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function apply_actor_activation_hold(npc, actor)
+    local enemy_ok, enemy_method = pcall(function() return npc and npc.set_enemy end)
+    local relation_ok, relation_method = pcall(function() return npc and npc.set_relation end)
+    local goodwill_ok, goodwill_method = pcall(function() return npc and npc.force_set_goodwill end)
+    local friend_ok, friend_relation = pcall(function() return game_object and game_object.friend end)
+    if not enemy_ok or type(enemy_method) ~= "function" or not relation_ok or type(relation_method) ~= "function"
+        or not goodwill_ok or type(goodwill_method) ~= "function" or not friend_ok or friend_relation == nil then
+        return gamma_arena_result.err("GA_ENTITY_ACTIVATION_HOLD_API_MISSING", "NPC temporary combat-hold APIs are unavailable")
+    end
+    local cleared, clear_result = pcall(enemy_method, npc, nil)
+    local related, relation_result = pcall(relation_method, npc, friend_relation, actor)
+    local forced, goodwill_result = pcall(goodwill_method, npc, 5000, actor)
+    if not cleared or clear_result == false or not related or relation_result == false or not forced or goodwill_result == false then
+        return gamma_arena_result.err("GA_ENTITY_ACTIVATION_HOLD_FAILED", "NPC temporary combat hold failed")
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function default_entity_adapter(actor_adapter, active_instance)
+    return gamma_arena_entity_adapter.new({
+        actor = actor_adapter,
+        clock = function() return time_global() end,
+        opponent_gate = function()
+            local instance = active_instance()
+            return instance ~= nil and instance:is_opponent_activation_allowed()
+        end,
+        resolve_spawn = function(path)
+            local path_object = patrol(path)
+            if path_object == nil then return gamma_arena_result.err("GA_ENTITY_PATROL_FAILED", "Opponent patrol is unavailable", { path = path }) end
+            return gamma_arena_result.ok({
+                position = path_object:point(0),
+                level_vertex_id = path_object:level_vertex_id(0),
+                game_vertex_id = path_object:game_vertex_id(0)
+            })
+        end,
+        alife = function() return alife() end,
+        create_npc = function(section, position, level_vertex_id, game_vertex_id)
+            return alife_create(section, position, level_vertex_id, game_vertex_id)
+        end,
+        hold_offline = hold_entity_offline,
+        request_online = request_entity_online,
+        create_item = function(section, parent, count, is_ammo)
+            if is_ammo then return alife_create_item(section, parent, { ammo = count }) end
+            return alife_create_item(section, parent)
+        end,
+        save_tag = function(id, name, key, value) return se_save_var(id, name, key, value) end,
+        load_tag = function(id, name, key) return se_load_var(id, name, key) end,
+        save_death_dropped = function(id, value) return se_save_var(id, nil, "death_dropped", value) end,
+        load_death_dropped = function(id) return se_load_var(id, nil, "death_dropped") end,
+        release = function(descriptor)
+            if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then
+                return gamma_arena_result.err("GA_ENTITY_SAFE_RELEASE_FAILED", "safe_release_manager.release is unavailable")
+            end
+            safe_release_manager.release({ id = descriptor.id })
+            return gamma_arena_result.ok(true)
+        end,
+        server_entity = entity_server_object,
+        entity_exists = runtime_arena_entity_exists,
+        online_object = entity_online_lookup,
+        entity_section = entity_section_name,
+        item_quantity = entity_ammo_quantity,
+        ammo_box_size = effective_ammo_box_size,
+        profile_runtime = { effective_profile = entity_effective_profile },
+        ensure_weapon_equipped = ensure_entity_weapon_equipped,
+        actor_object = function() return db and db.actor end,
+        set_pair_friends = function(first, second)
+            if game_object == nil or game_object.friend == nil then return gamma_arena_result.err("GA_ENTITY_FRIEND_RELATION_FAILED", "game_object.friend is unavailable") end
+            local first_ok, first_result = pcall(function() return first:set_relation(game_object.friend, second) end)
+            local second_ok, second_result = pcall(function() return second:set_relation(game_object.friend, first) end)
+            if not first_ok or first_result == false or not second_ok or second_result == false then
+                return gamma_arena_result.err("GA_ENTITY_FRIEND_RELATION_FAILED", "NPC pair friendship failed safely")
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        set_actor_hold = apply_actor_activation_hold,
+        set_actor_hostile = function(npc, actor, goodwill)
+            if game_object == nil or game_object.enemy == nil then return gamma_arena_result.err("GA_ENTITY_HOSTILE_RELATION_FAILED", "game_object.enemy is unavailable") end
+            return apply_actor_hostility(npc, actor, goodwill, game_object.enemy)
+        end,
+        release_timeout_ms = 10000,
+        online_timeout_ms = 10000
     })
 end
 
@@ -316,25 +873,50 @@ function compose(overrides)
     local store = overrides.store or module_store_port()
     local config = overrides.config or current_config()
     local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
+    local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance)
     local checkpoint_adapter = overrides.checkpoint or default_checkpoint_adapter(store, config, active_instance)
     local teardown_clock = overrides.teardown_clock or function() return time_global() end
     local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
     local teardown_max_updates = overrides.teardown_max_updates or 64
+    local entity_teardown_max_updates = overrides.entity_teardown_max_updates or overrides.teardown_max_updates or MAX_TEARDOWN_UPDATES
+    local actor_teardown_max_updates = overrides.actor_teardown_max_updates or overrides.teardown_max_updates or 64
     local teardown = overrides.teardown
     if teardown == nil then
-        teardown = function(_, preserve)
+        local teardown_context = nil
+        teardown = function(_, preserve, cycle)
             if preserve == true then return gamma_arena_result.ok(true) end
-            local errors = {}
-            local session = instance and instance:session_snapshot() or nil
-            local checkpoint = drain_checkpoint_cleanup(checkpoint_adapter, session, {
-                clock = teardown_clock,
-                timeout_ms = teardown_timeout_ms,
-                max_updates = teardown_max_updates
-            })
-            if not checkpoint.ok then errors[#errors + 1] = checkpoint.error end
-            local actor = actor_adapter:cleanup()
-            if not actor.ok then errors[#errors + 1] = actor.error end
-            if #errors > 0 then return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Arena adapter cleanup failed", { errors = errors }) end
+            if teardown_context == nil or teardown_context.cycle ~= cycle then
+                teardown_context = { cycle = cycle, stage = "entities", entity = {}, actor = {}, session = instance and instance:session_snapshot() or nil }
+            end
+            if teardown_context.stage == "entities" then
+                local entities = step_entity_cleanup(entity_adapter, teardown_context.entity, {
+                    clock = teardown_clock,
+                    timeout_ms = teardown_timeout_ms,
+                    max_updates = entity_teardown_max_updates
+                })
+                if not entities.ok then return entities end
+                if entities.value.pending == true then return gamma_arena_result.ok({ pending = true, stage = "entities" }) end
+                teardown_context.stage = "checkpoint"
+            end
+            if teardown_context.stage == "checkpoint" then
+                local checkpoint = drain_checkpoint_cleanup(checkpoint_adapter, teardown_context.session, {
+                    clock = teardown_clock,
+                    timeout_ms = teardown_timeout_ms,
+                    max_updates = teardown_max_updates
+                })
+                if not checkpoint.ok then return checkpoint end
+                teardown_context.stage = "actor"
+            end
+            if teardown_context.stage == "actor" then
+                local actor = step_actor_cleanup(actor_adapter, teardown_context.actor, {
+                    clock = teardown_clock,
+                    timeout_ms = teardown_timeout_ms,
+                    max_updates = actor_teardown_max_updates
+                })
+                if not actor.ok then return actor end
+                if actor.value.pending == true then return gamma_arena_result.ok({ pending = true, stage = "actor" }) end
+                teardown_context.stage = "done"
+            end
             return gamma_arena_result.ok(true)
         end
     end
@@ -349,6 +931,7 @@ function compose(overrides)
         teardown = teardown or neutral_teardown,
         launch_options = overrides.launch_options,
         actor = actor_adapter,
+        entities = entity_adapter,
         checkpoint = checkpoint_adapter,
         layout = overrides.layout or default_layout
     }
