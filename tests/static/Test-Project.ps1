@@ -882,6 +882,10 @@ if ($IsRepositoryCheckout) {
 
     $CompatibilityReportPath = Join-Path $RepoRoot 'tools\New-CompatibilityReport.ps1'
     if (Test-Path -LiteralPath $CompatibilityReportPath) {
+        $CompatibilityReportContent = Get-Content -LiteralPath $CompatibilityReportPath -Raw
+        foreach ($SafetyMarker in @('Get-SafeContainedFile', 'Get-SafeTreeFiles', 'Unsafe reparse point encountered', 'FileAttributes]::ReparsePoint')) {
+            Assert-True ($CompatibilityReportContent -match [regex]::Escape($SafetyMarker)) "Compatibility report must implement descendant safety marker: $SafetyMarker"
+        }
         $Task10TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gamma-arena-compatibility-" + [Guid]::NewGuid().ToString('N'))
         function Write-Task10FixtureFile([string]$Root, [string]$RelativePath, [string]$Content) {
             $Path = Join-Path $Root $RelativePath
@@ -975,6 +979,12 @@ if ($IsRepositoryCheckout) {
                 $InvalidIndex += 1
             }
 
+            foreach ($InvalidProfileName in @('..\Outside', 'Nested\Profile', 'Nested/Profile', 'Bad:Profile', 'Trailing.', 'Trailing ', 'CON')) {
+                $InvalidProfileOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $InvalidProfileName -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+                $InvalidProfileExit = $LASTEXITCODE
+                Assert-True ($InvalidProfileExit -ne 0 -and $InvalidProfileOutput -match 'MO2 profile name is invalid') "Compatibility report must reject non-component profile name: $InvalidProfileName"
+            }
+
             $OutsideProfileRoot = Join-Path $Task10TempRoot 'outside-profile'
             $null = Write-Task10FixtureFile $OutsideProfileRoot 'modlist.txt' "+Framework`r`n+Direct Root`r`n+High Priority`r`n"
             $EscapedProfilePath = Join-Path $Mo2Root 'profiles\Escaped Profile'
@@ -1003,6 +1013,69 @@ if ($IsRepositoryCheckout) {
             $DataEscapeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $DataEscapeProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
             $DataEscapeExit = $LASTEXITCODE
             Assert-True ($DataEscapeExit -ne 0 -and $DataEscapeOutput -match 'Resolved MO2 mod data root escapes enabled mod root') 'Compatibility report must reject a gamedata junction outside its enabled mod root'
+
+            $ProviderEscapeModRoot = Join-Path $Mo2Root 'mods\Provider Escape'
+            $ProviderEscapeScripts = Join-Path $Task10TempRoot 'outside-provider-scripts'
+            $null = Write-Task10FixtureFile $ProviderEscapeModRoot 'gamedata\placeholder.txt' 'provider escape mod'
+            $null = Write-Task10FixtureFile $ProviderEscapeScripts 'ui_main_menu.script' 'escaped provider'
+            $null = New-Item -ItemType Junction -Path (Join-Path $ProviderEscapeModRoot 'gamedata\scripts') -Target $ProviderEscapeScripts
+            $ProviderEscapeProfile = 'Provider Escape Profile'
+            $null = Write-Task10FixtureFile $Mo2Root ("profiles\$ProviderEscapeProfile\modlist.txt") "+Framework`r`n+Direct Root`r`n+High Priority`r`n+Provider Escape`r`n"
+            $ProviderEscapeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $ProviderEscapeProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $ProviderEscapeExit = $LASTEXITCODE
+            Assert-True ($ProviderEscapeExit -ne 0 -and $ProviderEscapeOutput -match 'Unsafe reparse point encountered') 'Compatibility report must reject a nested provider-directory junction before hashing'
+
+            $OverlapEscapeModRoot = Join-Path $Mo2Root 'mods\Overlap Escape'
+            $OverlapEscapeTextures = Join-Path $Task10TempRoot 'outside-overlap-textures'
+            $OverlapRelativePath = 'textures\gamma_arena\overlap.dds'
+            $null = Write-Task10FixtureFile $ReleaseRoot $OverlapRelativePath 'release overlap'
+            $null = Write-Task10FixtureFile $OverlapEscapeModRoot 'gamedata\placeholder.txt' 'overlap escape mod'
+            $null = Write-Task10FixtureFile $OverlapEscapeTextures 'gamma_arena\overlap.dds' 'escaped overlap'
+            $null = New-Item -ItemType Junction -Path (Join-Path $OverlapEscapeModRoot 'gamedata\textures') -Target $OverlapEscapeTextures
+            $OverlapEscapeProfile = 'Overlap Escape Profile'
+            $null = Write-Task10FixtureFile $Mo2Root ("profiles\$OverlapEscapeProfile\modlist.txt") "+Framework`r`n+Direct Root`r`n+High Priority`r`n+Overlap Escape`r`n"
+            $OverlapEscapeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $OverlapEscapeProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $OverlapEscapeExit = $LASTEXITCODE
+            Assert-True ($OverlapEscapeExit -ne 0 -and $OverlapEscapeOutput -match 'Unsafe reparse point encountered') 'Compatibility report must reject a nested overlap-directory junction before hashing'
+
+            $UnsafeReleaseRoot = Join-Path $Task10TempRoot 'unsafe-release'
+            $OutsideReleaseTree = Join-Path $Task10TempRoot 'outside-release-tree'
+            $null = Write-Task10FixtureFile $UnsafeReleaseRoot 'safe\file.txt' 'safe release file'
+            $null = Write-Task10FixtureFile $OutsideReleaseTree 'escaped.txt' 'escaped release file'
+            $null = New-Item -ItemType Junction -Path (Join-Path $UnsafeReleaseRoot 'escaped') -Target $OutsideReleaseTree
+            $UnsafeReleaseOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $Profile -ReleaseRoot $UnsafeReleaseRoot 2>&1 | Out-String)
+            $UnsafeReleaseExit = $LASTEXITCODE
+            Assert-True ($UnsafeReleaseExit -ne 0 -and $UnsafeReleaseOutput -match 'Unsafe reparse point encountered') 'Compatibility report must reject a nested release-root junction before recursive enumeration'
+
+            $ExecutableEscapeAnomaly = Join-Path $Task10TempRoot 'executable-escape-anomaly'
+            $OutsideExecutableBin = Join-Path $Task10TempRoot 'outside-executable-bin'
+            $null = Write-Task10FixtureFile $ExecutableEscapeAnomaly 'placeholder.txt' 'anomaly root'
+            $null = Write-Task10FixtureFile $OutsideExecutableBin 'AnomalyDX11.exe' 'escaped executable'
+            $null = New-Item -ItemType Junction -Path (Join-Path $ExecutableEscapeAnomaly 'bin') -Target $OutsideExecutableBin
+            $ExecutableEscapeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $ExecutableEscapeAnomaly -Mo2Root $Mo2Root -Profile $Profile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $ExecutableEscapeExit = $LASTEXITCODE
+            Assert-True ($ExecutableEscapeExit -ne 0 -and $ExecutableEscapeOutput -match 'Unsafe reparse point encountered') 'Compatibility report must reject an executable-bin junction before hashing'
+
+            $FileSymlinkTarget = Write-Task10FixtureFile $Task10TempRoot 'outside-file-provider.script' 'escaped file provider'
+            $FileSymlinkModRoot = Join-Path $Mo2Root 'mods\File Symlink Escape'
+            $FileSymlinkParent = Join-Path $FileSymlinkModRoot 'gamedata\scripts'
+            $null = New-Item -ItemType Directory -Path $FileSymlinkParent -Force
+            $FileSymlinkPath = Join-Path $FileSymlinkParent 'ui_main_menu.script'
+            $FileSymlinkSupported = $false
+            try {
+                $null = New-Item -ItemType SymbolicLink -Path $FileSymlinkPath -Target $FileSymlinkTarget -ErrorAction Stop
+                $FileSymlinkSupported = $true
+            }
+            catch {
+                Write-Host 'INFO: direct file symlink fixture unavailable; reparse-leaf rejection remains statically required'
+            }
+            if ($FileSymlinkSupported) {
+                $FileSymlinkProfile = 'File Symlink Profile'
+                $null = Write-Task10FixtureFile $Mo2Root ("profiles\$FileSymlinkProfile\modlist.txt") "+Framework`r`n+Direct Root`r`n+High Priority`r`n+File Symlink Escape`r`n"
+                $FileSymlinkOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile $FileSymlinkProfile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+                $FileSymlinkExit = $LASTEXITCODE
+                Assert-True ($FileSymlinkExit -ne 0 -and $FileSymlinkOutput -match 'Unsafe reparse point encountered') 'Compatibility report must reject a direct provider-file symlink before hashing'
+            }
 
             $MissingRootOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot (Join-Path $Task10TempRoot 'missing') -Mo2Root $Mo2Root -Profile $Profile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
             $MissingRootExit = $LASTEXITCODE

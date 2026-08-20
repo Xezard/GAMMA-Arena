@@ -91,8 +91,87 @@ function Test-SinglePathComponent([string]$Name) {
     return [string]::Equals([IO.Path]::GetFileName($Name), $Name, [StringComparison]::Ordinal)
 }
 
-function Get-OrdinalSortedFiles([string]$Root) {
-    $Paths = @([IO.Directory]::GetFiles($Root, '*', [IO.SearchOption]::AllDirectories))
+function Get-SafeContainedItem([string]$Root, [string]$RelativePath, [bool]$Directory) {
+    $Normalized = $RelativePath.Replace('\', '/')
+    $Components = @($Normalized.Split('/'))
+    if ($Components.Count -eq 0) {
+        throw "Unsafe empty relative path under root: $Root"
+    }
+    $Current = $Root
+    for ($Index = 0; $Index -lt $Components.Count; $Index += 1) {
+        $Component = $Components[$Index]
+        if ([string]::IsNullOrWhiteSpace($Component) -or $Component -eq '.' -or $Component -eq '..') {
+            throw "Unsafe relative path component encountered: $RelativePath"
+        }
+        $Candidate = Join-Path $Current $Component
+        $Item = Get-Item -LiteralPath $Candidate -Force -ErrorAction SilentlyContinue
+        if ($null -eq $Item) {
+            return $null
+        }
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Unsafe reparse point encountered: $Candidate"
+        }
+        $IsLast = $Index -eq ($Components.Count - 1)
+        if (-not $IsLast) {
+            if (-not $Item.PSIsContainer) {
+                return $null
+            }
+            $Current = $Item.FullName
+            continue
+        }
+        if ($Directory -and -not $Item.PSIsContainer) {
+            return $null
+        }
+        if (-not $Directory -and $Item.PSIsContainer) {
+            return $null
+        }
+        return $Item.FullName
+    }
+    return $null
+}
+
+function Get-SafeContainedFile([string]$Root, [string]$RelativePath) {
+    return Get-SafeContainedItem $Root $RelativePath $false
+}
+
+function Get-SafeContainedDirectory([string]$Root, [string]$RelativePath) {
+    return Get-SafeContainedItem $Root $RelativePath $true
+}
+
+function Get-SafeImmediateFiles([string]$Root) {
+    $Paths = New-Object System.Collections.Generic.List[string]
+    foreach ($Item in @(Get-ChildItem -LiteralPath $Root -Force)) {
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Unsafe reparse point encountered: $($Item.FullName)"
+        }
+        if (-not $Item.PSIsContainer) {
+            $Paths.Add($Item.FullName)
+        }
+    }
+    $Result = $Paths.ToArray()
+    [Array]::Sort($Result, [StringComparer]::Ordinal)
+    return $Result
+}
+
+function Get-SafeTreeFiles([string]$Root) {
+    $Pending = New-Object System.Collections.Generic.Stack[string]
+    $Files = New-Object System.Collections.Generic.List[string]
+    $Pending.Push($Root)
+    while ($Pending.Count -gt 0) {
+        $Directory = $Pending.Pop()
+        foreach ($Item in @(Get-ChildItem -LiteralPath $Directory -Force)) {
+            if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Unsafe reparse point encountered: $($Item.FullName)"
+            }
+            if ($Item.PSIsContainer) {
+                $Pending.Push($Item.FullName)
+            }
+            else {
+                $Files.Add($Item.FullName)
+            }
+        }
+    }
+    $Paths = $Files.ToArray()
     [Array]::Sort($Paths, [StringComparer]::Ordinal)
     return $Paths
 }
@@ -102,6 +181,10 @@ function Get-NormalizedRelativePath([string]$Root, [string]$Path) {
 }
 
 function Get-Sha256([string]$Path) {
+    $Item = Get-Item -LiteralPath $Path -Force
+    if ($Item.PSIsContainer -or ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Unsafe reparse point or non-file hash input encountered: $Path"
+    }
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
@@ -124,18 +207,15 @@ $AnomalyRoot = Resolve-RequiredDirectory $AnomalyRoot 'Anomaly root'
 $Mo2Root = Resolve-RequiredDirectory $Mo2Root 'MO2 root'
 $ReleaseRoot = Resolve-RequiredDirectory $ReleaseRoot 'Release root'
 
-if ([string]::IsNullOrWhiteSpace($Profile) -or
-    $Profile -eq '.' -or $Profile -eq '..' -or
-    $Profile.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
-    $Profile.Contains('\') -or $Profile.Contains('/')) {
+if (-not (Test-SinglePathComponent $Profile)) {
     throw "MO2 profile name is invalid: $Profile"
 }
 
 $ProfilesRoot = Resolve-RequiredDirectory (Join-Path $Mo2Root 'profiles') 'MO2 profiles root'
 $ProfileRoot = Resolve-ContainedDirectory (Join-Path $ProfilesRoot $Profile) $ProfilesRoot 'MO2 profile' 'profiles' $false
-$ModListPath = Join-Path $ProfileRoot 'modlist.txt'
-if (-not (Test-Path -LiteralPath $ModListPath -PathType Leaf)) {
-    throw "Active MO2 profile modlist.txt does not exist: $ModListPath"
+$ModListPath = Get-SafeContainedFile $ProfileRoot 'modlist.txt'
+if ($null -eq $ModListPath) {
+    throw "Active MO2 profile modlist.txt does not exist: $ProfileRoot\modlist.txt"
 }
 
 $ModsRoot = Resolve-RequiredDirectory (Join-Path $Mo2Root 'mods') 'MO2 mods root'
@@ -163,16 +243,16 @@ foreach ($RawLine in @(Get-Content -LiteralPath $ModListPath)) {
 
 $ExecutablePaths = New-Object System.Collections.Generic.List[string]
 $ExecutableSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-$BinRoot = Join-Path $AnomalyRoot 'bin'
-if (Test-Path -LiteralPath $BinRoot -PathType Container) {
-    foreach ($Path in @([IO.Directory]::GetFiles($BinRoot, 'AnomalyDX*.exe', [IO.SearchOption]::TopDirectoryOnly))) {
+$BinRoot = Get-SafeContainedDirectory $AnomalyRoot 'bin'
+if ($null -ne $BinRoot) {
+    foreach ($Path in @(Get-SafeImmediateFiles $BinRoot)) {
+        $Name = [IO.Path]::GetFileName($Path)
+        if ($Name -notlike 'AnomalyDX*.exe' -and $Name -ine 'VerifiedDX11.exe') {
+            continue
+        }
         if ($ExecutableSeen.Add($Path)) {
             $ExecutablePaths.Add($Path)
         }
-    }
-    $VerifiedPath = Join-Path $BinRoot 'VerifiedDX11.exe'
-    if ((Test-Path -LiteralPath $VerifiedPath -PathType Leaf) -and $ExecutableSeen.Add($VerifiedPath)) {
-        $ExecutablePaths.Add($VerifiedPath)
     }
 }
 $ExecutableArray = $ExecutablePaths.ToArray()
@@ -187,19 +267,21 @@ $CriticalPaths = @(
     'scripts/xrs_rnd_npc_loadout.script'
 )
 [Array]::Sort($CriticalPaths, [StringComparer]::Ordinal)
+$AnomalyGameDataRoot = Get-SafeContainedDirectory $AnomalyRoot 'gamedata'
 $Providers = @()
 foreach ($RelativePath in $CriticalPaths) {
-    $NativeRelativePath = $RelativePath.Replace('/', '\')
     $ProviderName = 'MISSING'
     $ProviderPath = $null
-    $BasePath = Join-Path (Join-Path $AnomalyRoot 'gamedata') $NativeRelativePath
-    if (Test-Path -LiteralPath $BasePath -PathType Leaf) {
-        $ProviderName = 'Anomaly base'
-        $ProviderPath = $BasePath
+    if ($null -ne $AnomalyGameDataRoot) {
+        $BasePath = Get-SafeContainedFile $AnomalyGameDataRoot $RelativePath
+        if ($null -ne $BasePath) {
+            $ProviderName = 'Anomaly base'
+            $ProviderPath = $BasePath
+        }
     }
     foreach ($Mod in $EnabledMods) {
-        $Candidate = Join-Path $Mod.DataRoot $NativeRelativePath
-        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+        $Candidate = Get-SafeContainedFile $Mod.DataRoot $RelativePath
+        if ($null -ne $Candidate) {
             $ProviderName = 'MO2 mod: ' + $Mod.Name
             $ProviderPath = $Candidate
         }
@@ -227,7 +309,7 @@ foreach ($ForbiddenPath in $ForbiddenOverrides) {
 }
 
 $ReleaseFiles = @()
-foreach ($Path in (Get-OrdinalSortedFiles $ReleaseRoot)) {
+foreach ($Path in (Get-SafeTreeFiles $ReleaseRoot)) {
     $RelativePath = Get-NormalizedRelativePath $ReleaseRoot $Path
     $ReleaseFiles += [PSCustomObject]@{
         RelativePath = $RelativePath
@@ -239,10 +321,9 @@ foreach ($Path in (Get-OrdinalSortedFiles $ReleaseRoot)) {
 $BlockingOverrides = @($ReleaseFiles | Where-Object { $ForbiddenSet.Contains($_.RelativePath) })
 $OverlapRows = @()
 foreach ($ReleaseFile in $ReleaseFiles) {
-    $NativeRelativePath = $ReleaseFile.RelativePath.Replace('/', '\')
     foreach ($Mod in $EnabledMods) {
-        $Candidate = Join-Path $Mod.DataRoot $NativeRelativePath
-        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+        $Candidate = Get-SafeContainedFile $Mod.DataRoot $ReleaseFile.RelativePath
+        if ($null -ne $Candidate) {
             $OverlapRows += [PSCustomObject]@{
                 RelativePath = $ReleaseFile.RelativePath
                 ModName = $Mod.Name
