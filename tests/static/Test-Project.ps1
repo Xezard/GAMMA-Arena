@@ -215,6 +215,7 @@ if (Test-Path -LiteralPath $ConfigTxPath) {
     Assert-True ($ConfigTxContent -match 'GA_CONFIG_QUARANTINED') 'Incomplete recovery must quarantine later Arena transactions'
     Assert-True ($ConfigTxContent -match 'GA_CONFIG_RECOVERY_FAILED') 'Recovery failures must be distinct from primary transaction failures'
     Assert-True ($ConfigTxContent -match 'boolean_returns') 'Explicit false-return failure semantics must be opt-in for adapters'
+    Assert-True ($ConfigTxContent -match 'if\s+value\s*==\s*nil\s+then\s+value\s*=\s*""\s+end') 'A present ini_file_ex key with an engine-nil blank value must snapshot as an empty string'
     Assert-True ($ConfigTxContent -match 'local function _snapshot_unchecked') 'Transactions must use a private unchecked snapshot only after their quarantine guard'
     Assert-True ($ConfigTxContent -match '(?s)function snapshot\s*\(\s*config\s*,\s*section\s*,\s*keys\s*\)\s*if is_quarantined\s*\(\s*config\s*\)') 'The public config snapshot API must reject quarantined configs'
 }
@@ -314,12 +315,19 @@ if (Test-Path -LiteralPath $UiXmlPath) {
         Assert-True ($null -ne $UiXml.SelectSingleNode("//*[local-name()='$Id']")) "Start UI XML is missing control $Id"
     }
     Assert-True (@($UiXml.SelectNodes("//*[local-name()='fatal']/*[local-name()='fatal_main_menu']")).Count -eq 1) 'Fatal UI must contain exactly one main-menu action'
+    Assert-True ($null -eq $UiXml.SelectSingleNode("/*[local-name()='w']/*[local-name()='gamma_arena_start']/*[local-name()='texture']")) 'Start UI root must not tile a widget texture across the screen'
+    $ArenaBackground = $UiXml.SelectSingleNode("/*[local-name()='w']/*[local-name()='gamma_arena_start']/*[local-name()='auto_static'][*[local-name()='texture' and normalize-space(text())='ui\ui_actor_main_menu_one']]")
+    Assert-True ($null -ne $ArenaBackground) 'Start UI must use the proven full-screen Anomaly new-game background'
+    if ($null -ne $ArenaBackground) {
+        Assert-True ($ArenaBackground.GetAttribute('x') -eq '0' -and $ArenaBackground.GetAttribute('y') -eq '0' -and $ArenaBackground.GetAttribute('width') -eq '1024' -and $ArenaBackground.GetAttribute('height') -eq '768' -and $ArenaBackground.GetAttribute('stretch') -eq '1') 'Start UI background must cover the virtual 1024x768 canvas exactly once'
+    }
 }
 
 foreach ($Locale in @('rus','eng')) {
     $LocalePath = Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena.xml"
     if (Test-Path -LiteralPath $LocalePath) {
-        [xml]$LocaleXml = Get-Content -LiteralPath $LocalePath -Raw
+        $LocaleEncoding = if ($Locale -eq 'rus') { [Text.Encoding]::GetEncoding(1251) } else { [Text.UTF8Encoding]::new($false, $true) }
+        [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
         Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
         foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled')) {
@@ -330,7 +338,12 @@ foreach ($Locale in @('rus','eng')) {
 
 $RussianLocalePath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
 if (Test-Path -LiteralPath $RussianLocalePath) {
-    [xml]$RussianXml = Get-Content -LiteralPath $RussianLocalePath -Raw -Encoding UTF8
+    $RussianBytes = [IO.File]::ReadAllBytes($RussianLocalePath)
+    $StrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $RussianIsUtf8 = $true
+    try { $null = $StrictUtf8.GetString($RussianBytes) } catch { $RussianIsUtf8 = $false }
+    Assert-True (-not $RussianIsUtf8) 'Russian localization must use the Windows-1251 byte encoding expected by Anomaly/GAMMA'
+    [xml]$RussianXml = [Text.Encoding]::GetEncoding(1251).GetString($RussianBytes)
     $RussianContent = (@($RussianXml.SelectNodes('//text')) | ForEach-Object { $_.InnerText }) -join "`n"
     $RussianExpected = @(
         (ConvertFrom-Json '"\u041d\u043e\u0432\u0438\u0447\u043e\u043a"'),
@@ -343,8 +356,14 @@ if (Test-Path -LiteralPath $RussianLocalePath) {
         (ConvertFrom-Json '"\u0412 \u0433\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e"')
     )
     foreach ($Text in $RussianExpected) {
-        Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact UTF-8 text: $Text"
+        Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact Windows-1251 text: $Text"
     }
+}
+
+$GitAttributesPath = Join-Path $RepoRoot '.gitattributes'
+if (Test-Path -LiteralPath $GitAttributesPath) {
+    $GitAttributesContent = Get-Content -LiteralPath $GitAttributesPath -Raw
+    Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/st_gamma_arena\.xml\s+-text\s*$') 'Git must preserve Russian localization bytes without text conversion'
 }
 
 $SessionSchemaPath = Join-Path $RepoRoot 'schemas\session-v1.md'

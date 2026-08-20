@@ -21,6 +21,12 @@ function Write-FixtureFile([string]$Root, [string]$RelativePath, [string]$Conten
     [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Write-FixtureFileEncoded([string]$Root, [string]$RelativePath, [string]$Content, [Text.Encoding]$Encoding) {
+    $Path = Join-Path $Root $RelativePath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    [IO.File]::WriteAllText($Path, $Content, $Encoding)
+}
+
 function New-StaticFixture([string]$Name) {
     $Root = Join-Path $TempRoot $Name
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\gamedata') -Force | Out-Null
@@ -31,6 +37,11 @@ function New-StaticFixture([string]$Name) {
 }
 
 function Add-Task2ContractFixture([string]$Root) {
+    Write-FixtureFile $Root '.gitattributes' @'
+* text=auto eol=lf
+*.xml text eol=lf
+src/gamedata/configs/text/rus/st_gamma_arena.xml -text
+'@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_assert.script' @'
 function equals() end
 function is_true() end
@@ -216,6 +227,8 @@ seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=1|sessio
     Write-FixtureFile $Root 'schemas\fight-spec-v1.md' 'fixture'
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
 local function _snapshot_unchecked()
+    local value = nil
+    if value == nil then value = "" end
     return "line_exist r_string_ex"
 end
 function snapshot(config, section, keys)
@@ -443,7 +456,7 @@ function run() end
     $DomainContent = Get-Content -LiteralPath $DomainPath -Raw
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_domain.script' ($DomainContent + "`nfunction task4_fixture() return gamma_arena_test_migrations.run(run_case_fn) end`n")
     Write-FixtureFile $Root 'src\gamedata\configs\ui\gamma_arena_start.xml' @'
-<w><gamma_arena_start><title/><difficulty/><seed/><random_seed/><validation/><start/><back/><fatal><fatal_text/><fatal_main_menu/></fatal></gamma_arena_start></w>
+<w><gamma_arena_start><auto_static x="0" y="0" width="1024" height="768" stretch="1"><texture>ui\ui_actor_main_menu_one</texture></auto_static><title/><difficulty/><seed/><random_seed/><validation/><start/><back/><fatal><fatal_text/><fatal_main_menu/></fatal></gamma_arena_start></w>
 '@
     $Locale = @'
 <?xml version="1.0" encoding="utf-8"?>
@@ -464,7 +477,8 @@ function run() end
 <string id="st_gamma_arena_manual_save_disabled"><text>Disabled</text></string>
 </string_table>
 '@
-    Write-FixtureFile $Root 'src\gamedata\configs\text\rus\st_gamma_arena.xml' $Locale
+    $RussianLocale = [Net.WebUtility]::HtmlDecode(($Locale -replace '^<\?xml[^>]+>\r?\n', ''))
+    Write-FixtureFileEncoded $Root 'src\gamedata\configs\text\rus\st_gamma_arena.xml' $RussianLocale ([Text.Encoding]::GetEncoding(1251))
     Write-FixtureFile $Root 'src\gamedata\configs\text\eng\st_gamma_arena.xml' $Locale
     Write-FixtureFile $Root 'tests\fixtures\settings-v0.ltx' "[gamma_arena]`nlast_difficulty_id = veteran`nlast_seed_mode = manual"
     Write-FixtureFile $Root 'tests\fixtures\settings-v1.ltx' "[gamma_arena]`nsettings_schema_version = 1`nlast_difficulty_id = master`nlast_seed_mode = random"
