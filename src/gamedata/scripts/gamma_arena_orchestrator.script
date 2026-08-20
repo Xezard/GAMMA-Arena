@@ -1,5 +1,7 @@
 local Orchestrator = {}
 Orchestrator.__index = Orchestrator
+local UINT32_MOD = 4294967296
+local COUNTDOWN_DURATION_MS = 3000
 
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
@@ -35,6 +37,11 @@ local function call_method(code, object, method_name, ...)
     local ok, method = pcall(function() return object and object[method_name] end)
     if not ok or type(method) ~= "function" then return fail(code, "Arena dependency method is unavailable", { method = method_name }) end
     return safe_result_call(code, method, object, ...)
+end
+
+local function clock_elapsed(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
 end
 
 local function error_results(result)
@@ -104,6 +111,16 @@ function Orchestrator:__init(deps)
     self.fatal_dialog = nil
     self.main_menu_executed = false
     self.cleanup_required = false
+    self.fight_spec = nil
+    self.catalog_snapshot = nil
+    self.countdown_started = nil
+    self.countdown_value = nil
+    self.active_started = nil
+    self.pending_victory = false
+    self.result_action_locked = false
+    self.next_cleanup_started = false
+    self.pending_disconnect = false
+    self.pending_callback_error = nil
     self.machine_state = gamma_arena_state_machine.states.IDLE
 end
 
@@ -132,9 +149,48 @@ function Orchestrator:is_checkpoint_ready()
 end
 
 function Orchestrator:is_opponent_activation_allowed()
-    -- Task 7 keeps this gate closed. Task 8 may open it only after the
-    -- countdown deadline and while input remains owned by the Arena runtime.
     return self:is_active() and self.runtime_stage == "SPAWNING"
+end
+
+function Orchestrator:clock_now()
+    if type(self.deps.clock) ~= "function" then return fail("GA_RUNTIME_CLOCK_FAILED", "Arena clock dependency is unavailable") end
+    local called, value = pcall(self.deps.clock)
+    if not called then return fail("GA_RUNTIME_CLOCK_FAILED", "Arena clock failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        value = value.value
+    end
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 0 or value >= UINT32_MOD then
+        return fail("GA_RUNTIME_CLOCK_FAILED", "Arena clock must return uint32 milliseconds")
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function Orchestrator:emit_log(code, message, context)
+    local log = self.deps.log
+    local lookup_ok, writer = pcall(function() return log and log.info end)
+    if not lookup_ok or type(writer) ~= "function" then return fail("GA_RUNTIME_LOG_FAILED", "Arena diagnostic log dependency is unavailable", { code = code }) end
+    local called, value = pcall(writer, code, message, context)
+    if not called then return fail("GA_RUNTIME_LOG_FAILED", "Arena diagnostic log failed safely", { code = code, reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return fail("GA_RUNTIME_LOG_FAILED", "Arena diagnostic log reported failure", { code = code }) end
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:clear_runtime_ui()
+    local ui = self.deps.result_ui
+    if ui == nil then return gamma_arena_result.ok(false) end
+    local errors = {}
+    for _, method_name in ipairs({ "clear_countdown", "clear_result" }) do
+        local method_ok, method = pcall(function() return ui[method_name] end)
+        if method_ok and type(method) == "function" then
+            local cleared = call_method("GA_RUNTIME_UI_CLEAR_FAILED", ui, method_name)
+            if not cleared.ok then errors[#errors + 1] = cleared.error end
+        end
+    end
+    self.countdown_value = nil
+    if #errors > 0 then return fail("GA_RUNTIME_UI_CLEAR_FAILED", "Arena runtime UI could not be removed safely", { errors = errors }) end
+    return gamma_arena_result.ok(true)
 end
 
 function Orchestrator:living_opponent_count()
@@ -242,6 +298,8 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         result = fail("GA_RUNTIME_INTERNAL", "Arena runtime entered fatal routing without a structured error")
     end
     local errors = error_results(result)
+    local ui_cleanup = self:clear_runtime_ui()
+    if not ui_cleanup.ok then errors[#errors + 1] = ui_cleanup end
     if not intent_finalized then
         local clear_method = self.session ~= nil and "clear_resume_if_matches" or "clear_transient"
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, clear_method, self.deps.config, self.session)
@@ -255,6 +313,9 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.checkpoint_ready = false
     self.machine_state = gamma_arena_state_machine.states.ERROR
     self.cleanup_required = true
+    self.pending_victory = false
+    self.pending_callback_error = nil
+    self.result_action_locked = true
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then errors[#errors + 1] = teardown end
     self.session = nil
@@ -278,20 +339,31 @@ function Orchestrator:enter_fatal(result, intent_finalized)
 end
 
 function Orchestrator:on_callback_error(callback_name, reason)
-    return self:enter_fatal(fail("GA_CALLBACK_FAILED", "Arena callback failed safely", {
+    local failure = fail("GA_CALLBACK_FAILED", "Arena callback failed safely", {
         callback = callback_name,
         reason = tostring(reason)
-    }))
+    })
+    if callback_name == "npc_on_death_callback" and self:is_active() then
+        if self.pending_callback_error == nil then self.pending_callback_error = failure end
+        return failure
+    end
+    return self:enter_fatal(failure)
 end
 
 function Orchestrator:on_callback_result_error(callback_name, result, was_active)
     if self.fatal_shown or self.machine_state == gamma_arena_state_machine.states.ERROR then return result end
+    if callback_name == "npc_on_death_callback" and was_active == true then
+        if self.pending_callback_error == nil then self.pending_callback_error = result end
+        return result
+    end
     local cleanup_callback = callback_name == "actor_on_net_destroy" or callback_name == "on_before_level_changing"
     if was_active == true or cleanup_callback then return self:enter_fatal(result, cleanup_callback) end
     return result
 end
 
 function Orchestrator:on_game_load()
+    local ui_cleanup = self:clear_runtime_ui()
+    if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
     local checkpoint_load = call_method("GA_CHECKPOINT_REHIDE_FAILED", self.deps.checkpoint, "on_game_load")
     if not checkpoint_load.ok then return self:enter_fatal(checkpoint_load) end
     self.game_load_seen = true
@@ -320,6 +392,15 @@ function Orchestrator:on_game_load()
     self.teardown_done = false
     self.fatal_shown = false
     self.main_menu_executed = false
+    self.fight_spec = nil
+    self.catalog_snapshot = nil
+    self.countdown_started = nil
+    self.active_started = nil
+    self.pending_victory = false
+    self.result_action_locked = false
+    self.next_cleanup_started = false
+    self.pending_disconnect = false
+    self.pending_callback_error = nil
     return gamma_arena_result.ok(true)
 end
 
@@ -389,6 +470,9 @@ function Orchestrator:create_session(request)
 end
 
 function Orchestrator:run_preflight()
+    local compat = self.deps.compat
+    local lookup_ok, preflight = pcall(function() return compat and compat.preflight end)
+    if lookup_ok and type(preflight) == "function" then return safe_result_call("GA_PREFLIGHT_FAILED", preflight) end
     return safe_result_call("GA_PREFLIGHT_FAILED", self.deps.preflight)
 end
 
@@ -461,7 +545,181 @@ function Orchestrator:layout_snapshot()
     return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id)
 end
 
+function Orchestrator:prepare_fight()
+    local catalogs = safe_result_call("GA_CATALOG_LOAD_FAILED", self.deps.catalogs)
+    if not catalogs.ok then return catalogs end
+    local generated = safe_result_call("GA_FIGHT_GENERATE_FAILED", self.deps.generator, self.session, self.session.fight_index, catalogs.value)
+    if not generated.ok then return generated end
+    local validated = safe_result_call("GA_FIGHT_VALIDATE_FAILED", self.deps.validator, generated.value, catalogs.value)
+    if not validated.ok then return validated end
+    local spec = validated.value
+    local encoded_ok, encoded = pcall(function() return spec and spec.stable_encode and spec.stable_encode() end)
+    local id_ok, fight_id = pcall(function() return spec and spec.fight_id and spec.fight_id() end)
+    if not encoded_ok or type(encoded) ~= "string" or encoded == "" or not id_ok or type(fight_id) ~= "string" or fight_id == "" then
+        return fail("GA_FIGHT_VALIDATE_FAILED", "Validated fight specification facade is incomplete")
+    end
+    local logged = self:emit_log("GA_FIGHT_SPEC", "session=" .. tostring(self.session.session_id)
+        .. " fight=" .. tostring(self.session.fight_index) .. " seed=" .. tostring(self.session.session_seed)
+        .. " spec=" .. encoded, { fight_id = fight_id })
+    if not logged.ok then return logged end
+    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id)
+    if not applied.ok then return applied end
+    local now = self:clock_now()
+    if not now.ok then return now end
+    local advanced = self:advance(gamma_arena_state_machine.events.PREPARATION_SUCCEEDED)
+    if not advanced.ok then return advanced end
+    self.catalog_snapshot = catalogs.value
+    self.fight_spec = spec
+    self.countdown_started = now.value
+    self.countdown_value = nil
+    self.pending_victory = false
+    self.result_action_locked = false
+    self.runtime_stage = "COUNTDOWN"
+    return self:update_countdown()
+end
+
+function Orchestrator:update_countdown()
+    local now = self:clock_now()
+    if not now.ok then return now end
+    local elapsed = clock_elapsed(self.countdown_started, now.value)
+    if elapsed >= COUNTDOWN_DURATION_MS then
+        local cleared = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "clear_countdown")
+        if not cleared.ok then return cleared end
+        self.countdown_value = nil
+        self.runtime_stage = "SPAWNING"
+        return gamma_arena_result.ok({ stage = "SPAWNING" })
+    end
+    local value = 3 - math.floor(elapsed / 1000)
+    if value ~= self.countdown_value then
+        local shown = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "show_countdown", value)
+        if not shown.ok then return shown end
+        self.countdown_value = value
+    end
+    return gamma_arena_result.ok({ stage = "COUNTDOWN", value = value })
+end
+
+function Orchestrator:observe_entity_activation()
+    local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
+    if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity registry snapshot failed safely") end
+    if snapshot.state ~= "ACTIVE" then return gamma_arena_result.ok({ stage = "SPAWNING", entity = snapshot.state }) end
+    local released = call_method("GA_ACTOR_INPUT_ENABLE_FAILED", self.deps.actor, "release_input")
+    if not released.ok then return released end
+    local now = self:clock_now()
+    if not now.ok then return now end
+    local advanced = self:advance(gamma_arena_state_machine.events.COUNTDOWN_FINISHED)
+    if not advanced.ok then return advanced end
+    self.active_started = now.value
+    self.runtime_stage = "ACTIVE"
+    local logged = self:emit_log("GA_FIGHT_ACTIVE", "registry_npcs=" .. tostring(#(snapshot.npcs or {}))
+        .. " registry_items=" .. tostring(#(snapshot.items or {})), {
+            registry_npcs = #(snapshot.npcs or {}), registry_items = #(snapshot.items or {})
+        })
+    if not logged.ok then return logged end
+    return gamma_arena_result.ok({ stage = "ACTIVE" })
+end
+
+function Orchestrator:show_victory()
+    local acquired = call_method("GA_ACTOR_INPUT_DISABLE_FAILED", self.deps.actor, "acquire_input")
+    if not acquired.ok then return acquired end
+    local now = self:clock_now()
+    if not now.ok then return now end
+    local duration = clock_elapsed(self.active_started, now.value)
+    local advanced = self:advance(gamma_arena_state_machine.events.VICTORY)
+    if not advanced.ok then return advanced end
+    self.pending_victory = false
+    self.result_action_locked = false
+    self.runtime_stage = "RESULT"
+    local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration), { duration_ms = duration })
+    if not logged.ok then return logged end
+    return call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "show_victory", {
+        fight_id = self.fight_spec and self.fight_spec.fight_id and self.fight_spec.fight_id() or nil,
+        fight_index = self.session.fight_index,
+        duration_ms = duration,
+        on_next = function() return self:victory_next_action() end,
+        on_main_menu = function() return self:request_main_menu_exit() end
+    })
+end
+
+function Orchestrator:queue_victory()
+    if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.pending_victory then return gamma_arena_result.ok(false) end
+    self.pending_victory = true
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:victory_next_action()
+    if not self:is_active() or self.runtime_stage ~= "RESULT" or self.result_action_locked then return gamma_arena_result.ok(false) end
+    self.result_action_locked = true
+    local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
+    if not cleared.ok then self.result_action_locked = false; return cleared end
+    self.next_cleanup_started = false
+    self.runtime_stage = "NEXT_CLEANUP"
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:request_main_menu_exit()
+    if not self:is_active() or self.runtime_stage ~= "RESULT" or self.result_action_locked then return gamma_arena_result.ok(false) end
+    self.result_action_locked = true
+    local cleared_ui = self:clear_runtime_ui()
+    if not cleared_ui.ok then self.result_action_locked = false; return cleared_ui end
+    local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
+    if not cleared.ok then self.result_action_locked = false; return cleared end
+    self.cleanup_required = true
+    self.pending_disconnect = true
+    local teardown = self:teardown_once("main_menu", false)
+    self.active = false
+    self.runtime_stage = "CLEANING"
+    self.checkpoint_ready = false
+    self.pending_victory = false
+    self.fight_spec = nil
+    self.catalog_snapshot = nil
+    self.session = nil
+    self.pending_resume = nil
+    return teardown
+end
+
+function Orchestrator:drive_next_fight()
+    if self.runtime_stage == "NEXT_CLEANUP" then
+        if not self.next_cleanup_started then
+            local cleanup = call_method("GA_ENTITY_CLEANUP_FAILED", self.deps.entities, "cleanup")
+            if not cleanup.ok then return cleanup end
+            self.next_cleanup_started = true
+        end
+        local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
+        if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity cleanup registry snapshot failed safely") end
+        if snapshot.state == "ERROR" then return fail("GA_ENTITY_CLEANUP_FAILED", "Entity cleanup entered ERROR", { error = snapshot.error }) end
+        if snapshot.state ~= "CLEAN" then return gamma_arena_result.ok({ stage = "NEXT_CLEANUP", entity = snapshot.state }) end
+        if #(snapshot.npcs or {}) ~= 0 or #(snapshot.items or {}) ~= 0 then return fail("GA_ENTITY_CLEANUP_FAILED", "Clean entity registry retained prior fight ids") end
+        self.runtime_stage = "NEXT_RESET"
+        return gamma_arena_result.ok({ stage = "NEXT_RESET" })
+    end
+    local layout = self:layout_snapshot()
+    if not layout.ok then return layout end
+    local reset = call_method("GA_ACTOR_RESET_FAILED", self.deps.actor, "reset_after_victory", layout.value)
+    if not reset.ok then return reset end
+    if type(reset.value) == "table" and reset.value.pending == true then return gamma_arena_result.ok({ stage = "NEXT_RESET", pending = true }) end
+    local policy = self.deps.mode_policy
+    local method_ok, next_method = pcall(function() return policy and policy.next_fight_index end)
+    if not method_ok or type(next_method) ~= "function" then return fail("GA_MODE_POLICY_FAILED", "Arena mode next-fight policy is unavailable") end
+    local called, next_index = pcall(next_method, self.session.fight_index, "victory")
+    if not called or type(next_index) ~= "number" or next_index ~= math.floor(next_index) or next_index ~= self.session.fight_index + 1 then
+        return fail("GA_MODE_POLICY_FAILED", "Arena mode returned an invalid next fight index")
+    end
+    self.session.fight_index = next_index
+    local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_VICTORY)
+    if not advanced.ok then return advanced end
+    self.fight_spec = nil
+    self.catalog_snapshot = nil
+    self.next_cleanup_started = false
+    self.runtime_stage = "PREPARING"
+    return gamma_arena_result.ok({ stage = "PREPARING", fight_index = next_index })
+end
+
 function Orchestrator:drive_runtime()
+    if self:is_active() and self.pending_callback_error ~= nil then
+        local pending = self.pending_callback_error
+        self.pending_callback_error = nil
+        return self:enter_fatal(pending)
+    end
     if not self:is_active() then
         if self.cleanup_required then
             local cleanup = self:cleanup_ready_for_disconnect()
@@ -473,7 +731,17 @@ function Orchestrator:drive_runtime()
             end
             -- This callback proved entity/checkpoint/actor teardown complete.
             -- Activation of a newly loaded intent begins on the next update.
+            if self.pending_disconnect then
+                local disconnected = self:main_menu_action()
+                if disconnected.ok and self.main_menu_executed then self.pending_disconnect = false end
+                return disconnected
+            end
             return gamma_arena_result.ok({ stage = "CLEANING", pending = false })
+        end
+        if self.pending_disconnect then
+            local disconnected = self:main_menu_action()
+            if disconnected.ok and self.main_menu_executed then self.pending_disconnect = false end
+            return disconnected
         end
         local checkpoint = self.deps.checkpoint
         local state_ok, state = pcall(function() return checkpoint and checkpoint:state() end)
@@ -538,8 +806,14 @@ function Orchestrator:drive_runtime()
     if self.runtime_stage == "READY" then
         local updated = call_method("GA_CHECKPOINT_UPDATE_FAILED", self.deps.checkpoint, "update")
         if not updated.ok then return updated end
-        return gamma_arena_result.ok({ stage = "READY" })
+        self.runtime_stage = "PREPARING"
+        return gamma_arena_result.ok({ stage = "PREPARING" })
     end
+    if self.runtime_stage == "PREPARING" then return self:prepare_fight() end
+    if self.runtime_stage == "COUNTDOWN" then return self:update_countdown() end
+    if self.runtime_stage == "SPAWNING" then return self:observe_entity_activation() end
+    if self.runtime_stage == "ACTIVE" and self.pending_victory then return self:show_victory() end
+    if self.runtime_stage == "NEXT_CLEANUP" or self.runtime_stage == "NEXT_RESET" then return self:drive_next_fight() end
     return gamma_arena_result.ok({ stage = self.runtime_stage })
 end
 
@@ -575,8 +849,19 @@ end
 function Orchestrator:npc_on_death_callback(victim, killer)
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local entities = self.deps.entities
-    if entities == nil then return gamma_arena_result.ok(false) end
-    return call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim)
+    if entities == nil or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
+    local id_ok, victim_id = pcall(function()
+        local accessor = victim and victim.id
+        if type(accessor) ~= "function" then return nil end
+        return accessor(victim)
+    end)
+    if not id_ok or type(victim_id) ~= "number" or victim_id ~= math.floor(victim_id) or victim_id < 0 then return gamma_arena_result.ok(false) end
+    local accepted = call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim_id)
+    if not accepted.ok or accepted.value ~= true then return accepted end
+    local living = self:living_opponent_count()
+    if not living.ok then return living end
+    if living.value == 0 then return self:queue_victory() end
+    return gamma_arena_result.ok(true)
 end
 
 function Orchestrator:block_manual_input(...)
@@ -619,8 +904,10 @@ function Orchestrator:actor_on_net_destroy()
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local preserve = self.checkpoint_reload_expected == true
     self.checkpoint_reload_expected = false
+    local ui_cleanup = self:clear_runtime_ui()
     if not preserve then self.cleanup_required = true end
     local result = self:teardown_once(preserve and "checkpoint_reload" or "actor_destroyed", preserve)
+    if not ui_cleanup.ok then result = ui_cleanup end
     if not preserve then
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
         if not cleared.ok then result = cleared end
@@ -638,7 +925,9 @@ end
 function Orchestrator:on_before_level_changing()
     if not self:is_active() then return gamma_arena_result.ok(false) end
     self.cleanup_required = true
+    local ui_cleanup = self:clear_runtime_ui()
     local result = self:teardown_once("level_change", false)
+    if not ui_cleanup.ok then result = ui_cleanup end
     local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
     if not cleared.ok then result = cleared end
     self.active = false

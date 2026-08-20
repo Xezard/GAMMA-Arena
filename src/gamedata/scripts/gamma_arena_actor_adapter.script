@@ -50,6 +50,7 @@ function ActorAdapter:__init(deps)
     self.purge_tick = nil
     self.inventory_clean = false
     self.held_after_death = false
+    self.victory_reset_started = false
 end
 
 function ActorAdapter:begin_update()
@@ -259,7 +260,23 @@ function ActorAdapter:apply_loadout(loadout)
 end
 
 function ActorAdapter:reset_after_victory(layout)
-    return self:normalize_for_checkpoint(layout)
+    if self.victory_reset_started then
+        local empty = self:verify_inventory_empty()
+        if not empty.ok then return empty end
+        if empty.value ~= true then return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" }) end
+        self.victory_reset_started = false
+        return gamma_arena_result.ok(true)
+    end
+    local loadout = self.deps.loadout
+    if type(loadout) == "table" and type(loadout.cleanup) == "function" then
+        local cleaned = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
+        if not cleaned.ok then return cleaned end
+        if type(cleaned.value) == "table" and cleaned.value.pending == true then return cleaned end
+    end
+    local normalized = self:normalize_for_checkpoint(layout)
+    if not normalized.ok then return normalized end
+    self.victory_reset_started = true
+    return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" })
 end
 
 function ActorAdapter:hold_after_logical_death()
@@ -302,6 +319,7 @@ function ActorAdapter:cleanup()
     if not input.ok then errors[#errors + 1] = input.error end
     self.purge_tick = nil
     self.inventory_clean = false
+    self.victory_reset_started = false
     if #errors > 0 then return fail("GA_ACTOR_CLEANUP_FAILED", "Arena actor cleanup failed", { errors = errors }) end
     if loadout_pending then return gamma_arena_result.ok({ pending = true, stage = "actor_loadout" }) end
     return gamma_arena_result.ok(true)
