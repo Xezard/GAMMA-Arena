@@ -75,16 +75,19 @@ foreach ($FilePath in (Get-OrdinalSortedPaths $StageRoot)) {
 }
 
 $Manifest = [ordered]@{
-    version = $Version
-    schemaVersions = [ordered]@{
-        manifest = 1
-        arenaData = 1
-    }
+    addon_version = $Version
+    state_schema_version = 1
+    session_schema_version = 1
+    fight_spec_schema_version = 1
+    generator_version = 1
+    catalog_revision = 1
+    layout_revision = 1
+    compatibility_manifest_version = 1
     files = $ManifestFiles
 }
 $ManifestPath = Join-Path $StageRoot 'gamma-arena-manifest.json'
-$ManifestJson = $Manifest | ConvertTo-Json -Depth 5
-[IO.File]::WriteAllText($ManifestPath, ($ManifestJson + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+$ManifestJson = (($Manifest | ConvertTo-Json -Depth 5) -replace "`r`n?", "`n")
+[IO.File]::WriteAllText($ManifestPath, ($ManifestJson + "`n"), (New-Object Text.UTF8Encoding($false)))
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem

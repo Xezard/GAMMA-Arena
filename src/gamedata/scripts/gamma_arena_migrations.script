@@ -1,7 +1,42 @@
 local SETTINGS_SECTION = "gamma_arena"
 local CURRENT_SETTINGS_SCHEMA = 1
+local CURRENT_ADDON_VERSION = "0.1.0"
 local DEFAULT_DIFFICULTY_ID = "rookie"
 local DEFAULT_SEED_MODE = "random"
+
+local TRANSIENT_INTENT_KEYS = {
+    "launch_pending",
+    "launch_token",
+    "launch_mode_id",
+    "launch_difficulty_id",
+    "launch_seed_mode",
+    "launch_session_seed",
+    "resume_pending",
+    "resume_session_id",
+    "resume_session_nonce",
+    "resume_next_fight_index",
+    "resume_checkpoint_name",
+    "resume_schema_version"
+}
+
+local SNAPSHOT_KEYS = {
+    "settings_schema_version",
+    "addon_version",
+    "last_difficulty_id",
+    "last_seed_mode",
+    "launch_pending",
+    "launch_token",
+    "launch_mode_id",
+    "launch_difficulty_id",
+    "launch_seed_mode",
+    "launch_session_seed",
+    "resume_pending",
+    "resume_session_id",
+    "resume_session_nonce",
+    "resume_next_fight_index",
+    "resume_checkpoint_name",
+    "resume_schema_version"
+}
 
 local valid_difficulties = {
     rookie = true,
@@ -47,7 +82,7 @@ end
 
 local function read_snapshot(config)
     local snapshot = {}
-    for _, key in ipairs({ "settings_schema_version", "last_difficulty_id", "last_seed_mode" }) do
+    for _, key in ipairs(SNAPSHOT_KEYS) do
         local read = raw_read(config, key)
         if not read.ok then
             return read
@@ -89,14 +124,119 @@ local function validate_preferences(snapshot)
 end
 
 local function write_v1(config, difficulty_id, seed_mode)
-    return gamma_arena_config_tx.run(config, SETTINGS_SECTION, {
-        { action = "write", key = "last_difficulty_id", value = difficulty_id },
-        { action = "write", key = "last_seed_mode", value = seed_mode },
-        { action = "write", key = "settings_schema_version", value = CURRENT_SETTINGS_SCHEMA }
-    }, {
-        commit_write_keys = { "settings_schema_version" },
+    local operations = {}
+    for _, key in ipairs(TRANSIENT_INTENT_KEYS) do
+        operations[#operations + 1] = { action = "remove", key = key }
+    end
+    operations[#operations + 1] = { action = "write", key = "last_difficulty_id", value = difficulty_id }
+    operations[#operations + 1] = { action = "write", key = "last_seed_mode", value = seed_mode }
+    operations[#operations + 1] = { action = "write", key = "addon_version", value = CURRENT_ADDON_VERSION }
+    operations[#operations + 1] = { action = "write", key = "settings_schema_version", value = CURRENT_SETTINGS_SCHEMA }
+    return gamma_arena_config_tx.run(config, SETTINGS_SECTION, operations, {
+        commit_remove_keys = TRANSIENT_INTENT_KEYS,
+        fail_closed_keys = TRANSIENT_INTENT_KEYS,
+        commit_write_keys = { "addon_version", "settings_schema_version" },
         error_code = "GA_SETTINGS_WRITE_FAILED"
     })
+end
+
+local function clear_upgrade_intents(config)
+    local operations = {}
+    for _, key in ipairs(TRANSIENT_INTENT_KEYS) do
+        operations[#operations + 1] = { action = "remove", key = key }
+    end
+    operations[#operations + 1] = { action = "write", key = "addon_version", value = CURRENT_ADDON_VERSION }
+    return gamma_arena_config_tx.run(config, SETTINGS_SECTION, operations, {
+        commit_remove_keys = TRANSIENT_INTENT_KEYS,
+        fail_closed_keys = TRANSIENT_INTENT_KEYS,
+        commit_write_keys = { "addon_version" },
+        error_code = "GA_SETTINGS_UPGRADE_WRITE_FAILED"
+    })
+end
+
+local function migrate_v0_to_v1(config, snapshot)
+    local events = {}
+    local difficulty_id = snapshot.last_difficulty_id
+    if not valid_difficulties[difficulty_id] then
+        difficulty_id = DEFAULT_DIFFICULTY_ID
+        events[#events + 1] = {
+            code = "GA_SETTINGS_DIFFICULTY_DEFAULTED",
+            previous = snapshot.last_difficulty_id,
+            value = difficulty_id
+        }
+    end
+    local seed_mode = snapshot.last_seed_mode
+    if not valid_seed_modes[seed_mode] then
+        seed_mode = DEFAULT_SEED_MODE
+        events[#events + 1] = {
+            code = "GA_SETTINGS_SEED_MODE_DEFAULTED",
+            previous = snapshot.last_seed_mode,
+            value = seed_mode
+        }
+    end
+    events[#events + 1] = {
+        code = snapshot.settings_schema_version == nil and "GA_SETTINGS_INITIALIZED" or "GA_SETTINGS_MIGRATED",
+        from_schema = 0,
+        to_schema = 1
+    }
+
+    local written = write_v1(config, difficulty_id, seed_mode)
+    if not written.ok then
+        return written
+    end
+    return gamma_arena_result.ok({
+        settings_schema_version = 1,
+        addon_version = CURRENT_ADDON_VERSION,
+        last_difficulty_id = difficulty_id,
+        last_seed_mode = seed_mode,
+        events = events
+    })
+end
+
+local function reconcile_addon_version(config, snapshot)
+    local preferences = validate_preferences(snapshot)
+    if not preferences.ok then
+        return preferences
+    end
+    if snapshot.addon_version == nil or snapshot.addon_version == CURRENT_ADDON_VERSION then
+        preferences.value.events = {}
+        return preferences
+    end
+
+    local written = clear_upgrade_intents(config)
+    if not written.ok then
+        return written
+    end
+    preferences.value.events = {
+        {
+            code = "GA_ADDON_VERSION_CHANGED",
+            previous = snapshot.addon_version,
+            value = CURRENT_ADDON_VERSION,
+            active_fight_compatible = false
+        }
+    }
+    return preferences
+end
+
+-- Durable settings are migrated forward one schema at a time. Transient launch
+-- and resume intent is deliberately discarded on add-on version transitions.
+local function migrate_forward(config, snapshot, schema_version)
+    local migrated = nil
+    while schema_version < CURRENT_SETTINGS_SCHEMA do
+        if schema_version == 0 then
+            migrated = migrate_v0_to_v1(config, snapshot)
+        else
+            return fail("GA_SETTINGS_MIGRATION_PATH_MISSING", "Settings migration path is unavailable", {
+                schema_version = schema_version,
+                supported = CURRENT_SETTINGS_SCHEMA
+            })
+        end
+        if not migrated.ok then
+            return migrated
+        end
+        schema_version = migrated.value.settings_schema_version
+    end
+    return migrated
 end
 
 function read_settings(config)
@@ -129,43 +269,9 @@ function migrate(config)
     if not schema_result.ok then
         return schema_result
     end
-    if schema_result.value == CURRENT_SETTINGS_SCHEMA then
-        return read_settings(config)
+    local migrated = migrate_forward(config, snapshot, schema_result.value)
+    if migrated ~= nil then
+        return migrated
     end
-
-    local events = {}
-    local difficulty_id = snapshot.last_difficulty_id
-    if not valid_difficulties[difficulty_id] then
-        difficulty_id = DEFAULT_DIFFICULTY_ID
-        events[#events + 1] = {
-            code = "GA_SETTINGS_DIFFICULTY_DEFAULTED",
-            previous = snapshot.last_difficulty_id,
-            value = difficulty_id
-        }
-    end
-    local seed_mode = snapshot.last_seed_mode
-    if not valid_seed_modes[seed_mode] then
-        seed_mode = DEFAULT_SEED_MODE
-        events[#events + 1] = {
-            code = "GA_SETTINGS_SEED_MODE_DEFAULTED",
-            previous = snapshot.last_seed_mode,
-            value = seed_mode
-        }
-    end
-    events[#events + 1] = {
-        code = snapshot.settings_schema_version == nil and "GA_SETTINGS_INITIALIZED" or "GA_SETTINGS_MIGRATED",
-        from_schema = 0,
-        to_schema = CURRENT_SETTINGS_SCHEMA
-    }
-
-    local written = write_v1(config, difficulty_id, seed_mode)
-    if not written.ok then
-        return written
-    end
-    return gamma_arena_result.ok({
-        settings_schema_version = CURRENT_SETTINGS_SCHEMA,
-        last_difficulty_id = difficulty_id,
-        last_seed_mode = seed_mode,
-        events = events
-    })
+    return reconcile_addon_version(config, snapshot)
 end

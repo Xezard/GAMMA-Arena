@@ -799,6 +799,157 @@ if (Test-Path -LiteralPath $Task2RngPath) {
     Assert-True ($Task2RngContent -match 'value\s*==\s*-math\.huge') 'RNG seed normalization must reject negative infinity'
 }
 
+$IsRepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
+if ($IsRepositoryCheckout) {
+    $Task10RequiredFiles = @(
+        'tools\New-CompatibilityReport.ps1',
+        'docs\installation.md',
+        'schemas\compatibility-manifest-v1.md'
+    )
+    foreach ($RelativePath in $Task10RequiredFiles) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 10 contract is missing: $RelativePath"
+    }
+
+    $BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
+    if (Test-Path -LiteralPath $BuildPath) {
+        $BuildContent = Get-Content -LiteralPath $BuildPath -Raw
+        foreach ($Field in @(
+            'addon_version',
+            'state_schema_version',
+            'session_schema_version',
+            'fight_spec_schema_version',
+            'generator_version',
+            'catalog_revision',
+            'layout_revision',
+            'compatibility_manifest_version'
+        )) {
+            Assert-True ($BuildContent -match ("(?m)^\s*" + [regex]::Escape($Field) + "\s*=")) "Release manifest must record $Field"
+        }
+        Assert-True ($BuildContent -match 'Get-OrdinalSortedPaths') 'Release manifest files must be sorted ordinally'
+        Assert-True ($BuildContent -match 'Get-FileHash[^\r\n]+SHA256') 'Release manifest must checksum raw staged files with SHA-256'
+        Assert-True ($BuildContent -match 'UTF8Encoding\(\$false\)') 'Release manifest must use UTF-8 without BOM'
+        Assert-True ($BuildContent -notmatch 'Copy-GameDataTree\s+\(Join-Path\s+\$RepoRoot\s+''dev\\gamedata''\)\s+\$StageGameData\s*(?:\r?\n)+\s*if\s*\(\$Configuration\s+-eq\s+''Release''\)') 'Release package must not copy Dev test files'
+    }
+
+    if (Test-Path -LiteralPath $MigrationPath) {
+        foreach ($Marker in @(
+            'CURRENT_ADDON_VERSION',
+            'migrate_v0_to_v1',
+            'while schema_version < CURRENT_SETTINGS_SCHEMA',
+            'GA_ADDON_VERSION_CHANGED',
+            'active_fight_compatible = false',
+            'commit_remove_keys = TRANSIENT_INTENT_KEYS',
+            'launch_pending',
+            'resume_pending'
+        )) {
+            Assert-True ($MigrationContent -match [regex]::Escape($Marker)) "Task 10 migration policy must cover $Marker"
+        }
+    }
+
+    $InstallationPath = Join-Path $RepoRoot 'docs\installation.md'
+    if (Test-Path -LiteralPath $InstallationPath) {
+        $InstallationContent = Get-Content -LiteralPath $InstallationPath -Raw
+        foreach ($Marker in @(
+            'Gamma Arena <version>',
+            'one Gamma Arena version at a time',
+            'exit an active Arena session',
+            'keep the old mod folder for rollback',
+            'never merge',
+            'ordinary saves',
+            'durable UI preferences',
+            'not resumed across add-on versions'
+        )) {
+            Assert-True ($InstallationContent -match [regex]::Escape($Marker)) "Installation guide must state: $Marker"
+        }
+    }
+
+    $CompatibilityReportPath = Join-Path $RepoRoot 'tools\New-CompatibilityReport.ps1'
+    if (Test-Path -LiteralPath $CompatibilityReportPath) {
+        $Task10TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gamma-arena-compatibility-" + [Guid]::NewGuid().ToString('N'))
+        function Write-Task10FixtureFile([string]$Root, [string]$RelativePath, [string]$Content) {
+            $Path = Join-Path $Root $RelativePath
+            New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+            [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($false)))
+            return $Path
+        }
+        function Get-Task10TreeFingerprint([string[]]$Roots) {
+            $Rows = @()
+            foreach ($Root in $Roots) {
+                foreach ($File in @(Get-ChildItem -LiteralPath $Root -File -Recurse)) {
+                    $Rows += ($File.FullName + '|' + (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash)
+                }
+            }
+            [Array]::Sort($Rows, [StringComparer]::Ordinal)
+            return ($Rows -join "`n")
+        }
+
+        try {
+            $AnomalyRoot = Join-Path $Task10TempRoot 'Anomaly'
+            $Mo2Root = Join-Path $Task10TempRoot 'GAMMA'
+            $ReleaseRoot = Join-Path $Task10TempRoot 'release\gamedata'
+            $Profile = 'Fixture Profile'
+            $null = Write-Task10FixtureFile $AnomalyRoot 'bin\AnomalyDX11.exe' 'dx11'
+            $null = Write-Task10FixtureFile $AnomalyRoot 'bin\AnomalyDX9.exe' 'dx9'
+            $null = Write-Task10FixtureFile $AnomalyRoot 'bin\VerifiedDX11.exe' 'verified'
+            $null = Write-Task10FixtureFile $AnomalyRoot 'gamedata\scripts\ui_main_menu.script' 'base menu'
+
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\configs\ui\ui_mm_main.xml' 'framework menu xml'
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\axr_main.script' 'axr'
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\bind_stalker_ext.script' 'bind'
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\Framework\gamedata\scripts\xrs_rnd_npc_loadout.script' 'loadout'
+            $EffectiveMenuPath = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_main_menu.script' 'effective menu'
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\ui_mm_faction_select.script' 'faction select'
+            $null = Write-Task10FixtureFile $Mo2Root 'mods\High Priority\gamedata\scripts\modxml_gamma_arena.script' 'conflicting patch'
+            $ModListPath = Write-Task10FixtureFile $Mo2Root ("profiles\$Profile\modlist.txt") "-Disabled`r`n+Framework`r`n+High Priority`r`n"
+
+            $null = Write-Task10FixtureFile $ReleaseRoot 'configs\ui\modxml_gamma_arena.xml' 'unique dxml'
+            $null = Write-Task10FixtureFile $ReleaseRoot 'scripts\modxml_gamma_arena.script' 'release patch'
+
+            $BeforeFingerprint = Get-Task10TreeFingerprint @($AnomalyRoot, $Mo2Root)
+            $Arguments = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $CompatibilityReportPath,
+                '-AnomalyRoot', $AnomalyRoot, '-Mo2Root', $Mo2Root, '-Profile', $Profile,
+                '-ReleaseRoot', $ReleaseRoot
+            )
+            $FirstReport = (& powershell.exe @Arguments 2>&1 | Out-String).TrimEnd()
+            $FirstExit = $LASTEXITCODE
+            $SecondReport = (& powershell.exe @Arguments 2>&1 | Out-String).TrimEnd()
+            $SecondExit = $LASTEXITCODE
+            $AfterFingerprint = Get-Task10TreeFingerprint @($AnomalyRoot, $Mo2Root)
+
+            Assert-True ($FirstExit -eq 0 -and $SecondExit -eq 0) 'Compatibility report must succeed for an isolated complete fixture'
+            Assert-True ($FirstReport -ceq $SecondReport) 'Compatibility report must be deterministic for identical inputs'
+            Assert-True ($BeforeFingerprint -ceq $AfterFingerprint) 'Compatibility report must never write to Anomaly or MO2 roots'
+            Assert-True ($FirstReport -match [regex]::Escape(('Active MO2 profile: `' + $Profile + '`'))) 'Compatibility report must identify the active MO2 profile'
+            Assert-True ($FirstReport -match [regex]::Escape((Get-FileHash -LiteralPath $ModListPath -Algorithm SHA256).Hash)) 'Compatibility report must hash active modlist.txt'
+            Assert-True ($FirstReport -match [regex]::Escape((Get-FileHash -LiteralPath $EffectiveMenuPath -Algorithm SHA256).Hash)) 'Compatibility report must hash the effective high-priority callback provider'
+            foreach ($RequiredName in @('AnomalyDX9.exe','AnomalyDX11.exe','VerifiedDX11.exe','ui_main_menu.script','ui_mm_main.xml','ui_mm_faction_select.script','axr_main.script','bind_stalker_ext.script','xrs_rnd_npc_loadout.script')) {
+                Assert-True ($FirstReport -match [regex]::Escape($RequiredName)) "Compatibility report must list $RequiredName"
+            }
+            Assert-True ($FirstReport -match '0 blocking overlaps') 'Unique DLTX/DXML release files must produce 0 blocking overlaps'
+            Assert-True ($FirstReport -match '1 warning overlap') 'Exact same-path overlap must be a warning'
+            Assert-True ($FirstReport -match 'explicit review') 'Same-path overlap warnings must require explicit review'
+            Assert-True ($FirstReport -match 'Forbidden core overrides:\s*0') 'Fixture release must report no forbidden core override'
+
+            $PreviousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $MissingRootOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot (Join-Path $Task10TempRoot 'missing') -Mo2Root $Mo2Root -Profile $Profile -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $MissingRootExit = $LASTEXITCODE
+            Assert-True ($MissingRootExit -ne 0 -and $MissingRootOutput -match 'Anomaly root does not exist') 'Compatibility report must fail clearly for a missing Anomaly root'
+
+            $MissingProfileOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CompatibilityReportPath -AnomalyRoot $AnomalyRoot -Mo2Root $Mo2Root -Profile 'Missing Profile' -ReleaseRoot $ReleaseRoot 2>&1 | Out-String)
+            $MissingProfileExit = $LASTEXITCODE
+            $ErrorActionPreference = $PreviousErrorActionPreference
+            Assert-True ($MissingProfileExit -ne 0 -and $MissingProfileOutput -match 'MO2 profile does not exist') 'Compatibility report must fail clearly for a missing profile'
+        }
+        finally {
+            if (Test-Path -LiteralPath $Task10TempRoot) {
+                Remove-Item -LiteralPath $Task10TempRoot -Recurse -Force
+            }
+        }
+    }
+}
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"
