@@ -298,7 +298,7 @@ local function guarded(active)
     if not active then return end
 end
 local MAX_TEARDOWN_UPDATES = 256
-local task6 = "gamma_arena_actor_adapter.new gamma_arena_checkpoint_adapter.new gamma_arena_entity_adapter.new level.disable_input level.enable_input level.object_by_id safe_release_manager.release drain_checkpoint_cleanup step_entity_cleanup step_actor_cleanup last_update_at pending = true entity_teardown_max_updates actor_teardown_max_updates MAX_TEARDOWN_UPDATES teardown_clock teardown_timeout_ms teardown_max_updates GA_RUNTIME_TEARDOWN_TIMEOUT GA_RUNTIME_TEARDOWN_EXHAUSTED se_load_var force_set_goodwill apply_actor_hostility game_object.enemy game_object.friend new_actor_loadout_port new_runtime_entity_exists_port entity_exists GA_ACTOR_LOADOUT_EXISTENCE_INVALID hold_entity_offline request_entity_online set_switch_online set_switch_offline switch_online apply_actor_activation_hold set_enemy make_item_active active_item effective_ammo_box_size system.r_u32 ammo_box_size box_size"
+local task6 = "gamma_arena_actor_adapter.new gamma_arena_checkpoint_adapter.new gamma_arena_entity_adapter.new gamma_arena_ui_result.new() actor.set_invulnerable level.disable_input level.enable_input level.object_by_id safe_release_manager.release drain_checkpoint_cleanup step_entity_cleanup step_actor_cleanup last_update_at pending = true entity_teardown_max_updates actor_teardown_max_updates MAX_TEARDOWN_UPDATES teardown_clock teardown_timeout_ms teardown_max_updates GA_RUNTIME_TEARDOWN_TIMEOUT GA_RUNTIME_TEARDOWN_EXHAUSTED se_load_var force_set_goodwill apply_actor_hostility game_object.enemy game_object.friend new_actor_loadout_port new_runtime_entity_exists_port entity_exists GA_ACTOR_LOADOUT_EXISTENCE_INVALID hold_entity_offline request_entity_online set_switch_online set_switch_offline switch_online apply_actor_activation_hold set_enemy make_item_active active_item effective_ammo_box_size system.r_u32 ammo_box_size box_size"
 local function actor_cleanup_fixture(exists)
     if type(exists.value) ~= "boolean" then return "GA_ACTOR_LOADOUT_EXISTENCE_INVALID" end
     if exists.value == true then return "present" end
@@ -315,11 +315,11 @@ function on_game_start() return new_registrar():register_all() end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_compat.script' @'
 local markers = "RegisterScriptCallback UnregisterScriptCallback ini_file system_ini system_ini.r_u32 alife alife().get_children alife().object alife().set_switch_online alife().set_switch_offline alife_create alife_create_item alife_release_id getFS se_save_var se_load_var level.patrol_path_exists level.object_by_id patrol db.actor game_object.friend game_object.enemy axr_main.config safe_release_manager.release l05_bar AI_STL_S bandit point level_vertex_id game_vertex_id 4294967295 GA_PREFLIGHT_PATROL_MISSING GA_PREFLIGHT_PATROL_INVALID GA_PREFLIGHT_SECTION_MISSING GA_NPC_CLASS_API_MISSING GA_NPC_CLASS_MISSING GA_NPC_CLASS_READ_FAILED GA_NPC_CLASS_INVALID GA_NPC_COMMUNITY_API_MISSING GA_NPC_COMMUNITY_MISSING GA_NPC_COMMUNITY_READ_FAILED GA_NPC_COMMUNITY_INVALID GA_AMMO_BOX_SIZE_INVALID"
-local task6_markers = "getFS.update_path getFS.file_rename getFS.file_delete exec_console_cmd time_global level.disable_input level.enable_input db.actor.iterate_inventory db.actor.set_bleeding db.actor.set_actor_position"
+local task6_markers = "getFS.update_path getFS.file_rename getFS.file_delete exec_console_cmd time_global level.disable_input level.enable_input db.actor.iterate_inventory db.actor.set_bleeding db.actor.set_actor_position db.actor.set_invulnerable/invulnerable"
 function preflight() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_orchestrator.script' @'
-local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation on_callback_result_error GA_DISCONNECT_FAILED main_menu_executed normalize_for_checkpoint verify_inventory_empty checkpoint request_checkpoint_restore runtime_stage begin_resume_recovery GA_RUNTIME_CLEANUP_PENDING cleanup_ready_for_disconnect normalize_resume_preparation entities on_npc_death living_opponent_count GA_ENTITY_COUNT_UNAVAILABLE GA_ENTITY_COUNT_STATE_INVALID"
+local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation on_callback_result_error GA_DISCONNECT_FAILED main_menu_executed normalize_for_checkpoint verify_inventory_empty checkpoint request_checkpoint_restore runtime_stage begin_resume_recovery GA_RUNTIME_CLEANUP_PENDING cleanup_ready_for_disconnect normalize_resume_preparation entities on_npc_death living_opponent_count GA_ENTITY_COUNT_UNAVAILABLE GA_ENTITY_COUNT_STATE_INVALID death_latched pending_result ret_value hold_after_logical_death cleanup_loadout_for_restore MAX_DEFEAT_RECOVERY_UPDATES show_defeat defeat_next_action NEXT_AFTER_DEFEAT GA_CHECKPOINT_RESTORE_FAILED"
 local function teardown_retry(result, pending) if result.ok and not pending then self.teardown_done = true end end
 local function new_cycle() self.teardown_cycle = self.teardown_cycle + 1 end
 function new() self.cleanup_required = true; return markers end
@@ -327,7 +327,7 @@ function update_runtime() if not self:is_active() and self.cleanup_required then
 function drive_runtime() if self.cleanup_required then return self:cleanup_ready_for_disconnect() end end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_actor_adapter.script' @'
-local markers = "normalize_for_checkpoint verify_inventory_empty apply_loadout reset_after_victory hold_after_logical_death begin_update iterate_inventory release_item_id set_health_ex set_power set_radiation set_bleeding set_psy_health give_money disable_effects_timer set_actor_position set_actor_direction input_owned GA_ACTOR_INACTIVE"
+local markers = "normalize_for_checkpoint verify_inventory_empty apply_loadout reset_after_victory hold_after_logical_death cleanup_loadout_for_restore release_logical_death_hold begin_update iterate_inventory release_item_id set_health_ex set_power set_radiation set_bleeding set_psy_health give_money disable_effects_timer set_actor_position set_actor_direction input_owned GA_ACTOR_INACTIVE"
 local parent_method = "parent"
 local effects = { "set_bleeding", 1 }
 function new() return markers, effects end
@@ -368,6 +368,7 @@ local markers = "runtime_preflight_aggregates_in_stable_order runtime_preflight_
 local task6_preflight_marker = "runtime_preflight_requires_task6_actor_checkpoint_ports"
 local review_markers = "runtime_actor_rejects_nil_inventory_parent runtime_actor_rejects_throwing_inventory_accessors runtime_checkpoint_load_wait_is_bounded_and_wrap_safe runtime_checkpoint_transient_mutation_failures_retry_to_success runtime_checkpoint_zero_required_target_waits_for_timeout runtime_checkpoint_permanent_mutation_throws_time_out runtime_checkpoint_fresh_process_recovers_all_exact_layouts runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift runtime_fatal_recovery_waits_for_cleanup_before_disconnect runtime_pre_session_fatal_waits_for_cleanup_before_disconnect runtime_prepare_resume_legacy_mismatch_is_normalized runtime_checkpoint_late_dds_retries_throw_then_succeeds runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently runtime_bootstrap_teardown_resets_across_sessions runtime_completed_teardown_allows_next_loaded_launch_activation runtime_bootstrap_teardown_permanent_failures_are_bounded runtime_bootstrap_teardown_rejects_unbounded_update_limits runtime_bootstrap_teardown_override_budgets_route_exactly runtime_failed_teardown_retries_then_latches_success runtime_entity_ammo_box_size_failure_precedes_actor_mutation runtime_entity_death_dropped_is_persisted_and_round_tripped"
 local task7_markers = "runtime_preflight_requires_task7_entity_ports_and_ammo_metadata runtime_entity_actor_loadout_precedes_spawn runtime_entity_npcs_are_offline_until_atomic_activation runtime_entity_online_wait_is_bounded_and_wrap_safe runtime_entity_active_defers_input_release_to_task8 runtime_bootstrap_actor_loadout_port_is_bound_and_exact runtime_actor_loadout_rollback_blocks_disconnect_until_absent runtime_bootstrap_actor_existence_lookup_fails_closed runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect runtime_bootstrap_hostility_port_is_feature_probed runtime_entity_partial_failures_rollback_in_reverse runtime_entity_purges_only_snapshot_children_still_parented runtime_entity_supports_real_get_children_iterator runtime_entity_multi_return_ammo_is_exact runtime_entity_multi_return_late_failure_is_fully_registered runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation runtime_entity_registry_is_plain_ids_only runtime_entity_cleanup_requires_registry_and_tag runtime_entity_forged_tag_is_ignored runtime_entity_tag_loss_fails_safe runtime_entity_parent_release_blocks_unproven_children runtime_entity_parent_release_blocks_unreadable_child_parent runtime_entity_cleanup_is_idempotent runtime_entity_lifecycle_cleanup_takes_over_mid_rollback runtime_entity_existence_result_must_be_boolean runtime_entity_duplicate_death_is_idempotent runtime_entity_unregistered_death_is_ignored runtime_entity_object_death_signature_is_normalized runtime_entity_numeric_death_requires_test_injection runtime_entity_release_is_async_and_never_direct runtime_entity_release_timeout_is_wrap_safe runtime_entity_max_cardinality_cleanup_fits_default_budget runtime_entity_relations_friend_first_then_actor_hostile runtime_entity_equipment_delays_active_and_times_out runtime_entity_callbacks_fail_closed runtime_validator_rejects_effective_nonhuman_profile runtime_entity_runtime_profile_check_precedes_actor_mutation runtime_orchestrator_living_count_fails_closed runtime_entity_does_not_spawn_before_begin_apply"
+local task9_markers = "runtime_preflight_requires_task9_death_hold_port runtime_task9_ordinary_death_is_inert runtime_task9_active_death_latches_and_defers_defeat runtime_task9_death_outside_active_is_not_a_defeat runtime_task9_single_result_contract_maps_both_kinds runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active runtime_task9_defeat_and_victory_share_main_menu_cleanup runtime_task9_restore_failure_enters_error_with_safe_menu_only"
 function run() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
@@ -431,6 +432,13 @@ function UIStart:OnFatalMainMenu() return invoke_fatal_main_menu(self.callback) 
 function create() end
 function show_fatal() end
 '@
+    Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_ui_result.script' @'
+class "UIResult" (CUIScriptWnd)
+local markers = "show_countdown clear_countdown show_result clear_result ClearOwnedWidgets __finalize st_gamma_arena_result_defeat st_gamma_arena_result_victory DIK_ESCAPE OnMainMenu"
+function new() return markers end
+function UIResult:OnMainMenu() end
+function UIResult:OnKeyboard() self:OnMainMenu(); return true end
+'@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_migrations.script' @'
 local function stale_launch_is_recovered_by_new_store() end
 local function same_store_corrupt_launch_is_replaced() end
@@ -458,6 +466,7 @@ function run() end
     Write-FixtureFile $Root 'src\gamedata\configs\ui\gamma_arena_start.xml' @'
 <w><gamma_arena_start><auto_static x="0" y="0" width="1024" height="768" stretch="1"><texture>ui\ui_actor_main_menu_one</texture></auto_static><title/><difficulty/><seed/><random_seed/><validation/><start/><back/><fatal><fatal_text/><fatal_main_menu/></fatal></gamma_arena_start></w>
 '@
+    Write-FixtureFile $Root 'src\gamedata\configs\ui\gamma_arena_result.xml' '<w><gamma_arena_result><countdown/><result_panel><title/><next/><main_menu/></result_panel></gamma_arena_result></w>'
     $Locale = @'
 <?xml version="1.0" encoding="utf-8"?>
 <string_table>
@@ -475,6 +484,10 @@ function run() end
 <string id="st_gamma_arena_fatal_main_menu"><text>&#x0412; &#x0433;&#x043B;&#x0430;&#x0432;&#x043D;&#x043E;&#x0435; &#x043C;&#x0435;&#x043D;&#x044E;</text></string>
 <string id="st_gamma_arena_seed_invalid"><text>Invalid</text></string>
 <string id="st_gamma_arena_manual_save_disabled"><text>Disabled</text></string>
+<string id="st_gamma_arena_result_victory"><text>&#x041F;&#x043E;&#x0431;&#x0435;&#x0434;&#x0430;</text></string>
+<string id="st_gamma_arena_result_defeat"><text>&#x0412;&#x044B; &#x043F;&#x043E;&#x0433;&#x0438;&#x0431;&#x043B;&#x0438;</text></string>
+<string id="st_gamma_arena_result_main_menu"><text>&#x0412; &#x0433;&#x043B;&#x0430;&#x0432;&#x043D;&#x043E;&#x0435; &#x043C;&#x0435;&#x043D;&#x044E;</text></string>
+<string id="st_gamma_arena_result_next"><text>&#x0421;&#x043B;&#x0435;&#x0434;&#x0443;&#x044E;&#x0449;&#x0438;&#x0439; &#x0431;&#x043E;&#x0439;</text></string>
 </string_table>
 '@
     $RussianLocale = [Net.WebUtility]::HtmlDecode(($Locale -replace '^<\?xml[^>]+>\r?\n', ''))

@@ -1,0 +1,211 @@
+local active_window = nil
+
+local function translated(string_id)
+    if game and type(game.translate_string) == "function" then
+        local ok, value = pcall(game.translate_string, string_id)
+        if ok and type(value) == "string" then return value end
+    end
+    return string_id
+end
+
+local function invoke_action(callback, action)
+    if type(callback) ~= "function" then
+        return gamma_arena_result.err("GA_RESULT_ACTION_FAILED", "Arena result callback is unavailable", { action = action })
+    end
+    local called, result = pcall(callback)
+    if not called then
+        return gamma_arena_result.err("GA_RESULT_ACTION_FAILED", "Arena result callback failed safely", {
+            action = action,
+            reason = tostring(result)
+        })
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_RESULT_ACTION_FAILED", "Arena result callback returned an invalid Result", {
+            action = action,
+            result_type = type(result)
+        })
+    end
+    return result
+end
+
+class "UIResult" (CUIScriptWnd)
+
+function UIResult:__init() super()
+    self.kind = nil
+    self.on_next = nil
+    self.on_main_menu = nil
+    self.action_locked = false
+    self:InitControls()
+    self:InitCallbacks()
+end
+
+function UIResult:__finalize()
+    pcall(function() self:ClearOwnedWidgets() end)
+    if active_window == self then active_window = nil end
+end
+
+function UIResult:InitControls()
+    self:SetWndRect(Frect():set(0, 0, 1024, 768))
+    self:SetAutoDelete(true)
+    local xml = CScriptXmlInit()
+    xml:ParseFile("gamma_arena_result.xml")
+    self.root = xml:InitStatic("gamma_arena_result", self)
+    self.countdown = xml:InitTextWnd("gamma_arena_result:countdown", self.root)
+    self.result_panel = xml:InitStatic("gamma_arena_result:result_panel", self.root)
+    self.title = xml:InitTextWnd("gamma_arena_result:result_panel:title", self.result_panel)
+    self.next_button = xml:Init3tButton("gamma_arena_result:result_panel:next", self.result_panel)
+    self.main_menu_button = xml:Init3tButton("gamma_arena_result:result_panel:main_menu", self.result_panel)
+    self:Register(self.next_button, "next")
+    self:Register(self.main_menu_button, "main_menu")
+    self.countdown:Show(false)
+    self.result_panel:Show(false)
+end
+
+function UIResult:InitCallbacks()
+    self:AddCallback("next", ui_events.BUTTON_CLICKED, self.OnNext, self)
+    self:AddCallback("main_menu", ui_events.BUTTON_CLICKED, self.OnMainMenu, self)
+end
+
+function UIResult:ClearOwnedWidgets()
+    if self.countdown then self.countdown:Show(false) end
+    if self.result_panel then self.result_panel:Show(false) end
+    self.kind = nil
+    self.on_next = nil
+    self.on_main_menu = nil
+    self.action_locked = true
+end
+
+function UIResult:ShowCountdown(value)
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > 3 then
+        return gamma_arena_result.err("GA_COUNTDOWN_UI_INVALID", "Countdown value must be an integer from 1 to 3")
+    end
+    self.kind = "countdown"
+    self.action_locked = false
+    self.result_panel:Show(false)
+    self.countdown:SetText(tostring(value))
+    self.countdown:Show(true)
+    return gamma_arena_result.ok(true)
+end
+
+function UIResult:ShowResult(model)
+    if type(model) ~= "table" or (model.kind ~= "victory" and model.kind ~= "defeat")
+        or type(model.title_key) ~= "string" or type(model.on_next) ~= "function" or type(model.on_main_menu) ~= "function" then
+        return gamma_arena_result.err("GA_RESULT_UI_INVALID", "Result model must contain kind, title key, and two actions")
+    end
+    local expected_key = model.kind == "victory" and "st_gamma_arena_result_victory" or "st_gamma_arena_result_defeat"
+    if model.title_key ~= expected_key then
+        return gamma_arena_result.err("GA_RESULT_UI_INVALID", "Result title key does not match its kind", { kind = model.kind })
+    end
+    self.kind = model.kind
+    self.on_next = model.on_next
+    self.on_main_menu = model.on_main_menu
+    self.action_locked = false
+    self.countdown:Show(false)
+    self.title:SetText(translated(model.title_key))
+    self.result_panel:Show(true)
+    return gamma_arena_result.ok(true)
+end
+
+function UIResult:OnNext()
+    if self.action_locked or self.kind == nil or self.kind == "countdown" then return gamma_arena_result.ok(false) end
+    self.action_locked = true
+    local result = invoke_action(self.on_next, "next")
+    if not result.ok and active_window == self then self.action_locked = false end
+    return result
+end
+
+function UIResult:OnMainMenu()
+    if self.action_locked or self.kind == nil or self.kind == "countdown" then return gamma_arena_result.ok(false) end
+    self.action_locked = true
+    local result = invoke_action(self.on_main_menu, "main_menu")
+    if not result.ok and active_window == self then self.action_locked = false end
+    return result
+end
+
+function UIResult:OnKeyboard(dik, keyboard_action)
+    local result = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
+    if result == false and keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then
+        self:OnMainMenu()
+        return true
+    end
+    return result
+end
+
+local function ensure_window()
+    if active_window == nil then
+        active_window = UIResult()
+        active_window:ShowDialog(true)
+        active_window:Show(true)
+    end
+    return active_window
+end
+
+local function dismiss_if_idle(window)
+    if window ~= nil and active_window == window and window.kind == nil then
+        local called, reason = pcall(function()
+            window:HideDialog()
+            window:Show(false)
+        end)
+        if not called then
+            return gamma_arena_result.err("GA_RUNTIME_UI_CLEAR_FAILED", "Arena UI window could not be dismissed safely", {
+                reason = tostring(reason)
+            })
+        end
+        active_window = nil
+        return gamma_arena_result.ok(true)
+    end
+    return gamma_arena_result.ok(false)
+end
+
+function show_countdown(value)
+    local window = ensure_window()
+    local result = window:ShowCountdown(value)
+    if not result.ok then
+        window:ClearOwnedWidgets()
+        local dismissed = dismiss_if_idle(window)
+        if not dismissed.ok then return dismissed end
+    end
+    return result
+end
+
+function clear_countdown()
+    local window = active_window
+    if window == nil then return gamma_arena_result.ok(false) end
+    if window.kind ~= "countdown" then
+        if window.kind == nil then return dismiss_if_idle(window) end
+        return gamma_arena_result.ok(false)
+    end
+    window:ClearOwnedWidgets()
+    return dismiss_if_idle(window)
+end
+
+function show_result(model)
+    local window = ensure_window()
+    local result = window:ShowResult(model)
+    if not result.ok then
+        window:ClearOwnedWidgets()
+        local dismissed = dismiss_if_idle(window)
+        if not dismissed.ok then return dismissed end
+    end
+    return result
+end
+
+function clear_result()
+    local window = active_window
+    if window == nil then return gamma_arena_result.ok(false) end
+    if window.kind ~= "victory" and window.kind ~= "defeat" then
+        if window.kind == nil then return dismiss_if_idle(window) end
+        return gamma_arena_result.ok(false)
+    end
+    window:ClearOwnedWidgets()
+    return dismiss_if_idle(window)
+end
+
+function new()
+    return {
+        show_countdown = function(_, value) return show_countdown(value) end,
+        clear_countdown = function() return clear_countdown() end,
+        show_result = function(_, model) return show_result(model) end,
+        clear_result = function() return clear_result() end
+    }
+end

@@ -259,6 +259,14 @@ function ActorAdapter:apply_loadout(loadout)
     return dependency_result("GA_ACTOR_LOADOUT_UNAVAILABLE", port and port.apply, owned.value, loadout)
 end
 
+function ActorAdapter:cleanup_loadout_for_restore()
+    local loadout = self.deps.loadout
+    if type(loadout) ~= "table" or type(loadout.cleanup) ~= "function" then
+        return fail("GA_ACTOR_LOADOUT_CLEANUP_FAILED", "Arena actor loadout cleanup port is unavailable before checkpoint restore")
+    end
+    return dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
+end
+
 function ActorAdapter:reset_after_victory(layout)
     if self.victory_reset_started then
         local empty = self:verify_inventory_empty()
@@ -297,6 +305,15 @@ function ActorAdapter:hold_after_logical_death()
     return gamma_arena_result.ok(true)
 end
 
+function ActorAdapter:release_logical_death_hold()
+    if not self.held_after_death then return gamma_arena_result.ok(false) end
+    local invulnerability = self.deps.invulnerability
+    local released = dependency_result("GA_ACTOR_DEATH_HOLD_RELEASE_FAILED", invulnerability and invulnerability.set, false)
+    if not released.ok then return released end
+    self.held_after_death = false
+    return gamma_arena_result.ok(true)
+end
+
 function ActorAdapter:cleanup()
     local errors = {}
     local loadout_pending = false
@@ -310,10 +327,8 @@ function ActorAdapter:cleanup()
         end
     end
     if self.held_after_death then
-        local invulnerability = self.deps.invulnerability
-        local result = dependency_result("GA_ACTOR_DEATH_HOLD_RELEASE_FAILED", invulnerability and invulnerability.set, false)
+        local result = self:release_logical_death_hold()
         if not result.ok then errors[#errors + 1] = result.error end
-        self.held_after_death = false
     end
     local input = self:release_input()
     if not input.ok then errors[#errors + 1] = input.error end

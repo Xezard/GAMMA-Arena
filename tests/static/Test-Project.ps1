@@ -330,7 +330,7 @@ foreach ($Locale in @('rus','eng')) {
         [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
         Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
-        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled')) {
+        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next')) {
             Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
         }
     }
@@ -353,7 +353,10 @@ if (Test-Path -LiteralPath $RussianLocalePath) {
         ((ConvertFrom-Json '"\u0421\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0439"') + ' seed'),
         (ConvertFrom-Json '"\u041d\u0410\u0427\u0410\u0422\u042c"'),
         (ConvertFrom-Json '"\u041d\u0410\u0417\u0410\u0414"'),
-        (ConvertFrom-Json '"\u0412 \u0433\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e"')
+        (ConvertFrom-Json '"\u0412 \u0433\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e"'),
+        (ConvertFrom-Json '"\u0412\u044b \u043f\u043e\u0433\u0438\u0431\u043b\u0438"'),
+        (ConvertFrom-Json '"\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0431\u043e\u0439"'),
+        (ConvertFrom-Json '"\u041f\u043e\u0431\u0435\u0434\u0430"')
     )
     foreach ($Text in $RussianExpected) {
         Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact Windows-1251 text: $Text"
@@ -447,6 +450,50 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     }
 }
 
+$Task9UiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_result.script'
+$Task9UiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_result.xml'
+Assert-True (Test-Path -LiteralPath $Task9UiScriptPath) 'Task 9 result/countdown UI adapter is missing'
+Assert-True (Test-Path -LiteralPath $Task9UiXmlPath) 'Task 9 result/countdown UI XML is missing'
+if (Test-Path -LiteralPath $Task9UiScriptPath) {
+    $Task9UiContent = Get-Content -LiteralPath $Task9UiScriptPath -Raw
+    foreach ($Marker in @('class "UIResult" (CUIScriptWnd)','show_countdown','clear_countdown','show_result','clear_result','ClearOwnedWidgets','__finalize','st_gamma_arena_result_defeat','st_gamma_arena_result_victory','DIK_ESCAPE','OnMainMenu')) {
+        Assert-True ($Task9UiContent -match [regex]::Escape($Marker)) "Task 9 UI must cover $Marker"
+    }
+    Assert-True ($Task9UiContent -notmatch 'AddCustomStatic') 'Task 9 UI must never reference an undefined custom-static id'
+    Assert-True ($Task9UiContent -match 'OnKeyboard[\s\S]{0,500}self:OnMainMenu\(\)[\s\S]{0,120}return\s+true') 'Task 9 Escape handler must route cleanup and return an engine boolean'
+}
+if (Test-Path -LiteralPath $Task9UiXmlPath) {
+    try {
+        [xml]$Task9UiXml = Get-Content -LiteralPath $Task9UiXmlPath -Raw
+        foreach ($Id in @('gamma_arena_result','countdown','result_panel','title','next','main_menu')) {
+            Assert-True ($null -ne $Task9UiXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 UI XML is missing control $Id"
+        }
+        Assert-True ($null -eq $Task9UiXml.SelectSingleNode("/*[local-name()='w']/*[local-name()='gamma_arena_result']/*[local-name()='texture']")) 'Task 9 UI root must not stretch or tile a widget texture across the screen'
+    } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
+}
+if (Test-Path -LiteralPath $Task5OrchestratorPath) {
+    foreach ($Marker in @('death_latched','pending_result','ret_value','hold_after_logical_death','cleanup_loadout_for_restore','MAX_DEFEAT_RECOVERY_UPDATES','show_defeat','defeat_next_action','NEXT_AFTER_DEFEAT','GA_CHECKPOINT_RESTORE_FAILED')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 9 orchestrator must cover $Marker"
+    }
+}
+$Task9ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
+if (Test-Path -LiteralPath $Task9ActorPath) {
+    $Task9ActorContent = Get-Content -LiteralPath $Task9ActorPath -Raw
+    Assert-True ($Task9ActorContent -match [regex]::Escape('cleanup_loadout_for_restore')) 'Task 9 actor adapter must expose owned-loadout-only cleanup before restore'
+}
+if (Test-Path -LiteralPath $Task5DevTestPath) {
+    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec','runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 9 Dev tests must cover $Marker"
+    }
+}
+if (Test-Path -LiteralPath $Task5CompatPath) {
+    Assert-True ($Task5CompatContent -match [regex]::Escape('db.actor.set_invulnerable/invulnerable')) 'Task 9 preflight must require a proven logical-death hold API'
+}
+if (Test-Path -LiteralPath $Task5BootstrapPath) {
+    Assert-True ($Task5BootstrapContent -match 'actor\.set_invulnerable') 'Task 9 bootstrap must bind the proven actor logical-death hold API'
+    Assert-True ($Task5BootstrapContent -match 'gamma_arena_ui_result\.new\s*\(') 'Task 9 bootstrap must replace the Task 8 UI placeholder with the real adapter'
+}
+
 $Task6RuntimeFiles = @(
     'src\gamedata\scripts\gamma_arena_actor_adapter.script',
     'src\gamedata\scripts\gamma_arena_checkpoint_adapter.script'
@@ -458,7 +505,7 @@ foreach ($RelativePath in $Task6RuntimeFiles) {
 $Task6ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
 if (Test-Path -LiteralPath $Task6ActorPath) {
     $Task6ActorContent = Get-Content -LiteralPath $Task6ActorPath -Raw
-    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
+    foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','release_logical_death_hold','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
         Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor adapter must cover $Marker"
     }
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
