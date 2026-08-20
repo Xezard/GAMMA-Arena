@@ -364,9 +364,14 @@ local function on_read(xml_file_name, xml_obj)
     local existing = xml_obj:query("menu_main btn[name=btn_gamma_arena]")
     if existing and #existing > 0 then return end
     local menu = xml_obj:query("menu_main")
-    if menu and #menu > 0 then
-        xml_obj:insertFromXMLString([[<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu" />]], menu[1], #menu[1].kids)
-    end
+    local new_game = xml_obj:query("menu_main > btn[name=btn_newgame]")
+    local new_game_position = xml_obj:getElementPosition(new_game[1])
+    local GA_DXML_POSITION_API_UNAVAILABLE = true
+    local GA_DXML_MENU_MISSING = true
+    local GA_DXML_NEW_GAME_MISSING = true
+    local GA_DXML_NEW_GAME_PARENT_MISMATCH = true
+    local GA_DXML_NEW_GAME_POSITION_INVALID = true
+    xml_obj:insertFromXMLString([[<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu" />]], menu[1], new_game_position + 1)
 end
 function on_xml_read()
     local result = { error = { code = "GA_DXML", message = "fixture", context = {} } }
@@ -426,6 +431,8 @@ local function prepared_resume_consume_rejects_persisted_drift() end
 local function dxml_accepts_canonical_callback_path() end
 local function dxml_registers_first_main_menu_click() end
 local function dxml_registration_failures_are_structured() end
+local function dxml_places_arena_after_new_game() end
+local function dxml_placement_failures_are_structured() end
 local function arm_fault() end
 local function arm_read_fault() end
 local function arm_recovery_fault() end

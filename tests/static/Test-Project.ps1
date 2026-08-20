@@ -262,6 +262,13 @@ if (Test-Path -LiteralPath $DxmlPath) {
     Assert-True ($DxmlContent -match 'string\.gsub') 'DXML handler must normalize callback path separators minimally'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main btn\[name=btn_gamma_arena\]"\s*\)') 'DXML handler must query the exact duplicate guard selector'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main\s*>\s*btn\[name=btn_newgame\]"\s*\)') 'DXML handler must locate the direct New Game child'
+    Assert-True ($DxmlContent -match 'getElementPosition') 'DXML handler must derive the insertion point from New Game'
+    Assert-True ($DxmlContent -match 'new_game_position\s*\+\s*1') 'Arena must be inserted immediately after New Game'
+    Assert-True ($DxmlContent -notmatch 'menu\[1\]\s*,\s*#menu\[1\]\.kids') 'Arena insertion must not use an end-relative menu position'
+    foreach ($Code in @('GA_DXML_POSITION_API_UNAVAILABLE','GA_DXML_MENU_MISSING','GA_DXML_NEW_GAME_MISSING','GA_DXML_NEW_GAME_PARENT_MISMATCH','GA_DXML_NEW_GAME_POSITION_INVALID')) {
+        Assert-True ($DxmlContent -match [regex]::Escape($Code)) "DXML placement must fail closed with $Code"
+    }
     Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
     Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
     Assert-True ($DxmlContent -match 'pcall\s*\(\s*(gamma_arena_log\.error|logger)\s*,\s*result\.error\.code\s*,\s*result\.error\.message\s*,\s*result\.error\.context') 'DXML callback must internally log structured failures because callback returns are ignored'
@@ -270,7 +277,7 @@ if (Test-Path -LiteralPath $DxmlPath) {
 $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
 }

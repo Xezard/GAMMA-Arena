@@ -795,16 +795,48 @@ local function stale_cleanup_and_conflict_faults_are_safe()
     end
 end
 
-local function dxml_fixture()
-    local xml = { insertions = 0 }
+local function dxml_fixture(options)
+    options = options or {}
+    local menu = { kids = {} }
+    local names = options.without_new_game
+        and { "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
+        or { "btn_newgame", "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
+    for _, name in ipairs(names) do
+        menu.kids[#menu.kids + 1] = { name = name, parent = menu }
+    end
+
+    local xml = { insertions = 0, menu = menu }
     function xml:query(selector)
         if selector == "menu_main btn[name=btn_gamma_arena]" then
-            return self.insertions > 0 and { {} } or {}
+            for _, child in ipairs(self.menu.kids) do
+                if child.name == "btn_gamma_arena" then return { child } end
+            end
+            return {}
         end
-        if selector == "menu_main" then return { { kids = {} } } end
+        if selector == "menu_main" then return { self.menu } end
+        if selector == "menu_main > btn[name=btn_newgame]" then
+            for _, child in ipairs(self.menu.kids) do
+                if child.name == "btn_newgame" then
+                    if options.parent_mismatch then
+                        return { { name = child.name, parent = { kids = { child } } } }
+                    end
+                    return { child }
+                end
+            end
+            return {}
+        end
         return {}
     end
-    function xml:insertFromXMLString()
+    if not options.without_position_api then
+        function xml:getElementPosition(element)
+            if options.invalid_position then return 0 end
+            for index, child in ipairs(element.parent.kids) do
+                if child == element then return index end
+            end
+        end
+    end
+    function xml:insertFromXMLString(_, parent, position)
+        table.insert(parent.kids, position, { name = "btn_gamma_arena", parent = parent })
         self.insertions = self.insertions + 1
     end
     return xml
@@ -862,6 +894,43 @@ local function dxml_registration_failures_are_structured()
     end)
     gamma_arena_test_assert.is_false(throwing.ok, "throwing registrar is contained")
     gamma_arena_test_assert.equals(throwing.error.code, "GA_DXML_REGISTER_FAILED", "throwing registrar uses exact error code")
+end
+
+local function dxml_places_arena_after_new_game()
+    local ordered = dxml_fixture()
+    local inserted = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(inserted.ok and inserted.value == true, "Arena is inserted into the effective GAMMA menu")
+    gamma_arena_test_assert.equals(ordered.menu.kids[1].name, "btn_newgame", "New Game remains first")
+    gamma_arena_test_assert.equals(ordered.menu.kids[2].name, "btn_gamma_arena", "Arena is directly below New Game")
+    gamma_arena_test_assert.equals(ordered.menu.kids[3].name, "btn_load", "former second item follows Arena")
+
+    local duplicate = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "second DXML pass is a no-op")
+    gamma_arena_test_assert.equals(ordered.insertions, 1, "Arena is inserted exactly once")
+    gamma_arena_test_assert.equals(#ordered.menu.kids, 8, "duplicate pass does not grow the menu")
+end
+
+local function dxml_placement_failures_are_structured()
+    local missing_new_game = dxml_fixture({ without_new_game = true })
+    local missing = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", missing_new_game)
+    gamma_arena_test_assert.is_false(missing.ok, "missing New Game fails closed")
+    gamma_arena_test_assert.equals(missing.error.code, "GA_DXML_NEW_GAME_MISSING", "missing New Game uses exact error code")
+    gamma_arena_test_assert.equals(missing_new_game.insertions, 0, "missing New Game does not mutate the menu")
+
+    local missing_api = dxml_fixture({ without_position_api = true })
+    local unavailable = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", missing_api)
+    gamma_arena_test_assert.is_false(unavailable.ok, "missing position API fails closed")
+    gamma_arena_test_assert.equals(unavailable.error.code, "GA_DXML_POSITION_API_UNAVAILABLE", "missing position API uses exact error code")
+
+    local invalid_position = dxml_fixture({ invalid_position = true })
+    local invalid = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", invalid_position)
+    gamma_arena_test_assert.is_false(invalid.ok, "invalid New Game position fails closed")
+    gamma_arena_test_assert.equals(invalid.error.code, "GA_DXML_NEW_GAME_POSITION_INVALID", "invalid position uses exact error code")
+
+    local parent_mismatch = dxml_fixture({ parent_mismatch = true })
+    local mismatched = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", parent_mismatch)
+    gamma_arena_test_assert.is_false(mismatched.ok, "foreign New Game parent fails closed")
+    gamma_arena_test_assert.equals(mismatched.error.code, "GA_DXML_NEW_GAME_PARENT_MISMATCH", "foreign parent uses exact error code")
 end
 
 local function character_creation_bridge_is_exact()
@@ -962,6 +1031,8 @@ local cases = {
     { name = "dxml_callback_path", fn = dxml_accepts_canonical_callback_path },
     { name = "dxml_cold_start_registration", fn = dxml_registers_first_main_menu_click },
     { name = "dxml_registration_failures", fn = dxml_registration_failures_are_structured },
+    { name = "dxml_menu_order", fn = dxml_places_arena_after_new_game },
+    { name = "dxml_placement_failures", fn = dxml_placement_failures_are_structured },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
     { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift }
