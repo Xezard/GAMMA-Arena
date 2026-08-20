@@ -452,7 +452,14 @@ function EntityAdapter:verify_npc_has_no_current_children(record)
     for _, id in ipairs(children.value) do
         local entity = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, id)
         if not entity.ok then return entity end
-        if entity.value ~= nil and read_parent_id(entity.value) == record.id then
+        if entity.value == nil then
+            return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because an authoritative child snapshot cannot be re-read", { npc_id = record.id, child_id = id })
+        end
+        local parent_id = read_parent_id(entity.value)
+        if parent_id == nil then
+            return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because the current child parent cannot be proved", { npc_id = record.id, child_id = id })
+        end
+        if parent_id == record.id then
             return fail("GA_ENTITY_PARENT_RELEASE_BLOCKED", "Arena NPC release is blocked by an extant child that must not be deleted indirectly", { npc_id = record.id, child_id = id })
         end
     end
@@ -534,6 +541,28 @@ function EntityAdapter:purge_current_child()
     return self:begin_release(registered.value)
 end
 
+function EntityAdapter:register_and_tag_created_item(entity, descriptor, index)
+    local id = read_entity_id(entity)
+    if id == nil then
+        return fail("GA_ENTITY_ITEM_CREATE_FAILED", "alife_create_item returned an entity without a valid id", { section = descriptor.section, index = index })
+    end
+    local registered = self:register_record("item", id, {
+        slot = self.current.slot,
+        section = descriptor.section,
+        parent_id = self.current.npc_id,
+        quantity = 1,
+        role = descriptor.role,
+        source = "assigned"
+    })
+    if not registered.ok then return registered end
+    -- Authorize each valid newly returned id before inspecting the next
+    -- element. A later invalid/duplicate return can then roll this record back
+    -- without guessing ownership or losing the first occurrence.
+    local tagged = self:tag_record(registered.value)
+    if not tagged.ok then return tagged end
+    return gamma_arena_result.ok({ record = registered.value, entity = entity })
+end
+
 function EntityAdapter:create_descriptor(descriptor)
     local parent_result = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, self.current.npc_id)
     if not parent_result.ok or parent_result.value == nil then return parent_result.ok and fail("GA_ENTITY_NPC_MISSING", "Arena NPC disappeared before item creation") or parent_result end
@@ -543,15 +572,9 @@ function EntityAdapter:create_descriptor(descriptor)
     if entities == nil then return fail("GA_ENTITY_ITEM_CREATE_FAILED", "alife_create_item did not return server entity/entities", { section = descriptor.section }) end
     local records, total = {}, 0
     for index, entity in ipairs(entities) do
-        local id = read_entity_id(entity)
-        if id == nil then return fail("GA_ENTITY_ITEM_CREATE_FAILED", "alife_create_item returned an entity without a valid id", { section = descriptor.section, index = index }) end
-        local registered = self:register_record("item", id, { slot = self.current.slot, section = descriptor.section, parent_id = self.current.npc_id, quantity = 1, role = descriptor.role, source = "assigned" })
-        if not registered.ok then return registered end
-        records[index] = { record = registered.value, entity = entity }
-    end
-    for _, entry in ipairs(records) do
-        local tagged = self:tag_record(entry.record)
-        if not tagged.ok then return tagged end
+        local authorized = self:register_and_tag_created_item(entity, descriptor, index)
+        if not authorized.ok then return authorized end
+        records[index] = authorized.value
     end
     for index, entry in ipairs(records) do
         local entity = entry.entity

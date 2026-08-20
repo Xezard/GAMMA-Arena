@@ -2197,7 +2197,10 @@ local function fake_entity_environment(options)
         if entity and options.cascade_parent_release and self.children[id] then
             local child_ids = {}
             for _, child_id in ipairs(self.children[id]) do child_ids[#child_ids + 1] = child_id end
-            for _, child_id in ipairs(child_ids) do self:remove_entity(child_id) end
+            for _, child_id in ipairs(child_ids) do
+                local child = self.objects[child_id]
+                if child and child.parent_id == id then self:remove_entity(child_id) end
+            end
         end
         if entity and entity.parent_id and self.children[entity.parent_id] then
             local kept = {}
@@ -2305,6 +2308,13 @@ local function fake_entity_environment(options)
             env.events[#env.events + 1] = "item:" .. section .. ":" .. tostring(count)
             env.create_item_calls[#env.create_item_calls + 1] = { section = section, count = count, is_ammo = is_ammo == true, parent_id = parent:id() }
             if options.fail_phase == "item" and #env.create_item_calls == (options.fail_item_at or 2) then return nil end
+            if is_ammo and options.multi_return_late_invalid_id then
+                return { env:add_entity(section, parent:id(), count), { id = function() return nil end } }
+            end
+            if is_ammo and options.multi_return_duplicate_id then
+                local entity = env:add_entity(section, parent:id(), count)
+                return { entity, entity }
+            end
             if options.multi_return_ammo and string.find(section, "^ammo_") then
                 local first = math.floor(count / 2)
                 local second = count - first
@@ -2668,6 +2678,59 @@ local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
     gamma_arena_test_assert.equals(disconnects, 1, "disconnect occurs exactly once after actor rollback")
 end
 
+local function runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect()
+    for _, case in ipairs({
+        { label = "Result.ok(nil)", result = function() return gamma_arena_result.ok(nil) end },
+        { label = "Result.ok(non-boolean)", result = function() return gamma_arena_result.ok("present") end }
+    }) do
+        local next_id, releases = 800, {}
+        local function entity(section, parent_id, quantity)
+            local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
+            next_id = next_id + 1
+            function value:id() return self.runtime_id end
+            return value
+        end
+        local port = gamma_arena_bootstrap.new_actor_loadout_port({
+            actor_id = function(target) return target:id() end,
+            ammo_box_size = function() return 20 end,
+            create_item = function(section, target, count) return entity(section, target:id(), count) end,
+            entity_id = function(item) return item:id() end,
+            entity_parent_id = function(item) return item.parent_id end,
+            entity_section = function(item) return item.section_name end,
+            item_quantity = function(item) return item.quantity end,
+            release_item = function(id) releases[#releases + 1] = id; return true end,
+            entity_exists = case.result
+        })
+        local actor_object = { id = function() return 77 end }
+        gamma_arena_test_assert.is_true(port.apply(actor_object, entity_spec(1).actor().loadout).ok, case.label .. " fixture owns a complete actor loadout")
+        local actor = { cleanup = function() return port.cleanup() end }
+        local entities = { cleanup = function() return gamma_arena_result.ok(true) end, update = function() return gamma_arena_result.ok(true) end, registry_snapshot = function() return { state = "CLEAN", npcs = {}, items = {} } end }
+        local checkpoint = { cleanup = function() return gamma_arena_result.ok(true) end, update = function() return gamma_arena_result.ok(true) end, state = function() return "NONE" end }
+        local store = { clear_resume_if_matches = function() return gamma_arena_result.ok(true) end }
+        local disconnects = 0
+        local orchestrator = gamma_arena_bootstrap.compose({
+            store = store,
+            config = {},
+            actor = actor,
+            entities = entities,
+            checkpoint = checkpoint,
+            disconnect = function() disconnects = disconnects + 1; return true end,
+            teardown_clock = function() return 100 end,
+            teardown_timeout_ms = 1000,
+            teardown_max_updates = 16
+        })
+        orchestrator.active = true
+        orchestrator.session = valid_session()
+        local teardown = orchestrator:on_before_level_changing()
+        gamma_arena_test_assert.is_false(teardown.ok, case.label .. " cannot prove actor item absence during teardown")
+        gamma_arena_test_assert.equals(teardown.error.code, "GA_ACTOR_LOADOUT_EXISTENCE_INVALID", case.label .. " has a deterministic error")
+        gamma_arena_test_assert.is_false(orchestrator.teardown_done, case.label .. " keeps lifecycle teardown retryable")
+        gamma_arena_test_assert.is_false(orchestrator:main_menu_action().ok, case.label .. " keeps disconnect gated without exact absence")
+        gamma_arena_test_assert.equals(disconnects, 0, case.label .. " never permits disconnect")
+        gamma_arena_test_assert.equals(#releases, 4, case.label .. " submits owned actor items once before absence polling fails closed")
+    end
+end
+
 local function runtime_bootstrap_actor_existence_lookup_fails_closed()
     local unavailable = gamma_arena_bootstrap.new_runtime_entity_exists_port(function() return nil end)(700)
     gamma_arena_test_assert.is_false(unavailable.ok, "missing ALife service cannot prove actor item absence")
@@ -2865,6 +2928,29 @@ local function runtime_entity_multi_return_late_failure_is_fully_registered()
     for index, id in ipairs(expected) do gamma_arena_test_assert.equals(env.release_requests[index], id, "late multi-return rollback stays reverse-ordered") end
 end
 
+local function runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation()
+    for _, case in ipairs({
+        { label = "late invalid id", option = "multi_return_late_invalid_id" },
+        { label = "duplicate id", option = "multi_return_duplicate_id" }
+    }) do
+        local options = {}; options[case.option] = true
+        local env, deps = fake_entity_environment(options)
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        begin_entity_apply(adapter, env, entity_spec(1), "session-multi-id-" .. case.option)
+        local result, snapshot = pump_entity(adapter, env)
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " fails the entity transaction")
+        gamma_arena_test_assert.equals(snapshot.state, "ERROR", case.label .. " completes rollback before surfacing ERROR")
+        gamma_arena_test_assert.equals(env.tag_writes, 3, case.label .. " authorizes the first newly returned ammo id before inspecting the later value")
+        gamma_arena_test_assert.equals(env.tags[102], "session-multi-id-" .. case.option, case.label .. " tags only the first newly created occurrence")
+        local expected = { 102, 101, 100 }
+        gamma_arena_test_assert.equals(#env.release_requests, #expected, case.label .. " releases every valid newly created id exactly once")
+        for index, id in ipairs(expected) do
+            gamma_arena_test_assert.equals(env.release_requests[index], id, case.label .. " rollback remains exact reverse creation order")
+            gamma_arena_test_assert.equals(env.objects[id], nil, case.label .. " leaves no valid created entity behind")
+        end
+    end
+end
+
 local function runtime_entity_registry_is_plain_ids_only()
     local env, deps = fake_entity_environment({ multi_return_ammo = true })
     local adapter = gamma_arena_entity_adapter.new(deps)
@@ -2916,6 +3002,41 @@ local function runtime_entity_parent_release_blocks_unproven_children()
     gamma_arena_test_assert.equals(snapshot.error.code, "GA_ENTITY_CLEANUP_FAILED", "blocked parent release is aggregated safely")
     gamma_arena_test_assert.is_true(env.objects[npc_id] ~= nil and env.objects[foreign:id()] ~= nil, "NPC and unproven child both remain protected")
     for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= npc_id, "blocked NPC is never submitted to safe release") end
+end
+
+local function runtime_entity_parent_release_blocks_unreadable_child_parent()
+    local cases = {
+        { label = "missing", mutate = function(env, child) env.objects[child:id()] = nil end, child_remains = false },
+        { label = "nil", mutate = function(_, child) child.parent_id = nil end },
+        { label = "non-number", mutate = function(_, child) child.parent_id = "unknown" end },
+        { label = "throwing", mutate = function(_, child) child.parent_id = function() error("injected parent read failure") end end }
+    }
+    for _, case in ipairs(cases) do
+        local env, deps = fake_entity_environment({ cascade_parent_release = true })
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        begin_entity_apply(adapter, env, entity_spec(1), "session-parent-unreadable-" .. case.label); pump_entity(adapter, env)
+        local npc_id = adapter:registry_snapshot().npcs[1].id
+        local child = env:add_entity("foreign_loot", npc_id, 1, 9001)
+        case.mutate(env, child)
+        adapter:cleanup(); local result, snapshot = pump_entity(adapter, env)
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " child parent proof blocks cleanup")
+        gamma_arena_test_assert.equals(snapshot.state, "ERROR", case.label .. " child parent proof fails closed")
+        gamma_arena_test_assert.is_true(env.objects[npc_id] ~= nil, case.label .. " parent remains protected from cascading release")
+        if case.child_remains ~= false then gamma_arena_test_assert.is_true(env.objects[9001] ~= nil, case.label .. " unreadable child remains protected") end
+        for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= npc_id, case.label .. " unreadable child parent never permits NPC release") end
+    end
+
+    local env, deps = fake_entity_environment({ cascade_parent_release = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-parent-explicit-foreign"); pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
+    local child = env:add_entity("foreign_loot", npc_id, 1, 9001)
+    child.parent_id = 7777
+    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "CLEAN", "valid explicit foreign parent proves the authoritative child moved away")
+    gamma_arena_test_assert.equals(env.objects[npc_id], nil, "explicit foreign parent permits owned NPC release")
+    gamma_arena_test_assert.is_true(env.objects[9001] ~= nil, "explicit foreign-parent child is not released or deleted indirectly")
+    for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= 9001, "explicit foreign-parent child is never submitted to safe release") end
 end
 
 local function runtime_entity_cleanup_is_idempotent()
@@ -3226,6 +3347,7 @@ local cases = {
     ,{ name = "runtime_entity_active_defers_input_release_to_task8", fn = runtime_entity_active_defers_input_release_to_task8 }
     ,{ name = "runtime_bootstrap_actor_loadout_port_is_bound_and_exact", fn = runtime_bootstrap_actor_loadout_port_is_bound_and_exact }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
+    ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
     ,{ name = "runtime_bootstrap_actor_existence_lookup_fails_closed", fn = runtime_bootstrap_actor_existence_lookup_fails_closed }
     ,{ name = "runtime_bootstrap_hostility_port_is_feature_probed", fn = runtime_bootstrap_hostility_port_is_feature_probed }
     ,{ name = "runtime_entity_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_ammo_box_size_failure_precedes_actor_mutation }
@@ -3235,11 +3357,13 @@ local cases = {
     ,{ name = "runtime_entity_multi_return_ammo_is_exact", fn = runtime_entity_multi_return_ammo_is_exact }
     ,{ name = "runtime_entity_death_dropped_is_persisted_and_round_tripped", fn = runtime_entity_death_dropped_is_persisted_and_round_tripped }
     ,{ name = "runtime_entity_multi_return_late_failure_is_fully_registered", fn = runtime_entity_multi_return_late_failure_is_fully_registered }
+    ,{ name = "runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation", fn = runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation }
     ,{ name = "runtime_entity_registry_is_plain_ids_only", fn = runtime_entity_registry_is_plain_ids_only }
     ,{ name = "runtime_entity_cleanup_requires_registry_and_tag", fn = runtime_entity_cleanup_requires_registry_and_tag }
     ,{ name = "runtime_entity_forged_tag_is_ignored", fn = runtime_entity_forged_tag_is_ignored }
     ,{ name = "runtime_entity_tag_loss_fails_safe", fn = runtime_entity_tag_loss_fails_safe }
     ,{ name = "runtime_entity_parent_release_blocks_unproven_children", fn = runtime_entity_parent_release_blocks_unproven_children }
+    ,{ name = "runtime_entity_parent_release_blocks_unreadable_child_parent", fn = runtime_entity_parent_release_blocks_unreadable_child_parent }
     ,{ name = "runtime_entity_cleanup_is_idempotent", fn = runtime_entity_cleanup_is_idempotent }
     ,{ name = "runtime_entity_lifecycle_cleanup_takes_over_mid_rollback", fn = runtime_entity_lifecycle_cleanup_takes_over_mid_rollback }
     ,{ name = "runtime_entity_existence_result_must_be_boolean", fn = runtime_entity_existence_result_must_be_boolean }
