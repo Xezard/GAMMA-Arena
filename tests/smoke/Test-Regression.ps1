@@ -360,7 +360,7 @@ function run() return markers end
     Write-FixtureFile $Root 'src\gamedata\scripts\modxml_gamma_arena.script' @'
 local function on_read(xml_file_name, xml_obj)
     local normalized = string.lower(string.gsub(xml_file_name, "/", "\\"))
-    if normalized ~= "ui\\ui_mm_main.xml" then return end
+    if normalized ~= "ui\\ui_mm_main.xml" and normalized ~= "ui\\ui_mm_main_16.xml" then return end
     local existing = xml_obj:query("menu_main btn[name=btn_gamma_arena]")
     if existing and #existing > 0 then return end
     local menu = xml_obj:query("menu_main")

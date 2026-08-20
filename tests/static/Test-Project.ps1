@@ -253,6 +253,7 @@ if (Test-Path -LiteralPath $DxmlPath) {
     $DxmlContent = Get-Content -LiteralPath $DxmlPath -Raw
     Assert-True ($DxmlContent -match 'RegisterScriptCallback\s*\(\s*"on_xml_read"') 'DXML module must register on_xml_read from its zero-argument registrar'
     Assert-True ($DxmlContent -match 'ui\\\\ui_mm_main\.xml') 'DXML handler must accept the canonical full callback path ui\ui_mm_main.xml'
+    Assert-True ($DxmlContent -match 'ui\\\\ui_mm_main_16\.xml') 'DXML handler must accept the effective GAMMA 16:9 callback path ui\ui_mm_main_16.xml'
     Assert-True ($DxmlContent -match 'string\.lower') 'DXML handler must normalize callback path case minimally'
     Assert-True ($DxmlContent -match 'string\.gsub') 'DXML handler must normalize callback path separators minimally'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main btn\[name=btn_gamma_arena\]"\s*\)') 'DXML handler must query the exact duplicate guard selector'
