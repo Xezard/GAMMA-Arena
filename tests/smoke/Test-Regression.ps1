@@ -369,8 +369,15 @@ local function on_read(xml_file_name, xml_obj)
     end
 end
 function on_xml_read()
-    pcall(gamma_arena_log.error, "GA_DXML", "fixture", {})
-    RegisterScriptCallback("on_xml_read", on_read)
+    local result = { error = { code = "GA_DXML", message = "fixture", context = {} } }
+    pcall(gamma_arena_log.error, result.error.code, result.error.message, result.error.context)
+    return register(RegisterScriptCallback)
+end
+function register(registrar)
+    local GA_DXML_REGISTRAR_UNAVAILABLE = true
+    local GA_DXML_REGISTER_FAILED = true
+    registrar("on_xml_read", on_read)
+    registrar("main_menu_on_init", gamma_arena_main_menu.on_main_menu_init)
 end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_main_menu.script' @'
@@ -379,8 +386,8 @@ local function bind(menu)
         menu:AddCallback("btn_gamma_arena", ui_events.BUTTON_CLICKED, function() end, menu)
     end
 end
-function on_game_start()
-    RegisterScriptCallback("main_menu_on_init", bind)
+function on_main_menu_init(menu)
+    bind(menu)
 end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_ui_start.script' @'
@@ -417,6 +424,8 @@ local function stale_cleanup_and_conflict_faults_are_safe() end
 local function matching_resume_cleanup_is_session_scoped() end
 local function prepared_resume_consume_rejects_persisted_drift() end
 local function dxml_accepts_canonical_callback_path() end
+local function dxml_registers_first_main_menu_click() end
+local function dxml_registration_failures_are_structured() end
 local function arm_fault() end
 local function arm_read_fault() end
 local function arm_recovery_fault() end

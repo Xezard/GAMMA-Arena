@@ -129,7 +129,7 @@ $Task4ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_session_store.script'; Namespace = 'gamma_arena_session_store'; Required = @('(?m)^function\s+new_store\s*\(', '(?m)^function\s+parse_manual_seed\s*\(', '(?m)^function\s+validate_start_request\s*\(', '(?m)^function\s+random_session_seed\s*\(', '(?m)^function\s+save_preferences\s*\(', '(?m)^function\s+issue_launch\s*\(', '(?m)^function\s+parse_launch_token\s*\(', '(?m)^function\s+consume_launch\s*\(', '(?m)^function\s+issue_resume\s*\(', '(?m)^function\s+consume_resume\s*\(', '(?m)^function\s+write_character_creation\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\modxml_gamma_arena.script'; Namespace = 'modxml_gamma_arena'; Required = @('(?m)^function\s+on_xml_read\s*\(') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_main_menu.script'; Namespace = 'gamma_arena_main_menu'; Required = @('(?m)^function\s+on_game_start\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_main_menu.script'; Namespace = 'gamma_arena_main_menu'; Required = @('(?m)^function\s+on_main_menu_init\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_start.script'; Namespace = 'gamma_arena_ui_start'; Required = @('class\s+"UIStart"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+show_fatal\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_migrations.script'; Namespace = 'gamma_arena_test_migrations'; Required = @('(?m)^function\s+run\s*\(') }
 )
@@ -251,7 +251,11 @@ if (Test-Path -LiteralPath $StorePath) {
 $DxmlPath = Join-Path $RepoRoot 'src\gamedata\scripts\modxml_gamma_arena.script'
 if (Test-Path -LiteralPath $DxmlPath) {
     $DxmlContent = Get-Content -LiteralPath $DxmlPath -Raw
-    Assert-True ($DxmlContent -match 'RegisterScriptCallback\s*\(\s*"on_xml_read"') 'DXML module must register on_xml_read from its zero-argument registrar'
+    Assert-True ($DxmlContent -match 'register\s*\(\s*RegisterScriptCallback\s*\)') 'DXML zero-argument entry point must use the engine registrar'
+    Assert-True ($DxmlContent -match 'registrar\s*\(\s*"on_xml_read"') 'DXML bootstrap must register XML handling through its injected registrar'
+    Assert-True ($DxmlContent -match 'registrar\s*\(\s*"main_menu_on_init"') 'DXML bootstrap must register the first main-menu callback early'
+    Assert-True ($DxmlContent -match 'GA_DXML_REGISTRAR_UNAVAILABLE') 'DXML bootstrap must fail closed when the callback registrar is unavailable'
+    Assert-True ($DxmlContent -match 'GA_DXML_REGISTER_FAILED') 'DXML bootstrap must contain callback registration exceptions'
     Assert-True ($DxmlContent -match 'ui\\\\ui_mm_main\.xml') 'DXML handler must accept the canonical full callback path ui\ui_mm_main.xml'
     Assert-True ($DxmlContent -match 'ui\\\\ui_mm_main_16\.xml') 'DXML handler must accept the effective GAMMA 16:9 callback path ui\ui_mm_main_16.xml'
     Assert-True ($DxmlContent -match 'string\.lower') 'DXML handler must normalize callback path case minimally'
@@ -260,13 +264,13 @@ if (Test-Path -LiteralPath $DxmlPath) {
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
     Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
     Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
-    Assert-True ($DxmlContent -match 'pcall\s*\(\s*gamma_arena_log\.error') 'DXML callback must internally log structured failures because callback returns are ignored'
+    Assert-True ($DxmlContent -match 'pcall\s*\(\s*(gamma_arena_log\.error|logger)\s*,\s*result\.error\.code\s*,\s*result\.error\.message\s*,\s*result\.error\.context') 'DXML callback must internally log structured failures because callback returns are ignored'
 }
 
 $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
 }
@@ -274,7 +278,9 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
 $MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
 if (Test-Path -LiteralPath $MainMenuPath) {
     $MainMenuContent = Get-Content -LiteralPath $MainMenuPath -Raw
-    Assert-True ($MainMenuContent -match 'RegisterScriptCallback\s*\(\s*"main_menu_on_init"') 'Main-menu adapter must bind through main_menu_on_init'
+    Assert-True ($MainMenuContent -match '(?m)^function\s+on_main_menu_init\s*\(') 'Main-menu adapter must export its main_menu_on_init bridge'
+    Assert-True ($MainMenuContent -notmatch '(?m)^function\s+on_game_start\s*\(') 'Main-menu adapter must not register after the first cold-start init'
+    Assert-True ($MainMenuContent -notmatch 'RegisterScriptCallback') 'Main-menu adapter registration must be owned by the early DXML bootstrap'
     Assert-True ($MainMenuContent -match 'type\s*\(\s*menu\.AddCallback\s*\)\s*==\s*"function"') 'Main-menu adapter must feature-probe AddCallback'
     Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind only btn_gamma_arena'
     Assert-True ($MainMenuContent -notmatch 'ui_main_menu') 'Main-menu adapter must not monkey-patch ui_main_menu'

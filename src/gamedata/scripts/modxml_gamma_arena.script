@@ -27,22 +27,48 @@ local function apply_impl(xml_file_name, xml_obj)
     return gamma_arena_result.ok(false)
 end
 
+local function log_failure(result)
+    if not result or result.ok then
+        return
+    end
+    local logger_ok, logger = pcall(function()
+        return gamma_arena_log and gamma_arena_log.error
+    end)
+    if logger_ok and type(logger) == "function" then
+        pcall(logger, result.error.code, result.error.message, result.error.context)
+    end
+end
+
 function apply(xml_file_name, xml_obj)
     local ok, result = pcall(apply_impl, xml_file_name, xml_obj)
     if not ok then
         result = gamma_arena_result.err("GA_DXML_INSERT_FAILED", "Arena main-menu button could not be inserted", { detail = tostring(result) })
     end
-    if result and not result.ok then
-        local logger_ok, logger = pcall(function()
-            return gamma_arena_log and gamma_arena_log.error
-        end)
-        if logger_ok and type(logger) == "function" then
-            pcall(gamma_arena_log.error, result.error.code, result.error.message, result.error.context)
-        end
+    log_failure(result)
+    return result
+end
+
+local function register_impl(registrar)
+    if type(registrar) ~= "function" then
+        return gamma_arena_result.err("GA_DXML_REGISTRAR_UNAVAILABLE", "Script callback registrar is unavailable")
     end
+    registrar("on_xml_read", apply)
+    registrar("main_menu_on_init", gamma_arena_main_menu.on_main_menu_init)
+    return gamma_arena_result.ok(true)
+end
+
+function register(registrar)
+    local ok, result = pcall(register_impl, registrar)
+    if not ok then
+        result = gamma_arena_result.err(
+            "GA_DXML_REGISTER_FAILED",
+            "Arena menu callbacks could not be registered",
+            { detail = tostring(result) })
+    end
+    log_failure(result)
     return result
 end
 
 function on_xml_read()
-    RegisterScriptCallback("on_xml_read", apply)
+    return register(RegisterScriptCallback)
 end
