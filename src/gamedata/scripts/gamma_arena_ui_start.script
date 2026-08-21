@@ -155,6 +155,28 @@ function UIStart:OnRandomSeed()
     self.validation:Show(false)
 end
 
+local function handoff_failure(config, failure)
+    local cleared = gamma_arena_session_store.clear_transient(config)
+    if not cleared.ok then return cleared end
+    return failure
+end
+
+function handoff_start_game(owner, config)
+    local lookup_ok, method = pcall(function() return owner and owner.StartGame end)
+    if not lookup_ok or type(method) ~= "function" then
+        return handoff_failure(config, gamma_arena_result.err("GA_START_GAME_UNAVAILABLE", "Main menu does not expose StartGame"))
+    end
+    local ok, detail = pcall(method, owner)
+    if not ok then
+        return handoff_failure(config, gamma_arena_result.err("GA_START_GAME_FAILED", "Engine new-game start failed", { detail = tostring(detail) }))
+    end
+    if detail == false then
+        return handoff_failure(config, gamma_arena_result.err("GA_START_GAME_FAILED", "Engine new-game start reported failure"))
+    end
+    if type(detail) == "table" and detail.ok == false then return handoff_failure(config, detail) end
+    return gamma_arena_result.ok(detail)
+end
+
 function UIStart:OnStart()
     local seed_text = self.seed_edit:GetText()
     local seed_result = gamma_arena_session_store.parse_manual_seed(seed_text)
@@ -199,16 +221,8 @@ function UIStart:OnStart()
         self:ShowFatal({ bridge })
         return
     end
-    if self.owner == nil or type(self.owner.StartGame) ~= "function" then
-        gamma_arena_session_store.clear_transient(axr_main.config)
-        self:ShowFatal({ gamma_arena_result.err("GA_START_GAME_UNAVAILABLE", "Main menu does not expose StartGame") })
-        return
-    end
-    local ok, detail = pcall(function() self.owner:StartGame() end)
-    if not ok then
-        gamma_arena_session_store.clear_transient(axr_main.config)
-        self:ShowFatal({ gamma_arena_result.err("GA_START_GAME_FAILED", "Engine new-game start failed", { detail = tostring(detail) }) })
-    end
+    local handoff = handoff_start_game(self.owner, axr_main.config)
+    if not handoff.ok then self:ShowFatal({ handoff }) end
 end
 
 function UIStart:RestoreOwner()

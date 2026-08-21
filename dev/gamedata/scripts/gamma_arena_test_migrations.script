@@ -997,11 +997,11 @@ local function character_creation_bridge_is_exact()
     local initial = {}
     for _, key in ipairs(character_keys) do initial[key] = "stale_" .. key end
     local config = fake_config(initial)
-    local result = gamma_arena_session_store.write_character_creation(config)
+    local store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(store:issue_launch(config, valid_request(), { clock = function() return 100 end, nonce = function() return "bridge" end }).ok, "character bridge requires an issued launch")
+    local result = store:write_character_creation(config)
     gamma_arena_test_assert.is_true(result.ok, "character creation bridge writes")
-    gamma_arena_test_assert.equals(config.save_count, 1, "character bridge saves once")
-    gamma_arena_test_assert.equals(#config.writes, 7, "seven fixed bridge keys")
-    gamma_arena_test_assert.equals(#config.removals, 14, "all stale gameplay-mode bridge keys removed")
+    gamma_arena_test_assert.equals(config.data.bridge_pending, "true", "character bridge persists its crash-safe undo lease")
     for key, value in pairs(character_write_values) do
         gamma_arena_test_assert.equals(config.data[key], value, "fixed character bridge value: " .. key)
         gamma_arena_test_assert.equals(config.persisted[key], value, "fixed persisted character bridge value: " .. key)
@@ -1009,6 +1009,141 @@ local function character_creation_bridge_is_exact()
     for _, key in ipairs(character_remove_keys) do
         gamma_arena_test_assert.equals(config.data[key], nil, "stale character mode removed: " .. key)
         gamma_arena_test_assert.equals(config.persisted[key], nil, "stale persisted character mode removed: " .. key)
+    end
+end
+
+local function character_snapshot(initial)
+    local snapshot = {}
+    for _, key in ipairs(character_keys) do snapshot[key] = initial[key] end
+    return snapshot
+end
+
+local function assert_character_snapshot(config, expected, message)
+    for _, key in ipairs(character_keys) do
+        gamma_arena_test_assert.equals(config.data[key], expected[key], message .. " working: " .. key)
+        gamma_arena_test_assert.equals(config.persisted[key], expected[key], message .. " persisted: " .. key)
+    end
+end
+
+local function bridge_fixture(label)
+    local initial = {}
+    for index, key in ipairs(character_keys) do
+        if index % 3 == 0 then initial[key] = "" elseif index % 2 == 0 then initial[key] = label .. "_" .. key end
+    end
+    local config = fake_config(initial)
+    local store = gamma_arena_session_store.new_store()
+    local issued = store:issue_launch(config, valid_request(), {
+        clock = function() return 100 end,
+        nonce = function() return label end
+    })
+    gamma_arena_test_assert.is_true(issued.ok, label .. " launch issues")
+    gamma_arena_test_assert.is_true(store:write_character_creation(config).ok, label .. " bridge writes")
+    return config, store, character_snapshot(initial)
+end
+
+local function character_creation_bridge_restores_exactly_from_fresh_store()
+    local config, _, expected = bridge_fixture("fresh_bridge")
+    local restored = gamma_arena_session_store.new_store():restore_character_creation(config)
+    gamma_arena_test_assert.is_true(restored.ok and restored.value == true, "fresh Store restores a durable bridge lease")
+    assert_character_snapshot(config, expected, "fresh Store exact restore")
+    gamma_arena_test_assert.equals(config.data.bridge_pending, nil, "successful restore consumes the durable lease")
+    local repeated = gamma_arena_session_store.new_store():restore_character_creation(config)
+    gamma_arena_test_assert.is_true(repeated.ok and repeated.value == false, "repeated bridge recovery is idempotent")
+    assert_character_snapshot(config, expected, "idempotent exact restore")
+end
+
+local function ordinary_character_creation_without_lease_is_untouched()
+    local initial = { new_game_character_name = "Ordinary_Stalker", new_game_faction = "loner", new_game_story_mode = "true" }
+    local config = fake_config(initial)
+    local restored = gamma_arena_session_store.new_store():restore_character_creation(config)
+    gamma_arena_test_assert.is_true(restored.ok and restored.value == false, "no bridge lease is an inert restore")
+    assert_character_snapshot(config, character_snapshot(initial), "ordinary character creation")
+end
+
+local function character_creation_bridge_restores_on_every_launch_terminal_route()
+    local success_config, success_store, success_expected = bridge_fixture("consumed_bridge")
+    local consumed = success_store:consume_launch(success_config, { clock = function() return 100 end })
+    gamma_arena_test_assert.is_true(consumed.ok, "successfully consumed launch restores its bridge")
+    assert_character_snapshot(success_config, success_expected, "successful consume")
+
+    local expired_config, expired_store, expired_expected = bridge_fixture("expired_bridge")
+    local expired = expired_store:consume_launch(expired_config, { clock = function() return 701 end })
+    gamma_arena_test_assert.is_false(expired.ok, "expired launch is rejected")
+    gamma_arena_test_assert.equals(expired.error.code, "GA_LAUNCH_TOKEN_EXPIRED", "expired launch preserves its exact reason")
+    assert_character_snapshot(expired_config, expired_expected, "expired launch")
+
+    local rejected_config, _, rejected_expected = bridge_fixture("rejected_bridge")
+    local rejected = gamma_arena_session_store.new_store():consume_launch(rejected_config, { clock = function() return 100 end })
+    gamma_arena_test_assert.is_false(rejected.ok, "fresh Store rejects a process-orphaned launch")
+    assert_character_snapshot(rejected_config, rejected_expected, "rejected launch")
+
+    local stale_config, _, stale_expected = bridge_fixture("stale_bridge")
+    local stale = gamma_arena_session_store.new_store():issue_launch(stale_config, valid_request(77), {
+        clock = function() return 100 end,
+        nonce = function() return "replacement" end
+    })
+    gamma_arena_test_assert.is_false(stale.ok, "stale launch is cleared before replacement")
+    gamma_arena_test_assert.equals(stale.error.code, "GA_LAUNCH_STALE_CLEARED", "stale launch preserves the retry contract")
+    assert_character_snapshot(stale_config, stale_expected, "stale launch")
+
+    local cleared_config, cleared_store, cleared_expected = bridge_fixture("cleared_bridge")
+    gamma_arena_test_assert.is_true(cleared_store:clear_transient(cleared_config).ok, "common transient cleanup succeeds")
+    assert_character_snapshot(cleared_config, cleared_expected, "common cleanup")
+end
+
+local function character_creation_bridge_faults_fail_closed()
+    local read_config, read_store, read_expected = bridge_fixture("read_fault_bridge")
+    read_config:arm_read_fault(1)
+    local read_failed = read_store:restore_character_creation(read_config)
+    gamma_arena_test_assert.is_false(read_failed.ok, "bridge recovery read faults are structured")
+    read_config:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.new_store():restore_character_creation(read_config).ok, "bridge recovery retries after read fault")
+    assert_character_snapshot(read_config, read_expected, "read-fault retry")
+
+    local write_config, write_store, write_expected = bridge_fixture("write_fault_bridge")
+    write_config:arm_fault(1, "false")
+    local write_failed = write_store:restore_character_creation(write_config)
+    gamma_arena_test_assert.is_false(write_failed.ok, "bridge recovery mutation faults are structured")
+    write_config:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.new_store():restore_character_creation(write_config).ok, "bridge recovery retries after mutation fault")
+    assert_character_snapshot(write_config, write_expected, "mutation-fault retry")
+
+    local save_config, save_store, save_expected = bridge_fixture("save_fault_bridge")
+    local base_save = save_config.save
+    local fail_save_once = true
+    function save_config:save()
+        if fail_save_once then fail_save_once = false; return false end
+        return base_save(self)
+    end
+    local save_failed = save_store:restore_character_creation(save_config)
+    gamma_arena_test_assert.is_false(save_failed.ok, "bridge recovery save faults are structured")
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.new_store():restore_character_creation(save_config).ok, "bridge recovery retries after save fault")
+    assert_character_snapshot(save_config, save_expected, "save-fault retry")
+
+    local recovery_config, recovery_store, recovery_expected = bridge_fixture("recovery_fault_bridge")
+    recovery_config:arm_fault(1)
+    recovery_config:arm_recovery_fault(1, "false")
+    local recovery_failed = recovery_store:restore_character_creation(recovery_config)
+    gamma_arena_test_assert.is_false(recovery_failed.ok, "failed touched-key recovery quarantines bridge restoration")
+    recovery_config:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.recover(recovery_config).ok, "explicit touched-key recovery unblocks bridge restoration")
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.new_store():restore_character_creation(recovery_config).ok, "fresh Store completes bridge restoration after recovery")
+    assert_character_snapshot(recovery_config, recovery_expected, "recovery-fault retry")
+end
+
+local function start_game_failures_restore_bridge_immediately()
+    local cases = {
+        { label = "missing", owner = {} , code = "GA_START_GAME_UNAVAILABLE" },
+        { label = "throwing", owner = { StartGame = function() error("injected StartGame failure") end }, code = "GA_START_GAME_FAILED" },
+        { label = "false", owner = { StartGame = function() return false end }, code = "GA_START_GAME_FAILED" }
+    }
+    for _, case in ipairs(cases) do
+        local config, _, expected = bridge_fixture(case.label .. "_start")
+        local result = gamma_arena_ui_start.handoff_start_game(case.owner, config)
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " StartGame fails structurally")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.label .. " StartGame failure code")
+        assert_character_snapshot(config, expected, case.label .. " StartGame immediate restore")
+        assert_keys_absent(config, launch_keys, case.label .. " StartGame clears launch intent")
     end
 end
 
@@ -1098,6 +1233,11 @@ local cases = {
     { name = "dxml_menu_order", fn = dxml_places_arena_after_new_game },
     { name = "dxml_placement_failures", fn = dxml_placement_failures_are_structured },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
+    { name = "character_creation_bridge_fresh_store_restore", fn = character_creation_bridge_restores_exactly_from_fresh_store },
+    { name = "ordinary_character_creation_without_lease", fn = ordinary_character_creation_without_lease_is_untouched },
+    { name = "character_creation_bridge_terminal_routes", fn = character_creation_bridge_restores_on_every_launch_terminal_route },
+    { name = "character_creation_bridge_faults", fn = character_creation_bridge_faults_fail_closed },
+    { name = "start_game_failures_restore_bridge", fn = start_game_failures_restore_bridge_immediately },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
     { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift }
 }

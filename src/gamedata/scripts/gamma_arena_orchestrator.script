@@ -1,6 +1,7 @@
 local Orchestrator = {}
 Orchestrator.__index = Orchestrator
 local UINT32_MOD = 4294967296
+local UINT32_MAX = UINT32_MOD - 1
 local COUNTDOWN_DURATION_MS = 3000
 local MAX_DEFEAT_RECOVERY_UPDATES = 256
 
@@ -151,6 +152,7 @@ function Orchestrator:__init(deps)
     self.death_latched = false
     self.result_kind = nil
     self.result_action_locked = false
+    self.pending_next_fight_index = nil
     self.next_cleanup_started = false
     self.defeat_cleanup_started = false
     self.defeat_cleanup_updates = 0
@@ -356,6 +358,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.result_kind = nil
     self.pending_callback_error = nil
     self.result_action_locked = true
+    self.pending_next_fight_index = nil
     self.pending_disconnect = false
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then errors[#errors + 1] = teardown end
@@ -444,6 +447,7 @@ function Orchestrator:on_game_load()
     self.death_latched = false
     self.result_kind = nil
     self.result_action_locked = false
+    self.pending_next_fight_index = nil
     self.next_cleanup_started = false
     self.defeat_cleanup_started = false
     self.pending_disconnect = false
@@ -530,6 +534,8 @@ function Orchestrator:activate_once()
     self.activation_attempted = true
     self.awaiting_activation = false
 
+    local reconciled = safe_result_call("GA_SETTINGS_RECONCILIATION_FAILED", self.deps.reconcile, self.deps.config)
+    if not reconciled.ok then return self:enter_fatal(reconciled) end
     local intents = call_method("GA_INTENT_INSPECTION_FAILED", self.deps.store, "inspect_intents", self.deps.config)
     if not intents.ok then return self:enter_fatal(intents) end
     local state = intents.value or {}
@@ -688,6 +694,7 @@ function Orchestrator:show_victory()
     self.pending_result = nil
     self.result_kind = "victory"
     self.result_action_locked = false
+    self.pending_next_fight_index = nil
     self.runtime_stage = "RESULT"
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration), { duration_ms = duration })
     if not logged.ok then return logged end
@@ -713,6 +720,7 @@ function Orchestrator:show_defeat()
     self.pending_victory = false
     self.result_kind = "defeat"
     self.result_action_locked = false
+    self.pending_next_fight_index = nil
     self.runtime_stage = "RESULT"
     local logged = self:emit_log("GA_FIGHT_DEFEAT", "fight_index=" .. tostring(self.session and self.session.fight_index), {
         fight_index = self.session and self.session.fight_index or nil
@@ -756,12 +764,36 @@ function Orchestrator:queue_victory()
     return gamma_arena_result.ok(true)
 end
 
+function Orchestrator:resolve_next_fight_index(result_kind)
+    local current_index = self.session and self.session.fight_index or nil
+    if type(current_index) ~= "number" or current_index ~= math.floor(current_index) or current_index < 0 or current_index > UINT32_MAX then
+        return fail("GA_MODE_POLICY_FAILED", "Arena session has no valid persisted fight index")
+    end
+    if current_index == UINT32_MAX then
+        return fail("GA_FIGHT_INDEX_EXHAUSTED", "Arena fight index exhausted the uint32 persistence range", { result_kind = result_kind })
+    end
+    local policy = self.deps.mode_policy
+    local method_ok, next_method = pcall(function() return policy and policy.next_fight_index end)
+    if not method_ok or type(next_method) ~= "function" then
+        return fail("GA_MODE_POLICY_FAILED", "Arena mode next-fight policy is unavailable")
+    end
+    local called, next_index = pcall(next_method, current_index, result_kind)
+    if not called or type(next_index) ~= "number" or next_index ~= math.floor(next_index)
+        or next_index ~= current_index + 1 or next_index < 0 or next_index >= UINT32_MOD then
+        return fail("GA_MODE_POLICY_FAILED", "Arena mode returned an invalid next fight index")
+    end
+    return gamma_arena_result.ok(next_index)
+end
+
 function Orchestrator:victory_next_action()
     if not self:is_active() or self.runtime_stage ~= "RESULT" or self.result_action_locked then return gamma_arena_result.ok(false) end
+    local next_index = self:resolve_next_fight_index("victory")
+    if not next_index.ok then return next_index end
     self.result_action_locked = true
     local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
     if not cleared.ok then self.result_action_locked = false; return cleared end
     self.next_cleanup_started = false
+    self.pending_next_fight_index = next_index.value
     self.runtime_stage = "NEXT_CLEANUP"
     return gamma_arena_result.ok(true)
 end
@@ -770,19 +802,10 @@ function Orchestrator:defeat_next_action()
     if not self:is_active() or self.runtime_stage ~= "RESULT" or self.result_kind ~= "defeat" or self.result_action_locked then
         return gamma_arena_result.ok(false)
     end
+    local next_index_result = self:resolve_next_fight_index("defeat")
+    if not next_index_result.ok then return next_index_result end
+    local next_index = next_index_result.value
     self.result_action_locked = true
-    local policy = self.deps.mode_policy
-    local method_ok, next_method = pcall(function() return policy and policy.next_fight_index end)
-    if not method_ok or type(next_method) ~= "function" then
-        self.result_action_locked = false
-        return fail("GA_MODE_POLICY_FAILED", "Arena mode next-fight policy is unavailable")
-    end
-    local called, next_index = pcall(next_method, self.session.fight_index, "defeat")
-    if not called or type(next_index) ~= "number" or next_index ~= math.floor(next_index)
-        or next_index ~= self.session.fight_index + 1 then
-        self.result_action_locked = false
-        return fail("GA_MODE_POLICY_FAILED", "Arena mode returned an invalid defeat continuation index")
-    end
     local restored = call_method("GA_CHECKPOINT_RESTORE_FAILED", self.deps.checkpoint, "restore", self.session, next_index)
     if not restored.ok then
         self.result_action_locked = false
@@ -846,12 +869,10 @@ function Orchestrator:drive_next_fight()
     local reset = call_method("GA_ACTOR_RESET_FAILED", self.deps.actor, "reset_after_victory", layout.value)
     if not reset.ok then return reset end
     if type(reset.value) == "table" and reset.value.pending == true then return gamma_arena_result.ok({ stage = "NEXT_RESET", pending = true }) end
-    local policy = self.deps.mode_policy
-    local method_ok, next_method = pcall(function() return policy and policy.next_fight_index end)
-    if not method_ok or type(next_method) ~= "function" then return fail("GA_MODE_POLICY_FAILED", "Arena mode next-fight policy is unavailable") end
-    local called, next_index = pcall(next_method, self.session.fight_index, "victory")
-    if not called or type(next_index) ~= "number" or next_index ~= math.floor(next_index) or next_index ~= self.session.fight_index + 1 then
-        return fail("GA_MODE_POLICY_FAILED", "Arena mode returned an invalid next fight index")
+    local next_index = self.pending_next_fight_index
+    if type(next_index) ~= "number" or next_index ~= math.floor(next_index)
+        or next_index ~= self.session.fight_index + 1 or next_index < 0 or next_index >= UINT32_MOD then
+        return fail("GA_MODE_POLICY_FAILED", "Arena mode continuation was not retained exactly across cleanup")
     end
     self.session.fight_index = next_index
     local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_VICTORY)
@@ -859,6 +880,7 @@ function Orchestrator:drive_next_fight()
     self.fight_spec = nil
     self.catalog_snapshot = nil
     self.next_cleanup_started = false
+    self.pending_next_fight_index = nil
     self.runtime_stage = "PREPARING"
     return gamma_arena_result.ok({ stage = "PREPARING", fight_index = next_index })
 end

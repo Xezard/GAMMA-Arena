@@ -378,9 +378,11 @@ local function fake_store(intent_state)
         intent_state = intent_state or { launch_pending = false, resume_pending = false },
         consume_launch_count = 0,
         prepare_resume_count = 0,
-        clear_count = 0
+        clear_count = 0,
+        inspect_count = 0
     }
     function store:inspect_intents()
+        self.inspect_count = self.inspect_count + 1
         if self.inspect_error then return self.inspect_error end
         return gamma_arena_result.ok(clone(self.intent_state))
     end
@@ -470,6 +472,7 @@ local function fake_orchestrator_deps(store)
     local deps = {
         store = store,
         config = {},
+        reconcile = function() return gamma_arena_result.ok({ events = {} }) end,
         preflight = function() return gamma_arena_result.ok(true) end,
         identity = function() return gamma_arena_result.ok({ session_id = "ga_test_session", session_nonce = "ga_test_nonce" }) end,
         ui = { show_fatal = function(errors, callback) return { errors = errors, callback = callback } end },
@@ -511,6 +514,75 @@ local function activation_requires_game_load_boundary()
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "load generation may consume launch exactly once")
+end
+
+local function activation_reconciles_before_intent_inspection_once()
+    local events = {}
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local base_inspect = store.inspect_intents
+    function store:inspect_intents(...)
+        events[#events + 1] = "inspect"
+        return base_inspect(self, ...)
+    end
+    local deps = fake_orchestrator_deps(store)
+    local reconcile_count = 0
+    deps.reconcile = function()
+        reconcile_count = reconcile_count + 1
+        events[#events + 1] = "reconcile"
+        return gamma_arena_result.ok({ events = {} })
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "current-version first activation remains valid")
+    gamma_arena_test_assert.equals(table.concat(events, ","), "reconcile,inspect", "reconciliation precedes intent inspection")
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(reconcile_count, 1, "one activation boundary reconciles exactly once")
+    gamma_arena_test_assert.equals(store.inspect_count, 1, "one activation boundary inspects exactly once")
+end
+
+local function activation_version_changes_clear_resume_before_checkpoint_routing()
+    local cases = {
+        { label = "upgrade_visible", previous = "0.0.9", layout = "visible" },
+        { label = "upgrade_hidden", previous = "0.0.9", layout = "hidden" },
+        { label = "rollback_visible", previous = "9.0.0", layout = "visible" },
+        { label = "rollback_hidden", previous = "9.0.0", layout = "hidden" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = false, resume_pending = true })
+        local deps = fake_orchestrator_deps(store)
+        deps.reconcile = function()
+            store.intent_state.resume_pending = false
+            return gamma_arena_result.ok({ events = { { code = "GA_ADDON_VERSION_CHANGED", previous = case.previous, checkpoint_layout = case.layout } } })
+        end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:load_state({ gamma_arena_session = valid_session() })
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " loaded session fails closed after reconciliation clears resume")
+        gamma_arena_test_assert.equals(result.error.code, "GA_RESUME_INTENT_REQUIRED", case.label .. " requires a current-version external route")
+        gamma_arena_test_assert.equals(store.prepare_resume_count, 0, case.label .. " never enters checkpoint routing")
+    end
+end
+
+local function activation_reconciliation_failures_are_fatal_before_inspection()
+    local cases = {
+        { code = "GA_SETTINGS_SCHEMA_NEWER", label = "future schema" },
+        { code = "GA_SETTINGS_READ_FAILED", label = "migration read" },
+        { code = "GA_SETTINGS_WRITE_FAILED", label = "migration write" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = false, resume_pending = true })
+        local deps = fake_orchestrator_deps(store)
+        deps.reconcile = function() return gamma_arena_result.err(case.code, "injected " .. case.label) end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " remains observable")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.label .. " preserves structured code")
+        gamma_arena_test_assert.equals(store.inspect_count, 0, case.label .. " fails before intent inspection")
+        gamma_arena_test_assert.equals(store.clear_count, 1, case.label .. " clears transient and bridge state at common fatal cleanup")
+        gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.label .. " enters ERROR")
+    end
 end
 
 local function invalid_or_expired_launch_never_reaches_preflight()
@@ -3684,6 +3756,7 @@ local function task8_environment(options)
     local deps = {
         store = store,
         config = {},
+        reconcile = function() return gamma_arena_result.ok({ events = {} }) end,
         preflight = function() return gamma_arena_result.ok(true) end,
         identity = function() return gamma_arena_result.ok({ session_id = "ga_task8_session", session_nonce = "ga_task8_nonce" }) end,
         ui = { show_fatal = function(errors, callback) env.fatal_shown = env.fatal_shown + 1; return { errors = errors, callback = callback } end },
@@ -3858,6 +3931,125 @@ local function runtime_task8_death_errors_defer_fatal_ui_to_update()
     callbacks.actor_on_update()
     gamma_arena_test_assert.equals(env.fatal_shown, 1, "next actor update opens fatal UI once")
     gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "deferred death error enters ERROR")
+end
+
+local function runtime_registered_death_owner_tag_failures_route_through_real_callback_router()
+    local cases = {
+        {
+            label = "throw",
+            install = function(deps) deps.load_tag = function() error("injected registered victim tag read throw") end end,
+            code = "GA_ENTITY_TAG_READ_FAILED"
+        },
+        {
+            label = "Result failure",
+            install = function(deps) deps.load_tag = function() return gamma_arena_result.err("GA_TEST_TAG_READ_RESULT", "injected registered victim tag Result failure") end end,
+            code = "GA_TEST_TAG_READ_RESULT"
+        }
+    }
+    for _, case in ipairs(cases) do
+        local entity_env, entity_deps = fake_entity_environment()
+        local adapter = gamma_arena_entity_adapter.new(entity_deps)
+        begin_entity_apply(adapter, entity_env, entity_spec(1), "ga_task8_session")
+        local applied, active = pump_entity(adapter, entity_env)
+        gamma_arena_test_assert.is_true(applied.ok and active.state == "ACTIVE", case.label .. " real adapter reaches ACTIVE")
+        local victim_id = active.npcs[1].id
+        case.install(entity_deps)
+
+        local env = task8_environment()
+        task8_pump_to_active(env)
+        env.orchestrator.deps.entities = adapter
+        env.orchestrator.deps.teardown = function()
+            adapter:cleanup()
+            return gamma_arena_result.ok(true)
+        end
+        local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+        local failed = callbacks.npc_on_death_callback({ id = function() return victim_id end })
+        gamma_arena_test_assert.is_false(failed.ok, case.label .. " owner-tag failure remains structured")
+        gamma_arena_test_assert.equals(failed.error.code, case.code, case.label .. " preserves the exact owner-tag failure")
+        gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, case.label .. " never manufactures a registered death")
+        gamma_arena_test_assert.equals(env.fatal_shown, 0, case.label .. " never opens fatal UI inside the death callback")
+        callbacks.actor_on_update()
+        gamma_arena_test_assert.equals(env.fatal_shown, 1, case.label .. " routes fatal UI on the next actor update")
+        gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.label .. " enters ERROR")
+        gamma_arena_test_assert.is_true(adapter:registry_snapshot().state ~= "ACTIVE", case.label .. " begins common safe cleanup")
+    end
+end
+
+local function runtime_registered_death_mismatching_owner_tag_is_benign()
+    local env, deps = fake_entity_environment({ allow_numeric_death = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-owner-mismatch")
+    local applied, active = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(applied.ok and active.state == "ACTIVE", "owner mismatch fixture reaches ACTIVE")
+    local victim_id = active.npcs[1].id
+    env.tags[victim_id] = "foreign-session"
+    local ignored = adapter:on_npc_death(victim_id)
+    gamma_arena_test_assert.is_true(ignored.ok and ignored.value == false, "successful mismatching owner tag is benign")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "mismatching tag does not decrement living count")
+end
+
+local function runtime_fight_index_max_minus_one_advances_once()
+    local victory = task8_environment()
+    victory.orchestrator.session.fight_index = 4294967294
+    task8_pump_to_active(victory)
+    victory.orchestrator:npc_on_death_callback({ id = function() return victory.registry.npcs[1].id end })
+    victory.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(victory.victory_dialogs[1].on_next().ok, "max-1 victory continuation starts")
+    local advanced = gamma_arena_result.ok(true)
+    for _ = 1, 5 do advanced = victory.orchestrator:actor_on_update() end
+    gamma_arena_test_assert.is_true(advanced.ok, "max-1 victory continuation reaches the next preparation")
+    gamma_arena_test_assert.equals(victory.orchestrator.session.fight_index, 4294967295, "max-1 victory advances exactly to uint32 max")
+
+    local defeat = task8_environment()
+    defeat.orchestrator.session.fight_index = 4294967294
+    task8_pump_to_active(defeat)
+    defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
+    defeat.orchestrator:actor_on_update()
+    local requested = defeat.orchestrator:defeat_next_action()
+    gamma_arena_test_assert.is_true(requested.ok, "max-1 defeat continuation persists once")
+    gamma_arena_test_assert.equals(defeat.restore_calls, 1, "max-1 defeat submits one checkpoint restore")
+    gamma_arena_test_assert.equals(defeat.restore_next_fight_index, 4294967295, "max-1 defeat targets uint32 max")
+    gamma_arena_test_assert.is_true(defeat.orchestrator:defeat_next_action().ok, "repeated defeat continuation is an idempotent Result")
+    gamma_arena_test_assert.equals(defeat.restore_calls, 1, "repeated max-1 defeat never resubmits restore")
+end
+
+local function runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal()
+    local victory = task8_environment()
+    victory.orchestrator.session.fight_index = 4294967295
+    task8_pump_to_active(victory)
+    victory.orchestrator:npc_on_death_callback({ id = function() return victory.registry.npcs[1].id end })
+    victory.orchestrator:actor_on_update()
+    local victory_failed = victory.orchestrator:victory_next_action()
+    gamma_arena_test_assert.is_false(victory_failed.ok, "uint32-max victory is rejected")
+    gamma_arena_test_assert.equals(victory_failed.error.code, "GA_FIGHT_INDEX_EXHAUSTED", "victory exhaustion code is stable")
+    gamma_arena_test_assert.equals(victory.orchestrator.session.fight_index, 4294967295, "victory exhaustion does not mutate session index")
+    gamma_arena_test_assert.equals(victory.orchestrator.runtime_stage, "RESULT", "victory exhaustion does not leave RESULT")
+    gamma_arena_test_assert.is_false(victory.orchestrator.result_action_locked, "victory exhaustion does not acquire the result-action latch")
+    gamma_arena_test_assert.equals(victory.reset_actor, 0, "victory exhaustion precedes actor mutation")
+
+    local defeat = task8_environment()
+    defeat.orchestrator.session.fight_index = 4294967295
+    task8_pump_to_active(defeat)
+    defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
+    defeat.orchestrator:actor_on_update()
+    local defeat_failed = defeat.orchestrator:defeat_next_action()
+    gamma_arena_test_assert.is_false(defeat_failed.ok, "uint32-max defeat is rejected")
+    gamma_arena_test_assert.equals(defeat_failed.error.code, "GA_FIGHT_INDEX_EXHAUSTED", "defeat exhaustion code is stable")
+    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967295, "defeat exhaustion does not mutate session index")
+    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "defeat exhaustion precedes checkpoint mutation")
+    gamma_arena_test_assert.is_false(defeat.orchestrator.result_action_locked, "defeat exhaustion does not acquire the result-action latch")
+
+    local routed = task8_environment()
+    routed.orchestrator.session.fight_index = 4294967295
+    task8_pump_to_active(routed)
+    routed.orchestrator:npc_on_death_callback({ id = function() return routed.registry.npcs[1].id end })
+    routed.orchestrator:actor_on_update()
+    local first = routed.victory_dialogs[1].on_next()
+    local repeated = routed.victory_dialogs[1].on_next()
+    gamma_arena_test_assert.is_false(first.ok, "UI exhaustion reaches common result-error routing")
+    gamma_arena_test_assert.is_true(repeated.ok and repeated.value == false, "repeated exhausted UI action is idempotent")
+    gamma_arena_test_assert.equals(routed.fatal_shown, 1, "exhaustion opens fatal UI exactly once")
+    gamma_arena_test_assert.equals(routed.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "exhaustion enters ERROR")
 end
 
 local function runtime_task8_result_action_failures_route_to_fatal()
@@ -4220,6 +4412,9 @@ local cases = {
     { name = "runtime_preflight_normalizes_effective_bandit_community", fn = preflight_normalizes_effective_bandit_community },
     { name = "runtime_launch_consumes_before_preflight_once", fn = launch_consumes_before_preflight_once },
     { name = "runtime_activation_requires_game_load_boundary", fn = activation_requires_game_load_boundary },
+    { name = "runtime_activation_reconciles_before_intent_inspection_once", fn = activation_reconciles_before_intent_inspection_once },
+    { name = "runtime_activation_version_changes_clear_resume_before_checkpoint_routing", fn = activation_version_changes_clear_resume_before_checkpoint_routing },
+    { name = "runtime_activation_reconciliation_failures_are_fatal_before_inspection", fn = activation_reconciliation_failures_are_fatal_before_inspection },
     { name = "runtime_invalid_or_expired_launch_never_reaches_preflight", fn = invalid_or_expired_launch_never_reaches_preflight },
     { name = "runtime_inactive_callbacks_are_inert", fn = inactive_callbacks_are_inert },
     { name = "runtime_ordinary_loaded_save_rejects_stray_launch", fn = ordinary_loaded_save_rejects_stray_launch },
@@ -4346,6 +4541,10 @@ local cases = {
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }
     ,{ name = "runtime_task8_main_menu_disconnect_retries_after_failure", fn = runtime_task8_main_menu_disconnect_retries_after_failure }
     ,{ name = "runtime_task8_death_errors_defer_fatal_ui_to_update", fn = runtime_task8_death_errors_defer_fatal_ui_to_update }
+    ,{ name = "runtime_registered_death_owner_tag_failures_route_through_real_callback_router", fn = runtime_registered_death_owner_tag_failures_route_through_real_callback_router }
+    ,{ name = "runtime_registered_death_mismatching_owner_tag_is_benign", fn = runtime_registered_death_mismatching_owner_tag_is_benign }
+    ,{ name = "runtime_fight_index_max_minus_one_advances_once", fn = runtime_fight_index_max_minus_one_advances_once }
+    ,{ name = "runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal", fn = runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal }
     ,{ name = "runtime_task8_result_action_failures_route_to_fatal", fn = runtime_task8_result_action_failures_route_to_fatal }
     ,{ name = "runtime_task8_inactive_cleanup_failures_route_to_fatal", fn = runtime_task8_inactive_cleanup_failures_route_to_fatal }
     ,{ name = "runtime_task8_clean_registry_requires_exact_empty_arrays", fn = runtime_task8_clean_registry_requires_exact_empty_arrays }

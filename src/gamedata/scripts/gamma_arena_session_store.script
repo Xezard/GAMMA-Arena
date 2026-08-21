@@ -4,6 +4,39 @@ local CHECKPOINT_NAME = "_gamma_arena_checkpoint"
 local LAUNCH_TOKEN_TTL = 600
 local UINT32_MAX = 4294967295
 
+local character_bridge = {
+    { key = "new_game_difficulty", action = "write", value = 2 },
+    { key = "new_game_economy", action = "write", value = 2 },
+    { key = "new_game_economy_treasure", action = "write", value = 2 },
+    { key = "new_game_character_name", action = "write", value = "Arena_Fighter" },
+    { key = "new_game_faction", action = "write", value = "dolg" },
+    { key = "new_game_map", action = "write", value = "makeshift_barracks" },
+    { key = "new_game_money", action = "write", value = 0 },
+    { key = "new_game_loadout", action = "remove" },
+    { key = "new_game_story_mode", action = "remove" },
+    { key = "new_game_icon", action = "remove" },
+    { key = "new_game_hardcore_mode", action = "remove" },
+    { key = "new_game_hardcore_mode_lives", action = "remove" },
+    { key = "new_game_hardcore_mode_regenerate", action = "remove" },
+    { key = "new_game_survival_mode", action = "remove" },
+    { key = "new_game_azazel_mode", action = "remove" },
+    { key = "new_game_warfare", action = "remove" },
+    { key = "new_game_campfire_mode", action = "remove" },
+    { key = "new_game_conditions_mode", action = "remove" },
+    { key = "new_game_timer_mode", action = "remove" },
+    { key = "new_game_opened_routes", action = "remove" },
+    { key = "new_game_test", action = "remove" }
+}
+
+local character_keys = {}
+local bridge_lease_keys = { "bridge_schema_version", "bridge_launch_token" }
+for _, descriptor in ipairs(character_bridge) do
+    character_keys[#character_keys + 1] = descriptor.key
+    bridge_lease_keys[#bridge_lease_keys + 1] = "bridge_" .. descriptor.key .. "_present"
+    bridge_lease_keys[#bridge_lease_keys + 1] = "bridge_" .. descriptor.key .. "_value"
+end
+bridge_lease_keys[#bridge_lease_keys + 1] = "bridge_pending"
+
 local launch_keys = {
     "launch_pending",
     "launch_token",
@@ -488,6 +521,8 @@ function Store:issue_launch(config, request, options)
 
     if stale_reason ~= nil then
         self:clear_launch_permits(config)
+        local restored = self:restore_character_creation(config)
+        if not restored.ok then return restored end
         local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_STALE_CLEAR_FAILED")
         if not cleared.ok then return cleared end
         return fail("GA_LAUNCH_STALE_CLEARED", "A stale launch intent was cleared; issue a fresh launch", { reason = stale_reason })
@@ -516,6 +551,8 @@ end
 
 function Store:reject_launch(config, token, result)
     if token ~= nil then self.volatile_launch_permits[token] = nil end
+    local restored = self:restore_character_creation(config)
+    if not restored.ok then return restored end
     local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CLEAR_FAILED")
     return cleared.ok and result or cleared
 end
@@ -534,6 +571,8 @@ function Store:consume_launch(config, options)
     local resume_pending = self:pending_value(resume_raw.value, "RESUME")
     if not resume_pending.ok then return self:reject_launch(config, values.launch_token, resume_pending) end
     if resume_pending.value then
+        local restored = self:restore_character_creation(config)
+        if not restored.ok then return restored end
         local operations = operations_for_removals(launch_keys)
         for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
         local cleared = self:transaction(config, SECTION, operations, {
@@ -557,6 +596,8 @@ function Store:consume_launch(config, options)
     local request = validate_persisted_launch_request(values)
     if not request.ok then return self:reject_launch(config, values.launch_token, request) end
 
+    local restored = self:restore_character_creation(config)
+    if not restored.ok then return restored end
     local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CONSUME_FAILED")
     self.volatile_launch_permits[values.launch_token] = nil
     if not cleared.ok then return cleared end
@@ -724,6 +765,8 @@ function Store:clear_resume_if_matches(config, expected)
 end
 
 function Store:clear_transient(config)
+    local restored = self:restore_character_creation(config)
+    if not restored.ok then return restored end
     local token = self:raw_read(config, "launch_token")
     if token.ok and token.value ~= nil then self.volatile_launch_permits[token.value] = nil end
     local operations = operations_for_removals(launch_keys)
@@ -735,35 +778,93 @@ function Store:clear_transient(config)
     })
 end
 
-function Store:write_character_creation(config)
-    local operations = operations_for_writes({
-        { "new_game_difficulty", 2 },
-        { "new_game_economy", 2 },
-        { "new_game_economy_treasure", 2 },
-        { "new_game_character_name", "Arena_Fighter" },
-        { "new_game_faction", "dolg" },
-        { "new_game_map", "makeshift_barracks" },
-        { "new_game_money", 0 }
-    })
-    for _, operation in ipairs(operations_for_removals({
-        "new_game_loadout",
-        "new_game_story_mode",
-        "new_game_icon",
-        "new_game_hardcore_mode",
-        "new_game_hardcore_mode_lives",
-        "new_game_hardcore_mode_regenerate",
-        "new_game_survival_mode",
-        "new_game_azazel_mode",
-        "new_game_warfare",
-        "new_game_campfire_mode",
-        "new_game_conditions_mode",
-        "new_game_timer_mode",
-        "new_game_opened_routes",
-        "new_game_test"
-    })) do
-        operations[#operations + 1] = operation
+function Store:restore_character_creation(config)
+    local lease_result = self:read_all(config, bridge_lease_keys)
+    if not lease_result.ok then return lease_result end
+    local lease = lease_result.value
+    local pending = self:pending_value(lease.bridge_pending, "BRIDGE")
+    if not pending.ok then return pending end
+    if not pending.value then return gamma_arena_result.ok(false) end
+    if lease.bridge_schema_version ~= "1" or type(lease.bridge_launch_token) ~= "string" or lease.bridge_launch_token == "" then
+        return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease metadata is invalid")
     end
-    return self:transaction(config, CHARACTER_SECTION, operations, { error_code = "GA_CHARACTER_CREATION_WRITE_FAILED" })
+
+    local operations = {}
+    for _, descriptor in ipairs(character_bridge) do
+        local key = descriptor.key
+        local present = lease["bridge_" .. key .. "_present"]
+        local value = lease["bridge_" .. key .. "_value"]
+        if present == "true" then
+            if value == nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease value is missing", { key = key }) end
+            operations[#operations + 1] = { action = "write", key = key, value = value }
+        elseif present == "false" then
+            if value ~= nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Absent character-creation bridge key retained a value", { key = key }) end
+            operations[#operations + 1] = { action = "remove", key = key }
+        else
+            return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease presence is invalid", { key = key })
+        end
+    end
+    local restored = self:transaction(config, CHARACTER_SECTION, operations, { error_code = "GA_CHARACTER_CREATION_RESTORE_FAILED" })
+    if not restored.ok then return restored end
+    local cleared = self:transaction(config, SECTION, operations_for_removals(bridge_lease_keys), {
+        commit_remove_keys = { "bridge_pending" },
+        error_code = "GA_CHARACTER_CREATION_LEASE_CLEAR_FAILED"
+    })
+    if not cleared.ok then return cleared end
+    return gamma_arena_result.ok(true)
+end
+
+function Store:write_character_creation(config)
+    local recovered = self:restore_character_creation(config)
+    if not recovered.ok then return recovered end
+    local launch_pending_result = self:raw_read(config, "launch_pending")
+    if not launch_pending_result.ok then return launch_pending_result end
+    local launch_pending = self:pending_value(launch_pending_result.value, "LAUNCH")
+    if not launch_pending.ok then return launch_pending end
+    local launch_token = self:raw_read(config, "launch_token")
+    if not launch_token.ok then return launch_token end
+    if not launch_pending.value or type(launch_token.value) ~= "string" or launch_token.value == "" then
+        return fail("GA_CHARACTER_CREATION_LAUNCH_REQUIRED", "Character-creation bridge requires a pending Arena launch")
+    end
+
+    local snapshot = gamma_arena_config_tx.snapshot(config, CHARACTER_SECTION, character_keys)
+    if not snapshot.ok then return snapshot end
+    local lease_operations = {
+        { action = "write", key = "bridge_schema_version", value = 1 },
+        { action = "write", key = "bridge_launch_token", value = launch_token.value }
+    }
+    for _, descriptor in ipairs(character_bridge) do
+        local key = descriptor.key
+        local entry = snapshot.value.entries[key]
+        lease_operations[#lease_operations + 1] = { action = "write", key = "bridge_" .. key .. "_present", value = entry.present }
+        lease_operations[#lease_operations + 1] = entry.present
+            and { action = "write", key = "bridge_" .. key .. "_value", value = entry.value }
+            or { action = "remove", key = "bridge_" .. key .. "_value" }
+    end
+    lease_operations[#lease_operations + 1] = { action = "write", key = "bridge_pending", value = true }
+    local leased = self:transaction(config, SECTION, lease_operations, {
+        commit_write_keys = { "bridge_pending" },
+        fail_closed_keys = bridge_lease_keys,
+        error_code = "GA_CHARACTER_CREATION_LEASE_WRITE_FAILED"
+    })
+    if not leased.ok then return leased end
+
+    local operations = {}
+    for _, descriptor in ipairs(character_bridge) do
+        operations[#operations + 1] = descriptor.action == "write"
+            and { action = "write", key = descriptor.key, value = descriptor.value }
+            or { action = "remove", key = descriptor.key }
+    end
+    local written = self:transaction(config, CHARACTER_SECTION, operations, { error_code = "GA_CHARACTER_CREATION_WRITE_FAILED" })
+    if written.ok then return written end
+    local restored = self:restore_character_creation(config)
+    if not restored.ok then
+        return fail("GA_CHARACTER_CREATION_RESTORE_FAILED", "Character-creation bridge mutation failed and exact restoration could not complete", {
+            mutation = written.error,
+            restoration = restored.error
+        })
+    end
+    return written
 end
 
 local default_store = new_store_impl()
@@ -788,3 +889,4 @@ function consume_resume(config, expected, prepared) return default_store:consume
 function clear_resume_if_matches(config, expected) return default_store:clear_resume_if_matches(config, expected) end
 function clear_transient(config) return default_store:clear_transient(config) end
 function write_character_creation(config) return default_store:write_character_creation(config) end
+function restore_character_creation(config) return default_store:restore_character_creation(config) end
