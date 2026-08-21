@@ -55,8 +55,8 @@ foreach ($difficultyId in @('rookie','stalker','veteran','master')) {
 $expectedLayoutPaths = @('bar_arena_walk_3_1','bar_arena_walk_3_2','bar_arena_walk_6_1','bar_arena_walk_6_3','bar_arena_walk_6_6','bar_arena_monstr_walk')
 $layoutManifestEntry = $layoutSections.ga_layout_rostok_arena_v1
 if ($layoutSections.Count -ne 2 -or $layoutSections.meta.Count -ne 2 -or $null -eq $layoutManifestEntry -or $layoutManifestEntry.Count -ne 4 -or
-    $layoutManifestEntry.level -cne 'l05_bar' -or $layoutManifestEntry.actor_spawn_path -cne 'bar_arena_walk_1_1' -or
-    $layoutManifestEntry.actor_look_path -cne 'bar_arena_walk_attack') { throw 'Layout catalog differs from the exact v1 semantic manifest.' }
+    $layoutManifestEntry.level -cne 'l05_bar' -or $layoutManifestEntry.actor_spawn_path -cne 't_way' -or
+    $layoutManifestEntry.actor_look_path -cne 't_look') { throw 'Layout catalog differs from the exact v1 semantic manifest.' }
 $actualLayoutPaths = @($layoutManifestEntry.opponent_spawn_paths.Split(',') | ForEach-Object { $_.Trim() })
 if (@(Compare-Object -ReferenceObject $expectedLayoutPaths -DifferenceObject $actualLayoutPaths -SyncWindow 0).Count -ne 0) { throw 'Layout opponent paths differ from the ordered v1 semantic manifest.' }
 

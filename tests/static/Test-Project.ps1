@@ -778,6 +778,8 @@ if (Test-Path -LiteralPath $DifficultyPath) {
 if (Test-Path -LiteralPath $LayoutPath) {
     $LayoutContent = Get-Content -LiteralPath $LayoutPath -Raw
     Assert-True ($LayoutContent -match '(?m)^level\s*=\s*l05_bar\s*$') 'Layout must target l05_bar'
+    Assert-True ($LayoutContent -match '(?m)^actor_spawn_path\s*=\s*t_way\s*$') 'Actor must spawn at the vanilla Rostok Arena ingress patrol'
+    Assert-True ($LayoutContent -match '(?m)^actor_look_path\s*=\s*t_look\s*$') 'Actor must face the vanilla Rostok Arena ingress look patrol'
     Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk') 'Layout must retain the six unique opponent paths'
 }
 if (Test-Path -LiteralPath $NpcPath) {
