@@ -558,6 +558,24 @@ function Store:reject_launch(config, token, result)
     return cleared.ok and result or cleared
 end
 
+function Store:validate_launch_handoff(config, token)
+    if self.volatile_launch_permits[token] == config then
+        return gamma_arena_result.ok({ route = "volatile" })
+    end
+    local lease_result = self:read_all(config, bridge_lease_keys)
+    if not lease_result.ok then return lease_result end
+    local lease = lease_result.value
+    local pending = self:pending_value(lease.bridge_pending, "BRIDGE")
+    if not pending.ok then return pending end
+    if pending.value ~= true then
+        return fail("GA_LAUNCH_HANDOFF_REQUIRED", "Cross-VM Arena launch requires a pending character-creation bridge lease")
+    end
+    if lease.bridge_schema_version ~= "1" or lease.bridge_launch_token ~= token then
+        return fail("GA_LAUNCH_HANDOFF_INVALID", "Character-creation bridge lease does not match the Arena launch token")
+    end
+    return gamma_arena_result.ok({ route = "bridge" })
+end
+
 function Store:consume_launch(config, options)
     local values_result = self:read_all(config, launch_keys)
     if not values_result.ok then return values_result end
@@ -591,11 +609,10 @@ function Store:consume_launch(config, options)
     if not now.ok then return self:reject_launch(config, values.launch_token, now) end
     local parsed = parse_launch_token_impl(values.launch_token, now.value)
     if not parsed.ok then return self:reject_launch(config, values.launch_token, parsed) end
-    if self.volatile_launch_permits[values.launch_token] ~= config then
-        return self:reject_launch(config, values.launch_token, fail("GA_LAUNCH_TOKEN_NOT_VOLATILE", "Launch token was not issued by this SessionStore instance"))
-    end
     local request = validate_persisted_launch_request(values)
     if not request.ok then return self:reject_launch(config, values.launch_token, request) end
+    local handoff = self:validate_launch_handoff(config, values.launch_token)
+    if not handoff.ok then return self:reject_launch(config, values.launch_token, handoff) end
 
     local restored = self:restore_character_creation(config)
     if not restored.ok then return restored end

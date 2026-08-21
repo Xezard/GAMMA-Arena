@@ -353,7 +353,58 @@ local function launch_token_is_volatile_ttl_bound_and_one_shot()
     })
     local stale_result = gamma_arena_session_store.consume_launch(stale, { clock = function() return 1001 end })
     gamma_arena_test_assert.is_false(stale_result.ok, "persisted prior-process token rejects")
-    gamma_arena_test_assert.equals(stale_result.error.code, "GA_LAUNCH_TOKEN_NOT_VOLATILE", "volatile permit code")
+    gamma_arena_test_assert.equals(stale_result.error.code, "GA_LAUNCH_HANDOFF_REQUIRED", "cross-VM launch requires a bridge lease")
+end
+
+local function launch_survives_vm_reload_with_matching_bridge_lease()
+    local backend = fake_backend()
+    local first_config = fake_config(nil, backend)
+    local first_store = gamma_arena_session_store.new_store()
+    local issued = first_store:issue_launch(first_config, valid_request(42), {
+        clock = function() return 1000 end,
+        nonce = function() return "cross_vm" end
+    })
+    gamma_arena_test_assert.is_true(issued.ok, "cross-VM launch issues")
+    gamma_arena_test_assert.is_true(first_store:write_character_creation(first_config).ok, "cross-VM bridge persists")
+
+    local second_config = fake_config(nil, backend)
+    local second_store = gamma_arena_session_store.new_store()
+    local consumed = second_store:consume_launch(second_config, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_true(consumed.ok, "matching bridge lease survives VM reload")
+    gamma_arena_test_assert.equals(consumed.value.session_seed, 42, "cross-VM request remains exact")
+    assert_keys_absent(second_config, launch_keys, "cross-VM launch consumes once")
+    gamma_arena_test_assert.equals(second_config.data.bridge_pending, nil, "cross-VM bridge lease clears")
+end
+
+local function launch_handoff_rejects_mismatched_or_expired_lease()
+    local mismatch_backend = fake_backend()
+    local mismatch_config = fake_config(nil, mismatch_backend)
+    local mismatch_issuer = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(mismatch_issuer:issue_launch(mismatch_config, valid_request(51), {
+        clock = function() return 1000 end,
+        nonce = function() return "mismatch" end
+    }).ok, "mismatch launch issues")
+    gamma_arena_test_assert.is_true(mismatch_issuer:write_character_creation(mismatch_config).ok, "mismatch bridge persists")
+    mismatch_config:corrupt("gamma_arena", "bridge_launch_token", "ga1:1000:other")
+    local mismatch = gamma_arena_session_store.new_store():consume_launch(fake_config(nil, mismatch_backend), {
+        clock = function() return 1001 end
+    })
+    gamma_arena_test_assert.is_false(mismatch.ok, "mismatched bridge token rejects")
+    gamma_arena_test_assert.equals(mismatch.error.code, "GA_LAUNCH_HANDOFF_INVALID", "mismatched bridge token has stable code")
+
+    local expired_backend = fake_backend()
+    local expired_config = fake_config(nil, expired_backend)
+    local expired_issuer = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(expired_issuer:issue_launch(expired_config, valid_request(52), {
+        clock = function() return 1000 end,
+        nonce = function() return "expired" end
+    }).ok, "expired launch issues")
+    gamma_arena_test_assert.is_true(expired_issuer:write_character_creation(expired_config).ok, "expired bridge persists")
+    local expired = gamma_arena_session_store.new_store():consume_launch(fake_config(nil, expired_backend), {
+        clock = function() return 1601 end
+    })
+    gamma_arena_test_assert.is_false(expired.ok, "expired cross-VM token rejects")
+    gamma_arena_test_assert.equals(expired.error.code, "GA_LAUNCH_TOKEN_EXPIRED", "expired cross-VM token preserves TTL code")
 end
 
 local function stale_launch_is_recovered_by_new_store()
@@ -1231,6 +1282,8 @@ local cases = {
     { name = "random_seed_injection", fn = random_seed_uses_injected_generator },
     { name = "durable_preferences", fn = durable_preferences_are_exact },
     { name = "launch_token_one_shot", fn = launch_token_is_volatile_ttl_bound_and_one_shot },
+    { name = "launch_cross_vm_handoff", fn = launch_survives_vm_reload_with_matching_bridge_lease },
+    { name = "launch_cross_vm_handoff_rejects_invalid", fn = launch_handoff_rejects_mismatched_or_expired_lease },
     { name = "stale_launch_recovery", fn = stale_launch_is_recovered_by_new_store },
     { name = "same_store_corrupt_launch", fn = same_store_corrupt_launch_is_replaced },
     { name = "resume_intent_one_shot", fn = resume_intent_requires_matching_nonce_and_is_one_shot },
