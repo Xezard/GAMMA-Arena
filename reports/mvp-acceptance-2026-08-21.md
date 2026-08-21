@@ -2,10 +2,10 @@
 
 - Evidence label: `2026-08-21`
 - Repository: `D:\Projects\gamma-arena`
-- Reviewed commit before release metadata: `60ea68475db509bb92236b05582fec57c9197076`
+- Reviewed commit before release metadata: `6facf58f995692c544ea1dcfcd93d716425656d9`
 - Release ZIP: `dist/Gamma-Arena-v0.1.0-MO2.zip`
-- Release SHA-256: `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa`
-- Checksum line: `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa  Gamma-Arena-v0.1.0-MO2.zip`
+- Release SHA-256: `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084`
+- Checksum line: `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084  Gamma-Arena-v0.1.0-MO2.zip`
 - Overall status: **DONE_WITH_CONCERNS**
 - Design-spec Definition of Done: **NOT MET**
 
@@ -25,15 +25,24 @@ Status meanings:
 
 | Command | Exit | Key output / result |
 | --- | ---: | --- |
-| `git status --short` | 0 | Initial state contained only user-owned untracked `gamma-arena-plan.md`; it was not touched or staged. |
+| `git status --short` | 0 | Before release-report edits, the committed source/test tree was clean apart from user-owned untracked `gamma-arena-plan.md`; it was not touched or staged. |
 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-GammaArena.ps1` | 0 | `PASS: static project checks passed`; `PASS: golden reference oracle matches fixture`; informational direct-file-symlink fixture unavailability remained statically covered. |
 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\smoke\Test-Regression.ps1` | 0 | `PASS: golden reference oracle matches fixture`; `PASS: tool regression smoke checks passed`. |
-| First final `Build-GammaArena.ps1 -Configuration Release` | 0 | Static/oracle PASS; built ZIP; SHA-256 `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa`. |
-| Second final `Build-GammaArena.ps1 -Configuration Release` | 0 | Static/oracle PASS; built ZIP; identical SHA-256 `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa`. |
+| First final `Build-GammaArena.ps1 -Configuration Release` | 0 | Static/oracle PASS; built ZIP; SHA-256 `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084`. |
+| Second final `Build-GammaArena.ps1 -Configuration Release` | 0 | Static/oracle PASS; built ZIP; identical SHA-256 `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084`. |
 | Final archive/manifest verifier | 0 | 35 safe ordinal unique fixed-date entries; MO2-ready root; 33/33 manifest file records and hashes match; exact key order/version values/encoding verified; 0 Dev entries; 0 forbidden overrides. |
 | Checksum generation and verification | 0 | ASCII sidecar names the ZIP and matches its exact bytes; ZIP was not changed. |
 
-An earlier pair of clean builds before the tracked changelog update also matched at `0ce4f9978c5cd1b49ac1905907e547d201a301c593c0e7c18bb97f122d1165a0`. That value is intentionally not the release hash because `CHANGELOG.md` is packaged. The two post-metadata builds above are authoritative.
+## Final-review defect closure
+
+The four final-review findings are closed by commit `6facf58f995692c544ea1dcfcd93d716425656d9` with repository-local behavioural coverage:
+
+- The launch bridge now persists an exact durable lease before mutating all 21 `character_creation` keys and restores value/presence exactly through success, false/throwing/missing `StartGame`, rejection, expiration, stale issue cleanup, migrations, and injected backend faults. Fresh-store recovery and idempotent no-lease behavior are covered.
+- Activation now reconciles migrations before inspecting intents. Upgrade, rollback, future-schema, pending-layout, and migration-failure cases are fail-closed through common cleanup.
+- NPC owner-tag read failures now propagate through the real callback router into one deferred fatal transition and cleanup; only a successful ownership mismatch remains benign.
+- Victory and defeat compute the next uint32 fight index before observable mutation. `0xFFFFFFFE` advances once to `0xFFFFFFFF`; exhaustion returns stable `GA_FIGHT_INDEX_EXHAUSTED` without changing session, checkpoint, actor, or result-latch state.
+
+These are `PASS_STATIC`/synthetic-runtime results only. They do not change any installed-profile or in-game row from `DEFERRED_RUNTIME_VERIFY`.
 
 ## Task 11 acceptance matrix
 
@@ -41,19 +50,19 @@ Every row records the authoritative final build hash, even where runtime verific
 
 | Scenario | Status | Evidence / missing evidence | Build SHA-256 |
 | --- | --- | --- | --- |
-| Main-menu integration | DEFERRED_RUNTIME_VERIFY | Static DXML adapter and forbidden-override checks support one namespaced entry, but one live button and unaffected New Game/MCM were not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Random seed | DEFERRED_RUNTIME_VERIFY | Static uint32 validation exists; a displayed random seed and successful real session start were not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Manual seed | PASS_STATIC | Fresh golden reference oracle proves stable FightSpec v1 encoding for fixed seed/difficulty/index/version inputs. This does not prove engine application. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Four difficulties | PASS_STATIC | Static project validation plus the golden oracle cover all four versioned difficulty manifests and configured generator envelopes. No live spawn budget was observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Human-only rule | DEFERRED_RUNTIME_VERIFY | Source/catalog scan found no mutant path and static validators reject non-human profiles, but the required pure in-game 100-fight run was not executed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Full reroll | DEFERRED_RUNTIME_VERIFY | Fake-port contracts regenerate actor/opponent specs; real consecutive fights and inventories were not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Victory next | DEFERRED_RUNTIME_VERIFY | Fake-port orchestration covers cleanup/heal/index increment/new spec without load; live callback/effect order was not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Defeat screen | DEFERRED_RUNTIME_VERIFY | CP1251 source decoding confirms the exact text `Вы погибли` and both required localization labels, but the actual screen/buttons were not displayed in game. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Defeat next | DEFERRED_RUNTIME_VERIFY | Fake-port contracts cover hidden checkpoint intent/index progression and no lost-spec replay; real save/load callback order was not exercised. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Main-menu exit | DEFERRED_RUNTIME_VERIFY | Exact cleanup is fail-closed in fake ports; real registry/intent/checkpoint absence after disconnect was not inspected. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Campaign isolation | DEFERRED_RUNTIME_VERIFY | No Arena source writes directly to Anomaly, but existing save hashes and stock death behavior require a real campaign and were not tested. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Update test | DEFERRED_RUNTIME_VERIFY | v0/v1 fixtures and migration/fake-store contracts are present and statically checked; the complete Lua suite and a real side-by-side update were not run. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| Conflict check | DEFERRED_RUNTIME_VERIFY | PASS_PACKAGE supporting result: no forbidden archive override. The exact live overlap/provider fingerprint was not produced or reviewed because the installed profile was out of scope. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
+| Main-menu integration | DEFERRED_RUNTIME_VERIFY | Static DXML adapter and forbidden-override checks support one namespaced entry, but one live button and unaffected New Game/MCM were not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Random seed | DEFERRED_RUNTIME_VERIFY | Static uint32 validation exists; a displayed random seed and successful real session start were not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Manual seed | PASS_STATIC | Fresh golden reference oracle proves stable FightSpec v1 encoding for fixed seed/difficulty/index/version inputs. This does not prove engine application. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Four difficulties | PASS_STATIC | Static project validation plus the golden oracle cover all four versioned difficulty manifests and configured generator envelopes. No live spawn budget was observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Human-only rule | DEFERRED_RUNTIME_VERIFY | Source/catalog scan found no mutant path and static validators reject non-human profiles, but the required pure in-game 100-fight run was not executed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Full reroll | DEFERRED_RUNTIME_VERIFY | Fake-port contracts regenerate actor/opponent specs; real consecutive fights and inventories were not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Victory next | DEFERRED_RUNTIME_VERIFY | Fake-port orchestration covers cleanup/heal/index increment/new spec without load; live callback/effect order was not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Defeat screen | DEFERRED_RUNTIME_VERIFY | CP1251 source decoding confirms the exact text `Вы погибли` and both required localization labels, but the actual screen/buttons were not displayed in game. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Defeat next | DEFERRED_RUNTIME_VERIFY | Fake-port contracts cover hidden checkpoint intent/index progression and no lost-spec replay; real save/load callback order was not exercised. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Main-menu exit | DEFERRED_RUNTIME_VERIFY | Exact cleanup is fail-closed in fake ports; real registry/intent/checkpoint absence after disconnect was not inspected. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Campaign isolation | DEFERRED_RUNTIME_VERIFY | No Arena source writes directly to Anomaly, but existing save hashes and stock death behavior require a real campaign and were not tested. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Update test | DEFERRED_RUNTIME_VERIFY | v0/v1 fixtures and migration/fake-store contracts are present and statically checked; the complete Lua suite and a real side-by-side update were not run. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| Conflict check | DEFERRED_RUNTIME_VERIFY | PASS_PACKAGE supporting result: no forbidden archive override. The exact live overlap/provider fingerprint was not produced or reviewed because the installed profile was out of scope. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
 
 Task 11 matrix accounting: **2 PASS_STATIC, 0 complete installed-runtime PASS, 11 DEFERRED_RUNTIME_VERIFY**.
 
@@ -61,20 +70,20 @@ Task 11 matrix accounting: **2 PASS_STATIC, 0 complete installed-runtime PASS, 1
 
 | # | Criterion | Status | Evidence / missing evidence | Build SHA-256 |
 | ---: | --- | --- | --- | --- |
-| 1 | Separate working `ARENA` button in the main menu | DEFERRED_RUNTIME_VERIFY | Namespaced DXML integration is statically checked; working live menu integration was not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 2 | Launch screen has difficulty, random/manual seed, and `START` | DEFERRED_RUNTIME_VERIFY | XML/localization/controllers are packaged; real rendering and interaction were not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 3 | Isolated temporary session on Rostok | DEFERRED_RUNTIME_VERIFY | Fake-port session contracts exist; no engine session was created. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 4 | Sequential fights generate only humans and new equipment | DEFERRED_RUNTIME_VERIFY | Human-only catalogs/full-reroll contracts are static support; no live sequence was run. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 5 | Same inputs/data versions produce same `FightSpec` | PASS_STATIC | Fresh independent PowerShell golden oracle matched the checked-in FightSpec v1 fixture; Release build reran it twice. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 6 | Victory is determined only by owned `FightRegistry` | DEFERRED_RUNTIME_VERIFY | Registry ownership contracts are statically/fake-port checked; live death callbacks and foreign NPCs were not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 7 | Death shows exact `Вы погибли` and both required buttons | DEFERRED_RUNTIME_VERIFY | Exact Russian source text was decoded and verified without copying console mojibake; real UI display was not observed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 8 | Death-next loads clean checkpoint and creates a new fight | DEFERRED_RUNTIME_VERIFY | Fake filesystem/orchestrator contracts support the flow; real checkpoint/save callback order was not run. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 9 | At least 20 fights leave no stale Arena entities/items | DEFERRED_RUNTIME_VERIFY | Synthetic 100-fight contract exists but was not executed in the game; no real soak evidence exists. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 10 | Ordinary GAMMA start/save/load never activates Arena | DEFERRED_RUNTIME_VERIFY | Intent gating is statically/fake-port checked; no real campaign was launched or hashed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 11 | Preparation failures leave no partial fight and preserve menu | DEFERRED_RUNTIME_VERIFY | Fail-closed rollback contracts exist; real missing catalog/patrol/spawn/checkpoint/intent failures were not injected. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 12 | ZIP installs via MO2 and writes nothing directly to `D:\Anomaly` | DEFERRED_RUNTIME_VERIFY | PASS_PACKAGE supporting result: MO2-ready root and no absolute paths/direct installer. Actual MO2 installation was not performed. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 13 | Side-by-side MO2 update preserves compatible Arena settings and ordinary saves | DEFERRED_RUNTIME_VERIFY | Migration/static contracts exist and active fights are intentionally incompatible across upgrades; real update/save hashes were not tested. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
-| 14 | Unit, property, static, and mandatory integration checks all pass | DEFERRED_RUNTIME_VERIFY | Static/oracle/smoke pass; mandatory installed integration checks were not run. | `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa` |
+| 1 | Separate working `ARENA` button in the main menu | DEFERRED_RUNTIME_VERIFY | Namespaced DXML integration is statically checked; working live menu integration was not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 2 | Launch screen has difficulty, random/manual seed, and `START` | DEFERRED_RUNTIME_VERIFY | XML/localization/controllers are packaged; real rendering and interaction were not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 3 | Isolated temporary session on Rostok | DEFERRED_RUNTIME_VERIFY | Fake-port session contracts exist; no engine session was created. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 4 | Sequential fights generate only humans and new equipment | DEFERRED_RUNTIME_VERIFY | Human-only catalogs/full-reroll contracts are static support; no live sequence was run. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 5 | Same inputs/data versions produce same `FightSpec` | PASS_STATIC | Fresh independent PowerShell golden oracle matched the checked-in FightSpec v1 fixture; Release build reran it twice. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 6 | Victory is determined only by owned `FightRegistry` | DEFERRED_RUNTIME_VERIFY | Registry ownership contracts are statically/fake-port checked; live death callbacks and foreign NPCs were not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 7 | Death shows exact `Вы погибли` and both required buttons | DEFERRED_RUNTIME_VERIFY | Exact Russian source text was decoded and verified without copying console mojibake; real UI display was not observed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 8 | Death-next loads clean checkpoint and creates a new fight | DEFERRED_RUNTIME_VERIFY | Fake filesystem/orchestrator contracts support the flow; real checkpoint/save callback order was not run. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 9 | At least 20 fights leave no stale Arena entities/items | DEFERRED_RUNTIME_VERIFY | Synthetic 100-fight contract exists but was not executed in the game; no real soak evidence exists. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 10 | Ordinary GAMMA start/save/load never activates Arena | DEFERRED_RUNTIME_VERIFY | Intent gating is statically/fake-port checked; no real campaign was launched or hashed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 11 | Preparation failures leave no partial fight and preserve menu | DEFERRED_RUNTIME_VERIFY | Fail-closed rollback contracts exist; real missing catalog/patrol/spawn/checkpoint/intent failures were not injected. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 12 | ZIP installs via MO2 and writes nothing directly to `D:\Anomaly` | DEFERRED_RUNTIME_VERIFY | PASS_PACKAGE supporting result: MO2-ready root and no absolute paths/direct installer. Actual MO2 installation was not performed. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 13 | Side-by-side MO2 update preserves compatible Arena settings and ordinary saves | DEFERRED_RUNTIME_VERIFY | Migration/static contracts exist and active fights are intentionally incompatible across upgrades; real update/save hashes were not tested. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
+| 14 | Unit, property, static, and mandatory integration checks all pass | DEFERRED_RUNTIME_VERIFY | Static/oracle/smoke pass; mandatory installed integration checks were not run. | `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084` |
 
 Design-spec criteria accounting: **1 PASS_STATIC, 13 DEFERRED_RUNTIME_VERIFY**. Because acceptance requires all 14 simultaneously, the MVP is not accepted.
 

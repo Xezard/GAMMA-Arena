@@ -1,8 +1,9 @@
 # Gamma Arena 0.1.0 compatibility evidence
 
 - Evidence label: `2026-08-21`
+- Final-review source commit: `6facf58f995692c544ea1dcfcd93d716425656d9`
 - Release ZIP: `dist/Gamma-Arena-v0.1.0-MO2.zip`
-- Release SHA-256: `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa`
+- Release SHA-256: `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084`
 - Overall installed-profile status: **DEFERRED_RUNTIME_VERIFY**
 
 ## Prominent limitation
@@ -26,13 +27,14 @@ Retain its standard output as the real compatibility fingerprint. It must includ
 | Check | Status | Evidence |
 | --- | --- | --- |
 | Compatibility reporter safety and determinism | PASS_STATIC | `tools/Test-GammaArena.ps1` exited 0. Its fixture checks require deterministic identical output, no writes to fake Anomaly/MO2 roots, later-enabled provider precedence, exact overlap reporting, rejection of missing providers, invalid names, traversal, and unsafe reparse points. |
+| Final-review recovery boundaries | PASS_STATIC | Fresh Dev-runtime and static checks cover exact durable character-creation restoration across success, rejection, stale/expired intents, migration, and injected read/write/save faults; migration-before-intent inspection; fatal owner-tag read propagation with benign successful mismatch; and uint32 fight-index exhaustion before latch, checkpoint, actor, or session mutation. |
 | Real active-profile fingerprint | DEFERRED_RUNTIME_VERIFY | No real `New-CompatibilityReport.ps1` invocation was made. No real profile/provider/modlist/executable hash was collected. |
 | Release path overlap with active profile | DEFERRED_RUNTIME_VERIFY | No installed profile was read. Synthetic same-path warning evidence cannot establish the live overlap set. |
 | Forbidden full overrides in release | PASS_PACKAGE | Final archive inspection found none of `ui_main_menu.script`, `ui_mm_faction_select.script`, `axr_main.script`, `bind_stalker_ext.script`, `system.ltx`, or the base `npc_loadouts.ltx` override. |
 | MO2-ready archive root | PASS_PACKAGE | Root contains `CHANGELOG.md`, `README.md`, `gamma-arena-manifest.json`, and `gamedata/`; all runtime content is below `gamedata/`. |
 | Release/manifest integrity | PASS_PACKAGE | 35 ZIP entries are ordinal, unique, fixed-date, and safe-path. All 33 non-manifest files are represented once in ordinal manifest order and every SHA-256 matches packaged bytes. Manifest keys, version values, UTF-8/no-BOM/LF rules, and checksum sidecar were verified. |
 | Dev material exclusion | PASS_PACKAGE | Archive scan found 0 Dev, test, tool, or `gamma_arena_test` entries. |
-| Byte reproducibility | PASS_PACKAGE | Two final Release builds independently produced `5a69aab748752b67a503e31f75debc0dae98235afae05037025bc67835a9f9aa`. |
+| Byte reproducibility | PASS_PACKAGE | Two final Release builds independently produced `d325b91883fcdc9ed148d24945a9e3d7dd2e6f1bcbf6e0d0e7eefdf126b9d084`. |
 | Installed menu/provider coexistence | DEFERRED_RUNTIME_VERIFY | DXML/DLTX adapters and absence of forbidden overrides are static support only; live MCM/menu coexistence and callback order were not exercised. |
 | Update against installed add-on | DEFERRED_RUNTIME_VERIFY | Static migration contracts say durable compatible preferences migrate while transient intent is cleared on version change. No side-by-side MO2 update or real save was exercised. |
 
