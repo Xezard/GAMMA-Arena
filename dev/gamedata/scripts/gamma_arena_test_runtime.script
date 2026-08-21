@@ -2089,6 +2089,34 @@ local function runtime_checkpoint_rejects_unsafe_resolved_paths()
     gamma_arena_test_assert.equals(result.error.code, "GA_CHECKPOINT_UNSAFE_PATH", "unsafe path code")
 end
 
+local function runtime_engine_checkpoint_port_canonicalizes_xray_alias()
+    local engine_fs = {}
+    function engine_fs:update_path(alias, name)
+        gamma_arena_test_assert.equals(alias, "$game_saves$", "engine port resolves only through the game-saves alias")
+        return "D:\\Anomaly\\bin\\..\\appdata\\savedgames\\" .. name
+    end
+    local fs = gamma_arena_checkpoint_adapter.engine_fs_port(engine_fs)
+    local adapter = gamma_arena_checkpoint_adapter.new({ fs = fs, clock = function() return 0 end })
+    local result = adapter:paths()
+    gamma_arena_test_assert.is_true(result.ok, "trusted X-Ray alias path is canonicalized at the engine boundary")
+    gamma_arena_test_assert.equals(result.value.visible.scop, "D:\\Anomaly\\appdata\\savedgames\\_gamma_arena_checkpoint.scop", "canonical path preserves the fixed checkpoint name")
+
+    local function assert_engine_path_rejected(prefix, label)
+        local rejected_fs = {}
+        function rejected_fs:update_path(_, name) return prefix .. name end
+        local rejected = gamma_arena_checkpoint_adapter.new({
+            fs = gamma_arena_checkpoint_adapter.engine_fs_port(rejected_fs),
+            clock = function() return 0 end
+        }):paths()
+        gamma_arena_test_assert.is_false(rejected.ok, label .. " must fail at the trusted engine boundary")
+        gamma_arena_test_assert.equals(rejected.error.code, "GA_CHECKPOINT_PATH_RESOLVE_FAILED", label .. " path code")
+    end
+    assert_engine_path_rejected([[\\.\pipe\arena\]], "Win32 device namespace")
+    assert_engine_path_rejected([[\\?\C:\ArenaSaves\]], "Win32 extended device namespace")
+    assert_engine_path_rejected([[C:\..\]], "drive root escape")
+    assert_engine_path_rejected([[\\server\share\..\]], "UNC share root escape")
+end
+
 local function runtime_checkpoint_command_throw_fails_safely()
     local env = fake_checkpoint_env()
     env.command_throw = true
@@ -4481,6 +4509,7 @@ local cases = {
     ,{ name = "runtime_checkpoint_two_sessions_leave_no_stale_paths", fn = runtime_checkpoint_two_sessions_leave_no_stale_paths }
     ,{ name = "runtime_checkpoint_six_paths_are_fixed_and_safe", fn = runtime_checkpoint_six_paths_are_fixed_and_safe }
     ,{ name = "runtime_checkpoint_rejects_unsafe_resolved_paths", fn = runtime_checkpoint_rejects_unsafe_resolved_paths }
+    ,{ name = "runtime_engine_checkpoint_port_canonicalizes_xray_alias", fn = runtime_engine_checkpoint_port_canonicalizes_xray_alias }
     ,{ name = "runtime_checkpoint_command_throw_fails_safely", fn = runtime_checkpoint_command_throw_fails_safely }
     ,{ name = "runtime_checkpoint_failed_intent_never_unhides", fn = runtime_checkpoint_failed_intent_never_unhides }
     ,{ name = "runtime_checkpoint_ready_gates_generation", fn = runtime_checkpoint_ready_gates_generation }

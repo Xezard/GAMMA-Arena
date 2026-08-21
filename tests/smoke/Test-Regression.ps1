@@ -266,6 +266,7 @@ local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficul
 local function remove(config, section, key) config:remove_line(section, key) end
 local function validate_expected_session() end
 local function validate_persisted_launch_request() end
+local function normalize_present_empty(value) if value == nil then value = "" end return value end
 gamma_arena_config_tx.run()
 function new_store() end
 function parse_manual_seed() end
@@ -391,7 +392,7 @@ function new() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_checkpoint_adapter.script' @'
 local CHECKPOINT_NAME = "_gamma_arena_checkpoint"
-local markers = "WAITING_STABLE HIDING READY UNHIDING LOADING REHIDING CLEANING ERROR .scop .scoc .dds .gamma_arena_hidden GA_CHECKPOINT_TIMEOUT GA_CHECKPOINT_UNSAFE_PATH issue_resume consume_resume clear_resume_if_matches pending_or_timeout elapsed_ms engine_fs_port update_path file_rename file_delete GA_CHECKPOINT_LOAD_TIMEOUT last_mutation_cause mutation_attempt begin_resume_recovery GA_CHECKPOINT_RECOVERY_MISSING GA_CHECKPOINT_RECOVERY_INCONSISTENT GA_CHECKPOINT_RECOVERY_MISMATCH GA_CHECKPOINT_RECOVERY_TIMEOUT prepared_resume late_dds_started GA_CHECKPOINT_DDS_TIMEOUT pending_late_dds_or_timeout"
+local markers = "WAITING_STABLE HIDING READY UNHIDING LOADING REHIDING CLEANING ERROR .scop .scoc .dds .gamma_arena_hidden GA_CHECKPOINT_TIMEOUT GA_CHECKPOINT_UNSAFE_PATH issue_resume consume_resume clear_resume_if_matches pending_or_timeout elapsed_ms engine_fs_port canonicalize_engine_path engine_device_namespace update_path file_rename file_delete GA_CHECKPOINT_LOAD_TIMEOUT last_mutation_cause mutation_attempt begin_resume_recovery GA_CHECKPOINT_RECOVERY_MISSING GA_CHECKPOINT_RECOVERY_INCONSISTENT GA_CHECKPOINT_RECOVERY_MISMATCH GA_CHECKPOINT_RECOVERY_TIMEOUT prepared_resume late_dds_started GA_CHECKPOINT_DDS_TIMEOUT pending_late_dds_or_timeout"
 local mode = "rb"
 local save_command = "save " .. CHECKPOINT_NAME
 local load_command = "load " .. CHECKPOINT_NAME
@@ -500,6 +501,7 @@ local function dxml_registration_failures_are_structured() end
 local function dxml_places_arena_after_new_game() end
 local function dxml_placement_failures_are_structured() end
 local function character_creation_bridge_restores_exactly_from_fresh_store() end
+local function character_creation_bridge_accepts_engine_nil_for_present_empty_values() end
 local function ordinary_character_creation_without_lease_is_untouched() end
 local function character_creation_bridge_restores_on_every_launch_terminal_route() end
 local function character_creation_bridge_faults_fail_closed() end

@@ -30,6 +30,13 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitign
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 
+$AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
+    $_.FullName -notmatch '[\\/](dist|build)[\\/]'
+})
+foreach ($Script in $AllLuaScripts) {
+    Assert-True (-not (Test-TextPattern $Script.FullName '(?m)\b[A-Za-z_][A-Za-z0-9_]*\.[0-9][A-Za-z0-9_.]*\s*=')) "Invalid bare Lua table key containing a dot: $(Get-RelativeRepoPath $Script.FullName)"
+}
+
 $ForbiddenOverrides = @(
     'gamedata\scripts\ui_main_menu.script',
     'gamedata\scripts\ui_mm_faction_select.script',
@@ -236,6 +243,7 @@ if (Test-Path -LiteralPath $StorePath) {
     Assert-True ($StoreContent -match 'GA_SESSION_GENERATOR_VERSION_INVALID') 'Resume consumption must reject incompatible generator versions'
     Assert-True ($StoreContent -match 'gamma_arena_config_tx\.run') 'Session writes must use the crash-safe config transaction adapter'
     Assert-True ($StoreContent -match 'gamma_arena_boolean_returns') 'Session reads must distinguish explicit false-return test adapters from real ini_file_ex nil-success methods'
+    Assert-True ($StoreContent -match 'if\s+value\s*==\s*nil\s+then\s+value\s*=\s*""\s+end') 'Present empty ini_file_ex values must normalize engine nil to an empty string'
     Assert-True ($StoreContent -match 'GA_RESUME_ALREADY_PENDING') 'Session store must not overwrite a pending resume intent'
     Assert-True (([regex]::Matches($StoreContent, 'GA_INTENT_CONFLICT')).Count -ge 4) 'Launch/resume issuance and consumption must reject intent conflicts'
     Assert-True ($ConfigTxContent -match 'remove_line') 'Transient and optional character-creation keys must use transactional remove_line operations'
@@ -284,6 +292,7 @@ if (Test-Path -LiteralPath $DxmlPath) {
 $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script'
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
+    Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
     foreach ($Marker in @('stale_launch_is_recovered_by_new_store','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
@@ -547,6 +556,8 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
 $Task6CheckpointPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_checkpoint_adapter.script'
 if (Test-Path -LiteralPath $Task6CheckpointPath) {
     $Task6CheckpointContent = Get-Content -LiteralPath $Task6CheckpointPath -Raw
+    Assert-True ($Task6CheckpointContent -match 'canonicalize_engine_path') 'Checkpoint engine port must canonicalize trusted update_path results before core validation'
+    Assert-True ($Task6CheckpointContent -match 'engine_device_namespace') 'Checkpoint engine port must reject Win32 device namespaces before UNC parsing'
     foreach ($Marker in @('WAITING_STABLE','HIDING','READY','UNHIDING','LOADING','REHIDING','CLEANING','_gamma_arena_checkpoint','.scop','.scoc','.dds','.gamma_arena_hidden','GA_CHECKPOINT_TIMEOUT','GA_CHECKPOINT_UNSAFE_PATH','issue_resume','consume_resume','clear_resume_if_matches','pending_or_timeout','elapsed_ms','engine_fs_port','update_path','file_rename','file_delete','"rb"','save " .. CHECKPOINT_NAME','load " .. CHECKPOINT_NAME')) {
         Assert-True ($Task6CheckpointContent -match [regex]::Escape($Marker)) "Checkpoint adapter must cover $Marker"
     }

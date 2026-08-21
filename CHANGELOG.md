@@ -10,6 +10,9 @@ All notable changes to Gamma Arena are documented in this file.
 - Defined compatibility manifest v1 with independent add-on, state, session, FightSpec, generator, catalog, layout, and manifest versions.
 - Defined forward-only durable preference migration and intentional transient launch/resume invalidation across recorded add-on version changes.
 - Made the character-creation handoff crash-safe with a durable exact undo lease, fresh-process recovery, and restoration on every launch terminal route.
+- Normalized GAMMA's engine-level `nil` representation of present empty INI values so durable character-creation recovery can complete.
+- Canonicalized trusted X-Ray `$game_saves$` paths at the engine adapter boundary while retaining strict traversal rejection in the core checkpoint adapter.
+- Fixed dotted ammunition keys in the in-game Dev generator fixture so the Lua test namespace can load.
 - Reconciled add-on settings before every first activation intent inspection, including direct checkpoint loads and structured migration failure routing.
 - Propagated registered NPC owner-tag read failures through deferred common fatal cleanup instead of treating them as benign deaths.
 - Rejected uint32 fight-index exhaustion before victory or defeat continuation can mutate session/checkpoint state.
