@@ -114,7 +114,7 @@ foreach ($File in $ReleaseFiles) {
 
 $Task2ScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_assert.script'; Namespace = 'gamma_arena_test_assert'; Required = @('(?m)^function\s+equals\s*\(', '(?m)^function\s+is_true\s*\(', '(?m)^function\s+is_false\s*\(') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_runner.script'; Namespace = 'gamma_arena_test_runner'; Required = @('(?m)^function\s+run_case\s*\(', '(?m)^function\s+on_game_start\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_runner.script'; Namespace = 'gamma_arena_test_runner'; Required = @('(?m)^function\s+run_case\s*\(', '(?m)^function\s+run_all\s*\(', '(?m)^function\s+on_game_start\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_domain.script'; Namespace = 'gamma_arena_test_domain'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_result.script'; Namespace = 'gamma_arena_result'; Required = @('(?m)^function\s+ok\s*\(', '(?m)^function\s+err\s*\(', '(?m)^function\s+is_ok\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_log.script'; Namespace = 'gamma_arena_log'; Required = @('(?m)^function\s+info\s*\(', '(?m)^function\s+warn\s*\(', '(?m)^function\s+error\s*\(') },
@@ -827,6 +827,15 @@ $Task2RngPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rng.script
 if (Test-Path -LiteralPath $Task2RunnerPath) {
     $Task2RunnerContent = Get-Content -LiteralPath $Task2RunnerPath -Raw
     Assert-True ($Task2RunnerContent -match '(?s)pcall\s*\(\s*function\s*\(\s*\)\s*return\s+gamma_arena_test_domain\.run\s*\(\s*run_case\s*\)\s*end\s*\)') 'Dev test runner must resolve and execute the domain suite inside pcall'
+    Assert-True ($Task2RunnerContent -match 'dev_test_autorun') 'Dev suite autorun must be controlled by an explicit setting'
+    Assert-True ($Task2RunnerContent -match 'r_value\s*\(\s*"gamma_arena"\s*,\s*"dev_test_autorun"\s*,\s*1\s*,\s*false\s*\)') 'Dev suite autorun must default to false'
+    Assert-True ($Task2RunnerContent -match 'if\s+not\s+autorun_enabled\(\)\s+then\s+return\s+end') 'Normal interactive launches must skip the synthetic Dev suite'
+}
+$ReadmePath = Join-Path $RepoRoot 'README.md'
+if (Test-Path -LiteralPath $ReadmePath) {
+    $ReadmeContent = Get-Content -LiteralPath $ReadmePath -Raw
+    Assert-True ($ReadmeContent -match 'dev_test_autorun\s*=\s*true') 'README must document explicit in-game Dev-suite enablement'
+    Assert-True ($ReadmeContent -match 'dev_test_autorun\s*=\s*false') 'README must document the production-like default'
 }
 $Task4DomainTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script'
 if (Test-Path -LiteralPath $Task4DomainTestPath) {
