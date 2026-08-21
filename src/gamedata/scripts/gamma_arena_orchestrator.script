@@ -403,7 +403,7 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
     local cleanup_callback = callback_name == "actor_on_net_destroy" or callback_name == "on_before_level_changing"
     local inactive_cleanup_update = was_active ~= true and (callback_name == "actor_on_update" or callback_name == "actor_on_first_update")
         and (self.cleanup_required or self.pending_disconnect or self.runtime_stage == "CLEANING")
-    if was_active == true or cleanup_callback or inactive_cleanup_update then return self:enter_fatal(result, cleanup_callback) end
+    if was_active == true or self:is_active() or cleanup_callback or inactive_cleanup_update then return self:enter_fatal(result, cleanup_callback) end
     return result
 end
 
@@ -531,8 +531,6 @@ function Orchestrator:activate_once()
     if self.active then return gamma_arena_result.ok(false) end
     if self.activation_attempted then return gamma_arena_result.ok(false) end
     if not self.awaiting_activation then return gamma_arena_result.ok(false) end
-    self.activation_attempted = true
-    self.awaiting_activation = false
 
     local reconciled = safe_result_call("GA_SETTINGS_RECONCILIATION_FAILED", self.deps.reconcile, self.deps.config)
     if not reconciled.ok then return self:enter_fatal(reconciled) end
@@ -548,6 +546,8 @@ function Orchestrator:activate_once()
         if has_embedded then
             return self:enter_fatal(self.load_state_error or fail("GA_RESUME_INTENT_REQUIRED", "Arena checkpoint requires a matching ResumeIntent"))
         end
+        self.activation_attempted = true
+        self.awaiting_activation = false
         return gamma_arena_result.ok(false)
     end
     if self.load_state_error then
@@ -555,13 +555,29 @@ function Orchestrator:activate_once()
         return self:enter_fatal(load_failure)
     end
 
-    local started = self:advance(gamma_arena_state_machine.events.START)
-    if not started.ok then return self:enter_fatal(started) end
-
     if state.launch_pending then
         if self.load_state_seen or self.loaded_session ~= nil then
             return self:enter_fatal(fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch intent is valid only for a distinct new game"))
         end
+        local layout = safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout)
+        if not layout.ok then return self:enter_fatal(layout) end
+        local expected = type(layout.value) == "table" and layout.value.level or nil
+        if type(expected) ~= "string" or expected == "" then
+            return self:enter_fatal(fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no target level"))
+        end
+        local current = safe_result_call("GA_CURRENT_LEVEL_FAILED", self.deps.current_level)
+        if not current.ok then return self:enter_fatal(current) end
+        if current.value ~= expected then
+            return gamma_arena_result.ok({ route = "deferred", current_level = current.value, expected_level = expected })
+        end
+    end
+
+    self.activation_attempted = true
+    self.awaiting_activation = false
+    local started = self:advance(gamma_arena_state_machine.events.START)
+    if not started.ok then return self:enter_fatal(started) end
+
+    if state.launch_pending then
         local consumed = call_method("GA_LAUNCH_CONSUME_FAILED", self.deps.store, "consume_launch", self.deps.config, self.deps.launch_options)
         if not consumed.ok then return self:enter_fatal(consumed, true) end
         local preflight = self:run_preflight()

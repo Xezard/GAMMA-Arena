@@ -472,6 +472,7 @@ local function fake_orchestrator_deps(store)
     local deps = {
         store = store,
         config = {},
+        current_level = function() return gamma_arena_result.ok("l05_bar") end,
         reconcile = function() return gamma_arena_result.ok({ events = {} }) end,
         preflight = function() return gamma_arena_result.ok(true) end,
         identity = function() return gamma_arena_result.ok({ session_id = "ga_test_session", session_nonce = "ga_test_nonce" }) end,
@@ -484,7 +485,7 @@ local function fake_orchestrator_deps(store)
         end,
         actor = actor_adapter,
         checkpoint = checkpoint_adapter,
-        layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
+        layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
     }
     return deps
 end
@@ -514,6 +515,55 @@ local function activation_requires_game_load_boundary()
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "load generation may consume launch exactly once")
+end
+
+local function launch_defers_on_fake_start_then_activates_on_rostok()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local current = "fake_start"
+    deps.current_level = function() return gamma_arena_result.ok(current) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+
+    local deferred = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(deferred.ok, "fake_start defers safely")
+    gamma_arena_test_assert.equals(deferred.value.route, "deferred", "fake_start exposes deferred route")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 0, "fake_start cannot consume launch")
+    gamma_arena_test_assert.is_false(orchestrator.activation_attempted, "fake_start cannot latch activation")
+    gamma_arena_test_assert.is_true(orchestrator.awaiting_activation, "fake_start retains activation ownership")
+
+    current = "l05_bar"
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "target level activates")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "target level owns Arena session")
+end
+
+local function ordinary_no_intent_activation_latches_once()
+    local store = fake_store({ launch_pending = false, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "ordinary game first update is inert")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "ordinary game later update is inert")
+    gamma_arena_test_assert.equals(store.inspect_count, 1, "ordinary game inspects intents once")
+    gamma_arena_test_assert.is_true(orchestrator.activation_attempted, "ordinary game latches completed activation probe")
+    gamma_arena_test_assert.is_false(orchestrator.awaiting_activation, "ordinary game clears activation wait")
+end
+
+local function first_activation_failure_routes_fatal()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    deps.actor.normalize_for_checkpoint = function()
+        return gamma_arena_result.err("GA_TEST_FIRST_ACTIVATION", "injected first activation failure")
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local was_active = orchestrator:is_active()
+    local failed = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(failed.ok, "first activation failure remains observable")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "session became active before runtime failure")
+    local routed = orchestrator:on_callback_result_error("actor_on_first_update", failed, was_active)
+    gamma_arena_test_assert.is_false(routed.ok, "first activation failure remains a Result")
+    gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "ERROR", "newly-active callback failure enters fatal")
 end
 
 local function activation_reconciles_before_intent_inspection_once()
@@ -4440,6 +4490,9 @@ local cases = {
     { name = "runtime_preflight_normalizes_effective_bandit_community", fn = preflight_normalizes_effective_bandit_community },
     { name = "runtime_launch_consumes_before_preflight_once", fn = launch_consumes_before_preflight_once },
     { name = "runtime_activation_requires_game_load_boundary", fn = activation_requires_game_load_boundary },
+    { name = "runtime_launch_defers_on_fake_start_then_activates_on_rostok", fn = launch_defers_on_fake_start_then_activates_on_rostok },
+    { name = "runtime_ordinary_no_intent_activation_latches_once", fn = ordinary_no_intent_activation_latches_once },
+    { name = "runtime_first_activation_failure_routes_fatal", fn = first_activation_failure_routes_fatal },
     { name = "runtime_activation_reconciles_before_intent_inspection_once", fn = activation_reconciles_before_intent_inspection_once },
     { name = "runtime_activation_version_changes_clear_resume_before_checkpoint_routing", fn = activation_version_changes_clear_resume_before_checkpoint_routing },
     { name = "runtime_activation_reconciliation_failures_are_fatal_before_inspection", fn = activation_reconciliation_failures_are_fatal_before_inspection },
