@@ -95,6 +95,9 @@ local function valid_preflight_probes()
     function actor:set_actor_position() return true end
     function actor:set_actor_direction() return true end
     function actor:set_invulnerable() return true end
+    function actor:position() return positions[snapshot.layouts.rostok_arena_v1.actor_spawn_path] end
+    local arena_zone = {}
+    function arena_zone:inside() return true end
 
     local probes = {
         RegisterScriptCallback = function() end,
@@ -124,7 +127,7 @@ local function valid_preflight_probes()
             disable_input = function() return true end,
             enable_input = function() return true end
         },
-        db = { actor = actor },
+        db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
         game_object = { friend = 1, enemy = 2 },
         relation_registry = { set_goodwill = function() return true end },
         axr_main = { config = config },
@@ -238,6 +241,20 @@ local function wrong_level_skips_patrol_resolution()
     gamma_arena_test_assert.is_false(result.ok, "wrong level must fail")
     gamma_arena_test_assert.equals(result.error.context.errors[1].code, "GA_PREFLIGHT_LEVEL_INVALID", "wrong-level error")
     gamma_arena_test_assert.equals(patrol_calls, 0, "dependent patrol probes must be skipped")
+end
+
+local function preflight_requires_arena_boundary_restrictor()
+    local missing = valid_preflight_probes()
+    missing.db.zone_by_name.bar_arena_sr = nil
+    local missing_result = gamma_arena_compat.preflight(missing)
+    gamma_arena_test_assert.is_false(missing_result.ok, "missing Arena boundary restrictor fails preflight")
+    gamma_arena_test_assert.is_true(string.find(error_codes(missing_result), "GA_PREFLIGHT_BOUNDARY_MISSING", 1, true) ~= nil, "missing boundary has stable code")
+
+    local invalid = valid_preflight_probes()
+    invalid.db.zone_by_name.bar_arena_sr.inside = nil
+    local invalid_result = gamma_arena_compat.preflight(invalid)
+    gamma_arena_test_assert.is_false(invalid_result.ok, "Arena boundary without inside API fails preflight")
+    gamma_arena_test_assert.is_true(string.find(error_codes(invalid_result), "GA_PREFLIGHT_BOUNDARY_INVALID", 1, true) ~= nil, "invalid boundary has stable code")
 end
 
 local function preflight_rejects_missing_patrol()
@@ -435,6 +452,7 @@ local function fake_orchestrator_deps(store)
         begin_update = function() return gamma_arena_result.ok(true) end,
         normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        enforce_boundary = function() return gamma_arena_result.ok({ breach = false, zone = "bar_arena_sr" }) end,
         release_input = function() return gamma_arena_result.ok(true) end,
         release_logical_death_hold = function() return gamma_arena_result.ok(true) end,
         cleanup = function() return gamma_arena_result.ok(true) end
@@ -485,7 +503,7 @@ local function fake_orchestrator_deps(store)
         end,
         actor = actor_adapter,
         checkpoint = checkpoint_adapter,
-        layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
+        layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end
     }
     return deps
 end
@@ -536,6 +554,33 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "target level activates")
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
     gamma_arena_test_assert.is_true(orchestrator:is_active(), "target level owns Arena session")
+end
+
+local function launch_transition_diagnostics_are_event_based()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local current = "fake_start"
+    local events = {}
+    deps.current_level = function() return gamma_arena_result.ok(current) end
+    deps.log = { info = function(code, message, context)
+        events[#events + 1] = { code = code, message = message, context = context }
+        return gamma_arena_result.ok(true)
+    end }
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    orchestrator:actor_on_update()
+    local function count(code)
+        local value = 0
+        for _, event in ipairs(events) do if event.code == code then value = value + 1 end end
+        return value
+    end
+    gamma_arena_test_assert.equals(count("GA_LAUNCH_DEFERRED"), 1, "fake_start diagnostic must be emitted once per level")
+    current = "l05_bar"
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(count("GA_LAUNCH_HANDOFF_ACCEPTED"), 1, "target-level handoff must be observable once")
+    gamma_arena_test_assert.equals(count("GA_ACTOR_POSITIONED"), 1, "successful normalization must expose the selected patrol paths")
+    gamma_arena_test_assert.is_true(count("GA_RUNTIME_STAGE_CHANGED") >= 2, "meaningful runtime stages must be observable")
 end
 
 local function ordinary_no_intent_activation_latches_once()
@@ -1179,6 +1224,8 @@ local function fake_actor_adapter_env()
         input_acquires = 0,
         input_releases = 0,
         effect_calls = 0,
+        boundary_inside = true,
+        boundary_checks = 0,
         positions = {
             actor_spawn = fake_vector(1, 2, 3),
             actor_look = fake_vector(5, 2, 9)
@@ -1200,9 +1247,10 @@ local function fake_actor_adapter_env()
     function actor:set_radiation(value) self.radiation_value = value end
     function actor:set_bleeding(value) self.bleeding_value = value end
     function actor:set_psy_health(value) self.psy_value = value end
-    function actor:set_actor_position(value) self.position_value = value end
+    function actor:set_actor_position(value) self.position_value = value; env.boundary_inside = true end
     function actor:set_actor_direction(value) self.direction_value = value end
     function actor:set_invulnerable(value) self.invulnerable_value = value end
+    function actor:position() return self.position_value or fake_vector(0, 0, 0) end
     env.actor = actor
     function env:add_item(id, options)
         options = options or {}
@@ -1238,6 +1286,12 @@ local function fake_actor_adapter_env()
             local object = {}
             function object:point() return env.positions[path] end
             return object
+        end,
+        boundary_contains = function(candidate, zone_name)
+            env.boundary_checks = env.boundary_checks + 1
+            gamma_arena_test_assert.is_true(candidate == actor, "boundary checks only the owned actor")
+            gamma_arena_test_assert.equals(zone_name, "bar_arena_sr", "boundary uses the configured restrictor")
+            return gamma_arena_result.ok(env.boundary_inside)
         end,
         effects = { disable_effects_timer = function() env.effect_calls = env.effect_calls + 1 end },
         input = {
@@ -1327,6 +1381,20 @@ local function runtime_actor_rejects_campaign_actor()
     local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_false(result.ok, "inactive/campaign actor must never be normalized")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INACTIVE", "campaign guard code")
+end
+
+local function runtime_actor_boundary_repositions_only_after_breach()
+    local env, adapter = fake_actor_adapter_env()
+    local layout = { actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }
+    local inside = adapter:enforce_boundary(layout)
+    gamma_arena_test_assert.is_true(inside.ok and inside.value.breach == false, "inside actor remains untouched")
+    gamma_arena_test_assert.equals(env.actor.position_value, nil, "inside actor is not repositioned")
+
+    env.boundary_inside = false
+    local outside = adapter:enforce_boundary(layout)
+    gamma_arena_test_assert.is_true(outside.ok and outside.value.breach == true, "outside actor is recovered")
+    gamma_arena_test_assert.equals(env.actor.position_value.x, 1, "boundary breach returns actor to ingress")
+    gamma_arena_test_assert.equals(env.boundary_checks, 2, "boundary is checked once per explicit enforcement")
 end
 
 local function fake_checkpoint_env()
@@ -4480,6 +4548,7 @@ local cases = {
     { name = "runtime_preflight_requires_task9_death_hold_port", fn = preflight_requires_task9_death_hold_port },
     { name = "runtime_preflight_requires_task7_entity_ports_and_ammo_metadata", fn = preflight_requires_task7_entity_ports_and_ammo_metadata },
     { name = "runtime_wrong_level_skips_patrol_resolution", fn = wrong_level_skips_patrol_resolution },
+    { name = "runtime_preflight_requires_arena_boundary_restrictor", fn = preflight_requires_arena_boundary_restrictor },
     { name = "runtime_preflight_rejects_missing_patrol", fn = preflight_rejects_missing_patrol },
     { name = "runtime_preflight_rejects_invalid_patrol_resolution", fn = preflight_rejects_invalid_patrol_resolution },
     { name = "runtime_preflight_rejects_missing_catalog_section", fn = preflight_rejects_missing_catalog_section },
@@ -4491,6 +4560,7 @@ local cases = {
     { name = "runtime_launch_consumes_before_preflight_once", fn = launch_consumes_before_preflight_once },
     { name = "runtime_activation_requires_game_load_boundary", fn = activation_requires_game_load_boundary },
     { name = "runtime_launch_defers_on_fake_start_then_activates_on_rostok", fn = launch_defers_on_fake_start_then_activates_on_rostok },
+    { name = "runtime_launch_transition_diagnostics_are_event_based", fn = launch_transition_diagnostics_are_event_based },
     { name = "runtime_ordinary_no_intent_activation_latches_once", fn = ordinary_no_intent_activation_latches_once },
     { name = "runtime_first_activation_failure_routes_fatal", fn = first_activation_failure_routes_fatal },
     { name = "runtime_activation_reconciles_before_intent_inspection_once", fn = activation_reconciles_before_intent_inspection_once },
@@ -4530,6 +4600,7 @@ local cases = {
     ,{ name = "runtime_actor_victory_reset_waits_for_inventory_absence", fn = runtime_actor_victory_reset_waits_for_inventory_absence }
     ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }
     ,{ name = "runtime_actor_rejects_campaign_actor", fn = runtime_actor_rejects_campaign_actor }
+    ,{ name = "runtime_actor_boundary_repositions_only_after_breach", fn = runtime_actor_boundary_repositions_only_after_breach }
     ,{ name = "runtime_actor_rejects_foreign_inventory_children", fn = runtime_actor_rejects_foreign_inventory_children }
     ,{ name = "runtime_actor_rejects_nil_inventory_parent", fn = runtime_actor_rejects_nil_inventory_parent }
     ,{ name = "runtime_actor_rejects_throwing_inventory_accessors", fn = runtime_actor_rejects_throwing_inventory_accessors }

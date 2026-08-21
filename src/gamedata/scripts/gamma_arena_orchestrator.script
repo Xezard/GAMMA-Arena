@@ -158,6 +158,7 @@ function Orchestrator:__init(deps)
     self.defeat_cleanup_updates = 0
     self.pending_disconnect = false
     self.pending_callback_error = nil
+    self.deferred_level_logged = nil
     self.machine_state = gamma_arena_state_machine.states.IDLE
 end
 
@@ -212,6 +213,29 @@ function Orchestrator:emit_log(code, message, context)
     if type(value) == "table" and type(value.ok) == "boolean" then return value end
     if value == false then return fail("GA_RUNTIME_LOG_FAILED", "Arena diagnostic log reported failure", { code = code }) end
     return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:diagnostic(code, message, context)
+    local log = self.deps.log
+    local lookup_ok, writer = pcall(function() return log and log.info end)
+    if not lookup_ok or type(writer) ~= "function" then return false end
+    local called, value = pcall(writer, code, message, context or {})
+    if not called or value == false then return false end
+    if type(value) == "table" and value.ok == false then return false end
+    return true
+end
+
+function Orchestrator:set_runtime_stage(stage)
+    if self.runtime_stage == stage then return false end
+    local previous = self.runtime_stage
+    self.runtime_stage = stage
+    self:diagnostic("GA_RUNTIME_STAGE_CHANGED", tostring(previous) .. "->" .. tostring(stage), {
+        previous = previous,
+        current = stage,
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil
+    })
+    return true
 end
 
 function Orchestrator:clear_runtime_ui()
@@ -349,7 +373,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.active = false
     self.pending_resume = nil
     self.checkpoint_reload_expected = false
-    self.runtime_stage = "ERROR"
+    self:set_runtime_stage("ERROR")
     self.checkpoint_ready = false
     self.machine_state = gamma_arena_state_machine.states.ERROR
     self.cleanup_required = true
@@ -417,7 +441,7 @@ function Orchestrator:on_game_load()
     self.session = nil
     self.pending_resume = nil
     self.checkpoint_reload_expected = false
-    self.runtime_stage = "AWAITING_ACTIVATION"
+    self:set_runtime_stage("AWAITING_ACTIVATION")
     self.checkpoint_ready = false
     self.activation_attempted = false
     self.machine_state = gamma_arena_state_machine.states.IDLE
@@ -452,6 +476,7 @@ function Orchestrator:on_game_load()
     self.defeat_cleanup_started = false
     self.pending_disconnect = false
     self.pending_callback_error = nil
+    self.deferred_level_logged = nil
     return gamma_arena_result.ok(true)
 end
 
@@ -568,6 +593,14 @@ function Orchestrator:activate_once()
         local current = safe_result_call("GA_CURRENT_LEVEL_FAILED", self.deps.current_level)
         if not current.ok then return self:enter_fatal(current) end
         if current.value ~= expected then
+            local deferred_key = tostring(current.value) .. "->" .. tostring(expected)
+            if self.deferred_level_logged ~= deferred_key then
+                self:diagnostic("GA_LAUNCH_DEFERRED", "current_level=" .. tostring(current.value) .. " expected_level=" .. tostring(expected), {
+                    current_level = current.value,
+                    expected_level = expected
+                })
+                self.deferred_level_logged = deferred_key
+            end
             return gamma_arena_result.ok({ route = "deferred", current_level = current.value, expected_level = expected })
         end
     end
@@ -580,6 +613,13 @@ function Orchestrator:activate_once()
     if state.launch_pending then
         local consumed = call_method("GA_LAUNCH_CONSUME_FAILED", self.deps.store, "consume_launch", self.deps.config, self.deps.launch_options)
         if not consumed.ok then return self:enter_fatal(consumed, true) end
+        local handoff = type(consumed.value) == "table" and consumed.value.launch_handoff or nil
+        self:diagnostic("GA_LAUNCH_HANDOFF_ACCEPTED", "route=" .. tostring(handoff and handoff.route or "validated") .. " level=l05_bar", {
+            schema_version = handoff and handoff.schema_version or 1,
+            issued_at = handoff and handoff.issued_at or nil,
+            route = handoff and handoff.route or "validated",
+            level = "l05_bar"
+        })
         local preflight = self:run_preflight()
         if not preflight.ok then return self:enter_fatal(preflight, true) end
         local session = self:create_session(consumed.value)
@@ -588,7 +628,7 @@ function Orchestrator:activate_once()
         if not advanced.ok then return self:enter_fatal(advanced, true) end
         self.session = session.value
         self.active = true
-        self.runtime_stage = "NORMALIZING"
+        self:set_runtime_stage("NORMALIZING")
         return gamma_arena_result.ok({ route = "launch", session = self:session_snapshot() })
     end
 
@@ -612,12 +652,29 @@ function Orchestrator:activate_once()
         return self:enter_fatal(checkpoint_restore_failure(fail("GA_CHECKPOINT_RECOVERY_FAILED", "Checkpoint adapter did not bind the loaded recovery state")))
     end
     self.active = true
-    self.runtime_stage = "RESUME_REHIDING"
+    self:set_runtime_stage("RESUME_REHIDING")
     return gamma_arena_result.ok({ route = "resume", session = self:session_snapshot(), pending_resume = self:pending_resume_snapshot() })
 end
 
 function Orchestrator:layout_snapshot()
     return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id)
+end
+
+function Orchestrator:enforce_actor_boundary()
+    local stages = { WAIT_INVENTORY = true, CHECKPOINTING = true, READY = true, PREPARING = true, COUNTDOWN = true, SPAWNING = true, ACTIVE = true, RESULT = true, NEXT_CLEANUP = true, NEXT_RESET = true, DEFEAT_CLEANUP = true }
+    if not self:is_active() or stages[self.runtime_stage] ~= true then return gamma_arena_result.ok(false) end
+    local layout = self:layout_snapshot()
+    if not layout.ok then return layout end
+    local checked = call_method("GA_ARENA_BOUNDARY_CHECK_FAILED", self.deps.actor, "enforce_boundary", layout.value)
+    if not checked.ok then return checked end
+    if type(checked.value) == "table" and checked.value.breach == true then
+        local logged = self:emit_log("GA_ARENA_BOUNDARY_BREACH", "actor_repositioned=true zone=" .. tostring(checked.value.zone), {
+            zone = checked.value.zone,
+            position = checked.value.position
+        })
+        if not logged.ok then return logged end
+    end
+    return checked
 end
 
 function Orchestrator:prepare_fight()
@@ -639,6 +696,17 @@ function Orchestrator:prepare_fight()
     if not logged.ok then return logged end
     local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id)
     if not applied.ok then return applied end
+    local actor_ok, actor_spec = pcall(function() return spec.actor() end)
+    local actor_loadout = actor_ok and type(actor_spec) == "table" and actor_spec.loadout or nil
+    self:diagnostic("GA_ACTOR_LOADOUT_APPLIED", "weapon=" .. tostring(actor_loadout and actor_loadout.weapon)
+        .. " ammo_boxes=" .. tostring(actor_loadout and actor_loadout.ammo_boxes)
+        .. " consumables=" .. tostring(actor_loadout and actor_loadout.consumables and #actor_loadout.consumables or 0), {
+            weapon = actor_loadout and actor_loadout.weapon or nil,
+            ammo = actor_loadout and actor_loadout.ammo or nil,
+            ammo_boxes = actor_loadout and actor_loadout.ammo_boxes or nil,
+            outfit = actor_loadout and actor_loadout.outfit or nil,
+            consumables = actor_loadout and actor_loadout.consumables and #actor_loadout.consumables or 0
+        })
     local now = self:clock_now()
     if not now.ok then return now end
     local advanced = self:advance(gamma_arena_state_machine.events.PREPARATION_SUCCEEDED)
@@ -649,7 +717,7 @@ function Orchestrator:prepare_fight()
     self.countdown_value = nil
     self.pending_victory = false
     self.result_action_locked = false
-    self.runtime_stage = "COUNTDOWN"
+    self:set_runtime_stage("COUNTDOWN")
     return self:update_countdown()
 end
 
@@ -661,7 +729,7 @@ function Orchestrator:update_countdown()
         local cleared = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "clear_countdown")
         if not cleared.ok then return cleared end
         self.countdown_value = nil
-        self.runtime_stage = "SPAWNING"
+        self:set_runtime_stage("SPAWNING")
         return gamma_arena_result.ok({ stage = "SPAWNING" })
     end
     local value = 3 - math.floor(elapsed / 1000)
@@ -689,7 +757,13 @@ function Orchestrator:observe_entity_activation()
     local advanced = self:advance(gamma_arena_state_machine.events.COUNTDOWN_FINISHED)
     if not advanced.ok then return advanced end
     self.active_started = now.value
-    self.runtime_stage = "ACTIVE"
+    self:set_runtime_stage("ACTIVE")
+    local opponents_ok, opponents = pcall(function() return self.fight_spec and self.fight_spec.opponents and self.fight_spec.opponents() end)
+    local expected = opponents_ok and type(opponents) == "table" and #opponents or nil
+    self:diagnostic("GA_OPPONENTS_ACTIVATED", "expected=" .. tostring(expected) .. " active=" .. tostring(#(snapshot.npcs or {})), {
+        expected_humans = expected,
+        active_owned_humans = #(snapshot.npcs or {})
+    })
     local logged = self:emit_log("GA_FIGHT_ACTIVE", "registry_npcs=" .. tostring(#(snapshot.npcs or {}))
         .. " registry_items=" .. tostring(#(snapshot.items or {})), {
             registry_npcs = #(snapshot.npcs or {}), registry_items = #(snapshot.items or {})
@@ -711,7 +785,7 @@ function Orchestrator:show_victory()
     self.result_kind = "victory"
     self.result_action_locked = false
     self.pending_next_fight_index = nil
-    self.runtime_stage = "RESULT"
+    self:set_runtime_stage("RESULT")
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration), { duration_ms = duration })
     if not logged.ok then return logged end
     return call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "show_result", {
@@ -737,7 +811,7 @@ function Orchestrator:show_defeat()
     self.result_kind = "defeat"
     self.result_action_locked = false
     self.pending_next_fight_index = nil
-    self.runtime_stage = "RESULT"
+    self:set_runtime_stage("RESULT")
     local logged = self:emit_log("GA_FIGHT_DEFEAT", "fight_index=" .. tostring(self.session and self.session.fight_index), {
         fight_index = self.session and self.session.fight_index or nil
     })
@@ -810,7 +884,7 @@ function Orchestrator:victory_next_action()
     if not cleared.ok then self.result_action_locked = false; return cleared end
     self.next_cleanup_started = false
     self.pending_next_fight_index = next_index.value
-    self.runtime_stage = "NEXT_CLEANUP"
+    self:set_runtime_stage("NEXT_CLEANUP")
     return gamma_arena_result.ok(true)
 end
 
@@ -838,7 +912,7 @@ function Orchestrator:defeat_next_action()
     self.pending_victory = false
     self.defeat_cleanup_started = false
     self.defeat_cleanup_updates = 0
-    self.runtime_stage = "DEFEAT_CLEANUP"
+    self:set_runtime_stage("DEFEAT_CLEANUP")
     return gamma_arena_result.ok({ stage = self.runtime_stage, next_fight_index = next_index })
 end
 
@@ -853,7 +927,7 @@ function Orchestrator:request_main_menu_exit()
     self.pending_disconnect = true
     local teardown = self:teardown_once("main_menu", false)
     self.active = false
-    self.runtime_stage = "CLEANING"
+    self:set_runtime_stage("CLEANING")
     self.checkpoint_ready = false
     self.pending_victory = false
     self.pending_result = nil
@@ -877,7 +951,7 @@ function Orchestrator:drive_next_fight()
         if snapshot.state == "ERROR" then return fail("GA_ENTITY_CLEANUP_FAILED", "Entity cleanup entered ERROR", { error = snapshot.error }) end
         if snapshot.state ~= "CLEAN" then return gamma_arena_result.ok({ stage = "NEXT_CLEANUP", entity = snapshot.state }) end
         if not cleanup_registry_empty(snapshot) then return fail("GA_ENTITY_CLEANUP_FAILED", "Clean entity registry retained or omitted prior fight id arrays") end
-        self.runtime_stage = "NEXT_RESET"
+        self:set_runtime_stage("NEXT_RESET")
         return gamma_arena_result.ok({ stage = "NEXT_RESET" })
     end
     local layout = self:layout_snapshot()
@@ -897,7 +971,7 @@ function Orchestrator:drive_next_fight()
     self.catalog_snapshot = nil
     self.next_cleanup_started = false
     self.pending_next_fight_index = nil
-    self.runtime_stage = "PREPARING"
+    self:set_runtime_stage("PREPARING")
     return gamma_arena_result.ok({ stage = "PREPARING", fight_index = next_index })
 end
 
@@ -929,7 +1003,7 @@ function Orchestrator:drive_defeat_recovery()
     if type(actor_cleanup.value) == "table" and actor_cleanup.value.pending == true then
         return gamma_arena_result.ok({ stage = "DEFEAT_CLEANUP", actor_loadout = "PENDING" })
     end
-    self.runtime_stage = "RESTORING"
+    self:set_runtime_stage("RESTORING")
     return gamma_arena_result.ok({ stage = self.runtime_stage })
 end
 
@@ -973,7 +1047,15 @@ function Orchestrator:drive_runtime()
         if not layout.ok then return layout end
         local normalized = call_method("GA_ACTOR_NORMALIZE_FAILED", self.deps.actor, "normalize_for_checkpoint", layout.value)
         if not normalized.ok then return normalized end
-        self.runtime_stage = "WAIT_INVENTORY"
+        local position = type(normalized.value) == "table" and normalized.value.position or nil
+        self:diagnostic("GA_ACTOR_POSITIONED", "spawn_path=" .. tostring(layout.value.actor_spawn_path)
+            .. " look_path=" .. tostring(layout.value.actor_look_path), {
+                spawn_path = layout.value.actor_spawn_path,
+                look_path = layout.value.actor_look_path,
+                requested = type(position) == "table" and position.requested or nil,
+                observed = type(position) == "table" and position.observed or nil
+            })
+        self:set_runtime_stage("WAIT_INVENTORY")
         return gamma_arena_result.ok({ stage = self.runtime_stage })
     end
 
@@ -983,7 +1065,7 @@ function Orchestrator:drive_runtime()
         if empty.value ~= true then return gamma_arena_result.ok({ stage = self.runtime_stage }) end
         local created = call_method("GA_CHECKPOINT_CREATE_FAILED", self.deps.checkpoint, "create", self.session)
         if not created.ok then return created end
-        self.runtime_stage = "CHECKPOINTING"
+        self:set_runtime_stage("CHECKPOINTING")
         return gamma_arena_result.ok({ stage = self.runtime_stage })
     end
 
@@ -1001,7 +1083,11 @@ function Orchestrator:drive_runtime()
             local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
             if not advanced.ok then return advanced end
             self.checkpoint_ready = true
-            self.runtime_stage = "READY"
+            self:diagnostic("GA_CHECKPOINT_CREATED", "checkpoint=" .. tostring(self.session and self.session.checkpoint_name), {
+                checkpoint_name = self.session and self.session.checkpoint_name or nil,
+                session_id = self.session and self.session.session_id or nil
+            })
+            self:set_runtime_stage("READY")
         end
         return gamma_arena_result.ok({ stage = self.runtime_stage, checkpoint = checkpoint_state })
     end
@@ -1024,7 +1110,7 @@ function Orchestrator:drive_runtime()
             local advanced = self:advance(gamma_arena_state_machine.events.CHECKPOINT_SUCCEEDED)
             if not advanced.ok then return checkpoint_restore_failure(advanced) end
             self.checkpoint_ready = true
-            self.runtime_stage = "READY"
+            self:set_runtime_stage("READY")
         end
         return gamma_arena_result.ok({ stage = self.runtime_stage, checkpoint = checkpoint_state })
     end
@@ -1032,7 +1118,7 @@ function Orchestrator:drive_runtime()
     if self.runtime_stage == "READY" then
         local updated = call_method("GA_CHECKPOINT_UPDATE_FAILED", self.deps.checkpoint, "update")
         if not updated.ok then return updated end
-        self.runtime_stage = "PREPARING"
+        self:set_runtime_stage("PREPARING")
         return gamma_arena_result.ok({ stage = "PREPARING" })
     end
     if self.runtime_stage == "PREPARING" then return self:prepare_fight() end
@@ -1053,6 +1139,8 @@ function Orchestrator:update_runtime()
     if not activated.ok then return activated end
     local runtime = self:drive_runtime()
     if not runtime.ok then return runtime end
+    local boundary = self:enforce_actor_boundary()
+    if not boundary.ok then return boundary end
     local entities = self.deps.entities
     if entities ~= nil then
         local updated = call_method("GA_ENTITY_UPDATE_FAILED", entities, "update")
@@ -1132,7 +1220,7 @@ function Orchestrator:request_checkpoint_restore(next_fight_index)
     local restored = call_method("GA_CHECKPOINT_RESTORE_FAILED", self.deps.checkpoint, "restore", self.session, next_fight_index)
     if not restored.ok then return restored end
     self.checkpoint_ready = false
-    self.runtime_stage = "RESTORING"
+    self:set_runtime_stage("RESTORING")
     return gamma_arena_result.ok(true)
 end
 
@@ -1149,7 +1237,7 @@ function Orchestrator:actor_on_net_destroy()
         if not cleared.ok then result = cleared end
     end
     self.active = false
-    self.runtime_stage = preserve and "RESTORING" or "CLEANING"
+    self:set_runtime_stage(preserve and "RESTORING" or "CLEANING")
     self.checkpoint_ready = false
     if not preserve then
         self.session = nil
@@ -1167,7 +1255,7 @@ function Orchestrator:on_before_level_changing()
     local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_resume_if_matches", self.deps.config, self.session)
     if not cleared.ok then result = cleared end
     self.active = false
-    self.runtime_stage = "CLEANING"
+    self:set_runtime_stage("CLEANING")
     self.checkpoint_ready = false
     self.session = nil
     self.pending_resume = nil

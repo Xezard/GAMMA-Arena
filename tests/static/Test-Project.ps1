@@ -455,9 +455,16 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($ActivationContent.IndexOf('self.deps.reconcile') -lt $ActivationContent.IndexOf('inspect_intents')) 'Migration/reconciliation must complete before intent inspection'
     Assert-True ($ActivationContent -match 'GA_SETTINGS_RECONCILIATION_FAILED') 'Thrown/invalid activation reconciliation must use a structured wrapper code'
     Assert-True ($ActivationContent -match 'route\s*=\s*"deferred"') 'Launch activation must expose a non-consuming wrong-level deferred route'
-    Assert-True ($ActivationContent -match 'if\s+current\.value\s*~=\s*expected\s+then[\s\S]{0,250}route\s*=\s*"deferred"[\s\S]{0,100}end\s+self\.activation_attempted\s*=\s*true') 'Wrong-level deferral must precede the launch one-shot activation latch'
+    $WrongLevelStart = $ActivationContent.IndexOf('if current.value ~= expected then')
+    $DeferredRoute = $ActivationContent.IndexOf('route = "deferred"', $WrongLevelStart)
+    $LaunchActivationLatch = $ActivationContent.IndexOf('self.activation_attempted = true', $DeferredRoute)
+    Assert-True ($WrongLevelStart -ge 0 -and $DeferredRoute -gt $WrongLevelStart -and $LaunchActivationLatch -gt $DeferredRoute) 'Wrong-level deferral must precede the launch one-shot activation latch'
     Assert-True ($ActivationContent -match 'if\s+not\s+state\.launch_pending\s+and\s+not\s+state\.resume_pending[\s\S]{0,450}self\.activation_attempted\s*=\s*true[\s\S]{0,150}self\.awaiting_activation\s*=\s*false') 'Ordinary games without Arena intents must latch their activation probe once'
     Assert-True ($Task5OrchestratorContent -match 'was_active\s*==\s*true\s+or\s+self:is_active\(\)') 'A callback that activates and then fails must enter fatal routing'
+    foreach ($Marker in @('GA_LAUNCH_DEFERRED','GA_LAUNCH_HANDOFF_ACCEPTED','GA_RUNTIME_STAGE_CHANGED','GA_ACTOR_POSITIONED','GA_ARENA_BOUNDARY_BREACH','GA_CHECKPOINT_CREATED','GA_ACTOR_LOADOUT_APPLIED','GA_OPPONENTS_ACTIVATED')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Production event diagnostics must cover $Marker"
+    }
+    Assert-True ($Task5OrchestratorContent -match 'deferred_level_logged') 'Wrong-level launch diagnostics must be deduplicated instead of logging every frame'
 }
 
 $Task5StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
@@ -468,6 +475,7 @@ if (Test-Path -LiteralPath $Task5StorePath) {
     Assert-True ($Task5StoreContent -match 'function Store:prepare_resume') 'Session store must validate a resume route before checkpoint re-hide'
     Assert-True ($Task5StoreContent -match 'function Store:clear_resume_if_matches') 'Checkpoint cleanup must clear only a ResumeIntent bound to its ArenaSession'
     Assert-True ($Task5StoreContent -match 'function Store:consume_resume\s*\(\s*config\s*,\s*expected\s*,\s*prepared') 'Resume consumption must compare the persisted intent with its prepared snapshot'
+    Assert-True ($Task5StoreContent -match 'launch_handoff') 'Launch consumption must expose non-secret handoff metadata for diagnostics'
     $PrepareResumeStart = $Task5StoreContent.IndexOf('function Store:prepare_resume')
     $ConsumeResumeStart = $Task5StoreContent.IndexOf('function Store:consume_resume')
     $PrepareResumeContent = $Task5StoreContent.Substring($PrepareResumeStart, $ConsumeResumeStart - $PrepareResumeStart)
@@ -557,6 +565,9 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     foreach ($Marker in @('normalize_for_checkpoint','verify_inventory_empty','apply_loadout','reset_after_victory','hold_after_logical_death','release_logical_death_hold','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_power','set_radiation','set_bleeding','set_psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
         Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor adapter must cover $Marker"
     }
+    foreach ($Marker in @('enforce_boundary','boundary_contains','actor_boundary_zone','GA_ARENA_BOUNDARY_CHECK_FAILED')) {
+        Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor boundary adapter must cover $Marker"
+    }
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"set_bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
 }
@@ -600,6 +611,9 @@ if (Test-Path -LiteralPath $Task6CompatPath) {
     $Task6CompatContent = Get-Content -LiteralPath $Task6CompatPath -Raw
     foreach ($Marker in @('getFS.update_path','getFS.file_rename','getFS.file_delete','exec_console_cmd','time_global','level.disable_input','level.enable_input','db.actor.iterate_inventory','db.actor.set_bleeding','db.actor.set_actor_position')) {
         Assert-True ($Task6CompatContent -match [regex]::Escape($Marker)) "Task 6 preflight must require $Marker"
+    }
+    foreach ($Marker in @('actor_boundary_zone','db.zone_by_name','GA_PREFLIGHT_BOUNDARY_MISSING','GA_PREFLIGHT_BOUNDARY_INVALID')) {
+        Assert-True ($Task6CompatContent -match [regex]::Escape($Marker)) "Arena boundary preflight must cover $Marker"
     }
 }
 
@@ -788,6 +802,7 @@ if (Test-Path -LiteralPath $LayoutPath) {
     Assert-True ($LayoutContent -match '(?m)^level\s*=\s*l05_bar\s*$') 'Layout must target l05_bar'
     Assert-True ($LayoutContent -match '(?m)^actor_spawn_path\s*=\s*t_way\s*$') 'Actor must spawn at the vanilla Rostok Arena ingress patrol'
     Assert-True ($LayoutContent -match '(?m)^actor_look_path\s*=\s*t_look\s*$') 'Actor must face the vanilla Rostok Arena ingress look patrol'
+    Assert-True ($LayoutContent -match '(?m)^actor_boundary_zone\s*=\s*bar_arena_sr\s*$') 'Actor must remain inside the stock Rostok Arena restrictor'
     Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk') 'Layout must retain the six unique opponent paths'
 }
 if (Test-Path -LiteralPath $NpcPath) {

@@ -217,7 +217,34 @@ function ActorAdapter:position_actor(actor, layout)
     if not heading_result.ok or not finite(heading_result.value) then return fail("GA_ACTOR_PATROL_INVALID", "Arena actor look heading is invalid") end
     local positioned = call_actor(actor, "set_actor_position", spawn_result.value)
     if not positioned.ok then return positioned end
-    return call_actor(actor, "set_actor_direction", -heading_result.value)
+    local directed = call_actor(actor, "set_actor_direction", -heading_result.value)
+    if not directed.ok then return directed end
+    local observed = call_actor(actor, "position")
+    if not observed.ok then return observed end
+    local ox, oy, oz = point_coordinates(observed.value)
+    if ox == nil then return fail("GA_ACTOR_POSITION_INVALID", "Arena actor position could not be verified after teleport") end
+    return gamma_arena_result.ok({
+        spawn_path = spawn_path,
+        look_path = look_path,
+        requested = { x = sx, y = sy, z = sz },
+        observed = { x = ox, y = oy, z = oz }
+    })
+end
+
+function ActorAdapter:enforce_boundary(layout)
+    local layout_ok, zone_name = pcall(function() return layout.actor_boundary_zone end)
+    if type(layout) ~= "table" or not layout_ok or type(zone_name) ~= "string" or zone_name == "" then
+        return fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no actor boundary zone")
+    end
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local checked = dependency_result("GA_ARENA_BOUNDARY_CHECK_FAILED", self.deps.boundary_contains, owned.value, zone_name)
+    if not checked.ok then return checked end
+    if checked.value == true then return gamma_arena_result.ok({ breach = false, zone = zone_name }) end
+    if checked.value ~= false then return fail("GA_ARENA_BOUNDARY_CHECK_FAILED", "Arena boundary check must return a boolean", { zone = zone_name }) end
+    local repositioned = self:position_actor(owned.value, layout)
+    if not repositioned.ok then return repositioned end
+    return gamma_arena_result.ok({ breach = true, zone = zone_name, position = repositioned.value })
 end
 
 function ActorAdapter:zero_money(actor)
@@ -233,10 +260,15 @@ function ActorAdapter:normalize_for_checkpoint(layout)
     local acquired = self:acquire_input()
     if not acquired.ok then return acquired end
     local actor = owned.value
+    local position_snapshot = nil
     local steps = {
         function() return self:purge_inventory(actor) end,
         function() return self:normalize_status(actor) end,
-        function() return self:position_actor(actor, layout) end,
+        function()
+            local positioned = self:position_actor(actor, layout)
+            if positioned.ok then position_snapshot = positioned.value end
+            return positioned
+        end,
         function() return self:zero_money(actor) end
     }
     for index = 1, #steps do
@@ -249,7 +281,7 @@ function ActorAdapter:normalize_for_checkpoint(layout)
             return result
         end
     end
-    return gamma_arena_result.ok(true)
+    return gamma_arena_result.ok({ position = position_snapshot })
 end
 
 function ActorAdapter:apply_loadout(loadout)
