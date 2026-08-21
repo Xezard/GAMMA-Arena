@@ -276,7 +276,7 @@ end
 local LAUNCH_TOKEN_TTL = 600
 local volatile_launch_permits = {}
 local gamma_arena_boolean_returns = true
-local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_economy_treasure new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode new_game_icon new_game_hardcore_mode new_game_hardcore_mode_lives new_game_hardcore_mode_regenerate new_game_survival_mode new_game_azazel_mode new_game_warfare new_game_campfire_mode new_game_conditions_mode new_game_timer_mode new_game_opened_routes new_game_test GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID GA_SESSION_UNKNOWN_FIELD bridge_pending bridge_schema_version present launch_handoff GA_LAUNCH_HANDOFF_REQUIRED GA_LAUNCH_HANDOFF_INVALID"
+local markers = "ga1: launch_pending launch_token launch_mode_id launch_difficulty_id launch_seed_mode launch_session_seed launch_stage launch_deferred_level launch_target_level resume_pending resume_session_id resume_session_nonce resume_next_fight_index resume_checkpoint_name resume_schema_version new_game_difficulty new_game_economy new_game_economy_treasure new_game_character_name new_game_faction new_game_map new_game_money new_game_loadout new_game_story_mode new_game_icon new_game_hardcore_mode new_game_hardcore_mode_lives new_game_hardcore_mode_regenerate new_game_survival_mode new_game_azazel_mode new_game_warfare new_game_campfire_mode new_game_conditions_mode new_game_timer_mode new_game_opened_routes new_game_test GA_RESUME_ALREADY_PENDING GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_INTENT_CONFLICT GA_LAUNCH_STALE_CLEARED GA_RESUME_CHECKPOINT_MISMATCH GA_RESUME_FIGHT_INDEX_MISMATCH GA_SESSION_GENERATOR_VERSION_INVALID GA_SESSION_UNKNOWN_FIELD bridge_pending bridge_schema_version present launch_handoff GA_LAUNCH_HANDOFF_REQUIRED GA_LAUNCH_HANDOFF_INVALID"
 local function remove(config, section, key) config:remove_line(section, key) end
 local function validate_expected_session() end
 local function validate_persisted_launch_request() end
@@ -290,6 +290,8 @@ function save_preferences() end
 function issue_launch() end
 function parse_launch_token() end
 function validate_launch_handoff() end
+function Store:mark_launch_deferred() end
+function Store:validate_launch_activation() end
 function consume_launch() return restore_character_creation() end
 function Store:consume_launch() return self:restore_character_creation() end
 function Store:inspect_intents() end
@@ -348,7 +350,7 @@ local task6_markers = "getFS.update_path getFS.file_rename getFS.file_delete exe
 function preflight() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_orchestrator.script' @'
-local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation on_callback_result_error GA_DISCONNECT_FAILED main_menu_executed normalize_for_checkpoint verify_inventory_empty checkpoint request_checkpoint_restore runtime_stage begin_resume_recovery GA_RUNTIME_CLEANUP_PENDING cleanup_ready_for_disconnect normalize_resume_preparation entities on_npc_death living_opponent_count GA_ENTITY_COUNT_UNAVAILABLE GA_ENTITY_COUNT_STATE_INVALID death_latched pending_result ret_value hold_after_logical_death cleanup_loadout_for_restore MAX_DEFEAT_RECOVERY_UPDATES show_defeat defeat_next_action NEXT_AFTER_DEFEAT GA_CHECKPOINT_RESTORE_FAILED GA_FIGHT_INDEX_EXHAUSTED GA_LAUNCH_DEFERRED GA_LAUNCH_HANDOFF_ACCEPTED GA_RUNTIME_STAGE_CHANGED GA_ACTOR_POSITIONED GA_ARENA_BOUNDARY_BREACH GA_CHECKPOINT_CREATED GA_ACTOR_LOADOUT_APPLIED GA_OPPONENTS_ACTIVATED"
+local markers = "inspect_intents consume_launch prepare_resume gamma_arena_session st_gamma_arena_manual_save_disabled expect_checkpoint_reload GA_INTENT_CONFLICT GA_LAUNCH_REQUIRES_NEW_GAME disconnect pending_load_state awaiting_activation on_callback_result_error GA_DISCONNECT_FAILED main_menu_executed normalize_for_checkpoint verify_inventory_empty checkpoint request_checkpoint_restore runtime_stage begin_resume_recovery GA_RUNTIME_CLEANUP_PENDING cleanup_ready_for_disconnect normalize_resume_preparation entities on_npc_death living_opponent_count GA_ENTITY_COUNT_UNAVAILABLE GA_ENTITY_COUNT_STATE_INVALID death_latched pending_result ret_value hold_after_logical_death cleanup_loadout_for_restore MAX_DEFEAT_RECOVERY_UPDATES show_defeat defeat_next_action NEXT_AFTER_DEFEAT GA_CHECKPOINT_RESTORE_FAILED GA_FIGHT_INDEX_EXHAUSTED GA_LAUNCH_DEFERRED GA_LAUNCH_HANDOFF_ACCEPTED GA_RUNTIME_STAGE_CHANGED GA_ACTOR_POSITIONED GA_ARENA_BOUNDARY_BREACH GA_CHECKPOINT_CREATED GA_ACTOR_LOADOUT_APPLIED GA_OPPONENTS_ACTIVATED mark_launch_deferred validate_launch_activation"
 local deferred_level_logged = nil
 local function teardown_retry(result, pending) if result.ok and not pending then self.teardown_done = true end end
 local function new_cycle() self.teardown_cycle = self.teardown_cycle + 1 end
@@ -364,6 +366,8 @@ end
 function Orchestrator:activate_once()
     local reconciled = safe_result_call("GA_SETTINGS_RECONCILIATION_FAILED", self.deps.reconcile, self.deps.config)
     local intents = self.deps.store:inspect_intents(self.deps.config)
+    self.deps.store:mark_launch_deferred(self.deps.config, "fake_start", "l05_bar")
+    self.deps.store:validate_launch_activation(self.deps.config, { serialized = true, current_level = "l05_bar", expected_level = "l05_bar" })
     if not state.launch_pending and not state.resume_pending then
         self.activation_attempted = true
         self.awaiting_activation = false
@@ -516,6 +520,7 @@ function UIResult:OnKeyboard() self:OnMainMenu(); return true end
 local function stale_launch_is_recovered_by_new_store() end
 local function launch_survives_vm_reload_with_matching_bridge_lease() end
 local function launch_handoff_rejects_mismatched_or_expired_lease() end
+local function serialized_launch_requires_fake_start_phase_proof() end
 local function same_store_corrupt_launch_is_replaced() end
 local function resume_rejects_tampered_expected_session() end
 local function mutation_failure_matrix_is_crash_safe() end

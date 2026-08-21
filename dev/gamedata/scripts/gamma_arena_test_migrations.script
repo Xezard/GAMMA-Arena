@@ -187,7 +187,7 @@ local function assert_keys_absent(config, keys, message)
     end
 end
 
-local launch_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed" }
+local launch_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level" }
 local resume_keys = { "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" }
 local character_write_values = {
     new_game_difficulty = "2",
@@ -349,7 +349,7 @@ local function launch_token_is_volatile_ttl_bound_and_one_shot()
 
     local stale = fake_config({
         launch_pending = "true", launch_token = "ga1:1000:prior_process", launch_mode_id = "skirmish",
-        launch_difficulty_id = "stalker", launch_seed_mode = "manual", launch_session_seed = "99"
+        launch_difficulty_id = "stalker", launch_seed_mode = "manual", launch_session_seed = "99", launch_stage = "issued"
     })
     local stale_result = gamma_arena_session_store.consume_launch(stale, { clock = function() return 1001 end })
     gamma_arena_test_assert.is_false(stale_result.ok, "persisted prior-process token rejects")
@@ -405,6 +405,36 @@ local function launch_handoff_rejects_mismatched_or_expired_lease()
     })
     gamma_arena_test_assert.is_false(expired.ok, "expired cross-VM token rejects")
     gamma_arena_test_assert.equals(expired.error.code, "GA_LAUNCH_TOKEN_EXPIRED", "expired cross-VM token preserves TTL code")
+end
+
+local function serialized_launch_requires_fake_start_phase_proof()
+    local backend = fake_backend()
+    local issuer_config = fake_config(nil, backend)
+    local issuer = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(issuer:issue_launch(issuer_config, valid_request(53), {
+        clock = function() return 1000 end,
+        nonce = function() return "serialized_route" end
+    }).ok, "serialized launch issues")
+    gamma_arena_test_assert.is_true(issuer:write_character_creation(issuer_config).ok, "serialized bridge persists")
+
+    local target_store = gamma_arena_session_store.new_store()
+    local target_config = fake_config(nil, backend)
+    local unproven = target_store:validate_launch_activation(target_config, {
+        serialized = true,
+        current_level = "l05_bar",
+        expected_level = "l05_bar"
+    })
+    gamma_arena_test_assert.is_false(unproven.ok, "serialized target without fake_start proof rejects")
+    gamma_arena_test_assert.equals(unproven.error.code, "GA_LAUNCH_REQUIRES_NEW_GAME", "unproven serialized route preserves public code")
+
+    local fake_start_store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(fake_start_store:mark_launch_deferred(fake_config(nil, backend), "fake_start", "l05_bar").ok, "fake_start phase persists")
+    local proven = gamma_arena_session_store.new_store():validate_launch_activation(fake_config(nil, backend), {
+        serialized = true,
+        current_level = "l05_bar",
+        expected_level = "l05_bar"
+    })
+    gamma_arena_test_assert.is_true(proven.ok, "matching serialized target accepts exact fake_start proof")
 end
 
 local function stale_launch_is_recovered_by_new_store()
@@ -1284,6 +1314,7 @@ local cases = {
     { name = "launch_token_one_shot", fn = launch_token_is_volatile_ttl_bound_and_one_shot },
     { name = "launch_cross_vm_handoff", fn = launch_survives_vm_reload_with_matching_bridge_lease },
     { name = "launch_cross_vm_handoff_rejects_invalid", fn = launch_handoff_rejects_mismatched_or_expired_lease },
+    { name = "launch_serialized_route_phase_proof", fn = serialized_launch_requires_fake_start_phase_proof },
     { name = "stale_launch_recovery", fn = stale_launch_is_recovered_by_new_store },
     { name = "same_store_corrupt_launch", fn = same_store_corrupt_launch_is_replaced },
     { name = "resume_intent_one_shot", fn = resume_intent_requires_matching_nonce_and_is_one_shot },

@@ -252,7 +252,7 @@ if (Test-Path -LiteralPath $StorePath) {
     Assert-True ($ConfigTxContent -match 'remove_line') 'Transient and optional character-creation keys must use transactional remove_line operations'
     Assert-True ($StoreContent -notmatch '\btime_global\b') 'Session store must use injected wall-clock/os.time instead of time_global'
     Assert-True ($StoreContent -notmatch '(?is)\bw_value\s*\([^\)]*,\s*nil\s*\)') 'Session store must never use w_value(..., nil)'
-    foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
+    foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','launch_stage','launch_deferred_level','launch_target_level','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
         Assert-True ($StoreContent -match [regex]::Escape($Key)) "Session store must cover transient key $Key"
     }
     foreach ($Key in @('new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_character_name','new_game_faction','new_game_map','new_game_money','new_game_loadout','new_game_story_mode','new_game_icon','new_game_hardcore_mode','new_game_hardcore_mode_lives','new_game_hardcore_mode_regenerate','new_game_survival_mode','new_game_azazel_mode','new_game_warfare','new_game_campfire_mode','new_game_conditions_mode','new_game_timer_mode','new_game_opened_routes','new_game_test')) {
@@ -296,7 +296,7 @@ $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_m
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
     Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
 }
@@ -455,6 +455,8 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($ActivationContent.IndexOf('self.deps.reconcile') -lt $ActivationContent.IndexOf('inspect_intents')) 'Migration/reconciliation must complete before intent inspection'
     Assert-True ($ActivationContent -match 'GA_SETTINGS_RECONCILIATION_FAILED') 'Thrown/invalid activation reconciliation must use a structured wrapper code'
     Assert-True ($ActivationContent -match 'route\s*=\s*"deferred"') 'Launch activation must expose a non-consuming wrong-level deferred route'
+    Assert-True ($ActivationContent -match 'mark_launch_deferred') 'fake_start deferral must persist a cross-VM phase proof'
+    Assert-True ($ActivationContent -match 'validate_launch_activation') 'serialized target-level activation must validate its fake_start phase proof'
     $WrongLevelStart = $ActivationContent.IndexOf('if current.value ~= expected then')
     $DeferredRoute = $ActivationContent.IndexOf('route = "deferred"', $WrongLevelStart)
     $LaunchActivationLatch = $ActivationContent.IndexOf('self.activation_attempted = true', $DeferredRoute)
@@ -476,6 +478,9 @@ if (Test-Path -LiteralPath $Task5StorePath) {
     Assert-True ($Task5StoreContent -match 'function Store:clear_resume_if_matches') 'Checkpoint cleanup must clear only a ResumeIntent bound to its ArenaSession'
     Assert-True ($Task5StoreContent -match 'function Store:consume_resume\s*\(\s*config\s*,\s*expected\s*,\s*prepared') 'Resume consumption must compare the persisted intent with its prepared snapshot'
     Assert-True ($Task5StoreContent -match 'launch_handoff') 'Launch consumption must expose non-secret handoff metadata for diagnostics'
+    foreach ($Marker in @('launch_stage','function Store:mark_launch_deferred','function Store:validate_launch_activation')) {
+        Assert-True ($Task5StoreContent -match [regex]::Escape($Marker)) "Serialized new-game handoff must cover $Marker"
+    }
     $PrepareResumeStart = $Task5StoreContent.IndexOf('function Store:prepare_resume')
     $ConsumeResumeStart = $Task5StoreContent.IndexOf('function Store:consume_resume')
     $PrepareResumeContent = $Task5StoreContent.Substring($PrepareResumeStart, $ConsumeResumeStart - $PrepareResumeStart)

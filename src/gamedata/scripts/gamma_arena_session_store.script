@@ -43,7 +43,10 @@ local launch_keys = {
     "launch_mode_id",
     "launch_difficulty_id",
     "launch_seed_mode",
-    "launch_session_seed"
+    "launch_session_seed",
+    "launch_stage",
+    "launch_deferred_level",
+    "launch_target_level"
 }
 
 local resume_keys = {
@@ -539,6 +542,7 @@ function Store:issue_launch(config, request, options)
         { "launch_difficulty_id", value.difficulty_id },
         { "launch_seed_mode", value.seed_mode },
         { "launch_session_seed", value.session_seed },
+        { "launch_stage", "issued" },
         { "launch_pending", true }
     }), {
         commit_write_keys = { "launch_pending" },
@@ -576,6 +580,64 @@ function Store:validate_launch_handoff(config, token)
     return gamma_arena_result.ok({ route = "bridge" })
 end
 
+function Store:mark_launch_deferred(config, current_level, expected_level)
+    if current_level ~= "fake_start" or type(expected_level) ~= "string" or expected_level == "" or expected_level == current_level then
+        return fail("GA_LAUNCH_DEFER_FAILED", "Arena launch may be deferred only from fake_start to a distinct target level", {
+            current_level = current_level,
+            expected_level = expected_level
+        })
+    end
+    local values_result = self:read_all(config, launch_keys)
+    if not values_result.ok then return values_result end
+    local values = values_result.value
+    local pending = self:pending_value(values.launch_pending, "LAUNCH")
+    if not pending.ok then return pending end
+    if pending.value ~= true then return fail("GA_LAUNCH_NOT_PENDING", "No launch intent is pending") end
+    if values.launch_stage == "deferred" then
+        if values.launch_deferred_level == current_level and values.launch_target_level == expected_level then
+            return gamma_arena_result.ok(false)
+        end
+        return fail("GA_LAUNCH_DEFER_FAILED", "Persisted Arena launch phase conflicts with the current route")
+    end
+    if values.launch_stage ~= "issued" then
+        return fail("GA_LAUNCH_DEFER_FAILED", "Arena launch has no valid issued phase", { stage = values.launch_stage })
+    end
+    return self:transaction(config, SECTION, operations_for_writes({
+        { "launch_deferred_level", current_level },
+        { "launch_target_level", expected_level },
+        { "launch_stage", "deferred" }
+    }), {
+        commit_write_keys = { "launch_stage" },
+        fail_closed_keys = launch_keys,
+        error_code = "GA_LAUNCH_DEFER_FAILED"
+    })
+end
+
+function Store:validate_launch_activation(config, context)
+    if type(context) ~= "table" or type(context.current_level) ~= "string" or type(context.expected_level) ~= "string" then
+        return fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch activation context is invalid")
+    end
+    if context.serialized ~= true then return gamma_arena_result.ok({ route = "direct" }) end
+    local values_result = self:read_all(config, launch_keys)
+    if not values_result.ok then return values_result end
+    local values = values_result.value
+    local pending = self:pending_value(values.launch_pending, "LAUNCH")
+    if not pending.ok then return pending end
+    if pending.value ~= true or values.launch_stage ~= "deferred"
+        or values.launch_deferred_level ~= "fake_start"
+        or values.launch_target_level ~= context.expected_level
+        or context.current_level ~= context.expected_level then
+        return fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Serialized Arena launch lacks an exact fake_start handoff proof", {
+            current_level = context.current_level,
+            expected_level = context.expected_level,
+            stage = values.launch_stage,
+            deferred_level = values.launch_deferred_level,
+            target_level = values.launch_target_level
+        })
+    end
+    return gamma_arena_result.ok({ route = "deferred" })
+end
+
 function Store:consume_launch(config, options)
     local values_result = self:read_all(config, launch_keys)
     if not values_result.ok then return values_result end
@@ -596,7 +658,7 @@ function Store:consume_launch(config, options)
         for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
         local cleared = self:transaction(config, SECTION, operations, {
             commit_remove_keys = { "launch_pending", "resume_pending" },
-            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
             error_code = "GA_INTENT_CONFLICT_CLEAR_FAILED"
         })
         if values.launch_token ~= nil then
@@ -611,6 +673,9 @@ function Store:consume_launch(config, options)
     if not parsed.ok then return self:reject_launch(config, values.launch_token, parsed) end
     local request = validate_persisted_launch_request(values)
     if not request.ok then return self:reject_launch(config, values.launch_token, request) end
+    if values.launch_stage ~= "issued" and values.launch_stage ~= "deferred" then
+        return self:reject_launch(config, values.launch_token, fail("GA_LAUNCH_STAGE_INVALID", "Arena launch phase is invalid", { stage = values.launch_stage }))
+    end
     local handoff = self:validate_launch_handoff(config, values.launch_token)
     if not handoff.ok then return self:reject_launch(config, values.launch_token, handoff) end
 

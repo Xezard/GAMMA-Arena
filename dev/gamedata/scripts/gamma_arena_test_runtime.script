@@ -396,7 +396,10 @@ local function fake_store(intent_state)
         consume_launch_count = 0,
         prepare_resume_count = 0,
         clear_count = 0,
-        inspect_count = 0
+        inspect_count = 0,
+        mark_deferred_count = 0,
+        validate_launch_activation_count = 0,
+        launch_deferred = false
     }
     function store:inspect_intents()
         self.inspect_count = self.inspect_count + 1
@@ -407,6 +410,23 @@ local function fake_store(intent_state)
         self.consume_launch_count = self.consume_launch_count + 1
         self.intent_state.launch_pending = false
         return self.launch_result or gamma_arena_result.ok({ schema_version = 1, mode_id = "skirmish", difficulty_id = "stalker", seed_mode = "manual", session_seed = 42 })
+    end
+    function store:mark_launch_deferred(_, current_level, expected_level)
+        self.mark_deferred_count = self.mark_deferred_count + 1
+        self.launch_deferred = true
+        self.deferred_current_level = current_level
+        self.deferred_expected_level = expected_level
+        return gamma_arena_result.ok(true)
+    end
+    function store:validate_launch_activation(_, context)
+        self.validate_launch_activation_count = self.validate_launch_activation_count + 1
+        if context.serialized == true and (not self.launch_deferred
+            or self.deferred_current_level ~= "fake_start"
+            or self.deferred_expected_level ~= context.expected_level
+            or context.current_level ~= context.expected_level) then
+            return gamma_arena_result.err("GA_LAUNCH_REQUIRES_NEW_GAME", "serialized launch lacks fake_start handoff proof")
+        end
+        return gamma_arena_result.ok(true)
     end
     function store:prepare_resume(_, expected)
         self.prepare_resume_count = self.prepare_resume_count + 1
@@ -537,23 +557,28 @@ end
 
 local function launch_defers_on_fake_start_then_activates_on_rostok()
     local store = fake_store({ launch_pending = true, resume_pending = false })
-    local deps = fake_orchestrator_deps(store)
-    local current = "fake_start"
-    deps.current_level = function() return gamma_arena_result.ok(current) end
-    local orchestrator = gamma_arena_orchestrator.new(deps)
-    orchestrator:on_game_load()
+    local fake_start_deps = fake_orchestrator_deps(store)
+    fake_start_deps.current_level = function() return gamma_arena_result.ok("fake_start") end
+    local fake_start_vm = gamma_arena_orchestrator.new(fake_start_deps)
+    fake_start_vm:on_game_load()
 
-    local deferred = orchestrator:actor_on_first_update()
+    local deferred = fake_start_vm:actor_on_first_update()
     gamma_arena_test_assert.is_true(deferred.ok, "fake_start defers safely")
     gamma_arena_test_assert.equals(deferred.value.route, "deferred", "fake_start exposes deferred route")
     gamma_arena_test_assert.equals(store.consume_launch_count, 0, "fake_start cannot consume launch")
-    gamma_arena_test_assert.is_false(orchestrator.activation_attempted, "fake_start cannot latch activation")
-    gamma_arena_test_assert.is_true(orchestrator.awaiting_activation, "fake_start retains activation ownership")
+    gamma_arena_test_assert.equals(store.mark_deferred_count, 1, "fake_start persists one cross-VM phase proof")
+    gamma_arena_test_assert.is_false(fake_start_vm.activation_attempted, "fake_start cannot latch activation")
+    gamma_arena_test_assert.is_true(fake_start_vm.awaiting_activation, "fake_start retains activation ownership")
 
-    current = "l05_bar"
-    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "target level activates")
+    local rostok_deps = fake_orchestrator_deps(store)
+    rostok_deps.current_level = function() return gamma_arena_result.ok("l05_bar") end
+    local rostok_vm = gamma_arena_orchestrator.new(rostok_deps)
+    rostok_vm:load_state({})
+    rostok_vm:on_game_load()
+    gamma_arena_test_assert.is_true(rostok_vm:actor_on_first_update().ok, "serialized target-level VM activates")
+    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 1, "target VM validates persisted fake_start phase proof")
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
-    gamma_arena_test_assert.is_true(orchestrator:is_active(), "target level owns Arena session")
+    gamma_arena_test_assert.is_true(rostok_vm:is_active(), "target level owns Arena session")
 end
 
 local function launch_transition_diagnostics_are_event_based()

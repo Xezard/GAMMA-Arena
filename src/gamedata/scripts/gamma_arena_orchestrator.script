@@ -581,7 +581,7 @@ function Orchestrator:activate_once()
     end
 
     if state.launch_pending then
-        if self.load_state_seen or self.loaded_session ~= nil then
+        if self.loaded_session ~= nil then
             return self:enter_fatal(fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch intent is valid only for a distinct new game"))
         end
         local layout = safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout)
@@ -593,6 +593,8 @@ function Orchestrator:activate_once()
         local current = safe_result_call("GA_CURRENT_LEVEL_FAILED", self.deps.current_level)
         if not current.ok then return self:enter_fatal(current) end
         if current.value ~= expected then
+            local marked = call_method("GA_LAUNCH_DEFER_FAILED", self.deps.store, "mark_launch_deferred", self.deps.config, current.value, expected)
+            if not marked.ok then return self:enter_fatal(marked, true) end
             local deferred_key = tostring(current.value) .. "->" .. tostring(expected)
             if self.deferred_level_logged ~= deferred_key then
                 self:diagnostic("GA_LAUNCH_DEFERRED", "current_level=" .. tostring(current.value) .. " expected_level=" .. tostring(expected), {
@@ -603,6 +605,12 @@ function Orchestrator:activate_once()
             end
             return gamma_arena_result.ok({ route = "deferred", current_level = current.value, expected_level = expected })
         end
+        local activation = call_method("GA_LAUNCH_REQUIRES_NEW_GAME", self.deps.store, "validate_launch_activation", self.deps.config, {
+            serialized = self.load_state_seen == true,
+            current_level = current.value,
+            expected_level = expected
+        })
+        if not activation.ok then return self:enter_fatal(activation, true) end
     end
 
     self.activation_attempted = true
