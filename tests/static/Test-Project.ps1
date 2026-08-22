@@ -792,6 +792,8 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Marker in @('runtime_actor_loadout_derives_unreadable_server_ammo_quantity','runtime_entity_derives_unreadable_server_ammo_quantity','runtime_actor_loadout_translates_ltx_slots_to_lua_slots','runtime_actor_loadout_progress_survives_clock_stalls','runtime_actor_loadout_no_progress_timeout_has_context','new_actor_loadout_test_fixture','runtime_actor_loadout_charges_powered_exo_before_ready','runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge','runtime_actor_loadout_exo_charge_failures_rollback')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime ammo allocation regression must cover $Marker"
     }
+    Assert-True ($Task5DevTestContent -match [regex]::Escape('runtime_bootstrap_missing_outfit_repair_type_is_ordinary')) 'Runtime actor loadout must cover missing ordinary outfit repair_type'
+    Assert-True ($Task5BootstrapContent -match 'if\s+present_ok\s+and\s+present\s+==\s+false\s+then\s+return\s+gamma_arena_result\.ok\(false\)\s+end') 'Missing effective outfit repair_type must classify as ordinary rather than fail the loadout transaction'
     foreach ($Marker in @('last_progress_at','elapsed_since_progress_ms','total_elapsed_ms')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment inactivity timeout must expose $Marker"
     }
