@@ -127,6 +127,100 @@ local function loadout(rng, catalogs, budget, code, weapons)
     return combination_loadout(rng, catalogs, budget, code, source)
 end
 
+local PLAYER_WEAPON_CLASSES = { "w_pistol", "w_smg", "w_shotgun", "w_rifle", "w_sniper" }
+local PLAYER_ARMOR_CLASSES = { "light", "medium", "scientific", "heavy", "powered_exo" }
+
+local function sorted_by_section(values)
+    local sorted = {}
+    for _, value in ipairs(values or {}) do sorted[#sorted + 1] = value end
+    table.sort(sorted, function(left, right) return left.section < right.section end)
+    return sorted
+end
+
+local function player_pair_has_completion(catalogs, budget, weapon_class, armor_class)
+    local bandage = catalogs.consumables and catalogs.consumables.bandage
+    if type(bandage) ~= "table" then return false end
+    for _, weapon in ipairs(catalogs.weapon_list or {}) do
+        local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
+        if weapon.kind == weapon_class and type(ammo) == "table" then
+            for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
+                for _, outfit in ipairs(catalogs.outfit_list or {}) do
+                    if outfit.armor_class == armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= budget then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function select_player_class_pair(rng, difficulty, available_pairs)
+    local eligible, total = {}, 0
+    for _, pair in ipairs(available_pairs or {}) do
+        local weapon_weight = difficulty.player_weapon_weights[pair.weapon_class] or 0
+        local armor_weight = difficulty.player_armor_weights[pair.armor_class] or 0
+        local weight = weapon_weight * armor_weight
+        if pair.available == true and weight > 0 then
+            total = total + weight
+            eligible[#eligible + 1] = { weapon_class = pair.weapon_class, armor_class = pair.armor_class, weight = weight }
+        end
+    end
+    if total == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "No positive-weight player class pair fits the budget") end
+    local draw = rng:next_int(1, total)
+    local cumulative = 0
+    for _, pair in ipairs(eligible) do
+        cumulative = cumulative + pair.weight
+        if draw <= cumulative then return gamma_arena_result.ok(pair) end
+    end
+    return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Weighted player class selection exhausted its range")
+end
+
+function player_loadout(request, fight_index, catalogs, difficulty)
+    local bandage = catalogs.consumables and catalogs.consumables.bandage
+    if type(bandage) ~= "table" then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Dynamic catalog has no bandage") end
+    local pairs = {}
+    for _, weapon_class in ipairs(PLAYER_WEAPON_CLASSES) do
+        for _, armor_class in ipairs(PLAYER_ARMOR_CLASSES) do
+            pairs[#pairs + 1] = { weapon_class = weapon_class, armor_class = armor_class, available = player_pair_has_completion(catalogs, difficulty.player_loadout_budget, weapon_class, armor_class) }
+        end
+    end
+    local selected_pair = select_player_class_pair(stream(request, fight_index, catalogs, "actor_class_pair"), difficulty, pairs)
+    if not selected_pair.ok then return selected_pair end
+    local pair = selected_pair.value
+    local weapons = {}
+    for _, weapon in ipairs(sorted_by_section(catalogs.weapon_list)) do
+        local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
+        local available = false
+        if weapon.kind == pair.weapon_class and type(ammo) == "table" then
+            for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
+                for _, outfit in ipairs(catalogs.outfit_list or {}) do
+                    if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then available = true; break end
+                end
+                if available then break end
+            end
+        end
+        if available then weapons[#weapons + 1] = weapon end
+    end
+    if #weapons == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "No selected player weapon has an affordable completion") end
+    local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)
+    local ammo = catalogs.ammo[weapon.ammo]
+    local boxes = {}
+    for count = weapon.ammo_box_min, weapon.ammo_box_max do
+        for _, outfit in ipairs(catalogs.outfit_list or {}) do
+            if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * count + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then boxes[#boxes + 1] = count; break end
+        end
+    end
+    if #boxes == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Selected player weapon has no affordable ammunition count") end
+    local ammo_boxes = stream(request, fight_index, catalogs, "actor_ammo_boxes"):pick(boxes)
+    local outfits = {}
+    for _, outfit in ipairs(sorted_by_section(catalogs.outfit_list)) do
+        if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * ammo_boxes + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then outfits[#outfits + 1] = outfit end
+    end
+    if #outfits == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Selected player class pair has no affordable outfit") end
+    local outfit = stream(request, fight_index, catalogs, "actor_outfit"):pick(outfits)
+    local cost = weapon.cost + ammo.cost * ammo_boxes + outfit.cost + bandage.cost
+    return gamma_arena_result.ok({ weapon = weapon.section, ammo = ammo.section, ammo_boxes = ammo_boxes, outfit = outfit.section, consumables = { bandage.section }, cost = cost })
+end
+
 local function random_knife(rng, knives)
     if type(knives) ~= "table" or #knives < 1 then return gamma_arena_result.err("GA_NO_VALID_KNIFE", "Knife catalog is empty") end
     local choice = rng:pick(knives)
@@ -245,7 +339,7 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
     local enemy_count = stream(normalized_request, fight_index, catalogs, "enemy_count"):next_int(difficulty.enemy_min, maximum)
     local spawn_slots = select_spawn_slots(stream(normalized_request, fight_index, catalogs, "spawn_slot"), resolved_layout, enemy_count)
     local assigned_routes = assign_routes(spawn_slots, resolved_layout.tactical_routes)
-    local actor = loadout(stream(normalized_request, fight_index, catalogs, "actor_loadout"), catalogs, difficulty.player_loadout_budget, "GA_NO_VALID_PLAYER_LOADOUT", catalogs.weapon_list); if not actor.ok then return actor end
+    local actor = player_loadout(normalized_request, fight_index, catalogs, difficulty); if not actor.ok then return actor end
     local actor_knife = random_knife(stream(normalized_request, fight_index, catalogs, "actor_knife"), catalogs.knife_list); if not actor_knife.ok then return actor_knife end
     actor.value.knife = actor_knife.value
     local spec = { schema_version = 3, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV3 skirmish " .. difficulty.id .. " #" .. fight_index }

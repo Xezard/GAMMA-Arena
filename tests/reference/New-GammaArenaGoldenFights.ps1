@@ -33,26 +33,26 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 3 -or [int]$catalog.meta.revision -ne 3 -or [int]$catalog.meta.generator_version -ne 4 -or
-    [int]$difficulties.meta.schema_version -ne 2 -or [int]$difficulties.meta.revision -ne 2 -or
+if ([int]$catalog.meta.schema_version -ne 4 -or [int]$catalog.meta.revision -ne 4 -or [int]$catalog.meta.generator_version -ne 5 -or
+    [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 3 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
     $generatorText -notmatch 'schema_version\s*=\s*3' -or $generatorText -notmatch 'FightSpecV3') {
-    throw 'Reference oracle requires catalog v3, generator v4, layout/difficulty v2, and FightSpec v3.'
+    throw 'Reference oracle requires catalog v4, generator v5, difficulty v3, layout v2, and FightSpec v3.'
 }
 
 $difficultyManifest = @{
-    rookie = @(2,3,25,15,50)
-    stalker = @(3,5,50,20,60)
-    veteran = @(5,7,75,25,75)
-    master = @(7,10,100,35,80)
+    rookie = @(2,3,25,8,50,50,30,15,5,0,55,30,10,5,0)
+    stalker = @(3,5,50,11,60,25,35,20,18,2,30,40,20,9,1)
+    veteran = @(5,7,75,14,75,10,25,20,38,7,15,30,25,25,5)
+    master = @(7,10,100,16,80,5,15,15,50,15,5,20,20,35,20)
 }
 $difficultyCatalog = @{}
 foreach ($id in @('rookie','stalker','veteran','master')) {
     $entry = $difficulties["ga_difficulty_$id"]
-    if ($null -eq $entry -or $entry.Count -ne 5) { throw "Difficulty $id must expose exactly five v2 fields." }
-    $actual = @([int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_loadout_budget,[int]$entry.primary_share_percent)
-    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v2 semantic manifest." }
-    $difficultyCatalog[$id] = [pscustomobject]@{Id=$id;EnemyMin=$actual[0];EnemyMax=$actual[1];EnemyBudget=$actual[2];PlayerBudget=$actual[3];PrimaryShare=$actual[4]}
+    if ($null -eq $entry -or $entry.Count -ne 15) { throw "Difficulty $id must expose exactly fifteen v3 fields." }
+    $actual = @([int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_loadout_budget,[int]$entry.primary_share_percent,[int]$entry.weapon_weight_pistol,[int]$entry.weapon_weight_smg,[int]$entry.weapon_weight_shotgun,[int]$entry.weapon_weight_rifle,[int]$entry.weapon_weight_sniper,[int]$entry.armor_weight_light,[int]$entry.armor_weight_medium,[int]$entry.armor_weight_scientific,[int]$entry.armor_weight_heavy,[int]$entry.armor_weight_powered_exo)
+    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v3 semantic manifest." }
+    $difficultyCatalog[$id] = [pscustomobject]@{Id=$id;EnemyMin=$actual[0];EnemyMax=$actual[1];EnemyBudget=$actual[2];PlayerBudget=$actual[3];PrimaryShare=$actual[4];WeaponWeights=@{w_pistol=$actual[5];w_smg=$actual[6];w_shotgun=$actual[7];w_rifle=$actual[8];w_sniper=$actual[9]};ArmorWeights=@{light=$actual[10];medium=$actual[11];scientific=$actual[12];heavy=$actual[13];powered_exo=$actual[14]}}
 }
 
 $layout = $layouts.ga_layout_rostok_arena_v1
@@ -92,9 +92,20 @@ function Get-GaNextRaw([hashtable]$Rng) {
 }
 function Get-GaNextInt([hashtable]$Rng, [int]$Minimum, [int]$Maximum) { return $Minimum + (Get-GaNextRaw $Rng) % ($Maximum - $Minimum + 1) }
 function New-GaStream([pscustomobject]$Request, [int]$FightIndex, [string]$Tag) {
-    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,4,3,2,$Tag)
+    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,5,4,2,$Tag)
 }
 function Select-GaPick([hashtable]$Rng, [array]$Values) { return $Values[(Get-GaNextInt $Rng 1 $Values.Count) - 1] }
+function Select-GaWeightedPair {
+    param([hashtable]$Rng, [array]$Pairs)
+    $total = ($Pairs | Measure-Object Weight -Sum).Sum
+    $draw = Get-GaNextInt $Rng 1 $total
+    $cumulative = 0
+    foreach ($pair in $Pairs) {
+        $cumulative += $pair.Weight
+        if ($draw -le $cumulative) { return $pair }
+    }
+    throw 'Weighted pair selection exhausted its range.'
+}
 function Select-GaBand([hashtable]$Rng, [array]$Values, [int]$Maximum) {
     $affordable = @($Values | Where-Object { $_.Cost -le $Maximum })
     if ($affordable.Count -eq 0) { throw "No affordable reference candidate for budget $Maximum." }
@@ -121,7 +132,7 @@ $weapons = @($catalog.weapons.ids.Split(',') | ForEach-Object { $_.Trim() } | So
     $entry=$catalog["weapon_$_"]
     [pscustomobject]@{Section=$entry.section;Ammo=$entry.ammo;Cost=[int]$entry.cost;AmmoBoxMin=[int]$entry.ammo_box_min;AmmoBoxMax=[int]$entry.ammo_box_max;Kind=$entry.kind;Slot=[int]$entry.slot}
 })
-$outfits = @($catalog.outfits.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["outfit_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
+$outfits = @($catalog.outfits.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["outfit_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost;ArmorClass=$entry.armor_class} })
 $profiles = @($catalog.profiles.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["profile_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
 $knives = @($catalog.knives.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $catalog["knife_$_"].section })
 $bandageCost = [int]$catalog.consumable_bandage.cost
@@ -141,6 +152,45 @@ function Get-GaRoleCombinations([string]$Role) {
 function New-GaLoadout([hashtable]$Rng, [int]$Budget, [array]$Candidates, [string]$Knife) {
     $choice = Select-GaBand $Rng $Candidates $Budget
     return [pscustomobject]@{Encoded="$($choice.Weapon),$($choice.Ammo),$($choice.AmmoBoxes),$($choice.Outfit),$Knife,bandage,$($choice.Cost)";Cost=[int]$choice.Cost;Kind=$choice.Kind}
+}
+function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscustomobject]$Difficulty, [string]$Knife) {
+    $pairs = @()
+    foreach ($weaponClass in @('w_pistol','w_smg','w_shotgun','w_rifle','w_sniper')) {
+        foreach ($armorClass in @('light','medium','scientific','heavy','powered_exo')) {
+            $available = $false
+            foreach ($weapon in $weapons) {
+                if ($weapon.Kind -ne $weaponClass) { continue }
+                foreach ($boxes in $weapon.AmmoBoxMin..$weapon.AmmoBoxMax) {
+                    foreach ($outfit in $outfits) {
+                        if ($outfit.ArmorClass -eq $armorClass -and $weapon.Cost + $ammoCosts[$weapon.Ammo] * $boxes + $outfit.Cost + $bandageCost -le $Difficulty.PlayerBudget) { $available = $true; break }
+                    }
+                    if ($available) { break }
+                }
+                if ($available) { break }
+            }
+            $weight = $Difficulty.WeaponWeights[$weaponClass] * $Difficulty.ArmorWeights[$armorClass]
+            if ($available -and $weight -gt 0) { $pairs += [pscustomobject]@{WeaponClass=$weaponClass;ArmorClass=$armorClass;Weight=$weight} }
+        }
+    }
+    if ($pairs.Count -eq 0) { throw 'No valid player class pair fits the budget.' }
+    $pair = Select-GaWeightedPair (New-GaStream $Request $FightIndex 'actor_class_pair') $pairs
+    $eligibleWeapons = @($weapons | Where-Object {
+        $weapon = $_
+        $weapon.Kind -eq $pair.WeaponClass -and @($weapon.AmmoBoxMin..$weapon.AmmoBoxMax | Where-Object {
+            $boxes = $_
+            @($outfits | Where-Object { $_.ArmorClass -eq $pair.ArmorClass -and $weapon.Cost + $ammoCosts[$weapon.Ammo] * $boxes + $_.Cost + $bandageCost -le $Difficulty.PlayerBudget }).Count -gt 0
+        }).Count -gt 0
+    })
+    $weapon = Select-GaPick (New-GaStream $Request $FightIndex 'actor_weapon') $eligibleWeapons
+    $eligibleBoxes = @($weapon.AmmoBoxMin..$weapon.AmmoBoxMax | Where-Object {
+        $boxes = $_
+        @($outfits | Where-Object { $_.ArmorClass -eq $pair.ArmorClass -and $weapon.Cost + $ammoCosts[$weapon.Ammo] * $boxes + $_.Cost + $bandageCost -le $Difficulty.PlayerBudget }).Count -gt 0
+    })
+    $ammoBoxes = Select-GaPick (New-GaStream $Request $FightIndex 'actor_ammo_boxes') $eligibleBoxes
+    $eligibleOutfits = @($outfits | Where-Object { $_.ArmorClass -eq $pair.ArmorClass -and $weapon.Cost + $ammoCosts[$weapon.Ammo] * $ammoBoxes + $_.Cost + $bandageCost -le $Difficulty.PlayerBudget })
+    $outfit = Select-GaPick (New-GaStream $Request $FightIndex 'actor_outfit') $eligibleOutfits
+    $cost = $weapon.Cost + $ammoCosts[$weapon.Ammo] * $ammoBoxes + $outfit.Cost + $bandageCost
+    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$ammoBoxes,$($outfit.Section),$Knife,bandage,$cost";Cost=[int]$cost;Kind=$weapon.Kind}
 }
 
 $resolvedSlots = @()
@@ -183,7 +233,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
     $slots=Get-GaSelectedSlots (New-GaStream $request $FightIndex 'spawn_slot') $count
     $assigned=Get-GaAssignedRoutes $slots
     $actorKnife=Select-GaPick (New-GaStream $request $FightIndex 'actor_knife') $knives
-    $actor=New-GaLoadout (New-GaStream $request $FightIndex 'actor_loadout') $difficulty.PlayerBudget $combinations $actorKnife
+    $actor=New-GaPlayerLoadout $request $FightIndex $difficulty $actorKnife
     $primaryCount=[math]::Ceiling($count*$difficulty.PrimaryShare/100)
     $base=[math]::Floor($difficulty.EnemyBudget/$count);$remainder=$difficulty.EnemyBudget%$count
     $opponents=@()
@@ -202,7 +252,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
         $opponents += "${index}:$index,$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($assigned[$zero]),$role,$($profile.Section),$($profile.Cost),$($gear.Encoded),$($profile.Cost+$gear.Cost)"
     }
-    $fields=@('schema_version=3','generator_version=4','catalog_revision=3','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g4-c3-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV3 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=3','generator_version=5','catalog_revision=4','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g5-c4-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV3 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 

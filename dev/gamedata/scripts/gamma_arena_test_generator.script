@@ -56,6 +56,18 @@ end
 local function catalogs() local result = gamma_arena_catalog.load(fixture_factory()); gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load"); return result.value end
 local function request(seed, difficulty) return { session_seed=seed, mode_id="skirmish", difficulty_id=difficulty, layout_id="rostok_arena_v1" } end
 
+local function all_available_pairs()
+    local weapons = { "w_pistol", "w_smg", "w_shotgun", "w_rifle", "w_sniper" }
+    local armors = { "light", "medium", "scientific", "heavy", "powered_exo" }
+    local pairs = {}
+    for _, weapon_class in ipairs(weapons) do
+        for _, armor_class in ipairs(armors) do
+            pairs[#pairs + 1] = { weapon_class = weapon_class, armor_class = armor_class, available = true }
+        end
+    end
+    return pairs
+end
+
 function fixture_resolved_layout(snapshot, capacity)
     local layout = snapshot.layouts.rostok_arena_v1
     local result = {
@@ -91,8 +103,97 @@ local function validate_fixture(spec, snapshot, capacity)
 end
 
 local function generator_10000_seeds()
-    local snapshot = catalogs(); local ids = { "rookie", "stalker", "veteran", "master" }
-    for seed = 0, 9999 do local generated = generate_fixture(request(seed, ids[(seed % 4) + 1]), seed % 32, snapshot); gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed"); gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "10k generated FightSpec must validate") end
+    local snapshot = catalogs()
+    for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
+        local difficulty = snapshot.difficulties[difficulty_id]
+        for seed = 0, 9999 do
+            local generated = generate_fixture(request(seed, difficulty_id), seed % 32, snapshot)
+            gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed")
+            gamma_arena_test_assert.is_true(generated.value.actor.loadout.cost <= difficulty.player_loadout_budget, "10k actor loadout cost must fit the exact player budget")
+            gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "10k generated FightSpec must validate")
+        end
+    end
+end
+
+local function weighted_player_class_pair_selection()
+    local snapshot = catalogs()
+    local pair = gamma_arena_generator.select_player_class_pair(
+        { next_int = function(_, minimum, maximum) return maximum end },
+        snapshot.difficulties.master,
+        all_available_pairs()
+    )
+    gamma_arena_test_assert.is_true(pair.ok, "weighted pair selection succeeds")
+    gamma_arena_test_assert.equals(pair.value.weapon_class, "w_sniper", "last weighted bucket is reachable")
+    gamma_arena_test_assert.equals(pair.value.armor_class, "powered_exo", "last armor bucket is reachable")
+
+    local renormalized = gamma_arena_generator.select_player_class_pair(
+        { next_int = function(_, minimum, maximum) return maximum end },
+        snapshot.difficulties.master,
+        {
+            { weapon_class = "w_pistol", armor_class = "light", available = false },
+            { weapon_class = "invalid", armor_class = "light", available = true },
+            { weapon_class = "w_smg", armor_class = "medium", available = true }
+        }
+    )
+    gamma_arena_test_assert.is_true(renormalized.ok, "unavailable and zero-weight pairs are removed")
+    gamma_arena_test_assert.equals(renormalized.value.weapon_class, "w_smg", "remaining pair weight is renormalized")
+    gamma_arena_test_assert.equals(renormalized.value.armor_class, "medium", "remaining armor pair is retained")
+end
+
+local function player_class_pair_ignores_concrete_cardinality()
+    local baseline, duplicated = catalogs(), catalogs()
+    baseline.selection_mode, duplicated.selection_mode = "staged", "staged"
+    baseline.minimum_loadout_cost, duplicated.minimum_loadout_cost = 1, 1
+    local baseline_exo = { section = "synthetic_powered_exo", cost = 1, armor_class = "powered_exo" }
+    local duplicated_exo = { section = "synthetic_powered_exo", cost = 1, armor_class = "powered_exo" }
+    baseline.outfits[baseline_exo.section] = baseline_exo
+    baseline.outfit_list[#baseline.outfit_list + 1] = baseline_exo
+    duplicated.outfits[duplicated_exo.section] = duplicated_exo
+    duplicated.outfit_list[#duplicated.outfit_list + 1] = duplicated_exo
+    duplicated.weapon_list[#duplicated.weapon_list + 1] = duplicated.weapons.ak74
+    duplicated.weapon_list[#duplicated.weapon_list + 1] = duplicated.weapons.ak74
+    duplicated.outfit_list[#duplicated.outfit_list + 1] = duplicated_exo
+    duplicated.outfit_list[#duplicated.outfit_list + 1] = duplicated_exo
+    for seed = 0, 255 do
+        local first = generate_fixture(request(seed, "master"), seed % 32, baseline)
+        local second = generate_fixture(request(seed, "master"), seed % 32, duplicated)
+        gamma_arena_test_assert.is_true(first.ok and second.ok, "duplicate concrete records still generate")
+        gamma_arena_test_assert.equals(baseline.weapons[first.value.actor.loadout.weapon].kind, duplicated.weapons[second.value.actor.loadout.weapon].kind, "duplicate rifles do not change the selected weapon class")
+        gamma_arena_test_assert.equals(baseline.outfits[first.value.actor.loadout.outfit].armor_class, duplicated.outfits[second.value.actor.loadout.outfit].armor_class, "duplicate exos do not change the selected armor class")
+    end
+end
+
+local function master_player_class_diversity()
+    local snapshot = catalogs()
+    local ammo = snapshot.ammo.ammo_9x18_fmj
+    local function add_weapon(section, kind)
+        local weapon = { section = section, ammo = ammo.section, cost = 2, ammo_box_min = 1, ammo_box_max = 1, kind = kind, slot = 2 }
+        snapshot.weapons[section] = weapon
+        snapshot.weapon_list[#snapshot.weapon_list + 1] = weapon
+    end
+    local function add_outfit(section, armor_class)
+        local outfit = { section = section, cost = 1, armor_class = armor_class }
+        snapshot.outfits[section] = outfit
+        snapshot.outfit_list[#snapshot.outfit_list + 1] = outfit
+    end
+    add_weapon("synthetic_sniper", "w_sniper")
+    add_outfit("synthetic_heavy", "heavy")
+    add_outfit("synthetic_powered_exo", "powered_exo")
+    snapshot.selection_mode = "staged"
+    snapshot.minimum_loadout_cost = 1
+    local seen_weapons, seen_armors = {}, {}
+    for seed = 0, 9999 do
+        local generated = generate_fixture(request(seed, "master"), seed % 32, snapshot)
+        gamma_arena_test_assert.is_true(generated.ok, "synthetic Master generation succeeds")
+        local loadout = generated.value.actor.loadout
+        seen_weapons[snapshot.weapons[loadout.weapon].kind] = true
+        seen_armors[snapshot.outfits[loadout.outfit].armor_class] = true
+    end
+    local weapon_count, armor_count = 0, 0
+    for _ in pairs(seen_weapons) do weapon_count = weapon_count + 1 end
+    for _ in pairs(seen_armors) do armor_count = armor_count + 1 end
+    gamma_arena_test_assert.is_true(weapon_count >= 4, "Master selection reaches at least four affordable weapon classes")
+    gamma_arena_test_assert.is_true(armor_count >= 4, "Master selection reaches at least four affordable armor classes")
 end
 local function catalog_enforces_max_count_viability()
     local loaded = gamma_arena_catalog.load(fixture_factory())
@@ -444,6 +545,6 @@ local function golden_fights_v3()
 end
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v3",fn=stable_and_fight_index},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v3",fn=golden_fights_v3}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v3",fn=stable_and_fight_index},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v3",fn=golden_fights_v3}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end
