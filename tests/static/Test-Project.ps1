@@ -813,8 +813,8 @@ $Task3DataFiles = @(
     'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
     'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx',
     'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx',
-    'tests\fixtures\golden-fights-v2.txt',
-    'schemas\fight-spec-v2.md'
+    'tests\fixtures\golden-fights-v3.txt',
+    'schemas\fight-spec-v3.md'
 )
 foreach ($RelativePath in $Task3DataFiles) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
@@ -827,9 +827,9 @@ $NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
-    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*2\s*$') 'Catalog must declare schema_version = 2'
-    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*2\s*$') 'Catalog must declare revision = 2'
-    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*2\s*$') 'Catalog must declare generator_version = 2'
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*3\s*$') 'Catalog must declare schema_version = 3'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*3\s*$') 'Catalog must declare revision = 3'
+    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*4\s*$') 'Catalog must declare generator_version = 4'
     Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s*$') 'Novice outfit must cost 1 so every maximum-count envelope is feasible'
     foreach ($Profile in @('gamma_arena_bandit_novice', 'gamma_arena_bandit_trainee', 'gamma_arena_bandit_experienced', 'gamma_arena_bandit_veteran')) {
@@ -845,10 +845,10 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'r_line') 'Runtime catalog enumeration must use r_line'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_SECTION_CHECK_FAILED') 'Catalog section checks must return structured errors'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
-    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v2 semantic manifest'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v3 semantic manifest'
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
-    Assert-True ($Task3CatalogScriptContent -match 'v1_difficulty_manifest') 'Catalog loader must bind exact v1 difficulty semantics'
-    Assert-True ($Task3CatalogScriptContent -match 'v1_layout_manifest') 'Catalog loader must bind exact ordered v1 layout semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v2') 'Catalog loader must bind exact v2 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'layout_manifest_v2') 'Catalog loader must bind exact ordered v2 layout semantics'
     Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
 }
 $Task3ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
@@ -861,6 +861,9 @@ if (Test-Path -LiteralPath $Task3ValidatorPath) {
     Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_COMBINATION_INVALID') 'Validator must reject non-v2 loadout combinations'
     Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_KNIFE_INVALID') 'Validator must reject non-cataloged knives'
     Assert-True ($Task3ValidatorContent -match 'GA_ENEMY_SLOT_BUDGET_INVALID') 'Validator must enforce deterministic per-slot enemy budgets'
+    foreach ($Code in @('GA_SPAWN_SLOT_INVALID','GA_SPAWN_SLOT_DUPLICATE','GA_TACTICAL_ROUTE_INVALID','GA_ENEMY_ROLE_INVALID','GA_ENEMY_PRIMARY_SHARE_INVALID','GA_ENEMY_SNIPER_LIMIT_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match $Code) "FightSpec v3 validator must return structured $Code"
+    }
     Assert-True ($Task3ValidatorContent -match 'math\.floor\s*\(\s*difficulty\.enemy_total_budget\s*/\s*opponent_count\s*\)') 'Validator must recompute the generator slot-budget base'
     Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
 }
@@ -876,7 +879,13 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($Task3GeneratorContent -match 'stream\s*\(\s*normalized_request') 'Every generated RNG stream must use the normalized request'
     Assert-True ($Task3GeneratorContent -match 'gamma_arena_number\.is_integer') 'Generator seed and index checks must use the finite integer contract'
     Assert-True ($Task3GeneratorContent -match '"actor_knife"') 'Player knife must use an independent tagged RNG stream'
-    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*2') 'Generator must emit FightSpecV2'
+    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*3') 'Generator must emit FightSpecV3'
+    foreach ($Marker in @('pick_affordable_band','primary_share_percent','spawn_slot_id','tactical_route','role_weapon_pool','resolved_layout')) {
+        Assert-True ($Task3GeneratorContent -match $Marker) "FightSpec v3 generator must contain $Marker"
+    }
+    Assert-True ($Task3GeneratorContent -match 'global_role_pool') 'Unaffordable faction role pools must fall back to the matching global role pool'
+    $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
+    Assert-True ($GeneratorTests -match 'generator_primary_pool_affordability_falls_back') 'Generator tests must cover unaffordable non-empty faction primary pools'
     Assert-True ($Task3GeneratorContent -match 'value\.knife') 'Stable encoding must include the generated knife'
 }
 if (Test-Path -LiteralPath $DifficultyPath) {
@@ -892,6 +901,9 @@ if (Test-Path -LiteralPath $LayoutPath) {
     Assert-True ($LayoutContent -match '(?m)^actor_look_path\s*=\s*t_look\s*$') 'Actor must face the vanilla Rostok Arena ingress look patrol'
     Assert-True ($LayoutContent -notmatch '(?m)^actor_boundary_zone\s*=') 'Closed Rostok Arena must not declare a runtime boundary restrictor'
     Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk') 'Layout must retain the six unique opponent paths'
+    foreach ($Marker in @('virtual_capacity = 10','virtual_radii = 1.5,2.5','max_height_delta = 1.0','min_opponent_separation = 1.75','min_actor_separation = 8.0','max_base_distance = 3.0')) {
+        Assert-True ($LayoutContent.Contains($Marker)) "Layout v2 must declare $Marker"
+    }
 }
 if (Test-Path -LiteralPath $NpcPath) {
     $NpcContent = Get-Content -LiteralPath $NpcPath -Raw
@@ -909,10 +921,10 @@ if (Test-Path -LiteralPath $SkipPath) {
     Assert-True ($SkipContent -match '(?m)^!\[skip_npcs\]\s*$') 'Loadout patch must use ![skip_npcs]'
     Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)_(novice|trainee|experienced|veteran)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)\s*$')).Count -eq 36) 'Loadout patch must add all 36 Arena human aliases to skip_npcs'
 }
-$GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v2.txt'
+$GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v3.txt'
 if (Test-Path -LiteralPath $GoldenPath) {
     $GoldenContent = Get-Content -LiteralPath $GoldenPath -Raw
-    Assert-True (([regex]::Matches($GoldenContent, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=2\|.+\|diagnostic=FightSpecV2 .+$')).Count -eq 4) 'Golden fixture must contain four complete v2 stable encodings'
+    Assert-True (([regex]::Matches($GoldenContent, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=3\|.+\|diagnostic=FightSpecV3 .+$')).Count -eq 4) 'Golden fixture must contain four complete v3 stable encodings'
 }
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'

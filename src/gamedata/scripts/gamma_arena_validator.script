@@ -6,12 +6,17 @@ local function positive_integer(value)
     return gamma_arena_number.is_positive_integer(value)
 end
 
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
 local function array_length(value)
     if type(value) ~= "table" then return nil end
     local count, maximum = 0, 0
     for key in pairs(value) do
-        if not gamma_arena_number.is_positive_integer(key) then return nil end
-        count = count + 1; maximum = math.max(maximum, key)
+        if not positive_integer(key) then return nil end
+        count = count + 1
+        maximum = math.max(maximum, key)
     end
     if maximum ~= count then return nil end
     return count
@@ -40,8 +45,10 @@ local function validate_loadout(loadout, catalogs, budget)
     end
     local consumable_count = array_length(loadout.consumables)
     if consumable_count == nil then return failure("GA_LOADOUT_TYPE_INVALID", "Loadout consumables must be an array", {}) end
-    if consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v2 catalog combination", {}) end
-    local weapon = item_exists(catalogs.weapons, loadout.weapon); local ammo = item_exists(catalogs.ammo, loadout.ammo); local outfit = item_exists(catalogs.outfits, loadout.outfit)
+    if consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must contain a consumable", {}) end
+    local weapon = item_exists(catalogs.weapons, loadout.weapon)
+    local ammo = item_exists(catalogs.ammo, loadout.ammo)
+    local outfit = item_exists(catalogs.outfits, loadout.outfit)
     local knife = item_exists(catalogs.knives, loadout.knife)
     if not knife then return failure("GA_LOADOUT_KNIFE_INVALID", "Loadout knife is not cataloged", { section = loadout.knife }) end
     if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
@@ -56,13 +63,18 @@ local function validate_loadout(loadout, catalogs, budget)
     end
     if cost ~= loadout.cost or cost > budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout cost exceeds budget", { cost = cost, budget = budget }) end
     if catalogs.selection_mode == "staged" then
-        if not positive_integer(catalogs.minimum_loadout_cost) then
-            return failure("GA_LOADOUT_COMBINATION_INVALID", "Dynamic catalog minimum loadout cost is invalid", {})
-        end
+        if not positive_integer(catalogs.minimum_loadout_cost) then return failure("GA_LOADOUT_COMBINATION_INVALID", "Dynamic catalog minimum loadout cost is invalid", {}) end
     elseif not loadout_combination_exists(loadout, catalogs.combinations) then
-        return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v2 catalog combination", {})
+        return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a catalog combination", {})
     end
-    return gamma_arena_result.ok(true)
+    return gamma_arena_result.ok(weapon)
+end
+
+local function copy_position(position)
+    if position == nil then return nil end
+    local ok, x, y, z = pcall(function() return position.x, position.y, position.z end)
+    if not ok or not finite_number(x) or not finite_number(y) or not finite_number(z) then return nil end
+    return { x = x, y = y, z = z }
 end
 
 local function copy_loadout(loadout)
@@ -71,7 +83,11 @@ local function copy_loadout(loadout)
 end
 
 local function copy_participant(participant)
-    return { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, community = participant.community, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost }
+    local result = { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, community = participant.community, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost, spawn_slot_id = participant.spawn_slot_id, tactical_route = participant.tactical_route, role = participant.role }
+    if type(participant.spawn) == "table" then
+        result.spawn = { position = copy_position(participant.spawn.position), level_vertex_id = participant.spawn.level_vertex_id, game_vertex_id = participant.spawn.game_vertex_id }
+    end
+    return result
 end
 
 local function normalized_community(value)
@@ -80,100 +96,114 @@ local function normalized_community(value)
 end
 
 function validate_effective_profile(section, slot, runtime, expected_community)
-    if type(runtime) ~= "table" then
-        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section })
-    end
+    if type(runtime) ~= "table" then return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section }) end
     local resolver_ok, resolver = pcall(function() return runtime.effective_profile end)
-    if not resolver_ok or type(resolver) ~= "function" then
-        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section })
-    end
+    if not resolver_ok or type(resolver) ~= "function" then return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section }) end
     local called, value = pcall(resolver, section)
-    if not called then
-        return failure("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective NPC profile could not be read safely", { slot = slot, section = section, reason = tostring(value) })
-    end
-    if type(value) == "table" and type(value.ok) == "boolean" then
-        if not value.ok then return value end
-        value = value.value
-    end
-    if type(value) ~= "table" then
-        return failure("GA_ENEMY_EFFECTIVE_PROFILE_INVALID", "Effective NPC profile must contain class and community", { slot = slot, section = section })
-    end
-    if value.class ~= "AI_STL_S" then
-        return failure("GA_ENEMY_EFFECTIVE_CLASS_INVALID", "Effective Arena opponent class must be human AI_STL_S", { slot = slot, section = section, class = value.class })
-    end
+    if not called then return failure("GA_ENEMY_EFFECTIVE_PROFILE_READ_FAILED", "Effective NPC profile could not be read safely", { slot = slot, section = section, reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then if not value.ok then return value end; value = value.value end
+    if type(value) ~= "table" then return failure("GA_ENEMY_EFFECTIVE_PROFILE_INVALID", "Effective NPC profile must contain class and community", { slot = slot, section = section }) end
+    if value.class ~= "AI_STL_S" then return failure("GA_ENEMY_EFFECTIVE_CLASS_INVALID", "Effective Arena opponent class must be human AI_STL_S", { slot = slot, section = section, class = value.class }) end
     expected_community = normalized_community(expected_community) or "bandit"
-    if normalized_community(value.community) ~= expected_community then
-        return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community does not match FightSpec", { slot = slot, section = section, community = value.community, expected_community = expected_community })
-    end
+    if normalized_community(value.community) ~= expected_community then return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community does not match FightSpec", { slot = slot, section = section, community = value.community, expected_community = expected_community }) end
     return gamma_arena_result.ok(true)
 end
 
-local function validate_impl(spec, catalogs, runtime)
+local function resolved_layout_index(value, expected)
+    if type(value) ~= "table" or value.id ~= expected.id or value.level ~= expected.level or value.version ~= expected.version then return nil, failure("GA_RESOLVED_LAYOUT_INVALID", "Resolved layout identity is invalid", {}) end
+    local slot_count = array_length(value.opponent_spawn_slots)
+    local route_count = array_length(value.tactical_routes)
+    if slot_count == nil or route_count == nil or slot_count < 1 or route_count < 1 then return nil, failure("GA_RESOLVED_LAYOUT_INVALID", "Resolved layout arrays are invalid", {}) end
+    local slots, routes = {}, {}
+    for _, route in ipairs(value.tactical_routes) do
+        if type(route) ~= "string" or route == "" or routes[route] then return nil, failure("GA_RESOLVED_LAYOUT_INVALID", "Resolved tactical routes are invalid", { route = route }) end
+        routes[route] = true
+    end
+    for _, slot in ipairs(value.opponent_spawn_slots) do
+        local position = type(slot) == "table" and copy_position(slot.position) or nil
+        if type(slot) ~= "table" or type(slot.id) ~= "string" or slot.id == "" or slots[slot.id] or type(slot.base_route) ~= "string" or not routes[slot.base_route] or position == nil or not gamma_arena_number.is_integer(slot.level_vertex_id) or slot.level_vertex_id < 0 or not gamma_arena_number.is_integer(slot.game_vertex_id) or slot.game_vertex_id < 0 then
+            return nil, failure("GA_RESOLVED_LAYOUT_INVALID", "Resolved physical spawn slot is invalid", { id = type(slot) == "table" and slot.id or nil })
+        end
+        slots[slot.id] = { position = position, level_vertex_id = slot.level_vertex_id, game_vertex_id = slot.game_vertex_id }
+    end
+    return { slots = slots, routes = routes, capacity = slot_count }
+end
+
+local function same_position(left, right)
+    return left ~= nil and right ~= nil and left.x == right.x and left.y == right.y and left.z == right.z
+end
+
+local function validate_impl(spec, catalogs, resolved_layout, runtime)
     if type(spec) ~= "table" or type(catalogs) ~= "table" or type(catalogs.layouts) ~= "table" or type(catalogs.difficulties) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec and normalized catalogs are required", {}) end
     if spec.mode_id ~= "skirmish" then return failure("GA_MODE_INVALID", "FightSpec mode must be skirmish", { mode_id = spec.mode_id }) end
     if type(spec.layout_id) ~= "string" or type(catalogs.layouts[spec.layout_id]) ~= "table" then return failure("GA_LAYOUT_UNKNOWN", "FightSpec layout is unknown", { layout_id = spec.layout_id }) end
     if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
-    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 2 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
-    if not gamma_arena_number.is_integer(spec.layout_version) or not gamma_arena_number.is_integer(layout.version) or spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
-    if spec.level ~= layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
+    local resolved, resolved_error = resolved_layout_index(resolved_layout, layout); if not resolved then return resolved_error end
+    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 3 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.layout_version) or spec.layout_version ~= resolved_layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
+    if spec.level ~= resolved_layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
     if not gamma_arena_number.is_integer(spec.session_seed) or spec.session_seed < 1 or spec.session_seed > 2147483646 or not gamma_arena_number.is_integer(spec.fight_index) or spec.fight_index < 0 then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec seed and index are invalid", {}) end
-    local expected_fight_id = "ga-" .. spec.session_seed .. "-" .. spec.fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version
+    local expected_fight_id = "ga-" .. spec.session_seed .. "-" .. spec.fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version
     if spec.fight_id ~= expected_fight_id then return failure("GA_FIGHT_ID_INVALID", "Fight id does not match FightSpec generation inputs", { expected = expected_fight_id, actual = spec.fight_id }) end
     if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
-    if spec.actor.spawn_path ~= layout.actor_spawn_path or spec.actor.look_path ~= layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
+    if spec.actor.spawn_path ~= resolved_layout.actor_spawn_path or spec.actor.look_path ~= resolved_layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
     local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget); if not actor_result.ok then return actor_result end
     local opponent_count = array_length(spec.opponents)
     if opponent_count == nil then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec opponents must be a dense array", {}) end
-    if opponent_count < difficulty.enemy_min or opponent_count > math.min(difficulty.enemy_max, #layout.opponent_spawn_paths) then return failure("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
+    if opponent_count < difficulty.enemy_min or opponent_count > math.min(difficulty.enemy_max, resolved.capacity) then return failure("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
     local slot_base = math.floor(difficulty.enemy_total_budget / opponent_count)
     local slot_remainder = difficulty.enemy_total_budget % opponent_count
-    local valid_paths = {}; for _, path in ipairs(layout.opponent_spawn_paths) do valid_paths[path] = true end
-    local seen, spent = {}, 0
+    local seen, spent, primary_count, sniper_count = {}, 0, 0, 0
     for index = 1, opponent_count do
         local opponent = spec.opponents[index]
-        if type(opponent) ~= "table" or not positive_integer(opponent.slot) or opponent.slot ~= index or type(opponent.spawn_path) ~= "string" or opponent.spawn_path == "" or type(opponent.profile) ~= "string" or not positive_integer(opponent.profile_cost) or not positive_integer(opponent.total_cost) or type(opponent.loadout) ~= "table" then
+        if type(opponent) ~= "table" or not positive_integer(opponent.slot) or opponent.slot ~= index or type(opponent.spawn_slot_id) ~= "string" or opponent.spawn_slot_id == "" or type(opponent.tactical_route) ~= "string" or type(opponent.profile) ~= "string" or not positive_integer(opponent.profile_cost) or not positive_integer(opponent.total_cost) or type(opponent.loadout) ~= "table" or (opponent.role ~= "leader" and opponent.role ~= "primary" and opponent.role ~= "secondary") then
             if type(opponent) == "table" and (not positive_integer(opponent.slot) or opponent.slot ~= index) then return failure("GA_OPPONENT_SLOT_INVALID", "Opponent slot must equal array index", { index = index, slot = opponent.slot }) end
             return failure("GA_FIGHTSPEC_TYPE_INVALID", "Opponent fields have invalid types", { index = index })
         end
+        local physical = resolved.slots[opponent.spawn_slot_id]
+        local spawn_position = type(opponent.spawn) == "table" and copy_position(opponent.spawn.position) or nil
+        if physical == nil or spawn_position == nil or not same_position(spawn_position, physical.position) or opponent.spawn.level_vertex_id ~= physical.level_vertex_id or opponent.spawn.game_vertex_id ~= physical.game_vertex_id then return failure("GA_SPAWN_SLOT_INVALID", "Opponent physical spawn does not match resolved layout", { slot = index, spawn_slot_id = opponent.spawn_slot_id }) end
+        if seen[opponent.spawn_slot_id] then return failure("GA_SPAWN_SLOT_DUPLICATE", "Opponent physical spawn slots must be unique", { spawn_slot_id = opponent.spawn_slot_id }) end
+        seen[opponent.spawn_slot_id] = true
+        if not resolved.routes[opponent.tactical_route] or opponent.spawn_path ~= opponent.tactical_route then return failure("GA_TACTICAL_ROUTE_INVALID", "Opponent tactical route is unavailable", { route = opponent.tactical_route }) end
         local profile = item_exists(catalogs.profiles, opponent.profile)
         if not profile then return failure("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
         local expected_community = normalized_community(profile.community) or "bandit"
-        if catalogs.selection_mode == "staged" and normalized_community(opponent.community) ~= expected_community then
-            return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "FightSpec opponent community does not match catalog profile", { slot = index, section = opponent.profile, community = opponent.community, expected_community = expected_community })
-        end
-        if runtime ~= nil then
-            local effective = validate_effective_profile(opponent.profile, index, runtime, expected_community)
-            if not effective.ok then return effective end
-        end
-        if not valid_paths[opponent.spawn_path] then return failure("GA_SPAWN_PATH_INVALID", "Opponent spawn path is not in the selected layout", { path = opponent.spawn_path }) end
-        if seen[opponent.spawn_path] then return failure("GA_SPAWN_PATH_DUPLICATE", "Opponent spawn paths must be unique", { path = opponent.spawn_path }) end
-        seen[opponent.spawn_path] = true
-        local gear_result = validate_loadout(opponent.loadout, catalogs, difficulty.enemy_total_budget - profile.cost); if not gear_result.ok then return gear_result end
-        if opponent.profile_cost ~= profile.cost or opponent.total_cost ~= profile.cost + opponent.loadout.cost then return failure("GA_ENEMY_COST_INVALID", "Opponent cost is inconsistent", { slot = index }) end
+        if catalogs.selection_mode == "staged" and normalized_community(opponent.community) ~= expected_community then return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "FightSpec opponent community does not match catalog profile", { slot = index, section = opponent.profile, community = opponent.community, expected_community = expected_community }) end
+        if runtime ~= nil then local effective = validate_effective_profile(opponent.profile, index, runtime, expected_community); if not effective.ok then return effective end end
         local slot_budget = slot_base + (index <= slot_remainder and 1 or 0)
-        if profile.cost + opponent.loadout.cost > slot_budget then return failure("GA_ENEMY_SLOT_BUDGET_INVALID", "Opponent exceeds its deterministic slot budget", { slot = index, cost = profile.cost + opponent.loadout.cost, budget = slot_budget }) end
+        local gear_result = validate_loadout(opponent.loadout, catalogs, slot_budget - profile.cost); if not gear_result.ok then return gear_result end
+        local weapon = gear_result.value
+        local is_primary = weapon.kind ~= "w_pistol"
+        if opponent.role == "secondary" and is_primary then return failure("GA_ENEMY_ROLE_INVALID", "Secondary role received a primary firearm", { slot = index }) end
+        if opponent.role ~= "secondary" and not is_primary then return failure("GA_ENEMY_ROLE_INVALID", "Primary role received a sidearm", { slot = index }) end
+        if opponent.role == "leader" and index ~= 1 then return failure("GA_ENEMY_ROLE_INVALID", "Leader must occupy the first deterministic slot", { slot = index }) end
+        if is_primary then primary_count = primary_count + 1 end
+        if weapon.kind == "w_sniper" then sniper_count = sniper_count + 1 end
+        if opponent.profile_cost ~= profile.cost or opponent.total_cost ~= profile.cost + opponent.loadout.cost then return failure("GA_ENEMY_COST_INVALID", "Opponent cost is inconsistent", { slot = index }) end
+        if opponent.total_cost > slot_budget then return failure("GA_ENEMY_SLOT_BUDGET_INVALID", "Opponent exceeds its deterministic slot budget", { slot = index, cost = opponent.total_cost, budget = slot_budget }) end
         spent = spent + opponent.total_cost
     end
+    if primary_count * 100 < opponent_count * difficulty.primary_share_percent then return failure("GA_ENEMY_PRIMARY_SHARE_INVALID", "Opponent primary firearm share is below difficulty minimum", { primary = primary_count, opponents = opponent_count }) end
+    if sniper_count > 1 then return failure("GA_ENEMY_SNIPER_LIMIT_INVALID", "Opponent cohort contains more than one sniper", { count = sniper_count }) end
     if spent > difficulty.enemy_total_budget then return failure("GA_ENEMY_BUDGET_INVALID", "Enemy total cost exceeds difficulty budget", {}) end
     local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, session_seed = spec.session_seed, fight_index = spec.fight_index, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, tactical_routes = {}, diagnostic = spec.diagnostic }
     for index = 1, opponent_count do private.opponents[index] = copy_participant(spec.opponents[index]) end
-    for index, path in ipairs(layout.opponent_spawn_paths) do private.tactical_routes[index] = path end
+    for index, route in ipairs(resolved_layout.tactical_routes) do private.tactical_routes[index] = route end
     return gamma_arena_result.ok({ session_seed = function() return private.session_seed end, fight_index = function() return private.fight_index end, fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, tactical_routes = function() local copy = {}; for index, value in ipairs(private.tactical_routes) do copy[index] = value end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
 end
 
-function validate(spec, catalogs)
-    local succeeded, result = pcall(validate_impl, spec, catalogs, nil)
+function validate(spec, catalogs, resolved_layout)
+    local succeeded, result = pcall(validate_impl, spec, catalogs, resolved_layout, nil)
     if succeeded then return result end
     return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec validation failed safely", { reason = tostring(result) })
 end
 
-function validate_runtime(spec, catalogs, runtime)
-    if type(runtime) ~= "table" then
-        return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Runtime FightSpec validation requires an effective profile resolver", {})
-    end
-    local succeeded, result = pcall(validate_impl, spec, catalogs, runtime)
+function validate_runtime(spec, catalogs, resolved_layout, runtime)
+    if type(runtime) ~= "table" then return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Runtime FightSpec validation requires an effective profile resolver", {}) end
+    local succeeded, result = pcall(validate_impl, spec, catalogs, resolved_layout, runtime)
     if succeeded then return result end
     return failure("GA_FIGHTSPEC_TYPE_INVALID", "Runtime FightSpec validation failed safely", { reason = tostring(result) })
 end

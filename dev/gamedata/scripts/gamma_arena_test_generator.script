@@ -56,9 +56,43 @@ end
 local function catalogs() local result = gamma_arena_catalog.load(fixture_factory()); gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load"); return result.value end
 local function request(seed, difficulty) return { session_seed=seed, mode_id="skirmish", difficulty_id=difficulty, layout_id="rostok_arena_v1" } end
 
+function fixture_resolved_layout(snapshot, capacity)
+    local layout = snapshot.layouts.rostok_arena_v1
+    local result = {
+        id = layout.id,
+        version = layout.version,
+        level = layout.level,
+        actor_spawn_path = layout.actor_spawn_path,
+        actor_look_path = layout.actor_look_path,
+        tactical_routes = {},
+        opponent_spawn_slots = {}
+    }
+    for index, path in ipairs(layout.opponent_spawn_paths) do result.tactical_routes[index] = path end
+    for index = 1, capacity or 10 do
+        local route = layout.opponent_spawn_paths[((index - 1) % #layout.opponent_spawn_paths) + 1]
+        result.opponent_spawn_slots[index] = {
+            id = index <= #layout.opponent_spawn_paths and ("native:" .. route) or ("virtual:" .. (index - #layout.opponent_spawn_paths)),
+            base_route = route,
+            native = index <= #layout.opponent_spawn_paths,
+            position = { x = index * 4, y = 0, z = index % 2 == 0 and 4 or -4 },
+            level_vertex_id = 1000 + index,
+            game_vertex_id = 77
+        }
+    end
+    return result
+end
+
+local function generate_fixture(start_request, fight_index, snapshot, capacity)
+    return gamma_arena_generator.generate(start_request, fight_index, snapshot, fixture_resolved_layout(snapshot, capacity))
+end
+
+local function validate_fixture(spec, snapshot, capacity)
+    return gamma_arena_validator.validate(spec, snapshot, fixture_resolved_layout(snapshot, capacity))
+end
+
 local function generator_10000_seeds()
     local snapshot = catalogs(); local ids = { "rookie", "stalker", "veteran", "master" }
-    for seed = 0, 9999 do local generated = gamma_arena_generator.generate(request(seed, ids[(seed % 4) + 1]), seed % 32, snapshot); gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed"); gamma_arena_test_assert.is_true(gamma_arena_validator.validate(generated.value, snapshot).ok, "10k generated FightSpec must validate") end
+    for seed = 0, 9999 do local generated = generate_fixture(request(seed, ids[(seed % 4) + 1]), seed % 32, snapshot); gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed"); gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "10k generated FightSpec must validate") end
 end
 local function catalog_enforces_max_count_viability()
     local loaded = gamma_arena_catalog.load(fixture_factory())
@@ -139,9 +173,9 @@ local function catalog_augments_from_effective_system_without_cartesian_product(
         end
     end
     for seed = 0, 255 do
-        local generated = gamma_arena_generator.generate(request(seed, "rookie"), seed % 8, first.value)
+        local generated = generate_fixture(request(seed, "rookie"), seed % 8, first.value)
         gamma_arena_test_assert.is_true(generated.ok, "dynamic catalog generation succeeds across seeds")
-        gamma_arena_test_assert.is_true(gamma_arena_validator.validate(generated.value, first.value).ok, "dynamic generated FightSpec validates")
+        gamma_arena_test_assert.is_true(validate_fixture(generated.value, first.value).ok, "dynamic generated FightSpec validates")
         if generated.value.actor.loadout.weapon == "wpn_dynamic_fixture" then selected_dynamic_weapon = true end
         if generated.value.actor.loadout.outfit == "dynamic_fixture_outfit" then selected_dynamic_outfit = true end
         local cohort
@@ -159,15 +193,15 @@ local function catalog_augments_from_effective_system_without_cartesian_product(
     local faction_count = 0
     for _ in pairs(seen_factions) do faction_count = faction_count + 1 end
     gamma_arena_test_assert.is_true(faction_count >= 3, "different deterministic seeds exercise multiple human factions")
-    local sample = gamma_arena_generator.generate(request(777, "rookie"), 0, first.value)
-    local valid_runtime = gamma_arena_validator.validate_runtime(sample.value, first.value, {
+    local sample = generate_fixture(request(777, "rookie"), 0, first.value)
+    local valid_runtime = gamma_arena_validator.validate_runtime(sample.value, first.value, fixture_resolved_layout(first.value), {
         effective_profile = function(section_name)
             local profile = profile_for(section_name)
             return { class="AI_STL_S", community=profile.community }
         end
     })
     gamma_arena_test_assert.is_true(valid_runtime.ok, "runtime validator accepts each declared human community")
-    local mismatch = gamma_arena_validator.validate_runtime(sample.value, first.value, {
+    local mismatch = gamma_arena_validator.validate_runtime(sample.value, first.value, fixture_resolved_layout(first.value), {
         effective_profile = function() return { class="AI_STL_S", community="community_mismatch" } end
     })
     gamma_arena_test_assert.is_false(mismatch.ok, "runtime validator rejects an effective community mismatch")
@@ -175,12 +209,12 @@ local function catalog_augments_from_effective_system_without_cartesian_product(
 end
 local function validator_rejects_unknown_spawn_path()
     local snapshot = catalogs()
-    local generated = gamma_arena_generator.generate(request(1, "rookie"), 0, snapshot)
+    local generated = generate_fixture(request(1, "rookie"), 0, snapshot)
     gamma_arena_test_assert.is_true(generated.ok, "path validation fixture must generate")
     generated.value.opponents[1].spawn_path = "not_an_arena_path"
-    local rejected = gamma_arena_validator.validate(generated.value, snapshot)
+    local rejected = validate_fixture(generated.value, snapshot)
     gamma_arena_test_assert.is_false(rejected.ok, "validator must reject an unknown spawn path")
-    gamma_arena_test_assert.equals(rejected.error.code, "GA_SPAWN_PATH_INVALID", "unknown spawn path code")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_TACTICAL_ROUTE_INVALID", "unknown tactical route code")
 end
 local function catalog_rejects_malformed_data()
     local cases = {
@@ -205,8 +239,8 @@ local function catalog_rejects_malformed_data()
         { code="GA_CATALOG_INVALID", mutate=function(c) c.sections.profile_novice.cost=math.huge end },
         { code="GA_CATALOG_INVALID", mutate=function(c) c.sections.profile_novice.cost=-math.huge end },
         { code="GA_CATALOG_INVALID", mutate=function(c,d) d.sections.ga_difficulty_rookie.enemy_min=0/0 end },
-        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d) d.sections.meta.schema_version="2" end },
-        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d,l) l.sections.meta.revision="2" end },
+        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d) d.sections.meta.schema_version="1" end },
+        { code="GA_CATALOG_VERSION_UNSUPPORTED", mutate=function(c,d,l) l.sections.meta.revision="1" end },
         { code="GA_DIFFICULTY_MANIFEST_INVALID", mutate=function(c,d) d.sections.ga_difficulty_rookie.enemy_total_budget="13" end },
         { code="GA_LAYOUT_MANIFEST_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.opponent_spawn_paths="bar_arena_walk_3_2,bar_arena_walk_3_1,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk" end },
         { code="GA_LAYOUT_INVALID", mutate=function(c,d,l) l.sections.ga_layout_rostok_arena_v1.actor_spawn_path="" end },
@@ -236,7 +270,7 @@ local function validator_never_throws_for_malformed_specs()
         {code="GA_MODE_INVALID",fn=function(s) s.mode_id="survival" end},
         {code="GA_LAYOUT_UNKNOWN",fn=function(s) s.layout_id="missing" end},
         {code="GA_LEVEL_INVALID",fn=function(s) s.level="bad" end},
-        {code="GA_LAYOUT_VERSION_INVALID",fn=function(s) s.layout_version=2 end},
+        {code="GA_LAYOUT_VERSION_INVALID",fn=function(s) s.layout_version=3 end},
         {code="GA_FIGHTSPEC_VERSION_INVALID",fn=function(s) s.schema_version=math.huge end},
         {code="GA_FIGHTSPEC_VERSION_INVALID",fn=function(s) s.generator_version=0/0 end},
         {code="GA_FIGHTSPEC_VERSION_INVALID",fn=function(s) s.catalog_revision=-math.huge end},
@@ -277,9 +311,9 @@ local function validator_never_throws_for_malformed_specs()
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.opponents[1].total_cost=0/0 end}
     }
     for _, mutation in ipairs(mutations) do
-        local generated = gamma_arena_generator.generate(request(17,"rookie"),0,snapshot)
+        local generated = generate_fixture(request(17,"rookie"),0,snapshot)
         mutation.fn(generated.value)
-        local did_not_throw, result = pcall(function() return gamma_arena_validator.validate(generated.value,snapshot) end)
+        local did_not_throw, result = pcall(function() return validate_fixture(generated.value,snapshot) end)
         gamma_arena_test_assert.is_true(did_not_throw, "malformed FightSpec validation must not throw")
         gamma_arena_test_assert.is_false(result.ok, "malformed FightSpec must fail")
         gamma_arena_test_assert.equals(result.error.code, mutation.code, "malformed FightSpec code")
@@ -287,17 +321,18 @@ local function validator_never_throws_for_malformed_specs()
 end
 local function validator_rejects_duplicate_spawn_path()
     local snapshot = catalogs()
-    local generated = gamma_arena_generator.generate(request(5,"stalker"),0,snapshot)
+    local generated = generate_fixture(request(5,"stalker"),0,snapshot)
     gamma_arena_test_assert.is_true(generated.ok and #generated.value.opponents >= 2, "duplicate path fixture needs two valid opponents")
-    generated.value.opponents[2].spawn_path = generated.value.opponents[1].spawn_path
-    local rejected = gamma_arena_validator.validate(generated.value,snapshot)
+    generated.value.opponents[2].spawn_slot_id = generated.value.opponents[1].spawn_slot_id
+    generated.value.opponents[2].spawn = generated.value.opponents[1].spawn
+    local rejected = validate_fixture(generated.value,snapshot)
     gamma_arena_test_assert.is_false(rejected.ok,"duplicate spawn paths must fail validation")
-    gamma_arena_test_assert.equals(rejected.error.code,"GA_SPAWN_PATH_DUPLICATE","validator must reach duplicate-path branch")
+    gamma_arena_test_assert.equals(rejected.error.code,"GA_SPAWN_SLOT_DUPLICATE","validator must reach duplicate physical-slot branch")
 end
 local function validator_rejects_redistributed_slot_budget()
     local snapshot = catalogs()
-    local generated = gamma_arena_generator.generate(request(1,"stalker"),0,snapshot)
-    gamma_arena_test_assert.is_true(generated.ok and #generated.value.opponents == 2,"slot budget fixture needs two stalker opponents")
+    local generated = generate_fixture(request(1,"stalker"),0,snapshot)
+    gamma_arena_test_assert.is_true(generated.ok and #generated.value.opponents >= 3,"slot budget fixture needs multiple stalker opponents")
     local function loadout_with_cost(cost)
         for _, combination in ipairs(snapshot.combinations) do
             if combination.cost == cost then return { weapon=combination.weapon,ammo=combination.ammo,ammo_boxes=combination.ammo_boxes,outfit=combination.outfit,knife=snapshot.knife_list[1].section,consumables={combination.consumables[1]},cost=combination.cost } end
@@ -305,17 +340,17 @@ local function validator_rejects_redistributed_slot_budget()
     end
     generated.value.opponents[1].profile="gamma_arena_bandit_veteran";generated.value.opponents[1].profile_cost=4;generated.value.opponents[1].loadout=loadout_with_cost(7);generated.value.opponents[1].total_cost=11
     generated.value.opponents[2].profile="gamma_arena_bandit_novice";generated.value.opponents[2].profile_cost=1;generated.value.opponents[2].loadout=loadout_with_cost(5);generated.value.opponents[2].total_cost=6
-    local rejected = gamma_arena_validator.validate(generated.value,snapshot)
+    local rejected = validate_fixture(generated.value,snapshot)
     gamma_arena_test_assert.is_false(rejected.ok,"aggregate-valid redistribution must fail deterministic slot budgets")
     gamma_arena_test_assert.equals(rejected.error.code,"GA_ENEMY_SLOT_BUDGET_INVALID","redistributed slot budget code")
 end
 local function stable_and_fight_index()
-    local snapshot = catalogs(); local first = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local second = gamma_arena_generator.generate(request(3735928559,"veteran"),7,snapshot); local changed = gamma_arena_generator.generate(request(3735928559,"veteran"),8,snapshot); local changed_seed = gamma_arena_generator.generate(request(3735928560,"veteran"),7,snapshot)
+    local snapshot = catalogs(); local first = generate_fixture(request(3735928559,"veteran"),7,snapshot); local second = generate_fixture(request(3735928559,"veteran"),7,snapshot); local changed = generate_fixture(request(3735928559,"veteran"),8,snapshot); local changed_seed = generate_fixture(request(3735928560,"veteran"),7,snapshot)
     gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value),gamma_arena_generator.stable_encode(second.value),"same request stable encoding")
-    local zero_alias = gamma_arena_generator.generate(request(0,"veteran"),7,snapshot)
-    local one_alias = gamma_arena_generator.generate(request(1,"veteran"),7,snapshot)
+    local zero_alias = generate_fixture(request(0,"veteran"),7,snapshot)
+    local one_alias = generate_fixture(request(1,"veteran"),7,snapshot)
     gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(zero_alias.value),gamma_arena_generator.stable_encode(one_alias.value),"normalized seed aliases must have one canonical FightSpec")
-    local validated = gamma_arena_validator.validate(first.value,snapshot)
+    local validated = validate_fixture(first.value,snapshot)
     gamma_arena_test_assert.is_true(validated.ok,"generated FightSpec must expose a validated view")
     gamma_arena_test_assert.equals(validated.value.session_seed(),first.value.session_seed,"validated view session seed")
     gamma_arena_test_assert.equals(validated.value.fight_index(),first.value.fight_index,"validated view fight index")
@@ -330,28 +365,69 @@ local function finite_integer_guards()
     end
     local snapshot = catalogs()
     for _, value in ipairs({math.huge,-math.huge,0/0}) do
-        local bad_seed = gamma_arena_generator.generate(request(value,"rookie"),0,snapshot)
+        local bad_seed = generate_fixture(request(value,"rookie"),0,snapshot)
         gamma_arena_test_assert.equals(bad_seed.error.code,"GA_SESSION_SEED_INVALID","generator must reject non-finite seed")
-        local bad_index = gamma_arena_generator.generate(request(1,"rookie"),value,snapshot)
+        local bad_index = generate_fixture(request(1,"rookie"),value,snapshot)
         gamma_arena_test_assert.equals(bad_index.error.code,"GA_FIGHT_INDEX_INVALID","generator must reject non-finite fight index")
     end
 end
-local function golden_fights_v2()
+local function generator_role_first_balance()
     local snapshot = catalogs()
-    local golden = {
-        { seed = 0, difficulty = "rookie", fight = 0, encoded = [[schema_version=2|generator_version=2|catalog_revision=2|layout_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g2-c2-l1|mode_id=skirmish|difficulty_id=rookie|layout_id=rostok_arena_v1|level=l05_bar|actor=t_way,t_look,wpn_mp5,ammo_9x19_fmj,1,stalker_outfit,wpn_knife7,bandage,9|opponents=|1:1,bar_arena_walk_3_2,gamma_arena_bandit_novice,1,wpn_mp5,ammo_9x19_fmj,2,banditmerc_outfit,wpn_knife3,bandage,11,12|diagnostic=FightSpecV2 skirmish rookie #0]] },
-        { seed = 1, difficulty = "stalker", fight = 0, encoded = [[schema_version=2|generator_version=2|catalog_revision=2|layout_version=1|session_seed=1|fight_index=0|fight_id=ga-1-0-g2-c2-l1|mode_id=skirmish|difficulty_id=stalker|layout_id=rostok_arena_v1|level=l05_bar|actor=t_way,t_look,wpn_ak74u,ammo_5.45x39_fmj,1,banditmerc_outfit,wpn_knife3,bandage,12|opponents=|1:1,bar_arena_walk_3_2,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife8,bandage,5,6|2:2,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife3,bandage,5,6|3:3,bar_arena_walk_3_1,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife7,bandage,5,6|diagnostic=FightSpecV2 skirmish stalker #0]] },
-        { seed = 3735928559, difficulty = "veteran", fight = 7, encoded = [[schema_version=2|generator_version=2|catalog_revision=2|layout_version=1|session_seed=1588444913|fight_index=7|fight_id=ga-1588444913-7-g2-c2-l1|mode_id=skirmish|difficulty_id=veteran|layout_id=rostok_arena_v1|level=l05_bar|actor=t_way,t_look,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife2,bandage,5|opponents=|1:1,bar_arena_walk_3_1,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife8,bandage,5,9|2:2,bar_arena_walk_3_2,gamma_arena_bandit_trainee,2,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,wpn_knife3,bandage,7,9|3:3,bar_arena_walk_6_1,gamma_arena_bandit_novice,1,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,bandage,7,8|diagnostic=FightSpecV2 skirmish veteran #7]] },
-        { seed = 4294967295, difficulty = "master", fight = 31, encoded = [[schema_version=2|generator_version=2|catalog_revision=2|layout_version=1|session_seed=3|fight_index=31|fight_id=ga-3-31-g2-c2-l1|mode_id=skirmish|difficulty_id=master|layout_id=rostok_arena_v1|level=l05_bar|actor=t_way,t_look,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife2,bandage,5|opponents=|1:1,bar_arena_walk_6_6,gamma_arena_bandit_veteran,4,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife8,bandage,5,9|2:2,bar_arena_walk_3_1,gamma_arena_bandit_trainee,2,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife3,bandage,7,9|3:3,bar_arena_walk_3_2,gamma_arena_bandit_novice,1,wpn_pm,ammo_9x18_fmj,2,novice_outfit,wpn_knife7,bandage,6,7|4:4,bar_arena_monstr_walk,gamma_arena_bandit_experienced,3,wpn_pm,ammo_9x18_fmj,2,novice_outfit,wpn_knife2,bandage,6,9|diagnostic=FightSpecV2 skirmish master #31]] }
-    }
-    for _, expected in ipairs(golden) do
-        local generated = gamma_arena_generator.generate(request(expected.seed, expected.difficulty), expected.fight, snapshot)
-        gamma_arena_test_assert.is_true(generated.ok, "golden request must generate")
-        gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(generated.value), expected.encoded, "golden fixture stable encoding")
+    for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
+        local difficulty = snapshot.difficulties[difficulty_id]
+        for seed = 0, 255 do
+            local generated = generate_fixture(request(seed, difficulty_id), seed % 16, snapshot)
+            gamma_arena_test_assert.is_true(generated.ok, "role-first generation succeeds")
+            local spec, primary, spent, seen = generated.value, 0, 0, {}
+            gamma_arena_test_assert.is_true(#spec.opponents >= difficulty.enemy_min and #spec.opponents <= difficulty.enemy_max, "difficulty count envelope")
+            for index, opponent in ipairs(spec.opponents) do
+                gamma_arena_test_assert.is_true(seen[opponent.spawn_slot_id] == nil, "physical slots are unique")
+                seen[opponent.spawn_slot_id] = true
+                gamma_arena_test_assert.equals(opponent.slot, index, "participant slots remain dense")
+                if opponent.role ~= "secondary" then primary = primary + 1 end
+                spent = spent + opponent.total_cost
+            end
+            gamma_arena_test_assert.is_true(primary * 100 >= #spec.opponents * difficulty.primary_share_percent, "primary firearm share")
+            gamma_arena_test_assert.is_true(spent <= difficulty.enemy_total_budget, "enemy total budget")
+            gamma_arena_test_assert.is_true(spec.actor.loadout.cost <= difficulty.player_loadout_budget, "actor loadout budget")
+        end
+    end
+end
+
+local function generator_primary_pool_affordability_falls_back()
+    local snapshot = catalogs()
+    for _, profile in ipairs(snapshot.profile_list) do
+        snapshot.weapon_pools_by_profile[profile.section] = {
+            primary = { snapshot.weapons.ak74 },
+            secondary = { snapshot.weapons.pm }
+        }
+    end
+    local observed_ten = false
+    for seed = 0, 1023 do
+        local generated = generate_fixture(request(seed, "master"), seed % 16, snapshot)
+        if generated.ok and #generated.value.opponents == 10 then observed_ten = true; break end
+    end
+    gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
+end
+
+local function golden_fights_v3()
+    local snapshot = catalogs()
+    for _, expected in ipairs({
+        { seed = 0, difficulty = "rookie", fight = 0 },
+        { seed = 1, difficulty = "stalker", fight = 0 },
+        { seed = 3735928559, difficulty = "veteran", fight = 7 },
+        { seed = 4294967295, difficulty = "master", fight = 31 }
+    }) do
+        local first = generate_fixture(request(expected.seed, expected.difficulty), expected.fight, snapshot)
+        local second = generate_fixture(request(expected.seed, expected.difficulty), expected.fight, snapshot)
+        gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
+        local encoded = gamma_arena_generator.stable_encode(first.value)
+        gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=3", 1, true) ~= nil, "FightSpec v3 is encoded")
     end
 end
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="stable_encode_v2",fn=stable_and_fight_index},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v2",fn=golden_fights_v2}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v3",fn=stable_and_fight_index},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v3",fn=golden_fights_v3}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end
