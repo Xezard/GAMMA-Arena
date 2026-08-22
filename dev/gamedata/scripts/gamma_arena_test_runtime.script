@@ -5294,6 +5294,194 @@ local function runtime_natural_death_outside_active_arena_is_inert()
     end
 end
 
+local function defeat_menu_test_owner()
+    local menu = { hide_dialog = 0, hidden = 0, show_dialog = 0, shown = 0 }
+    function menu:HideDialog() self.hide_dialog = self.hide_dialog + 1 end
+    function menu:ShowDialog(value) if value then self.show_dialog = self.show_dialog + 1 end end
+    function menu:Show(value)
+        if value then self.shown = self.shown + 1 else self.hidden = self.hidden + 1 end
+    end
+    return menu
+end
+
+local function runtime_defeat_menu_rejects_invalid_or_expired_handoff()
+    for _, handoff in ipairs({ gamma_arena_result.ok(false), gamma_arena_result.err("GA_DEFEAT_TOKEN_EXPIRED", "expired") }) do
+        local menu = defeat_menu_test_owner()
+        local shown = 0
+        local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+            config = {},
+            peek_defeat = function() return handoff end,
+            show_result = function() shown = shown + 1; return gamma_arena_result.ok(true) end
+        })
+        gamma_arena_test_assert.equals(result.ok, handoff.ok, "invalid or expired handoff remains observable")
+        gamma_arena_test_assert.equals(shown, 0, "invalid or expired handoff never opens Arena UI")
+        gamma_arena_test_assert.equals(menu.hide_dialog + menu.hidden, 0, "invalid or expired handoff leaves the stock menu visible")
+    end
+end
+
+local function runtime_defeat_menu_fresh_failures_are_bounded()
+    for _, stage in ipairs({ "seed", "promotion", "bridge", "handoff" }) do
+        local menu = defeat_menu_test_owner()
+        local model
+        local clears = 0
+        local fatal_calls = 0
+        local recovered = false
+        local ports = {
+            config = {},
+            peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:" .. stage }) end,
+            show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+            clear_result = function() return gamma_arena_result.ok(true) end,
+            clear_transient = function() clears = clears + 1; return gamma_arena_result.ok(true) end,
+            random_session_seed = function()
+                if stage == "seed" then return gamma_arena_result.err("GA_TEST_SEED", "seed") end
+                return gamma_arena_result.ok(987654321)
+            end,
+            issue_launch_from_defeat = function()
+                if stage == "promotion" then return gamma_arena_result.err("GA_TEST_PROMOTION", "promotion") end
+                return gamma_arena_result.ok(true)
+            end,
+            write_character_creation = function()
+                if stage == "bridge" then return gamma_arena_result.err("GA_TEST_BRIDGE", "bridge") end
+                return gamma_arena_result.ok(true)
+            end,
+            handoff_start_game = function()
+                if stage == "handoff" then return gamma_arena_result.err("GA_TEST_HANDOFF", "handoff") end
+                return gamma_arena_result.ok(true)
+            end,
+            show_fatal = function(owner, errors, callback, context)
+                fatal_calls = fatal_calls + 1
+                gamma_arena_test_assert.equals(owner, menu, stage .. " fatal retains menu owner")
+                gamma_arena_test_assert.equals(#errors, 1, stage .. " fatal reports one bounded failure")
+                local dialog = { HideDialog = function() end, Show = function() end }
+                local recovery = callback(context, dialog)
+                recovered = recovery.ok
+                return dialog
+            end
+        }
+        gamma_arena_test_assert.is_true(gamma_arena_main_menu.show_confirmed_defeat(menu, ports).ok, stage .. " fixture displays")
+        local failed = model.on_next()
+        gamma_arena_test_assert.is_false(failed.ok, stage .. " failure stays structured")
+        gamma_arena_test_assert.equals(clears, 1, stage .. " failure clears conflicting transient state once")
+        gamma_arena_test_assert.equals(fatal_calls, 1, stage .. " failure opens one fatal recovery dialog")
+        gamma_arena_test_assert.is_true(recovered, stage .. " fatal offers a working main-menu-only recovery")
+        gamma_arena_test_assert.equals(menu.show_dialog, 1, stage .. " recovery restores owner dialog")
+        gamma_arena_test_assert.equals(menu.shown, 1, stage .. " recovery restores owner visibility")
+    end
+end
+
+local function runtime_defeat_menu_exit_retries_consumption_safely()
+    local menu = defeat_menu_test_owner()
+    local model
+    local consumes = 0
+    local clears = 0
+    local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:retry" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        consume_defeat = function()
+            consumes = consumes + 1
+            if consumes == 1 then return gamma_arena_result.err("GA_TEST_CONSUME", "retry") end
+            return gamma_arena_result.ok(true)
+        end,
+        clear_result = function() clears = clears + 1; return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(result.ok, "retry fixture displays")
+    gamma_arena_test_assert.is_false(model.on_main_menu().ok, "failed defeat consumption remains retryable")
+    gamma_arena_test_assert.equals(clears, 0, "failed consumption keeps result UI visible")
+    gamma_arena_test_assert.is_true(model.on_main_menu().ok, "defeat consumption retry succeeds")
+    gamma_arena_test_assert.equals(consumes, 2, "defeat consumption is retried exactly once")
+    gamma_arena_test_assert.equals(clears, 1, "successful retry clears result UI once")
+end
+
+local function runtime_defeat_menu_fatal_ui_failure_restores_owner()
+    local menu = defeat_menu_test_owner()
+    local model
+    local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:fatal" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_result.ok(true) end,
+        clear_transient = function() return gamma_arena_result.ok(true) end,
+        random_session_seed = function() return gamma_arena_result.err("GA_TEST_SEED", "seed") end,
+        show_fatal = function() error("injected fatal UI construction failure") end
+    })
+    gamma_arena_test_assert.is_true(result.ok, "fatal UI failure fixture displays")
+    gamma_arena_test_assert.is_false(model.on_next().ok, "fatal UI construction failure remains structured")
+    gamma_arena_test_assert.equals(menu.show_dialog, 1, "fatal UI construction failure restores owner dialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "fatal UI construction failure restores owner visibility")
+end
+
+local function runtime_defeat_menu_post_consume_ui_failure_restores_owner()
+    local menu = defeat_menu_test_owner()
+    local model
+    local consumes = 0
+    local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:post_consume" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        consume_defeat = function() consumes = consumes + 1; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_result.err("GA_TEST_CLEAR_RESULT", "clear") end
+    })
+    gamma_arena_test_assert.is_true(result.ok, "post-consume UI failure fixture displays")
+    local failed = model.on_main_menu()
+    gamma_arena_test_assert.is_false(failed.ok, "post-consume UI failure remains structured")
+    gamma_arena_test_assert.equals(consumes, 1, "post-consume UI failure never replays defeat consumption")
+    gamma_arena_test_assert.equals(menu.show_dialog, 1, "post-consume UI failure restores owner dialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "post-consume UI failure restores owner visibility")
+end
+
+local function runtime_defeat_menu_post_consume_restore_failure_is_recoverable()
+    local menu = defeat_menu_test_owner()
+    local original_show_dialog = menu.ShowDialog
+    local restore_attempts = 0
+    function menu:ShowDialog(value)
+        restore_attempts = restore_attempts + 1
+        if restore_attempts == 1 then error("injected owner restore failure") end
+        return original_show_dialog(self, value)
+    end
+    local model
+    local fatal_calls = 0
+    local recovered = false
+    local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:restore" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        consume_defeat = function() return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_result.ok(true) end,
+        show_fatal = function(_, errors, callback, context)
+            fatal_calls = fatal_calls + 1
+            gamma_arena_test_assert.equals(errors[1].error.code, "GA_MAIN_MENU_RESTORE_FAILED", "post-consume fatal reports restore failure")
+            recovered = callback(context, { HideDialog = function() end, Show = function() end }).ok
+            return true
+        end
+    })
+    gamma_arena_test_assert.is_true(result.ok, "restore failure fixture displays")
+    gamma_arena_test_assert.is_false(model.on_main_menu().ok, "post-consume restore failure remains structured")
+    gamma_arena_test_assert.equals(fatal_calls, 1, "post-consume restore failure opens one recovery dialog")
+    gamma_arena_test_assert.is_true(recovered, "post-consume restore failure recovery retries owner restoration")
+    gamma_arena_test_assert.equals(menu.show_dialog, 1, "restore retry restores the owner dialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "restore retry restores owner visibility")
+end
+
+local function runtime_defeat_result_keyboard_and_lock_are_behavioral()
+    local pressed = ui_events.WINDOW_KEY_PRESSED
+    gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("defeat", DIK_keys.DIK_RETURN, pressed, false), "next", "defeat Enter maps to New fight")
+    gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("defeat", DIK_keys.DIK_SPACE, pressed, false), "next", "defeat Space maps to New fight")
+    gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("defeat", DIK_keys.DIK_ESCAPE, pressed, false), "main_menu", "defeat Escape maps to Main menu")
+    gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("countdown", DIK_keys.DIK_RETURN, pressed, false), nil, "countdown Enter never starts a fight")
+    gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("defeat", DIK_keys.DIK_RETURN, pressed, true), nil, "engine-handled input is not dispatched twice")
+
+    local calls = 0
+    local window = {
+        action_locked = false,
+        kind = "defeat",
+        on_next = function() calls = calls + 1; return gamma_arena_result.ok(true) end
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnNext(window).ok, "first defeat primary action is accepted")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnNext(window).ok, "duplicate defeat primary event is safely ignored")
+    gamma_arena_test_assert.equals(calls, 1, "repeated defeat primary events dispatch exactly once")
+end
+
 local function death_neutralization_fixture(actor)
     local env = { stops = 0, cleared = {}, held = {}, tags = {}, online = {} }
     local tactical = {}
@@ -5677,6 +5865,13 @@ local cases = {
     ,{ name = "runtime_natural_death_arms_confirms_and_neutralizes_once", fn = runtime_natural_death_arms_confirms_and_neutralizes_once }
     ,{ name = "runtime_natural_death_failures_never_cancel_engine_death", fn = runtime_natural_death_failures_never_cancel_engine_death }
     ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
+    ,{ name = "runtime_defeat_menu_rejects_invalid_or_expired_handoff", fn = runtime_defeat_menu_rejects_invalid_or_expired_handoff }
+    ,{ name = "runtime_defeat_menu_fresh_failures_are_bounded", fn = runtime_defeat_menu_fresh_failures_are_bounded }
+    ,{ name = "runtime_defeat_menu_exit_retries_consumption_safely", fn = runtime_defeat_menu_exit_retries_consumption_safely }
+    ,{ name = "runtime_defeat_menu_fatal_ui_failure_restores_owner", fn = runtime_defeat_menu_fatal_ui_failure_restores_owner }
+    ,{ name = "runtime_defeat_menu_post_consume_ui_failure_restores_owner", fn = runtime_defeat_menu_post_consume_ui_failure_restores_owner }
+    ,{ name = "runtime_defeat_menu_post_consume_restore_failure_is_recoverable", fn = runtime_defeat_menu_post_consume_restore_failure_is_recoverable }
+    ,{ name = "runtime_defeat_result_keyboard_and_lock_are_behavioral", fn = runtime_defeat_result_keyboard_and_lock_are_behavioral }
     ,{ name = "runtime_entity_death_neutralization_is_owned_living_and_idempotent", fn = runtime_entity_death_neutralization_is_owned_living_and_idempotent }
     ,{ name = "runtime_entity_death_neutralization_without_actor_still_clears_enemy", fn = runtime_entity_death_neutralization_without_actor_still_clears_enemy }
     ,{ name = "runtime_entity_death_neutralization_aggregates_every_failure", fn = runtime_entity_death_neutralization_aggregates_every_failure }

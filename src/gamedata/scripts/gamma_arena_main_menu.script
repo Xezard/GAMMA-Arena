@@ -24,6 +24,80 @@ local function on_arena_clicked(menu)
     open_arena(menu)
 end
 
+local function port_or_default(ports, name, default)
+    if type(ports) == "table" and ports[name] ~= nil then return ports[name] end
+    return default
+end
+
+local function call_result_port(name, callback)
+    if type(callback) ~= "function" then
+        return gamma_arena_result.err("GA_DEFEAT_PORT_UNAVAILABLE", "Defeat menu dependency is unavailable", { port = name })
+    end
+    local called, result = pcall(callback)
+    if not called then
+        return gamma_arena_result.err("GA_DEFEAT_PORT_FAILED", "Defeat menu dependency failed safely", {
+            port = name,
+            reason = tostring(result)
+        })
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_DEFEAT_PORT_FAILED", "Defeat menu dependency returned an invalid Result", {
+            port = name,
+            result_type = type(result)
+        })
+    end
+    return result
+end
+
+local function restore_main_menu(menu, dialog)
+    local called, reason = pcall(function()
+        if dialog then
+            if type(dialog.HideDialog) == "function" then dialog:HideDialog() end
+            if type(dialog.Show) == "function" then dialog:Show(false) end
+        end
+        menu:ShowDialog(true)
+        menu:Show(true)
+    end)
+    if not called then
+        return gamma_arena_result.err("GA_MAIN_MENU_RESTORE_FAILED", "Main menu could not be restored safely", { reason = tostring(reason) })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function default_config()
+    return axr_main and axr_main.config or nil
+end
+
+local function recover_from_fresh_failure(menu, ports, config, failure)
+    local errors = { failure }
+    local clear_transient = port_or_default(ports, "clear_transient", gamma_arena_session_store.clear_transient)
+    local cleared = call_result_port("clear_transient", function() return clear_transient(config) end)
+    if not cleared.ok then errors[#errors + 1] = cleared end
+
+    local clear_result = port_or_default(ports, "clear_result", gamma_arena_ui_result.clear_result)
+    local result_cleared = call_result_port("clear_result", function() return clear_result() end)
+    if not result_cleared.ok then errors[#errors + 1] = result_cleared end
+
+    local function on_recover(_, dialog)
+        local dismissed = call_result_port("clear_result", function() return clear_result() end)
+        if not dismissed.ok then return dismissed end
+        return restore_main_menu(menu, dialog)
+    end
+    local show_fatal = port_or_default(ports, "show_fatal", gamma_arena_ui_start.show_fatal)
+    local shown, reason = pcall(show_fatal, menu, errors, on_recover, { action = "main_menu" })
+    if not shown then
+        local restored = restore_main_menu(menu)
+        if not restored.ok then
+            return gamma_arena_result.err("GA_DEFEAT_FATAL_UI_FAILED", "Fresh-fight failure UI could not be shown safely", {
+                reason = tostring(reason),
+                cause = failure.error and failure.error.code or nil,
+                restore_code = restored.error and restored.error.code or nil
+            })
+        end
+    end
+    return failure
+end
+
 function bind(menu)
     if menu == nil then
         return gamma_arena_result.err("GA_MAIN_MENU_INVALID", "Main-menu callback did not provide an owner")
@@ -44,6 +118,101 @@ function bind(menu)
     return gamma_arena_result.err("GA_MAIN_MENU_CALLBACK_UNAVAILABLE", "Main menu does not expose AddCallback")
 end
 
+function show_confirmed_defeat(menu, ports)
+    if menu == nil then
+        return gamma_arena_result.err("GA_MAIN_MENU_INVALID", "Confirmed defeat requires a main-menu owner")
+    end
+    ports = ports or {}
+    local config = ports.config
+    if config == nil then config = default_config() end
+    local peek_defeat = port_or_default(ports, "peek_defeat", gamma_arena_session_store.peek_defeat)
+    local peeked = call_result_port("peek_defeat", function() return peek_defeat(config) end)
+    if not peeked.ok then return peeked end
+    if not peeked.value then return gamma_arena_result.ok(false) end
+    local defeat = peeked.value
+
+    local model = {
+        kind = "defeat",
+        title_key = "st_gamma_arena_result_defeat",
+        next_title_key = "st_gamma_arena_result_new_fight"
+    }
+    model.on_next = function()
+        local random_session_seed = port_or_default(ports, "random_session_seed", gamma_arena_session_store.random_session_seed)
+        local seed = call_result_port("random_session_seed", function() return random_session_seed() end)
+        if not seed.ok then return recover_from_fresh_failure(menu, ports, config, seed) end
+        local request = {
+            schema_version = 1,
+            mode_id = defeat.mode_id,
+            difficulty_id = defeat.difficulty_id,
+            seed_mode = "random",
+            session_seed = seed.value
+        }
+        local issue_launch_from_defeat = port_or_default(ports, "issue_launch_from_defeat", gamma_arena_session_store.issue_launch_from_defeat)
+        local promoted = call_result_port("issue_launch_from_defeat", function()
+            return issue_launch_from_defeat(config, defeat.token, request)
+        end)
+        if not promoted.ok then return recover_from_fresh_failure(menu, ports, config, promoted) end
+        local write_character_creation = port_or_default(ports, "write_character_creation", gamma_arena_session_store.write_character_creation)
+        local bridge = call_result_port("write_character_creation", function() return write_character_creation(config) end)
+        if not bridge.ok then return recover_from_fresh_failure(menu, ports, config, bridge) end
+        local handoff_start_game = port_or_default(ports, "handoff_start_game", gamma_arena_ui_start.handoff_start_game)
+        local handoff = call_result_port("handoff_start_game", function() return handoff_start_game(menu, config) end)
+        if not handoff.ok then return recover_from_fresh_failure(menu, ports, config, handoff) end
+        return handoff
+    end
+    model.on_main_menu = function()
+        local consume_defeat = port_or_default(ports, "consume_defeat", gamma_arena_session_store.consume_defeat)
+        local consumed = call_result_port("consume_defeat", function() return consume_defeat(config, defeat.token) end)
+        if not consumed.ok then return consumed end
+        local clear_result = port_or_default(ports, "clear_result", gamma_arena_ui_result.clear_result)
+        local cleared = call_result_port("clear_result", function() return clear_result() end)
+        local restored = restore_main_menu(menu)
+        if not restored.ok then
+            local errors = {}
+            if not cleared.ok then errors[#errors + 1] = cleared end
+            errors[#errors + 1] = restored
+            local function on_recover(_, dialog)
+                local dismissed = call_result_port("clear_result", function() return clear_result() end)
+                if not dismissed.ok then return dismissed end
+                return restore_main_menu(menu, dialog)
+            end
+            local show_fatal = port_or_default(ports, "show_fatal", gamma_arena_ui_start.show_fatal)
+            local shown, reason = pcall(show_fatal, menu, errors, on_recover, { action = "main_menu" })
+            if not shown then
+                local fallback = restore_main_menu(menu)
+                if not fallback.ok then
+                    return gamma_arena_result.err("GA_DEFEAT_FATAL_UI_FAILED", "Post-defeat recovery UI could not be shown safely", {
+                        reason = tostring(reason),
+                        restore_code = fallback.error and fallback.error.code or nil
+                    })
+                end
+            end
+            return restored
+        end
+        if not cleared.ok then return cleared end
+        return restored
+    end
+
+    local hidden, reason = pcall(function()
+        menu:HideDialog()
+        menu:Show(false)
+    end)
+    if not hidden then
+        return gamma_arena_result.err("GA_DEFEAT_MENU_HIDE_FAILED", "Main menu could not be hidden for the defeat result", { reason = tostring(reason) })
+    end
+    local show_result = port_or_default(ports, "show_result", gamma_arena_ui_result.show_result)
+    local shown = call_result_port("show_result", function() return show_result(model) end)
+    if not shown.ok then
+        local restored = restore_main_menu(menu)
+        if not restored.ok then return restored end
+        return shown
+    end
+    return gamma_arena_result.ok(true)
+end
+
 function on_main_menu_init(menu)
     log_result(bind(menu))
+    local result = show_confirmed_defeat(menu)
+    log_result(result)
+    return result
 end

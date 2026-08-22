@@ -1440,6 +1440,99 @@ local function start_game_failures_restore_bridge_immediately()
     end
 end
 
+local function defeat_main_menu_fresh_fight_promotes_once()
+    local config = {}
+    local shown_model
+    local promoted_request
+    local promoted_token
+    local bridge_calls = 0
+    local start_game_calls = 0
+    local menu = { hidden = 0, shown = 0, dialog_shown = 0 }
+    function menu:HideDialog() self.hidden = self.hidden + 1 end
+    function menu:Show(value) if value then self.shown = self.shown + 1 end end
+    function menu:ShowDialog(value) if value then self.dialog_shown = self.dialog_shown + 1 end end
+
+    local ports = {
+        config = config,
+        peek_defeat = function(candidate)
+            gamma_arena_test_assert.equals(candidate, config, "defeat peek receives injected config")
+            return gamma_arena_result.ok({
+                schema_version = 1,
+                session_id = "ga_dead_session",
+                session_nonce = "ga_dead_nonce",
+                mode_id = "skirmish",
+                difficulty_id = "master",
+                token = "gad1:1000:menu"
+            })
+        end,
+        show_result = function(model) shown_model = model; return gamma_arena_result.ok(true) end,
+        random_session_seed = function() return gamma_arena_result.ok(987654321) end,
+        issue_launch_from_defeat = function(candidate, token, request)
+            gamma_arena_test_assert.equals(candidate, config, "defeat promotion receives injected config")
+            promoted_token = token
+            promoted_request = request
+            return gamma_arena_result.ok({ token = "ga1:1001:fresh" })
+        end,
+        write_character_creation = function(candidate)
+            gamma_arena_test_assert.equals(candidate, config, "fresh bridge receives injected config")
+            bridge_calls = bridge_calls + 1
+            return gamma_arena_result.ok(true)
+        end,
+        handoff_start_game = function(owner, candidate)
+            gamma_arena_test_assert.equals(owner, menu, "fresh handoff retains main-menu owner")
+            gamma_arena_test_assert.equals(candidate, config, "fresh handoff receives injected config")
+            start_game_calls = start_game_calls + 1
+            return gamma_arena_result.ok(true)
+        end
+    }
+
+    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, ports)
+    gamma_arena_test_assert.is_true(displayed.ok, "confirmed defeat opens after the stock death transition")
+    gamma_arena_test_assert.equals(menu.hidden, 1, "confirmed defeat hides the ordinary main menu")
+    gamma_arena_test_assert.equals(shown_model.kind, "defeat", "main-menu handoff opens defeat UI")
+    gamma_arena_test_assert.equals(shown_model.title_key, "st_gamma_arena_result_defeat", "defeat title remains exact")
+    gamma_arena_test_assert.equals(shown_model.next_title_key, "st_gamma_arena_result_new_fight", "defeat primary action says new fight")
+
+    local launched = shown_model.on_next()
+    gamma_arena_test_assert.is_true(launched.ok, "fresh fight launch succeeds")
+    gamma_arena_test_assert.equals(promoted_token, "gad1:1000:menu", "fresh fight consumes the confirmed token through promotion")
+    gamma_arena_test_assert.equals(promoted_request.mode_id, "skirmish", "fresh fight keeps mode")
+    gamma_arena_test_assert.equals(promoted_request.difficulty_id, "master", "fresh fight keeps difficulty")
+    gamma_arena_test_assert.equals(promoted_request.seed_mode, "random", "fresh fight always rerolls")
+    gamma_arena_test_assert.equals(promoted_request.session_seed, 987654321, "fresh fight uses new seed")
+    gamma_arena_test_assert.equals(bridge_calls, 1, "fresh fight writes one character-creation bridge")
+    gamma_arena_test_assert.equals(start_game_calls, 1, "fresh fight invokes engine StartGame once")
+end
+
+local function defeat_main_menu_exit_consumes_without_launch()
+    local config = {}
+    local shown_model
+    local consumed_token
+    local launch_calls = 0
+    local clear_result_calls = 0
+    local menu = { hidden = 0, shown = 0, dialog_shown = 0 }
+    function menu:HideDialog() self.hidden = self.hidden + 1 end
+    function menu:Show(value) if value then self.shown = self.shown + 1 end end
+    function menu:ShowDialog(value) if value then self.dialog_shown = self.dialog_shown + 1 end end
+    local ports = {
+        config = config,
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:exit" }) end,
+        show_result = function(model) shown_model = model; return gamma_arena_result.ok(true) end,
+        consume_defeat = function(_, token) consumed_token = token; return gamma_arena_result.ok(true) end,
+        issue_launch_from_defeat = function() launch_calls = launch_calls + 1; return gamma_arena_result.ok(true) end,
+        clear_result = function() clear_result_calls = clear_result_calls + 1; return gamma_arena_result.ok(true) end
+    }
+
+    gamma_arena_test_assert.is_true(gamma_arena_main_menu.show_confirmed_defeat(menu, ports).ok, "exit fixture displays defeat")
+    local exited = shown_model.on_main_menu()
+    gamma_arena_test_assert.is_true(exited.ok, "defeat main-menu action succeeds")
+    gamma_arena_test_assert.equals(consumed_token, "gad1:1000:exit", "main-menu exit consumes the defeat")
+    gamma_arena_test_assert.equals(launch_calls, 0, "main-menu exit never issues a launch")
+    gamma_arena_test_assert.equals(clear_result_calls, 1, "main-menu exit clears Arena result UI")
+    gamma_arena_test_assert.equals(menu.dialog_shown, 1, "main-menu exit restores ShowDialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "main-menu exit restores Show")
+end
+
 local function matching_resume_cleanup_is_session_scoped()
     local intent = {
         schema_version = 1,
@@ -1538,6 +1631,8 @@ local cases = {
     { name = "character_creation_bridge_terminal_routes", fn = character_creation_bridge_restores_on_every_launch_terminal_route },
     { name = "character_creation_bridge_faults", fn = character_creation_bridge_faults_fail_closed },
     { name = "start_game_failures_restore_bridge", fn = start_game_failures_restore_bridge_immediately },
+    { name = "defeat_main_menu_fresh_fight", fn = defeat_main_menu_fresh_fight_promotes_once },
+    { name = "defeat_main_menu_exit", fn = defeat_main_menu_exit_consumes_without_launch },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
     { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift },
     { name = "defeat_intent_cross_vm", fn = defeat_intent_is_transactional_and_cross_vm_safe },

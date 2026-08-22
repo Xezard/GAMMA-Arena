@@ -369,7 +369,7 @@ foreach ($Locale in @('rus','eng')) {
         [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
         Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
-        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next')) {
+        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
             Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
         }
     }
@@ -551,7 +551,7 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
     }
     Assert-True ($Task9UiContent -notmatch 'AddCustomStatic') 'Task 9 UI must never reference an undefined custom-static id'
     Assert-True ($Task9UiContent -match 'OnKeyboard[\s\S]{0,500}self:OnMainMenu\(\)[\s\S]{0,120}return\s+true') 'Task 9 Escape handler must route cleanup and return an engine boolean'
-    Assert-True ($Task9UiContent -match 'OnKeyboard[\s\S]{0,500}DIK_RETURN[\s\S]{0,240}DIK_SPACE[\s\S]{0,240}self:OnNext\(\)[\s\S]{0,120}return\s+true') 'Task 9 result keyboard fallback must route Enter/Space to the next-fight action'
+    Assert-True ($Task9UiContent -match 'resolve_result_keyboard_action[\s\S]{0,500}DIK_RETURN[\s\S]{0,240}DIK_SPACE[\s\S]{0,160}return\s+["'']next["''][\s\S]{0,600}OnKeyboard[\s\S]{0,400}action\s*==\s*["'']next["''][\s\S]{0,160}self:OnNext\(\)[\s\S]{0,120}return\s+true') 'Task 9 result keyboard fallback must route Enter/Space to the next-fight action'
     Assert-True ($Task9UiContent -match 'ShowCountdown[\s\S]{0,900}model\.on_main_menu[\s\S]{0,900}self\.on_main_menu') 'Task 9 countdown UI must retain the common Arena main-menu callback'
     Assert-True ($Task9UiContent -notmatch 'OnMainMenu[\s\S]{0,240}kind\s*==\s*["'']countdown["'']') 'Task 9 main-menu action must not reject countdown Escape'
 }
@@ -563,6 +563,49 @@ if (Test-Path -LiteralPath $Task9UiXmlPath) {
         }
         Assert-True ($null -eq $Task9UiXml.SelectSingleNode("/*[local-name()='w']/*[local-name()='gamma_arena_result']/*[local-name()='texture']")) 'Task 9 UI root must not stretch or tile a widget texture across the screen'
     } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
+}
+
+$Task6MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
+$Task6UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
+$Task6TextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
+if (Test-Path -LiteralPath $Task6MainMenuPath) {
+    $Task6MainMenuContent = Get-Content -LiteralPath $Task6MainMenuPath -Raw
+    Assert-True ($Task6MainMenuContent -match '(?m)^function\s+show_confirmed_defeat\s*\(') 'Task 6 main-menu adapter must expose the confirmed-defeat controller'
+    foreach ($Marker in @('peek_defeat','consume_defeat','issue_launch_from_defeat','random_session_seed','write_character_creation','handoff_start_game','st_gamma_arena_result_new_fight','show_fatal','clear_transient')) {
+        Assert-True ($Task6MainMenuContent -match [regex]::Escape($Marker)) "Task 6 defeat controller must cover $Marker"
+    }
+    Assert-True ($Task6MainMenuContent -notmatch '\bdb\.actor\b') 'Task 6 menu-side defeat flow must never dereference the destroyed actor'
+    Assert-True ($Task6MainMenuContent -notmatch 'Anomaly|load_game|load_save|checkpoint|resume|revive') 'Task 6 fresh-fight action must use only the engine new-game handoff'
+    Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\s+then[\s\S]{0,500}restore_main_menu\s*\(\s*menu') 'Task 6 fatal-UI construction failure must restore the owner menu as a fallback'
+    Assert-True ($Task6MainMenuContent -match 'model\.on_main_menu\s*=\s*function\(\)[\s\S]{0,900}local\s+cleared[\s\S]{0,500}local\s+restored\s*=\s*restore_main_menu') 'Task 6 post-consume UI handling must attempt owner restoration even when result dismissal fails'
+    $Task6BindIndex = $Task6MainMenuContent.IndexOf('bind(menu)')
+    $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('show_confirmed_defeat(menu', $Task6BindIndex + 1)
+    Assert-True ($Task6BindIndex -ge 0 -and $Task6DefeatIndex -gt $Task6BindIndex) 'Task 6 main-menu init must bind normally before checking the confirmed defeat'
+}
+if (Test-Path -LiteralPath $Task9UiScriptPath) {
+    Assert-True ($Task9UiContent -match 'next_title_key') 'Task 6 result UI must accept a primary-action title key'
+    Assert-True ($Task9UiContent -match 'st_gamma_arena_result_new_fight') 'Task 6 result UI must validate the defeat-specific primary label'
+    Assert-True ($Task9UiContent -match 'next_button:SetText\s*\(') 'Task 6 result UI must apply the translated primary-action label'
+    Assert-True ($Task9UiContent -match 'if\s+self\.action_locked[\s\S]{0,180}return\s+gamma_arena_result\.ok\(false\)') 'Task 6 result actions must retain the repeated-click lock'
+    Assert-True ($Task9UiContent -match '(?m)^function\s+resolve_result_keyboard_action\s*\(') 'Task 6 result keyboard routing must expose a behavioral test seam'
+}
+if (Test-Path -LiteralPath $Task6UiStartPath) {
+    $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
+    Assert-True ($Task6UiStartContent -match '(?m)^function\s+handoff_start_game\s*\(') 'Task 6 must expose the shared StartGame handoff'
+}
+if (Test-Path -LiteralPath $Task6TextPath) {
+    [xml]$Task6Text = Get-Content -LiteralPath $Task6TextPath -Raw
+    Assert-True ($null -ne $Task6Text.SelectSingleNode("//*[local-name()='string' and @id='st_gamma_arena_result_new_fight']")) 'Task 6 localization must define the New fight label'
+}
+if (Test-Path -LiteralPath $Task4DevTestPath) {
+    foreach ($Marker in @('defeat_main_menu_fresh_fight_promotes_once','defeat_main_menu_exit_consumes_without_launch')) {
+        Assert-True ($Task4DevTestContent -match [regex]::Escape($Marker)) "Task 6 migration tests must cover $Marker"
+    }
+}
+if (Test-Path -LiteralPath $Task5DevTestPath) {
+    foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_result_keyboard_and_lock_are_behavioral')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 runtime tests must cover $Marker"
+    }
 }
 if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     foreach ($Marker in @('death_latched','defeat_token','arm_defeat','confirm_defeat','neutralize_owned_opponents','NEXT_AFTER_DEFEAT','drive_continuation')) {
