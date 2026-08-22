@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$PositiveFixtureOnly
+    [switch]$PositiveFixtureOnly,
+    [switch]$StaticFixturesOnly,
+    [switch]$ToolFixturesOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,8 +10,10 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gamma-arena-regression-" + [Guid]::NewGuid().ToString('N'))
 
-& (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1') -Verify
-if (-not $?) { exit 1 }
+if (-not $ToolFixturesOnly) {
+    & (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1') -Verify
+    if (-not $?) { exit 1 }
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
@@ -229,7 +233,7 @@ cost = 1
 level = l05_bar
 actor_spawn_path = t_way
 actor_look_path = t_look
-opponent_spawn_paths = bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk
+opponent_spawn_paths = bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_1_1
 '@
     $ArenaFactions = @('army','bandit','csky','dolg','ecolog','freedom','killer','monolith','stalker')
     $ArenaProfileBases = @{ army='military'; bandit='bandit'; csky='csky'; dolg='duty'; ecolog='ecolog'; freedom='freedom'; killer='killer'; monolith='monolith'; stalker='stalker' }
@@ -720,9 +724,42 @@ function run() end
     Write-FixtureFile $Root 'tests\fixtures\settings-v1.ltx' "[gamma_arena]`nsettings_schema_version = 1`nlast_difficulty_id = master`nlast_seed_mode = random"
     Write-FixtureFile $Root 'schemas\session-v1.md' 'session_nonce checkpoint_name resume_session_nonce FightSpec FightRegistry ResumeIntent non-durable ga1:<issued_at_epoch>:<nonce> 600'
     Write-FixtureFile $Root 'docs\compatibility.md' 'fixture'
+
+    # Keep the positive baseline aligned with the current versioned combat-loop
+    # contracts. Negative fixtures below overwrite only the file under test.
+    $CurrentContractFiles = @(
+        'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx',
+        'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx',
+        'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
+        'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx',
+        'src\gamedata\scripts\gamma_arena_catalog.script',
+        'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
+        'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_validator.script',
+        'src\gamedata\scripts\gamma_arena_layout_adapter.script',
+        'src\gamedata\scripts\gamma_arena_bootstrap.script',
+        'src\gamedata\scripts\gamma_arena_compat.script',
+        'src\gamedata\scripts\gamma_arena_orchestrator.script',
+        'src\gamedata\scripts\gamma_arena_entity_adapter.script',
+        'dev\gamedata\scripts\gamma_arena_test_domain.script',
+        'dev\gamedata\scripts\gamma_arena_test_generator.script',
+        'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script',
+        'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script',
+        'dev\gamedata\scripts\gamma_arena_test_runtime.script',
+        'tests\fixtures\golden-fights-v3.txt',
+        'schemas\fight-spec-v3.md'
+    )
+    foreach ($RelativePath in $CurrentContractFiles) {
+        $SourcePath = Join-Path $RepoRoot $RelativePath
+        $DestinationPath = Join-Path $Root $RelativePath
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+    }
 }
 
 function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {
+    $Target = if ($Arguments.Count -gt 0) { Split-Path -Leaf $Arguments[$Arguments.Count - 1] } else { '' }
+    Write-Host ("SMOKE: {0} {1}" -f (Split-Path -Leaf $Path), $Target)
     $PreviousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $Output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Path @Arguments 2>&1
@@ -735,6 +772,7 @@ function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {
 try {
     New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
 
+    if (-not $ToolFixturesOnly) {
     $DevFixture = New-StaticFixture 'dev-fixture'
     Add-Task2ContractFixture $DevFixture
     Write-FixtureFile $DevFixture 'dev\gamedata\scripts\gamma_arena_test_dev.script' 'dev fixture'
@@ -823,6 +861,16 @@ end
     Remove-Item -LiteralPath (Join-Path $MissingTask2Fixture 'src\gamedata\scripts\gamma_arena_rng.script') -Force
     $MissingTask2Exit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingTask2Fixture)
     Assert-True ($MissingTask2Exit -ne 0) 'Static policy must reject a missing required Task 2 contract script.'
+    }
+
+    if ($StaticFixturesOnly) {
+        if ($script:Failures.Count -gt 0) {
+            foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
+            exit 1
+        }
+        Write-Host 'PASS: static smoke fixtures passed'
+        return
+    }
 
     $OutsideReleaseOutput = Join-Path $TempRoot 'outside-release-output'
     $ReleaseOutputExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tools\Build-GammaArena.ps1') @('-Configuration', 'Release', '-OutputDirectory', $OutsideReleaseOutput)
