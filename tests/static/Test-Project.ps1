@@ -735,6 +735,7 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -notmatch '\bmath\.(random|randomseed)\b') 'Entity adapter must not consume global randomness'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:on_npc_death[\s\S]{0,900}if\s+not\s+owner\.ok\s+then\s+return\s+owner\s+end') 'Registered death owner-tag read failures must propagate instead of looking like benign mismatches'
     Assert-True ($Task7EntityContent -match 'expected_created_quantity') 'Opponent loadout must derive exact ammo allocation when server quantity is unavailable'
+    Assert-True ($Task7EntityContent -match 'community\s*=\s*participant\.community') 'Entity adapter participant copies must preserve dynamic FightSpec community'
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
 }
 
