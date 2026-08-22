@@ -11,25 +11,31 @@ local PROFILE_RANKS = {
     { id = "experienced", cost = 3 },
     { id = "veteran", cost = 4 }
 }
-local v2_manifest = {
+local catalog_manifest_v3 = {
     profiles = { novice={section="gamma_arena_bandit_novice",cost=1}, trainee={section="gamma_arena_bandit_trainee",cost=2}, experienced={section="gamma_arena_bandit_experienced",cost=3}, veteran={section="gamma_arena_bandit_veteran",cost=4} },
-    weapons = { pm={section="wpn_pm",ammo="ammo_9x18_fmj",cost=2,ammo_box_min=1,ammo_box_max=2}, mp5={section="wpn_mp5",ammo="ammo_9x19_fmj",cost=4,ammo_box_min=1,ammo_box_max=2}, ak74u={section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost=5,ammo_box_min=1,ammo_box_max=2}, ak74={section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost=6,ammo_box_min=1,ammo_box_max=2}, wincheaster1300={section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost=5,ammo_box_min=1,ammo_box_max=2} },
+    weapons = { pm={section="wpn_pm",ammo="ammo_9x18_fmj",cost=2,ammo_box_min=1,ammo_box_max=2,kind="w_pistol",slot=1}, mp5={section="wpn_mp5",ammo="ammo_9x19_fmj",cost=4,ammo_box_min=1,ammo_box_max=2,kind="w_smg",slot=1}, ak74u={section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost=5,ammo_box_min=1,ammo_box_max=2,kind="w_rifle",slot=2}, ak74={section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost=6,ammo_box_min=1,ammo_box_max=2,kind="w_rifle",slot=2}, wincheaster1300={section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost=5,ammo_box_min=1,ammo_box_max=2,kind="w_shotgun",slot=2} },
     ammo = { ammo_9x18_fmj={section="ammo_9x18_fmj",cost=1}, ammo_9x19_fmj={section="ammo_9x19_fmj",cost=1}, ["ammo_5.45x39_fmj"]={section="ammo_5.45x39_fmj",cost=2}, ammo_12x70_buck={section="ammo_12x70_buck",cost=2} },
     outfits = { novice={section="novice_outfit",cost=1}, stalker={section="stalker_outfit",cost=3}, banditmerc={section="banditmerc_outfit",cost=4} },
     knives = { knife={section="wpn_knife"}, knife2={section="wpn_knife2"}, knife3={section="wpn_knife3"}, knife4={section="wpn_knife4"}, knife5={section="wpn_knife5"}, knife6={section="wpn_knife6"}, knife7={section="wpn_knife7"}, knife8={section="wpn_knife8"}, knife9={section="wpn_knife9"} },
     consumables = { bandage={section="bandage",cost=1}, medkit={section="medkit",cost=2} }
 }
-local v1_difficulty_manifest = {
-    rookie = { enemy_min=1,enemy_max=2,enemy_total_budget=12,player_loadout_budget=12 },
-    stalker = { enemy_min=2,enemy_max=3,enemy_total_budget=18,player_loadout_budget=15 },
-    veteran = { enemy_min=3,enemy_max=4,enemy_total_budget=26,player_loadout_budget=18 },
-    master = { enemy_min=4,enemy_max=6,enemy_total_budget=38,player_loadout_budget=22 }
+local difficulty_manifest_v2 = {
+    rookie = { enemy_min=2,enemy_max=3,enemy_total_budget=25,player_loadout_budget=15,primary_share_percent=50 },
+    stalker = { enemy_min=3,enemy_max=5,enemy_total_budget=50,player_loadout_budget=20,primary_share_percent=60 },
+    veteran = { enemy_min=5,enemy_max=7,enemy_total_budget=75,player_loadout_budget=25,primary_share_percent=75 },
+    master = { enemy_min=7,enemy_max=10,enemy_total_budget=100,player_loadout_budget=35,primary_share_percent=80 }
 }
-local v1_layout_manifest = {
+local layout_manifest_v2 = {
     level = "l05_bar",
     actor_spawn_path = "t_way",
     actor_look_path = "t_look",
-    opponent_spawn_paths = { "bar_arena_walk_3_1", "bar_arena_walk_3_2", "bar_arena_walk_6_1", "bar_arena_walk_6_3", "bar_arena_walk_6_6", "bar_arena_monstr_walk" }
+    opponent_spawn_paths = { "bar_arena_walk_3_1", "bar_arena_walk_3_2", "bar_arena_walk_6_1", "bar_arena_walk_6_3", "bar_arena_walk_6_6", "bar_arena_monstr_walk" },
+    virtual_capacity = 10,
+    virtual_radii = { 1.5, 2.5 },
+    max_height_delta = 1.0,
+    min_opponent_separation = 1.75,
+    min_actor_separation = 8.0,
+    max_base_distance = 3.0
 }
 
 local function split(text, sort_values)
@@ -128,9 +134,29 @@ local function integer(value, name, context)
     return parsed
 end
 
+local function finite_number(value, name, context)
+    local parsed = tonumber(value)
+    if type(parsed) ~= "number" or parsed ~= parsed or parsed == math.huge or parsed == -math.huge then
+        return nil, gamma_arena_result.err("GA_CATALOG_INVALID", name .. " must be finite", context)
+    end
+    return parsed
+end
+
+local function positive_number_list(value, name, context)
+    local values = split(value, false)
+    if #values == 0 then return nil, gamma_arena_result.err("GA_CATALOG_INVALID", name .. " must not be empty", context) end
+    for index, raw in ipairs(values) do
+        local parsed, parse_error = finite_number(raw, name, context)
+        if parsed == nil then return nil, parse_error end
+        if parsed <= 0 then return nil, gamma_arena_result.err("GA_CATALOG_INVALID", name .. " values must be positive", context) end
+        values[index] = parsed
+    end
+    return values
+end
+
 local function exact_ids(group_name, raw_ids)
-    local expected = v2_manifest[group_name]
-    if type(raw_ids) ~= "string" or type(expected) ~= "table" then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group ids must match v2", { group = group_name }) end
+    local expected = catalog_manifest_v3[group_name]
+    if type(raw_ids) ~= "string" or type(expected) ~= "table" then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog group ids must match v3", { group = group_name }) end
     local ids, seen, expected_count = split(raw_ids), {}, 0
     for _, id in ipairs(ids) do if seen[id] then return nil, gamma_arena_result.err("GA_CATALOG_DUPLICATE_ID", "Catalog ids must be unique", { group = group_name, id = id }) end; seen[id] = true end
     for _ in pairs(expected) do expected_count = expected_count + 1 end
@@ -141,10 +167,10 @@ local function exact_ids(group_name, raw_ids)
 end
 
 local function validate_semantic_entry(group_name, item)
-    local expected = v2_manifest[group_name] and v2_manifest[group_name][item.id]
-    if not expected or item.section ~= expected.section or item.cost ~= expected.cost then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog entry differs from v2", { group = group_name, id = item.id }) end
-    if group_name == "weapons" and item.ammo ~= expected.ammo then return nil, gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo differs from v2", { id = item.id, ammo = item.ammo }) end
-    if group_name == "weapons" and (item.ammo_box_min ~= expected.ammo_box_min or item.ammo_box_max ~= expected.ammo_box_max) then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Weapon entry differs from v2", { id = item.id }) end
+    local expected = catalog_manifest_v3[group_name] and catalog_manifest_v3[group_name][item.id]
+    if not expected or item.section ~= expected.section or item.cost ~= expected.cost then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Catalog entry differs from v3", { group = group_name, id = item.id }) end
+    if group_name == "weapons" and item.ammo ~= expected.ammo then return nil, gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo differs from v3", { id = item.id, ammo = item.ammo }) end
+    if group_name == "weapons" and (item.ammo_box_min ~= expected.ammo_box_min or item.ammo_box_max ~= expected.ammo_box_max or item.kind ~= expected.kind or item.slot ~= expected.slot) then return nil, gamma_arena_result.err("GA_CATALOG_MANIFEST_INVALID", "Weapon entry differs from v3", { id = item.id }) end
     return true
 end
 
@@ -283,7 +309,7 @@ local function enumerate_loadout_keys(factory, ini, section)
 end
 
 local function index_faction_weapon_pools(factory, snapshot)
-    snapshot.weapons_by_profile = {}
+    snapshot.weapon_pools_by_profile = {}
     if type(factory.open_loadouts) ~= "function" then return end
     local opened, loadouts = pcall(factory.open_loadouts)
     if not opened or loadouts == nil then return end
@@ -292,25 +318,37 @@ local function index_faction_weapon_pools(factory, snapshot)
     for _, profile in ipairs(snapshot.profile_list) do
         if type(profile.faction) == "string" and type(profile.rank) == "string" then
             local loadout_section = profile.faction .. "_" .. profile.rank
-            local values, seen = {}, {}
+            local pools = { primary = {}, secondary = {} }
+            local seen = { primary = {}, secondary = {} }
             for _, slot_key in ipairs({ "primary", "primery", "secondary" }) do
+                local role = slot_key == "secondary" and "secondary" or "primary"
                 local pool_section = read_loadout_string(factory, loadouts, loadout_section, slot_key)
                 if type(pool_section) == "string" and pool_section ~= "" then
                     local keys = enumerate_loadout_keys(factory, loadouts, pool_section)
                     if type(keys) == "table" then
                         for _, line in ipairs(keys) do
                             local section = normalized_pool_weapon(line)
-                            if eligible[section] ~= nil and not seen[section] then
-                                seen[section] = true
-                                values[#values + 1] = eligible[section]
+                            if eligible[section] ~= nil and not seen[role][section] then
+                                seen[role][section] = true
+                                pools[role][#pools[role] + 1] = eligible[section]
                             end
                         end
                     end
                 end
             end
-            table.sort(values, function(left, right) return left.section < right.section end)
-            snapshot.weapons_by_profile[profile.section] = values
+            table.sort(pools.primary, function(left, right) return left.section < right.section end)
+            table.sort(pools.secondary, function(left, right) return left.section < right.section end)
+            snapshot.weapon_pools_by_profile[profile.section] = pools
         end
+    end
+end
+
+local function index_global_weapon_roles(snapshot)
+    snapshot.primary_weapon_list = {}
+    snapshot.secondary_weapon_list = {}
+    for _, weapon in ipairs(snapshot.weapon_list) do
+        local target = weapon.kind == "w_pistol" and snapshot.secondary_weapon_list or snapshot.primary_weapon_list
+        target[#target + 1] = weapon
     end
 end
 
@@ -343,10 +381,11 @@ local function augment_from_effective_system(factory, snapshot)
     if not profile_ok then return profile_error end
     index_faction_weapon_pools(factory, snapshot)
     snapshot.selection_mode = "staged"
-    snapshot.generator_version = 3
+    index_global_weapon_roles(snapshot)
+    snapshot.generator_version = 4
     table.sort(discovered.value.fingerprint_parts)
     snapshot.revision = gamma_arena_rng.derive_seed({
-        "dynamic_catalog_v3",
+        "dynamic_catalog_v4",
         snapshot.revision,
         table.concat(discovered.value.fingerprint_parts, "|")
     })
@@ -383,16 +422,16 @@ local function load_impl(ini_factory)
     local catalogs, open_error = safe_open(factory, catalog_path); if not catalogs then return open_error end
     local difficulties; difficulties, open_error = safe_open(factory, difficulty_path); if not difficulties then return open_error end
     local layouts; layouts, open_error = safe_open(factory, layout_path); if not layouts then return open_error end
-    local snapshot = { schema_version = 2, revision = 2, generator_version = 2, profiles = {}, profile_list = {}, weapons = {}, weapon_list = {}, ammo = {}, outfits = {}, outfit_list = {}, knives = {}, knife_list = {}, consumables = {}, difficulties = {}, difficulty_ids = {}, layouts = {}, layout_ids = {} }
+    local snapshot = { schema_version = 3, revision = 3, generator_version = 4, profiles = {}, profile_list = {}, weapons = {}, weapon_list = {}, primary_weapon_list = {}, secondary_weapon_list = {}, weapon_pools_by_profile = {}, ammo = {}, outfits = {}, outfit_list = {}, knives = {}, knife_list = {}, consumables = {}, difficulties = {}, difficulty_ids = {}, layouts = {}, layout_ids = {} }
     local metadata, metadata_error = require_section(factory, catalogs, "meta", { schema_version = true, revision = true, generator_version = true })
     if not metadata then return metadata_error end
-    for _, pair in ipairs({ { "schema_version", 2 }, { "revision", 2 }, { "generator_version", 2 } }) do
+    for _, pair in ipairs({ { "schema_version", 3 }, { "revision", 3 }, { "generator_version", 4 } }) do
         local value, parse_error = integer(read(factory, catalogs, "meta", pair[1]), pair[1], { section = "meta" })
         if not value then return parse_error end
         if value ~= pair[2] then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported catalog version", { field = pair[1], value = value }) end
         snapshot[pair[1]] = value
     end
-    local groups = { { name = "profiles", singular = "profile", target = snapshot.profiles, list = snapshot.profile_list, keys = { section = true, cost = true } }, { name = "weapons", singular = "weapon", target = snapshot.weapons, list = snapshot.weapon_list, keys = { section = true, ammo = true, cost = true, ammo_box_min = true, ammo_box_max = true } }, { name = "ammo", singular = "ammo", target = snapshot.ammo, keys = { section = true, cost = true } }, { name = "outfits", singular = "outfit", target = snapshot.outfits, list = snapshot.outfit_list, keys = { section = true, cost = true } }, { name = "knives", singular = "knife", target = snapshot.knives, list = snapshot.knife_list, keys = { section = true }, costed = false }, { name = "consumables", singular = "consumable", target = snapshot.consumables, keys = { section = true, cost = true } } }
+    local groups = { { name = "profiles", singular = "profile", target = snapshot.profiles, list = snapshot.profile_list, keys = { section = true, cost = true } }, { name = "weapons", singular = "weapon", target = snapshot.weapons, list = snapshot.weapon_list, keys = { section = true, ammo = true, cost = true, ammo_box_min = true, ammo_box_max = true, kind = true, slot = true } }, { name = "ammo", singular = "ammo", target = snapshot.ammo, keys = { section = true, cost = true } }, { name = "outfits", singular = "outfit", target = snapshot.outfits, list = snapshot.outfit_list, keys = { section = true, cost = true } }, { name = "knives", singular = "knife", target = snapshot.knives, list = snapshot.knife_list, keys = { section = true }, costed = false }, { name = "consumables", singular = "consumable", target = snapshot.consumables, keys = { section = true, cost = true } } }
     local catalog_manifest = { meta = true }
     for _, group in ipairs(groups) do
         local group_ok, group_error = require_section(factory, catalogs, group.name, { ids = true })
@@ -424,6 +463,9 @@ local function load_impl(ini_factory)
                 item.ammo = read(factory, catalogs, section, "ammo")
                 item.ammo_box_min, section_error = integer(read(factory, catalogs, section, "ammo_box_min"), "ammo_box_min", { section = section }); if not item.ammo_box_min then return section_error end
                 item.ammo_box_max, section_error = integer(read(factory, catalogs, section, "ammo_box_max"), "ammo_box_max", { section = section }); if not item.ammo_box_max or item.ammo_box_min < 1 or item.ammo_box_max < item.ammo_box_min then return gamma_arena_result.err("GA_CATALOG_AMMO_RANGE_INVALID", "Weapon ammo box range is invalid", { section = section }) end
+                item.kind = read(factory, catalogs, section, "kind")
+                item.slot, section_error = integer(read(factory, catalogs, section, "slot"), "slot", { section = section }); if not item.slot then return section_error end
+                if type(item.kind) ~= "string" or item.kind == "" or (item.slot ~= 1 and item.slot ~= 2) then return gamma_arena_result.err("GA_CATALOG_WEAPON_ROLE_INVALID", "Weapon kind and slot are invalid", { section = section }) end
             end
             local semantic_ok, semantic_error = validate_semantic_entry(group.name, item); if not semantic_ok then return semantic_error end
             group.target[entry_id] = item
@@ -434,32 +476,40 @@ local function load_impl(ini_factory)
         if not snapshot.ammo[weapon.ammo] or snapshot.ammo[weapon.ammo].section ~= weapon.ammo or weapon_ammo_sections[weapon.section] ~= weapon.ammo then return gamma_arena_result.err("GA_CATALOG_AMMO_INVALID", "Weapon ammo is not the allowlisted matching section", { weapon = weapon.section, ammo = weapon.ammo }) end
     end
     local difficulty_ok, difficulty_error = require_section(factory, difficulties, "meta", { schema_version = true, revision = true }); if not difficulty_ok then return difficulty_error end
-    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, difficulties, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 1 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported difficulty catalog version", { field = key, value = value }) end end
+    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, difficulties, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 2 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported difficulty catalog version", { field = key, value = value }) end end
     local difficulty_manifest = { meta = true, ga_difficulty_rookie = true, ga_difficulty_stalker = true, ga_difficulty_veteran = true, ga_difficulty_master = true }
     local difficulty_manifest_ok, difficulty_manifest_error = validate_section_manifest(factory, difficulties, difficulty_manifest, difficulty_path); if not difficulty_manifest_ok then return difficulty_manifest_error end
     for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
         local section = "ga_difficulty_" .. difficulty_id
-        local section_ok, section_error = require_section(factory, difficulties, section, { enemy_min = true, enemy_max = true, enemy_total_budget = true, player_loadout_budget = true }); if not section_ok then return section_error end
-        local item = { id = difficulty_id }; for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget" }) do item[key], section_error = integer(read(factory, difficulties, section, key), key, { section = section }); if not item[key] then return section_error end; if item[key] <= 0 then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty values must be positive integers", { section = section, key = key }) end end
+        local section_ok, section_error = require_section(factory, difficulties, section, { enemy_min = true, enemy_max = true, enemy_total_budget = true, player_loadout_budget = true, primary_share_percent = true }); if not section_ok then return section_error end
+        local item = { id = difficulty_id }; for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget", "primary_share_percent" }) do item[key], section_error = integer(read(factory, difficulties, section, key), key, { section = section }); if not item[key] then return section_error end; if item[key] <= 0 then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty values must be positive integers", { section = section, key = key }) end end
         if item.enemy_max < item.enemy_min then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Difficulty maximum is below minimum", { section = section }) end
-        local expected = v1_difficulty_manifest[difficulty_id]
-        for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget" }) do if item[key] ~= expected[key] then return gamma_arena_result.err("GA_DIFFICULTY_MANIFEST_INVALID", "Difficulty entry differs from v1", { difficulty_id = difficulty_id, field = key }) end end
+        if item.primary_share_percent > 100 then return gamma_arena_result.err("GA_DIFFICULTY_INVALID", "Primary firearm share cannot exceed 100 percent", { section = section }) end
+        local expected = difficulty_manifest_v2[difficulty_id]
+        for _, key in ipairs({ "enemy_min", "enemy_max", "enemy_total_budget", "player_loadout_budget", "primary_share_percent" }) do if item[key] ~= expected[key] then return gamma_arena_result.err("GA_DIFFICULTY_MANIFEST_INVALID", "Difficulty entry differs from v2", { difficulty_id = difficulty_id, field = key }) end end
         snapshot.difficulties[difficulty_id] = item; snapshot.difficulty_ids[#snapshot.difficulty_ids + 1] = difficulty_id
     end
     local layout_meta_ok, layout_meta_error = require_section(factory, layouts, "meta", { schema_version = true, revision = true }); if not layout_meta_ok then return layout_meta_error end
-    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, layouts, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 1 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported layout catalog version", { field = key, value = value }) end end
+    for _, key in ipairs({ "schema_version", "revision" }) do local value, version_error = integer(read(factory, layouts, "meta", key), key, { section = "meta" }); if not value then return version_error end; if value ~= 2 then return gamma_arena_result.err("GA_CATALOG_VERSION_UNSUPPORTED", "Unsupported layout catalog version", { field = key, value = value }) end end
     local layout_manifest_ok, layout_manifest_error = validate_section_manifest(factory, layouts, { meta = true, ga_layout_rostok_arena_v1 = true }, layout_path); if not layout_manifest_ok then return layout_manifest_error end
-    local layout_ok, layout_error = require_section(factory, layouts, "ga_layout_rostok_arena_v1", { level = true, actor_spawn_path = true, actor_look_path = true, opponent_spawn_paths = true }); if not layout_ok then return layout_error end
-    local layout = { id = "rostok_arena_v1", version = 1, level = read(factory, layouts, "ga_layout_rostok_arena_v1", "level"), actor_spawn_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_spawn_path"), actor_look_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_look_path"), opponent_spawn_paths = split(read(factory, layouts, "ga_layout_rostok_arena_v1", "opponent_spawn_paths"), false) }
+    local layout_keys = { level = true, actor_spawn_path = true, actor_look_path = true, opponent_spawn_paths = true, virtual_capacity = true, virtual_radii = true, max_height_delta = true, min_opponent_separation = true, min_actor_separation = true, max_base_distance = true }
+    local layout_ok, layout_error = require_section(factory, layouts, "ga_layout_rostok_arena_v1", layout_keys); if not layout_ok then return layout_error end
+    local layout = { id = "rostok_arena_v1", version = 2, level = read(factory, layouts, "ga_layout_rostok_arena_v1", "level"), actor_spawn_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_spawn_path"), actor_look_path = read(factory, layouts, "ga_layout_rostok_arena_v1", "actor_look_path"), opponent_spawn_paths = split(read(factory, layouts, "ga_layout_rostok_arena_v1", "opponent_spawn_paths"), false) }
+    layout.virtual_capacity, layout_error = integer(read(factory, layouts, "ga_layout_rostok_arena_v1", "virtual_capacity"), "virtual_capacity", { section = "ga_layout_rostok_arena_v1" }); if not layout.virtual_capacity then return layout_error end
+    layout.virtual_radii, layout_error = positive_number_list(read(factory, layouts, "ga_layout_rostok_arena_v1", "virtual_radii"), "virtual_radii", { section = "ga_layout_rostok_arena_v1" }); if not layout.virtual_radii then return layout_error end
+    for _, key in ipairs({ "max_height_delta", "min_opponent_separation", "min_actor_separation", "max_base_distance" }) do layout[key], layout_error = finite_number(read(factory, layouts, "ga_layout_rostok_arena_v1", key), key, { section = "ga_layout_rostok_arena_v1" }); if not layout[key] or layout[key] <= 0 then return layout_error or gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout distances must be positive", { key = key }) end end
     if type(layout.level) ~= "string" or layout.level == "" or type(layout.actor_spawn_path) ~= "string" or layout.actor_spawn_path == "" or type(layout.actor_look_path) ~= "string" or layout.actor_look_path == "" or layout.actor_spawn_path == layout.actor_look_path or #layout.opponent_spawn_paths ~= 6 then return gamma_arena_result.err("GA_LAYOUT_INVALID", "Layout paths and level are invalid", {}) end
     local unique_paths = {}
     for _, path in ipairs(layout.opponent_spawn_paths) do if path == "" or path == layout.actor_spawn_path or path == layout.actor_look_path or unique_paths[path] then return gamma_arena_result.err("GA_LAYOUT_INVALID", "All actor and opponent paths must be non-empty and unique", { path = path }) end; unique_paths[path] = true end
-    if layout.level ~= v1_layout_manifest.level or layout.actor_spawn_path ~= v1_layout_manifest.actor_spawn_path or layout.actor_look_path ~= v1_layout_manifest.actor_look_path then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Layout routing differs from v1", {}) end
-    for index, expected_path in ipairs(v1_layout_manifest.opponent_spawn_paths) do if layout.opponent_spawn_paths[index] ~= expected_path then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Ordered opponent paths differ from v1", { index = index }) end end
+    if layout.level ~= layout_manifest_v2.level or layout.actor_spawn_path ~= layout_manifest_v2.actor_spawn_path or layout.actor_look_path ~= layout_manifest_v2.actor_look_path or layout.virtual_capacity ~= layout_manifest_v2.virtual_capacity or #layout.virtual_radii ~= #layout_manifest_v2.virtual_radii then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Layout routing differs from v2", {}) end
+    for index, expected_path in ipairs(layout_manifest_v2.opponent_spawn_paths) do if layout.opponent_spawn_paths[index] ~= expected_path then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Ordered opponent paths differ from v2", { index = index }) end end
+    for index, expected_radius in ipairs(layout_manifest_v2.virtual_radii) do if layout.virtual_radii[index] ~= expected_radius then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Virtual layout radii differ from v2", { index = index }) end end
+    for _, key in ipairs({ "max_height_delta", "min_opponent_separation", "min_actor_separation", "max_base_distance" }) do if layout[key] ~= layout_manifest_v2[key] then return gamma_arena_result.err("GA_LAYOUT_MANIFEST_INVALID", "Virtual layout constraint differs from v2", { key = key }) end end
     snapshot.layouts[layout.id] = layout; snapshot.layout_ids[1] = layout.id
     local augmented = augment_from_effective_system(factory, snapshot)
     if not augmented.ok then return augmented end
     snapshot = augmented.value
+    index_global_weapon_roles(snapshot)
     if snapshot.selection_mode == "combinations" then add_loadout_combinations(snapshot) end
     local minimum_profile_cost = snapshot.profile_list[1].cost
     for _, profile in ipairs(snapshot.profile_list) do minimum_profile_cost = math.min(minimum_profile_cost, profile.cost) end

@@ -45,6 +45,9 @@ if ($Production -notmatch 'pcall') {
 if ($Production -notmatch 'table\.sort') {
     throw 'Dynamic catalog discovery must normalize engine enumeration order'
 }
+if (-not $Production.Contains('slot = slot')) {
+    throw 'Dynamic catalog discovery must retain the effective weapon inventory slot'
+}
 if ($Production -match 'xrs_rnd_npc_loadout|wpn_addon_rifle|addon_medium_outfit') {
     throw 'Production discovery must use semantic metadata without fixture IDs or native loadout mutation'
 }
@@ -76,7 +79,11 @@ foreach ($Marker in @(
     'r_string_ex',
     'r_line_ex',
     'selection_mode',
-    'minimum_loadout_cost'
+    'minimum_loadout_cost',
+    'primary_weapon_list',
+    'secondary_weapon_list',
+    'weapon_pools_by_profile',
+    'primary_share_percent'
 )) {
     if (-not $Catalog.Contains($Marker)) {
         throw "Dynamic catalog integration is missing marker: $Marker"
@@ -128,7 +135,18 @@ foreach ($Marker in @('PROFILE_FACTIONS', 'profiles_by_faction')) {
     if (-not $Catalog.Contains($Marker)) { throw "Faction catalog contract is missing marker: $Marker" }
 }
 if (-not $Generator.Contains('enemy_faction')) { throw 'Generator must choose one deterministic enemy faction per fight' }
-if (-not $Catalog.Contains('open_loadouts') -or -not $Catalog.Contains('weapons_by_profile')) { throw 'Catalog must index effective GAMMA faction/rank weapon pools' }
-if (-not $Generator.Contains('weapons_by_profile')) { throw 'Generator must prefer the selected profile weapon pool' }
+if (-not $Catalog.Contains('open_loadouts') -or -not $Catalog.Contains('weapon_pools_by_profile')) { throw 'Catalog must index separate effective GAMMA faction/rank weapon pools' }
 if (-not $Validator.Contains('expected_community')) { throw 'Runtime validator must validate the selected profile community' }
 Write-Host 'PASS: faction cohort static contract passed'
+
+$DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
+$Difficulty = Get-Content -Raw -LiteralPath $DifficultyPath
+foreach ($Expected in @(
+    '(?ms)\[ga_difficulty_rookie\].*?enemy_min\s*=\s*2\s*.*?enemy_max\s*=\s*3\s*.*?enemy_total_budget\s*=\s*25\s*.*?player_loadout_budget\s*=\s*15\s*.*?primary_share_percent\s*=\s*50',
+    '(?ms)\[ga_difficulty_stalker\].*?enemy_min\s*=\s*3\s*.*?enemy_max\s*=\s*5\s*.*?enemy_total_budget\s*=\s*50\s*.*?player_loadout_budget\s*=\s*20\s*.*?primary_share_percent\s*=\s*60',
+    '(?ms)\[ga_difficulty_veteran\].*?enemy_min\s*=\s*5\s*.*?enemy_max\s*=\s*7\s*.*?enemy_total_budget\s*=\s*75\s*.*?player_loadout_budget\s*=\s*25\s*.*?primary_share_percent\s*=\s*75',
+    '(?ms)\[ga_difficulty_master\].*?enemy_min\s*=\s*7\s*.*?enemy_max\s*=\s*10\s*.*?enemy_total_budget\s*=\s*100\s*.*?player_loadout_budget\s*=\s*35\s*.*?primary_share_percent\s*=\s*80'
+)) {
+    if ($Difficulty -notmatch $Expected) { throw 'Difficulty budget/count/primary-share matrix is stale' }
+}
+Write-Host 'PASS: expanded difficulty balance contract passed'
