@@ -430,6 +430,7 @@ function Orchestrator:enter_fatal()
     self.awaiting_activation = false
 end
 function Orchestrator:on_callback_error() end
+function Orchestrator:reconcile_active_victory() return self:living_opponent_count() end
 function Orchestrator:activate_once()
     local reconciled = safe_result_call("GA_SETTINGS_RECONCILIATION_FAILED", self.deps.reconcile, self.deps.config)
     local intents = self.deps.store:inspect_intents(self.deps.config)
@@ -505,6 +506,7 @@ function EntityAdapter:on_npc_death(id)
     local owner = self:load_owner_tag(id)
     if not owner.ok then return owner end
 end
+function EntityAdapter:reconcile_active_deaths() return self.deps.online_object end
 function EntityAdapter:activate()
     local routes = validated_spec.tactical_routes()
     local tactical = self.deps.tactical:begin({})
@@ -531,6 +533,7 @@ function new() return gamma_arena_rng.derive_seed({ "fixture" }), local_evidence
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_tactical_adapter.script' @'
 local Adapter = {}
 local markers = "best_danger best_enemy get_enemy memory_position grenade see xr_logic.configure_schemes xr_logic.activate_by_section xr_logic.switch_to_section hint_requested actor.position pcall"
+local combat_owned = sees_actor.value == true
 function Adapter:begin() end
 function Adapter:update() end
 function Adapter:record_death() end

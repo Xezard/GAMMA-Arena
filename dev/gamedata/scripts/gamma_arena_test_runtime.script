@@ -3989,6 +3989,19 @@ local function runtime_entity_object_death_signature_is_normalized()
     gamma_arena_test_assert.is_true(adapter:on_npc_death(victim).value, "production victim game_object id is normalized safely")
 end
 
+local function runtime_entity_active_poll_reconciles_missed_death_callback()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-polled-death"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    env.online[victim.id].alive_value = false
+    env:advance(250)
+    local updated = adapter:update()
+    gamma_arena_test_assert.is_true(updated.ok, "ACTIVE death reconciliation remains frame-driven")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 0, "dead registered NPC is reconciled when the engine callback is missed")
+    gamma_arena_test_assert.equals(env.tactical_death_slots[1], victim.slot, "polled death reaches the tactical director exactly like callback death")
+end
+
 local function runtime_entity_numeric_death_requires_test_injection()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
@@ -4304,9 +4317,11 @@ local function task8_environment(options)
         if env.registry.state == "CLEANING" then env.registry = { state = "CLEAN", session_id = nil, npcs = {}, items = {}, error = nil } end
         return gamma_arena_result.ok({ state = env.registry.state })
     end
-    function entities:on_npc_death(id)
+    function entities:on_npc_death(victim_or_id)
         if options.death_error then return gamma_arena_result.err("GA_TEST_DEATH", "injected death processing failure") end
         if env.registry.state ~= "ACTIVE" then return gamma_arena_result.ok(false) end
+        local id = victim_or_id
+        if type(victim_or_id) == "table" and type(victim_or_id.id) == "function" then id = victim_or_id:id() end
         for _, record in ipairs(env.registry.npcs) do
             if record.id == id and not record.dead then record.dead = true; env.living = env.living - 1; return gamma_arena_result.ok(true) end
         end
@@ -4523,6 +4538,16 @@ local function runtime_task8_only_registered_deaths_queue_victory()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 0, "death callback queues and never opens result UI")
     env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "registered final death opens result UI on next update")
+end
+
+local function runtime_active_poll_queues_victory_without_death_callback()
+    local env = task8_environment(); task8_pump_to_active(env)
+    env.registry.npcs[1].dead = true
+    env.living = 0
+    env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 0, "ACTIVE reconciliation queues and never opens result UI synchronously")
+    env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "zero reconciled opponents opens victory without relying on the external death callback")
 end
 
 local function runtime_result_modal_releases_global_input()
@@ -5176,6 +5201,7 @@ local cases = {
     ,{ name = "runtime_entity_duplicate_death_is_idempotent", fn = runtime_entity_duplicate_death_is_idempotent }
     ,{ name = "runtime_entity_unregistered_death_is_ignored", fn = runtime_entity_unregistered_death_is_ignored }
     ,{ name = "runtime_entity_object_death_signature_is_normalized", fn = runtime_entity_object_death_signature_is_normalized }
+    ,{ name = "runtime_entity_active_poll_reconciles_missed_death_callback", fn = runtime_entity_active_poll_reconciles_missed_death_callback }
     ,{ name = "runtime_entity_numeric_death_requires_test_injection", fn = runtime_entity_numeric_death_requires_test_injection }
     ,{ name = "runtime_entity_release_is_async_and_never_direct", fn = runtime_entity_release_is_async_and_never_direct }
     ,{ name = "runtime_entity_release_timeout_is_wrap_safe", fn = runtime_entity_release_timeout_is_wrap_safe }
@@ -5197,6 +5223,7 @@ local cases = {
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
+    ,{ name = "runtime_active_poll_queues_victory_without_death_callback", fn = runtime_active_poll_queues_victory_without_death_callback }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }

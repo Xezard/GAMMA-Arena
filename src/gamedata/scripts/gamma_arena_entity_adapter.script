@@ -5,6 +5,7 @@ local OWNER_KEY = "gamma_arena_owner"
 local UINT32_MOD = 4294967296
 local DEFAULT_RELEASE_TIMEOUT_MS = 10000
 local DEFAULT_ONLINE_TIMEOUT_MS = 10000
+local DEATH_RECONCILE_INTERVAL_MS = 250
 local EXPECTED_HUMAN_CLASS = "AI_STL_S"
 local EXPECTED_COMMUNITY = "bandit"
 local ACTOR_GOODWILL = -5000
@@ -234,6 +235,7 @@ function EntityAdapter:__init(deps)
     self.tactical_started = false
     self.tactical_disabled = false
     self.tactical_warning_logged = false
+    self.last_death_reconcile_at = nil
 end
 
 function EntityAdapter:set_state(value)
@@ -945,6 +947,8 @@ function EntityAdapter:update()
     if self.state_value == "SPAWNING" then result = self:drive_spawning()
     elseif self.state_value == "WAIT_ONLINE" then result = self:drive_online()
     elseif self.state_value == "ACTIVE" then
+        local reconciled = self:reconcile_active_deaths()
+        if not reconciled.ok then return reconciled end
         if not self.tactical_disabled then
             local tactical = method_result("GA_ENTITY_TACTICAL_UPDATE_FAILED", self.deps.tactical, "update")
             if not tactical.ok then
@@ -966,6 +970,44 @@ function EntityAdapter:update()
     return result
 end
 
+function EntityAdapter:accept_registered_death(record)
+    if record == nil or record.dead or record.released then return gamma_arena_result.ok(false) end
+    record.dead = true
+    if self.tactical_started and not self.tactical_disabled then
+        local notified = method_result("GA_ENTITY_TACTICAL_DEATH_FAILED", self.deps.tactical, "record_death", record.slot)
+        if not notified.ok then self:disable_tactical(notified) end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:reconcile_active_deaths()
+    if self.state_value ~= "ACTIVE" then return gamma_arena_result.ok(0) end
+    local now = self:clock()
+    if not now.ok then return now end
+    if self.last_death_reconcile_at ~= nil
+        and elapsed_ms(self.last_death_reconcile_at, now.value) < DEATH_RECONCILE_INTERVAL_MS then
+        return gamma_arena_result.ok(0)
+    end
+    self.last_death_reconcile_at = now.value
+    local reconciled = 0
+    for _, record in ipairs(self.registry.npcs) do
+        if not record.dead and not record.released then
+            local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
+            if not object.ok then return object end
+            if object.value ~= nil then
+                local alive = self:is_alive(object.value)
+                if not alive.ok then return alive end
+                if not alive.value then
+                    local accepted = self:accept_registered_death(record)
+                    if not accepted.ok then return accepted end
+                    if accepted.value then reconciled = reconciled + 1 end
+                end
+            end
+        end
+    end
+    return gamma_arena_result.ok(reconciled)
+end
+
 function EntityAdapter:on_npc_death(victim_or_id)
     local function normalize()
         if type(victim_or_id) == "number" then
@@ -981,12 +1023,7 @@ function EntityAdapter:on_npc_death(victim_or_id)
     local owner = self:load_owner_tag(id)
     if not owner.ok then return owner end
     if owner.value ~= self.session_id then return gamma_arena_result.ok(false) end
-    record.dead = true
-    if self.tactical_started and not self.tactical_disabled then
-        local notified = method_result("GA_ENTITY_TACTICAL_DEATH_FAILED", self.deps.tactical, "record_death", record.slot)
-        if not notified.ok then self:disable_tactical(notified) end
-    end
-    return gamma_arena_result.ok(true)
+    return self:accept_registered_death(record)
 end
 
 function EntityAdapter:living_opponent_count()

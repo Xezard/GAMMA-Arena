@@ -1280,6 +1280,8 @@ if (Test-Path -LiteralPath $Task11AdapterPath) {
         Assert-True ($Task11AdapterContent.Contains($Task11Marker)) "Tactical adapter contract is missing marker: $Task11Marker"
     }
     Assert-True ($Task11AdapterContent -match 'pcall') 'Tactical adapter engine reads must be guarded'
+    Assert-True ($Task11AdapterContent -match 'combat_owned\s*=\s*sees_actor\.value\s*==\s*true') 'Only direct actor visibility may retain native combat ownership after target memory becomes stale'
+    Assert-True ($Task11AdapterContent -notmatch 'combat_owned\s*=\s*best_enemy\.value\s*~=\s*nil') 'Remembered best_enemy must not permanently block director search movement'
     Assert-True ($Task11AdapterContent -notmatch 'type\s*\(\s*native\s*\)\s*~=\s*["'']table["'']') 'Engine danger_object namespace must not be rejected solely because its Lua type is not table'
     Assert-True ($Task11AdapterContent -notmatch 'set_dest_level_vertex_id|set_sight|set_item|set_enemy|make_object_visible_somewhen|math\.random') 'Tactical adapter must not override native combat or use global randomness'
 }
@@ -1289,6 +1291,9 @@ Assert-True ($Task11EntityContent.Contains('STOPPING')) 'Entity adapter must ret
 foreach ($Task11Marker in @('stable_encode', 'deps.tactical', 'tactical_disabled', 'GA_DIRECTOR_RUNTIME_DISABLED', 'record_death', 'stop_tactical')) {
     Assert-True ($Task11EntityContent.Contains($Task11Marker)) "Entity tactical lifecycle is missing marker: $Task11Marker"
 }
+Assert-True ($Task11EntityContent -match 'function\s+EntityAdapter:reconcile_active_deaths\s*\(') 'ACTIVE entity updates must reconcile dead registered opponents when an external death callback is missed'
+$Task11OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+Assert-True ($Task11OrchestratorContent -match 'function\s+Orchestrator:reconcile_active_victory\s*\(') 'ACTIVE orchestration must derive victory from the reconciled living-opponent count'
 Assert-True ($Task11EntityContent -match 'tactical[\s\S]{0,1800}set_actor_hostile[\s\S]{0,1000}set_state\("ACTIVE"\)') 'Tactical bind must precede hostility and ACTIVE'
 $Task11BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 Assert-True ($Task11BootstrapContent -match 'gamma_arena_tactical_adapter\.new') 'Bootstrap must compose the production tactical adapter'
