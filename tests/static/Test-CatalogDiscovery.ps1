@@ -1,8 +1,12 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$RepoRoot
+)
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+}
 $ProductionPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
 $TestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'
 
@@ -99,6 +103,12 @@ if (-not $GeneratorTests.Contains('catalog_augments_effective_system_without_car
 if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
     throw 'Dynamic catalog integration must cover extended GAMMA loadout inheritance readers'
 }
+if ($Catalog -notmatch 'difficulty_manifest_v3' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
+    throw 'Weighted player class tables are missing from the catalog contract'
+}
+if ($Catalog -notmatch 'schema_version\s*=\s*4' -or $Catalog -notmatch 'generator_version\s*=\s*5') {
+    throw 'Catalog snapshot version markers are stale'
+}
 Write-Host 'PASS: dynamic catalog integration static contract passed'
 
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
@@ -154,3 +164,20 @@ foreach ($Expected in @(
     if ($Difficulty -notmatch $Expected) { throw 'Difficulty budget/count/primary-share matrix is stale' }
 }
 Write-Host 'PASS: expanded difficulty balance contract passed'
+
+if ($Production -notmatch 'read_string\(source, section, "repair_type"\)\s*==\s*"outfit_exo"[\s\S]{0,180}armor_class\s*=\s*"powered_exo"') {
+    throw 'Dynamic catalog discovery must classify repair_type outfit_exo as powered_exo, never generic heavy'
+}
+$PlayerLoadoutStart = $Generator.IndexOf('function player_loadout')
+$PlayerLoadoutEnd = $Generator.IndexOf('local function random_knife', $PlayerLoadoutStart)
+if ($PlayerLoadoutStart -lt 0 -or $PlayerLoadoutEnd -le $PlayerLoadoutStart) {
+    throw 'Weighted player loadout selection must remain structurally testable'
+}
+$PlayerLoadout = $Generator.Substring($PlayerLoadoutStart, $PlayerLoadoutEnd - $PlayerLoadoutStart)
+if ($PlayerLoadout -match 'pick_affordable_band') {
+    throw 'Player loadouts must use weighted class selection, not maximum-cost affordable-band selection'
+}
+if ($PlayerLoadout -notmatch 'select_player_class_pair[\s\S]{0,400}actor_class_pair' -or $Generator -notmatch 'weapon_weight\s*\*\s*armor_weight') {
+    throw 'Player loadouts must retain weighted weapon/armor class-pair selection'
+}
+Write-Host 'PASS: natural-death and weighted-loadout regression policy passed'

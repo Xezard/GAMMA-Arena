@@ -2,6 +2,13 @@
 
 All notable changes to Gamma Arena are documented in this file.
 
+## Unreleased
+
+- Added weighted player weapon/armor class selection with recalibrated difficulty budgets.
+- Powered exoskeleton loadouts now start at 100 percent charge after verified readback.
+- Arena defeats use natural actor death, then offer a fresh-fight action from the post-death menu.
+- Arena-owned bots are neutralized when the actor dies.
+
 ## 0.1.0 - 2026-08-21
 
 - Initial reproducible MO2 package scaffold.
