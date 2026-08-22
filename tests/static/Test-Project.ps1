@@ -1345,6 +1345,15 @@ foreach ($Task12Marker in @('level.vertex_in_direction', 'level.vertex_position'
     Assert-True ($Task12CompatContent.Contains($Task12Marker)) "Preflight must require resolved-layout engine capability: $Task12Marker"
 }
 
+foreach ($Task13Marker in @('WOUNDED_PENDING', 'MISSING_PENDING', 'DEFEATED_DEAD', 'DEFEATED_WOUNDED', 'DEFEATED_MISSING', 'TERMINAL_GRACE_MS', 'proved_online', 'is_critically_wounded', 'GA_OPPONENT_STATE_CHANGED')) {
+    Assert-True ($Task12EntityContent.Contains($Task13Marker)) "Authoritative opponent terminal-state contract is missing marker: $Task13Marker"
+}
+Assert-True ($Task12EntityContent -match 'function\s+EntityAdapter:transition_opponent\s*\(') 'Entity adapter must centralize opponent terminal transitions'
+Assert-True ($Task12EntityContent -match 'function\s+EntityAdapter:terminal_summary\s*\(') 'Entity adapter must expose final terminal counts by reason'
+Assert-True ($Task12BootstrapContent.Contains('critically_wounded') -and $Task12BootstrapContent.Contains('log_info')) 'Bootstrap must bind wound evidence and terminal transition diagnostics'
+Assert-True ($Task12CompatContent.Contains('game_object.critically_wounded')) 'Preflight must require the critical-wound query used by victory reconciliation'
+Assert-True ($Task12OrchestratorContent -match 'show_victory[\s\S]{0,900}terminal_summary') 'Victory logging must include authoritative terminal counts'
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"

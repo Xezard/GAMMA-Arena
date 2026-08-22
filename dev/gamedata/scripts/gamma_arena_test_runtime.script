@@ -2662,7 +2662,8 @@ local function fake_entity_environment(options)
         tactical_update_calls = 0,
         tactical_death_slots = {},
         tactical_stop_calls = 0,
-        tactical_warnings = {}
+        tactical_warnings = {},
+        terminal_transitions = {}
     }
 
     local function server_entity(id, section, parent_id, quantity)
@@ -2787,6 +2788,9 @@ local function fake_entity_environment(options)
             env.tactical_warnings[#env.tactical_warnings + 1] = code
             env.events[#env.events + 1] = "tactical_warn:" .. tostring(code)
         end,
+        log_info = function(code, message, context)
+            if code == "GA_OPPONENT_STATE_CHANGED" then env.terminal_transitions[#env.terminal_transitions + 1] = clone(context) end
+        end,
         clock = function() return env.now end,
         opponent_gate = function() return env.opponents_enabled end,
         allow_numeric_death = options.allow_numeric_death == true,
@@ -2801,7 +2805,7 @@ local function fake_entity_environment(options)
                 env:add_entity("random_weapon", npc:id(), 1)
                 env:add_entity("random_ammo", npc:id(), 8)
             end
-            local object = { runtime_id = npc:id(), alive_value = options.fail_phase ~= "alive" }
+            local object = { runtime_id = npc:id(), alive_value = options.fail_phase ~= "alive", critical_value = false }
             function object:id() return self.runtime_id end
             function object:alive() return self.alive_value end
             env.online_candidates[npc:id()] = object
@@ -2890,6 +2894,7 @@ local function fake_entity_environment(options)
             if options.fail_phase == "online" then return nil end
             return env.online[id]
         end,
+        is_critically_wounded = function(object) return object.critical_value == true end,
         actor_object = function() return { runtime_id = 1 } end,
         item_quantity = function(entity, is_ammo)
             if is_ammo and options.ammo_quantity_unavailable then return nil end
@@ -4005,6 +4010,79 @@ local function runtime_entity_active_poll_reconciles_missed_death_callback()
     gamma_arena_test_assert.is_true(updated.ok, "ACTIVE death reconciliation remains frame-driven")
     gamma_arena_test_assert.equals(adapter:living_opponent_count(), 0, "dead registered NPC is reconciled when the engine callback is missed")
     gamma_arena_test_assert.equals(env.tactical_death_slots[1], victim.slot, "polled death reaches the tactical director exactly like callback death")
+end
+
+local function runtime_entity_wounded_requires_grace_before_defeat()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-wounded-grace"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    env.online[victim.id].critical_value = true
+    env:advance(250); gamma_arena_test_assert.is_true(adapter:update().ok, "wound observation remains frame-driven")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "WOUNDED_PENDING", "critical wound first enters grace")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "wound grace cannot end the fight early")
+    env:advance(1500); gamma_arena_test_assert.is_true(adapter:update().ok, "stable critical wound becomes terminal")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_WOUNDED", "stable critical wound is authoritative defeat")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 0, "terminal wounded opponent no longer blocks victory")
+    gamma_arena_test_assert.equals(#env.tactical_death_slots, 1, "terminal transition notifies tactical ownership once")
+end
+
+local function runtime_entity_wounded_and_missing_pending_can_recover()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-terminal-recovery"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    local object = env.online[victim.id]
+    object.critical_value = true
+    env:advance(250); adapter:update()
+    object.critical_value = false
+    env:advance(250); adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "ALIVE", "recovered wound returns to ALIVE")
+    env.online[victim.id] = nil
+    env:advance(250); adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "MISSING_PENDING", "transient online loss enters grace")
+    env.online[victim.id] = object
+    env:advance(250); adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "ALIVE", "reappearing NPC returns to ALIVE")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "recovered pending evidence remains combat-live")
+end
+
+local function runtime_entity_missing_uses_grace_but_absence_is_immediate()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-missing-grace"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    env.online[victim.id] = nil
+    env:advance(250); adapter:update()
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "online loss with extant ALife entity observes grace")
+    env:advance(1500); adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_MISSING", "stable missing online object becomes terminal")
+
+    local absent_env, absent_deps = fake_entity_environment()
+    local absent_adapter = gamma_arena_entity_adapter.new(absent_deps)
+    begin_entity_apply(absent_adapter, absent_env, entity_spec(1), "session-hard-absence"); pump_entity(absent_adapter, absent_env)
+    local absent = absent_adapter:registry_snapshot().npcs[1]
+    absent_env.online[absent.id] = nil
+    absent_env.objects[absent.id] = nil
+    absent_env:advance(250); absent_adapter:update()
+    gamma_arena_test_assert.equals(absent_adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_MISSING", "proved ALife absence is terminal immediately")
+end
+
+local function runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-terminal-wrap"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    env.now = 4294967000
+    env.online[victim.id].critical_value = true
+    adapter:update()
+    gamma_arena_test_assert.equals(#env.terminal_transitions, 1, "pending transition logs once")
+    env.now = (env.now + 1500) % 4294967296
+    adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_WOUNDED", "wound grace survives uint32 wrap")
+    gamma_arena_test_assert.equals(#env.terminal_transitions, 2, "terminal transition logs once")
+    env:advance(250); adapter:update()
+    gamma_arena_test_assert.equals(#env.terminal_transitions, 2, "duplicate terminal evidence emits no diagnostic")
 end
 
 local function runtime_entity_numeric_death_requires_test_injection()
@@ -5208,6 +5286,10 @@ local cases = {
     ,{ name = "runtime_entity_unregistered_death_is_ignored", fn = runtime_entity_unregistered_death_is_ignored }
     ,{ name = "runtime_entity_object_death_signature_is_normalized", fn = runtime_entity_object_death_signature_is_normalized }
     ,{ name = "runtime_entity_active_poll_reconciles_missed_death_callback", fn = runtime_entity_active_poll_reconciles_missed_death_callback }
+    ,{ name = "runtime_entity_wounded_requires_grace_before_defeat", fn = runtime_entity_wounded_requires_grace_before_defeat }
+    ,{ name = "runtime_entity_wounded_and_missing_pending_can_recover", fn = runtime_entity_wounded_and_missing_pending_can_recover }
+    ,{ name = "runtime_entity_missing_uses_grace_but_absence_is_immediate", fn = runtime_entity_missing_uses_grace_but_absence_is_immediate }
+    ,{ name = "runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only", fn = runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only }
     ,{ name = "runtime_entity_numeric_death_requires_test_injection", fn = runtime_entity_numeric_death_requires_test_injection }
     ,{ name = "runtime_entity_release_is_async_and_never_direct", fn = runtime_entity_release_is_async_and_never_direct }
     ,{ name = "runtime_entity_release_timeout_is_wrap_safe", fn = runtime_entity_release_timeout_is_wrap_safe }

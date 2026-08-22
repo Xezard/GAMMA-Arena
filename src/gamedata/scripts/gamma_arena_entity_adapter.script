@@ -6,9 +6,24 @@ local UINT32_MOD = 4294967296
 local DEFAULT_RELEASE_TIMEOUT_MS = 10000
 local DEFAULT_ONLINE_TIMEOUT_MS = 10000
 local DEATH_RECONCILE_INTERVAL_MS = 250
+local TERMINAL_GRACE_MS = 1500
 local EXPECTED_HUMAN_CLASS = "AI_STL_S"
 local EXPECTED_COMMUNITY = "bandit"
 local ACTOR_GOODWILL = -5000
+local OPPONENT_STATES = {
+    ALIVE = "ALIVE",
+    WOUNDED_PENDING = "WOUNDED_PENDING",
+    MISSING_PENDING = "MISSING_PENDING",
+    DEFEATED_DEAD = "DEFEATED_DEAD",
+    DEFEATED_WOUNDED = "DEFEATED_WOUNDED",
+    DEFEATED_MISSING = "DEFEATED_MISSING",
+    RELEASED = "RELEASED"
+}
+local DEFEATED_STATES = {
+    DEFEATED_DEAD = true,
+    DEFEATED_WOUNDED = true,
+    DEFEATED_MISSING = true
+}
 
 -- Production composition binds safe_release_manager.release and the exact
 -- game_object.friend/game_object.enemy set_relation calls. The runtime
@@ -333,6 +348,12 @@ function EntityAdapter:register_record(kind, id, values)
         source = values.source or "assigned",
         tagged = false,
         dead = false,
+        terminal_state = kind == "npc" and OPPONENT_STATES.ALIVE or nil,
+        terminal_since = nil,
+        terminal_evidence = nil,
+        proved_online = false,
+        terminal_notified = false,
+        wound_query_warning_logged = false,
         equipped = false,
         held_offline = false,
         online_requested = false,
@@ -572,6 +593,7 @@ function EntityAdapter:poll_release()
     if not exists.ok then return exists end
     if not exists.value then
         pending.record.released = true
+        if pending.record.kind == "npc" then self:transition_opponent(pending.record, OPPONENT_STATES.RELEASED, "cleanup_released", nil) end
         self.pending_release = nil
         return gamma_arena_result.ok(true)
     end
@@ -751,6 +773,7 @@ function EntityAdapter:drive_online()
             local alive = self:is_alive(object.value)
             if not alive.ok then return alive end
             if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "Arena opponent is not alive before activation", { id = record.id }) end
+            record.proved_online = true
             objects[index] = object.value
             if not record.staged_friendly then
                 local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
@@ -899,7 +922,9 @@ function EntityAdapter:drive_cleanup()
             if not exists.ok then
                 self:add_cleanup_error(exists); record.protected = true; self.release_index = self.release_index - 1
             elseif not exists.value then
-                record.released = true; self.release_index = self.release_index - 1
+                record.released = true
+                if record.kind == "npc" then self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil) end
+                self.release_index = self.release_index - 1
             else
                 local release = self:begin_release(record)
                 if not release.ok then
@@ -985,14 +1010,62 @@ function EntityAdapter:update()
     return result
 end
 
-function EntityAdapter:accept_registered_death(record)
-    if record == nil or record.dead or record.released then return gamma_arena_result.ok(false) end
-    record.dead = true
-    if self.tactical_started and not self.tactical_disabled then
+local function defeated_state(state)
+    return DEFEATED_STATES[state] == true
+end
+
+function EntityAdapter:transition_opponent(record, next_state, evidence, now)
+    if record == nil or record.kind ~= "npc" or record.terminal_state == OPPONENT_STATES.RELEASED then return gamma_arena_result.ok(false) end
+    if record.released and next_state ~= OPPONENT_STATES.RELEASED then return gamma_arena_result.ok(false) end
+    if record.terminal_state == next_state or (defeated_state(record.terminal_state) and next_state ~= OPPONENT_STATES.RELEASED) then return gamma_arena_result.ok(false) end
+    local previous = record.terminal_state
+    record.terminal_state = next_state
+    record.terminal_evidence = evidence
+    if next_state == OPPONENT_STATES.WOUNDED_PENDING or next_state == OPPONENT_STATES.MISSING_PENDING then
+        record.terminal_since = now
+    else
+        record.terminal_since = nil
+    end
+    if defeated_state(next_state) then record.dead = true end
+    if next_state == OPPONENT_STATES.RELEASED then record.dead = true end
+    if next_state == OPPONENT_STATES.ALIVE then record.dead = false end
+    if type(self.deps.log_info) == "function" then
+        pcall(self.deps.log_info, "GA_OPPONENT_STATE_CHANGED", "Arena opponent terminal evidence changed", {
+            session_id = self.session_id,
+            fight_key = self.fight_key,
+            slot = record.slot,
+            id = record.id,
+            previous = previous,
+            state = next_state,
+            evidence = evidence
+        })
+    end
+    if defeated_state(next_state) and not record.terminal_notified and self.tactical_started and not self.tactical_disabled then
         local notified = method_result("GA_ENTITY_TACTICAL_DEATH_FAILED", self.deps.tactical, "record_death", record.slot)
         if not notified.ok then self:disable_tactical(notified) end
+        record.terminal_notified = true
     end
     return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:accept_registered_death(record, evidence)
+    return self:transition_opponent(record, OPPONENT_STATES.DEFEATED_DEAD, evidence or "death_callback", nil)
+end
+
+function EntityAdapter:is_critically_wounded(object)
+    return boolean_query("GA_ENTITY_WOUND_CHECK_FAILED", self.deps.is_critically_wounded, object)
+end
+
+function EntityAdapter:warn_wound_query_once(record, result)
+    if record.wound_query_warning_logged then return end
+    record.wound_query_warning_logged = true
+    if type(self.deps.log_warn) == "function" then
+        pcall(self.deps.log_warn, "GA_OPPONENT_WOUND_QUERY_FAILED", "Critical-wound evidence is unavailable; other terminal evidence remains active", {
+            id = record.id,
+            slot = record.slot,
+            cause = result and result.error or nil
+        })
+    end
 end
 
 function EntityAdapter:reconcile_active_deaths()
@@ -1006,16 +1079,48 @@ function EntityAdapter:reconcile_active_deaths()
     self.last_death_reconcile_at = now.value
     local reconciled = 0
     for _, record in ipairs(self.registry.npcs) do
-        if not record.dead and not record.released then
+        if not defeated_state(record.terminal_state) and not record.released then
             local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
             if not object.ok then return object end
             if object.value ~= nil then
+                record.proved_online = true
                 local alive = self:is_alive(object.value)
                 if not alive.ok then return alive end
                 if not alive.value then
-                    local accepted = self:accept_registered_death(record)
+                    local accepted = self:accept_registered_death(record, "alive_false")
                     if not accepted.ok then return accepted end
                     if accepted.value then reconciled = reconciled + 1 end
+                else
+                    local wounded = self:is_critically_wounded(object.value)
+                    if not wounded.ok then
+                        self:warn_wound_query_once(record, wounded)
+                        if record.terminal_state == OPPONENT_STATES.MISSING_PENDING then
+                            self:transition_opponent(record, OPPONENT_STATES.ALIVE, "online_reappeared", now.value)
+                        end
+                    elseif wounded.value then
+                        if record.terminal_state ~= OPPONENT_STATES.WOUNDED_PENDING then
+                            self:transition_opponent(record, OPPONENT_STATES.WOUNDED_PENDING, "critically_wounded", now.value)
+                        elseif record.terminal_since ~= nil and elapsed_ms(record.terminal_since, now.value) >= TERMINAL_GRACE_MS then
+                            local accepted = self:transition_opponent(record, OPPONENT_STATES.DEFEATED_WOUNDED, "critical_wound_stable", now.value)
+                            if accepted.value then reconciled = reconciled + 1 end
+                        end
+                    elseif record.terminal_state ~= OPPONENT_STATES.ALIVE then
+                        self:transition_opponent(record, OPPONENT_STATES.ALIVE, "online_alive", now.value)
+                    end
+                end
+            else
+                local exists = self:entity_exists(record.id)
+                if not exists.ok then return exists end
+                if not exists.value then
+                    local accepted = self:transition_opponent(record, OPPONENT_STATES.DEFEATED_MISSING, "alife_absent", now.value)
+                    if accepted.value then reconciled = reconciled + 1 end
+                elseif record.proved_online then
+                    if record.terminal_state ~= OPPONENT_STATES.MISSING_PENDING then
+                        self:transition_opponent(record, OPPONENT_STATES.MISSING_PENDING, "online_missing", now.value)
+                    elseif record.terminal_since ~= nil and elapsed_ms(record.terminal_since, now.value) >= TERMINAL_GRACE_MS then
+                        local accepted = self:transition_opponent(record, OPPONENT_STATES.DEFEATED_MISSING, "online_missing_stable", now.value)
+                        if accepted.value then reconciled = reconciled + 1 end
+                    end
                 end
             end
         end
@@ -1034,7 +1139,7 @@ function EntityAdapter:on_npc_death(victim_or_id)
     local called, id = pcall(normalize)
     if not called or id == nil or self.state_value ~= "ACTIVE" then return gamma_arena_result.ok(false) end
     local record = self.npc_by_id[id]
-    if record == nil or record.dead then return gamma_arena_result.ok(false) end
+    if record == nil or defeated_state(record.terminal_state) then return gamma_arena_result.ok(false) end
     local owner = self:load_owner_tag(id)
     if not owner.ok then return owner end
     if owner.value ~= self.session_id then return gamma_arena_result.ok(false) end
@@ -1043,8 +1148,35 @@ end
 
 function EntityAdapter:living_opponent_count()
     local count = 0
-    for _, record in ipairs(self.registry.npcs) do if not record.dead and not record.released then count = count + 1 end end
+    for _, record in ipairs(self.registry.npcs) do if not defeated_state(record.terminal_state) and not record.released then count = count + 1 end end
     return count
+end
+
+function EntityAdapter:terminal_summary()
+    local summary = {
+        total = #self.registry.npcs,
+        alive = 0,
+        wounded_pending = 0,
+        missing_pending = 0,
+        defeated_dead = 0,
+        defeated_wounded = 0,
+        defeated_missing = 0,
+        released = 0
+    }
+    local keys = {
+        [OPPONENT_STATES.ALIVE] = "alive",
+        [OPPONENT_STATES.WOUNDED_PENDING] = "wounded_pending",
+        [OPPONENT_STATES.MISSING_PENDING] = "missing_pending",
+        [OPPONENT_STATES.DEFEATED_DEAD] = "defeated_dead",
+        [OPPONENT_STATES.DEFEATED_WOUNDED] = "defeated_wounded",
+        [OPPONENT_STATES.DEFEATED_MISSING] = "defeated_missing",
+        [OPPONENT_STATES.RELEASED] = "released"
+    }
+    for _, record in ipairs(self.registry.npcs) do
+        local key = keys[record.terminal_state]
+        if key ~= nil then summary[key] = summary[key] + 1 end
+    end
+    return summary
 end
 
 function EntityAdapter:cleanup()
