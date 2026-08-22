@@ -1,0 +1,490 @@
+local Adapter = {}
+Adapter.__index = Adapter
+
+local UINT32_MOD = 4294967296
+local TACTICAL_INI_NAME = "gamma_arena\\gamma_arena_tactical.ltx"
+local CONFIG_KEYS = {
+    "observation_interval_ms",
+    "report_delay_min_ms",
+    "report_delay_max_ms",
+    "assignment_dwell_ms",
+    "visual_aging_ms",
+    "evidence_expiry_ms",
+    "hint_delay_ms",
+    "hint_cooldown_ms"
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function guarded(code, fn, ...)
+    if type(fn) ~= "function" then return failure(code, "Tactical dependency is unavailable") end
+    local ok, value, extra = pcall(fn, ...)
+    if not ok then
+        return failure(code, "Tactical dependency failed safely", { reason = tostring(value) })
+    end
+    return gamma_arena_result.ok(value, extra)
+end
+
+local function finite_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= 0 and value < UINT32_MOD
+end
+
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function copy_position(value)
+    local ok, x, y, z = pcall(function() return value and value.x, value and value.y, value and value.z end)
+    if not ok or not finite_number(x) or not finite_number(y) or not finite_number(z) then return nil end
+    return { x = x, y = y, z = z }
+end
+
+local function object_id(object)
+    local ok, method = pcall(function() return object and object.id end)
+    if not ok or type(method) ~= "function" then return nil end
+    local called, value = pcall(method, object)
+    if not called or not finite_integer(value) then return nil end
+    return value
+end
+
+local function call_result(code, object, method_name, ...)
+    local ok, method = pcall(function() return object and object[method_name] end)
+    if not ok then return failure(code, "Tactical engine method lookup failed safely", { method = method_name }) end
+    return guarded(code, method, object, ...)
+end
+
+local function unwrap_result(code, wrapped)
+    if not wrapped.ok then return wrapped end
+    local value = wrapped.value
+    if type(value) ~= "table" or type(value.ok) ~= "boolean" then
+        return failure(code, "Tactical collaborator returned an invalid result")
+    end
+    return value
+end
+
+local function read_config(ini)
+    local values = {}
+    for _, key in ipairs(CONFIG_KEYS) do
+        local line = call_result("GA_TACTICAL_CONFIG_INVALID", ini, "line_exist", "director", key)
+        if not line.ok or line.value ~= true then return nil end
+        local read = call_result("GA_TACTICAL_CONFIG_INVALID", ini, "r_u32", "director", key)
+        if not read.ok or not finite_integer(read.value) then return nil end
+        values[key] = read.value
+    end
+    return values
+end
+
+local function build_danger_kinds(native)
+    if native == nil then return nil end
+    local values = {}
+    local function register(name, normalized)
+        local ok, value = pcall(function() return native[name] end)
+        if ok and value ~= nil then values[value] = normalized end
+    end
+    register("hit", "hit")
+    register("sound", "sound")
+    register("visual", "visual")
+    register("entity_corpse", "casualty")
+    register("entity_attacked", "hit")
+    register("attacked", "hit")
+    register("bullet_ricochet", "ricochet")
+    register("enemy_sound", "enemy_sound")
+    register("attack_sound", "attack_sound")
+    register("entity_death", "casualty")
+    register("grenade", "grenade")
+    return values
+end
+
+local function native_memory_position(npc, actor)
+    local lookup_ok, method = pcall(function() return npc and npc.memory_position end)
+    if not lookup_ok or type(method) ~= "function" then return nil end
+    local called, value = pcall(method, npc, actor)
+    if not called then return nil end
+    return copy_position(value)
+end
+
+local function distance_sqr(left, right)
+    local x, y, z = left.x - right.x, left.y - right.y, left.z - right.z
+    return x * x + y * y + z * z
+end
+
+local function deadline_reached(now_ms, deadline_ms)
+    return ((now_ms - deadline_ms) % UINT32_MOD) < (UINT32_MOD / 2)
+end
+
+function Adapter:reset_runtime()
+    self.fight_key = nil
+    self.actor_id = nil
+    self.routes = {}
+    self.route_by_id = {}
+    self.participants = {}
+    self.participant_by_slot = {}
+    self.participant_ids = {}
+    self.dead_slots = {}
+    self.next_observation_at = nil
+end
+
+function Adapter:stop_director()
+    if self.director_started ~= true then return gamma_arena_result.ok(true) end
+    local called = call_result("GA_TACTICAL_STOP_FAILED", self.director, "stop")
+    if not called.ok then return called end
+    local stopped = unwrap_result("GA_TACTICAL_STOP_FAILED", called)
+    if stopped.ok then self.director_started = false end
+    return stopped
+end
+
+function Adapter:resolve_begin_context(context)
+    if type(context) ~= "table" or type(context.fight_key) ~= "string" or context.fight_key == ""
+        or not finite_integer(context.actor_id) or type(context.routes) ~= "table" or #context.routes < 1
+        or type(context.opponents) ~= "table" or #context.opponents < 1 then
+        return failure("GA_TACTICAL_BEGIN_INVALID", "Tactical begin context is invalid")
+    end
+
+    local routes, route_by_id = {}, {}
+    for index, route_id in ipairs(context.routes) do
+        if type(route_id) ~= "string" or route_id == "" or route_by_id[route_id] ~= nil then
+            return failure("GA_TACTICAL_ROUTE_INVALID", "Tactical route identity is invalid", { route = route_id })
+        end
+        local resolved = guarded("GA_TACTICAL_ROUTE_INVALID", self.deps.resolve_route, route_id)
+        local anchor = resolved.ok and copy_position(resolved.value) or nil
+        if anchor == nil then return failure("GA_TACTICAL_ROUTE_INVALID", "Tactical route anchor is invalid", { route = route_id }) end
+        routes[index] = { id = route_id, anchor = anchor }
+        route_by_id[route_id] = routes[index]
+    end
+
+    local participants, participant_by_slot, participant_ids = {}, {}, {}
+    for index, opponent in ipairs(context.opponents) do
+        if type(opponent) ~= "table" or opponent.slot ~= index or not finite_integer(opponent.id)
+            or type(opponent.spawn_path) ~= "string" or route_by_id[opponent.spawn_path] == nil
+            or participant_ids[opponent.id] ~= nil then
+            return failure("GA_TACTICAL_BEGIN_INVALID", "Tactical participant is invalid", { slot = index })
+        end
+        local online = guarded("GA_TACTICAL_NPC_OFFLINE", self.deps.online_object, opponent.id)
+        if not online.ok or online.value == nil or object_id(online.value) ~= opponent.id then
+            return failure("GA_TACTICAL_NPC_OFFLINE", "Arena participant is not online", { slot = opponent.slot, id = opponent.id })
+        end
+        local participant = {
+            slot = opponent.slot,
+            id = opponent.id,
+            spawn_route = opponent.spawn_path
+        }
+        participants[index] = participant
+        participant_by_slot[participant.slot] = participant
+        participant_ids[participant.id] = true
+    end
+    return gamma_arena_result.ok({
+        fight_key = context.fight_key,
+        actor_id = context.actor_id,
+        routes = routes,
+        route_by_id = route_by_id,
+        participants = participants,
+        participant_by_slot = participant_by_slot,
+        participant_ids = participant_ids
+    })
+end
+
+function Adapter:begin(context)
+    if self.state ~= "IDLE" and self.state ~= "STOPPED" then
+        return failure("GA_TACTICAL_BUSY", "Tactical adapter is already active")
+    end
+    local resolved = self:resolve_begin_context(context)
+    if not resolved.ok then return resolved end
+    local now = guarded("GA_TACTICAL_CLOCK_FAILED", self.deps.clock)
+    if not now.ok or not finite_integer(now.value) then return failure("GA_TACTICAL_CLOCK_FAILED", "Tactical clock is invalid") end
+
+    local value = resolved.value
+    local begun = call_result(
+        "GA_TACTICAL_DIRECTOR_BEGIN_FAILED",
+        self.director,
+        "begin",
+        value.fight_key,
+        value.routes,
+        value.participants,
+        now.value
+    )
+    if not begun.ok then return begun end
+    begun = unwrap_result("GA_TACTICAL_DIRECTOR_BEGIN_FAILED", begun)
+    if not begun.ok then return begun end
+    self.director_started = true
+
+    for _, participant in ipairs(value.participants) do
+        local online = guarded("GA_TACTICAL_NPC_OFFLINE", self.deps.online_object, participant.id)
+        if not online.ok or online.value == nil then
+            self:stop_director()
+            return failure("GA_TACTICAL_NPC_OFFLINE", "Arena participant disappeared during tactical bind", { slot = participant.slot })
+        end
+        local logic_section = "logic@ga_" .. participant.spawn_route
+        local walker_section = "walker@ga_" .. participant.spawn_route
+        local configured = guarded(
+            "GA_TACTICAL_CONFIGURE_FAILED",
+            self.deps.xr_logic.configure_schemes,
+            online.value,
+            self.deps.tactical_ini,
+            TACTICAL_INI_NAME,
+            self.deps.stype_stalker,
+            logic_section,
+            ""
+        )
+        if not configured.ok then self:stop_director(); return configured end
+        local activated = guarded(
+            "GA_TACTICAL_ACTIVATE_FAILED",
+            self.deps.xr_logic.activate_by_section,
+            online.value,
+            self.deps.tactical_ini,
+            walker_section,
+            "",
+            false
+        )
+        if not activated.ok then self:stop_director(); return activated end
+    end
+
+    self.fight_key = value.fight_key
+    self.actor_id = value.actor_id
+    self.routes = value.routes
+    self.route_by_id = value.route_by_id
+    self.participants = value.participants
+    self.participant_by_slot = value.participant_by_slot
+    self.participant_ids = value.participant_ids
+    self.dead_slots = {}
+    self.next_observation_at = now.value
+    self.state = "ACTIVE"
+    return gamma_arena_result.ok({ state = self.state })
+end
+
+function Adapter:combat_status(participant)
+    if self.dead_slots[participant.slot] then return gamma_arena_result.ok({ alive = false, combat_owned = false }) end
+    local online = guarded("GA_TACTICAL_NPC_OFFLINE", self.deps.online_object, participant.id)
+    if not online.ok or online.value == nil then return gamma_arena_result.ok({ alive = false, combat_owned = false }) end
+    local npc = online.value
+    local alive = call_result("GA_TACTICAL_STATUS_FAILED", npc, "alive")
+    if not alive.ok then return alive end
+    if alive.value ~= true then return gamma_arena_result.ok({ alive = false, combat_owned = false, npc = npc }) end
+
+    local best_enemy = call_result("GA_TACTICAL_STATUS_FAILED", npc, "best_enemy")
+    if not best_enemy.ok then return best_enemy end
+    local current_enemy = call_result("GA_TACTICAL_STATUS_FAILED", npc, "get_enemy")
+    if not current_enemy.ok then return current_enemy end
+    local sees_actor = call_result("GA_TACTICAL_STATUS_FAILED", npc, "see", self.deps.actor)
+    if not sees_actor.ok then return sees_actor end
+    local contact_kind, contact_position = nil, nil
+    if sees_actor.value == true then
+        contact_kind = "visual"
+        contact_position = native_memory_position(npc, self.deps.actor)
+        if contact_position == nil then
+            local position_read = call_result("GA_TACTICAL_STATUS_FAILED", self.deps.actor, "position")
+            if not position_read.ok then return position_read end
+            contact_position = copy_position(position_read.value)
+        end
+    elseif object_id(best_enemy.value) == self.actor_id or object_id(current_enemy.value) == self.actor_id then
+        contact_kind = "enemy_contact"
+        contact_position = native_memory_position(npc, self.deps.actor)
+    end
+    if contact_position == nil then contact_kind = nil end
+    return gamma_arena_result.ok({
+        alive = true,
+        combat_owned = best_enemy.value ~= nil or current_enemy.value ~= nil or sees_actor.value == true,
+        contact_kind = contact_kind,
+        contact_position = contact_position,
+        npc = npc
+    })
+end
+
+function Adapter:danger_evidence(participant, npc)
+    local danger_read = call_result("GA_TACTICAL_DANGER_FAILED", npc, "best_danger")
+    if not danger_read.ok or danger_read.value == nil then return nil end
+    local native_danger = danger_read.value
+    local kind_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "type")
+    local perceive_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "perceive_type")
+    local kind = kind_read.ok and self.danger_kinds[kind_read.value] or nil
+    kind = kind or (perceive_read.ok and self.danger_kinds[perceive_read.value] or nil)
+    if kind == nil then return nil end
+
+    local object_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "object")
+    local dependent_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "dependent_object")
+    local object_value = object_read.ok and object_read.value or nil
+    local dependent_value = dependent_read.ok and dependent_read.value or nil
+    local object_value_id, dependent_value_id = object_id(object_value), object_id(dependent_value)
+    local relevant = object_value_id == self.actor_id or dependent_value_id == self.actor_id
+        or self.participant_ids[object_value_id] == true or self.participant_ids[dependent_value_id] == true
+    if not relevant then return nil end
+
+    local time_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "time")
+    local position_read = call_result("GA_TACTICAL_DANGER_FAILED", native_danger, "position")
+    local position = position_read.ok and copy_position(position_read.value) or nil
+    if not time_read.ok or not finite_integer(time_read.value) or position == nil then return nil end
+    return { kind = kind, observer_slot = participant.slot, at_ms = time_read.value, position = position }
+end
+
+function Adapter:observe(evidence)
+    local observed = call_result("GA_TACTICAL_OBSERVE_FAILED", self.director, "observe", evidence)
+    if not observed.ok then return observed end
+    return unwrap_result("GA_TACTICAL_OBSERVE_FAILED", observed)
+end
+
+function Adapter:rank_hint_routes(actor_position)
+    local ranked = {}
+    for _, route in ipairs(self.routes) do
+        ranked[#ranked + 1] = { id = route.id, distance = distance_sqr(route.anchor, actor_position) }
+    end
+    table.sort(ranked, function(left, right)
+        if left.distance == right.distance then return left.id < right.id end
+        return left.distance < right.distance
+    end)
+    local route_ids = {}
+    for index, route in ipairs(ranked) do route_ids[index] = route.id end
+    return route_ids
+end
+
+function Adapter:apply_commands(commands)
+    local latest_by_slot = {}
+    for _, command in ipairs(type(commands) == "table" and commands or {}) do
+        if type(command) == "table" and self.participant_by_slot[command.slot] ~= nil
+            and self.route_by_id[command.route_id] ~= nil then latest_by_slot[command.slot] = command end
+    end
+    local applied = 0
+    for slot, command in pairs(latest_by_slot) do
+        local participant = self.participant_by_slot[slot]
+        local fresh = self:combat_status(participant)
+        if not fresh.ok then return fresh end
+        if fresh.value.alive and fresh.value.combat_owned ~= true then
+            local switched = guarded(
+                "GA_TACTICAL_SWITCH_FAILED",
+                self.deps.xr_logic.switch_to_section,
+                fresh.value.npc,
+                self.deps.tactical_ini,
+                "walker@ga_" .. command.route_id
+            )
+            if not switched.ok then return switched end
+            applied = applied + 1
+        end
+    end
+    return gamma_arena_result.ok(applied)
+end
+
+function Adapter:update()
+    if self.state ~= "ACTIVE" then return failure("GA_TACTICAL_NOT_ACTIVE", "Tactical adapter is not active") end
+    local now = guarded("GA_TACTICAL_CLOCK_FAILED", self.deps.clock)
+    if not now.ok or not finite_integer(now.value) then return failure("GA_TACTICAL_CLOCK_FAILED", "Tactical clock is invalid") end
+    if self.next_observation_at ~= nil and not deadline_reached(now.value, self.next_observation_at) then
+        return gamma_arena_result.ok({ state = self.state, observed = false })
+    end
+
+    local statuses = {}
+    for _, participant in ipairs(self.participants) do
+        local status = self:combat_status(participant)
+        if not status.ok then return status end
+        statuses[participant.slot] = { alive = status.value.alive, combat_owned = status.value.combat_owned }
+        if status.value.alive then
+            if status.value.contact_kind ~= nil then
+                local observed = self:observe({
+                    kind = status.value.contact_kind,
+                    observer_slot = participant.slot,
+                    at_ms = now.value,
+                    position = status.value.contact_position
+                })
+                if not observed.ok then return observed end
+            end
+            local evidence = self:danger_evidence(participant, status.value.npc)
+            if evidence ~= nil then
+                local observed = self:observe(evidence)
+                if not observed.ok then return observed end
+            end
+        end
+    end
+
+    local updated = call_result("GA_TACTICAL_UPDATE_FAILED", self.director, "update", now.value, statuses)
+    if not updated.ok then return updated end
+    updated = unwrap_result("GA_TACTICAL_UPDATE_FAILED", updated)
+    if not updated.ok then return updated end
+    local commands = {}
+    for _, command in ipairs(updated.value.commands or {}) do commands[#commands + 1] = command end
+
+    if updated.value.hint_requested == true then
+        local actor_position = guarded("GA_TACTICAL_HINT_FAILED", self.deps.actor.position, self.deps.actor)
+        local copied_actor_position = actor_position.ok and copy_position(actor_position.value) or nil
+        if copied_actor_position == nil then return failure("GA_TACTICAL_HINT_FAILED", "Authorized actor hint position is invalid") end
+        local accepted = call_result(
+            "GA_TACTICAL_HINT_FAILED",
+            self.director,
+            "accept_hint",
+            now.value,
+            self:rank_hint_routes(copied_actor_position)
+        )
+        if not accepted.ok then return accepted end
+        accepted = unwrap_result("GA_TACTICAL_HINT_FAILED", accepted)
+        if not accepted.ok then return accepted end
+        for _, command in ipairs(accepted.value.commands or {}) do commands[#commands + 1] = command end
+    end
+
+    local applied = self:apply_commands(commands)
+    if not applied.ok then return applied end
+    self.next_observation_at = finite_integer(updated.value.next_observation_at)
+        and updated.value.next_observation_at
+        or ((now.value + self.config.observation_interval_ms) % UINT32_MOD)
+    return gamma_arena_result.ok({ state = self.state, observed = true, commands_applied = applied.value })
+end
+
+function Adapter:record_death(slot)
+    if not finite_integer(slot) or self.participant_by_slot[slot] == nil then
+        return failure("GA_TACTICAL_DEATH_INVALID", "Tactical death slot is invalid", { slot = slot })
+    end
+    self.dead_slots[slot] = true
+    return gamma_arena_result.ok(true)
+end
+
+function Adapter:stop()
+    if self.state == "STOPPED" then return gamma_arena_result.ok(true) end
+    local stopped = self:stop_director()
+    if not stopped.ok then return stopped end
+    self:reset_runtime()
+    self.state = "STOPPED"
+    return stopped
+end
+
+function Adapter:snapshot()
+    local director_snapshot = nil
+    local ok, method = pcall(function() return self.director and self.director.snapshot end)
+    if ok and type(method) == "function" then
+        local called, value = pcall(method, self.director)
+        if called and type(value) == "table" then director_snapshot = value end
+    end
+    return {
+        state = self.state,
+        participant_count = #(self.participants or {}),
+        next_observation_at = self.next_observation_at,
+        director = director_snapshot
+    }
+end
+
+function new(deps)
+    if type(deps) ~= "table" or type(deps.clock) ~= "function" or type(deps.online_object) ~= "function"
+        or type(deps.resolve_route) ~= "function" or deps.actor == nil or deps.tactical_ini == nil
+        or type(deps.xr_logic) ~= "table" or type(deps.xr_logic.configure_schemes) ~= "function"
+        or type(deps.xr_logic.activate_by_section) ~= "function" or type(deps.xr_logic.switch_to_section) ~= "function"
+        or deps.stype_stalker == nil then
+        return nil, failure("GA_TACTICAL_DEPS_INVALID", "Tactical adapter dependencies are invalid")
+    end
+    local config = read_config(deps.tactical_ini)
+    local danger_kinds = build_danger_kinds(deps.danger_object or danger_object)
+    if config == nil or danger_kinds == nil then
+        return nil, failure("GA_TACTICAL_CONFIG_INVALID", "Tactical adapter configuration is invalid")
+    end
+    local factory = deps.director_factory or gamma_arena_tactical_director.new
+    local ok, director, director_failure = pcall(factory, config)
+    if not ok or director == nil then
+        return nil, director_failure or failure("GA_TACTICAL_DIRECTOR_CREATE_FAILED", "Tactical director could not be created", { reason = tostring(director) })
+    end
+    local adapter = setmetatable({
+        deps = deps,
+        config = config,
+        danger_kinds = danger_kinds,
+        director = director,
+        director_started = false,
+        state = "IDLE"
+    }, Adapter)
+    adapter:reset_runtime()
+    return adapter, nil
+end

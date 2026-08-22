@@ -1,0 +1,291 @@
+local function vector(x, y, z)
+    return { x = x, y = y, z = z }
+end
+
+local function config()
+    return {
+        observation_interval_ms = 500,
+        report_delay_min_ms = 1000,
+        report_delay_max_ms = 3000,
+        assignment_dwell_ms = 5000,
+        visual_aging_ms = 20000,
+        evidence_expiry_ms = 60000,
+        hint_delay_ms = 60000,
+        hint_cooldown_ms = 60000
+    }
+end
+
+local function new_fixture(options)
+    options = options or {}
+    local state = {
+        now = 0,
+        actor_position_calls = 0,
+        memory_position_calls = 0,
+        configured = {},
+        activated = {},
+        switched = {},
+        observed = {},
+        accepted_hints = {},
+        stop_calls = 0
+    }
+    local actor = {}
+    function actor:id() return 1 end
+    function actor:position()
+        state.actor_position_calls = state.actor_position_calls + 1
+        return vector(1, 0, 0)
+    end
+
+    local danger_types = {
+        hit = 1,
+        sound = 2,
+        visual = 3,
+        entity_corpse = 4,
+        entity_attacked = 5,
+        attacked = 6,
+        bullet_ricochet = 7,
+        enemy_sound = 8,
+        attack_sound = 9,
+        entity_death = 10,
+        grenade = 11
+    }
+    local objects = {}
+    local function new_object(id)
+        local value = {}
+        function value:id() return id end
+        function value:alive() return options.dead_slot ~= id - 100 end
+        function value:best_enemy() return options.combat_mode == "best_enemy" and actor or nil end
+        function value:get_enemy() return options.combat_mode == "get_enemy" and actor or nil end
+        function value:see(target) return options.combat_mode == "see" and target == actor end
+        function value:position() return vector(6, 0, 0) end
+        function value:memory_position(target)
+            state.memory_position_calls = state.memory_position_calls + 1
+            if target ~= actor then return nil end
+            return options.memory_position or vector(7, 0, 0)
+        end
+        function value:best_danger() return options.danger end
+        objects[id] = value
+    end
+    new_object(101)
+    new_object(102)
+
+    local values = config()
+    local tactical_ini = {}
+    function tactical_ini:line_exist(section, key) return section == "director" and values[key] ~= nil end
+    function tactical_ini:r_u32(section, key) return section == "director" and values[key] or nil end
+
+    local fake_director = {}
+    function fake_director:begin(fight_key, routes, participants, now_ms)
+        state.director_begin = { fight_key = fight_key, routes = routes, participants = participants, now_ms = now_ms }
+        return gamma_arena_result.ok({ commands = {}, hint_requested = false })
+    end
+    function fake_director:observe(evidence)
+        state.observed[#state.observed + 1] = evidence
+        return gamma_arena_result.ok({ queued = true, deliver_at = evidence.at_ms + 1000 })
+    end
+    function fake_director:update(now_ms, statuses)
+        state.director_update = { now_ms = now_ms, statuses = statuses }
+        return gamma_arena_result.ok(options.update_value or {
+            commands = {}, hint_requested = false, next_observation_at = now_ms + 500
+        })
+    end
+    function fake_director:accept_hint(now_ms, ranked_route_ids)
+        state.accepted_hints[#state.accepted_hints + 1] = { now_ms = now_ms, routes = ranked_route_ids }
+        return gamma_arena_result.ok(options.hint_value or { commands = {}, selected_rank = 2 })
+    end
+    function fake_director:stop()
+        state.stop_calls = state.stop_calls + 1
+        if state.stop_calls <= (options.stop_failures or 0) then return gamma_arena_result.err("GA_TEST_STOP", "injected stop failure") end
+        return gamma_arena_result.ok(true)
+    end
+    function fake_director:snapshot() return { state = "ACTIVE" } end
+
+    local xr_logic = {}
+    function xr_logic.configure_schemes(npc, ini, ini_name, stype, section, gulag)
+        state.configured[#state.configured + 1] = {
+            npc = npc, ini = ini, ini_name = ini_name, stype = stype, section = section, gulag = gulag
+        }
+        return true
+    end
+    function xr_logic.activate_by_section(npc, ini, section, gulag, loaded)
+        state.activated[#state.activated + 1] = {
+            npc = npc, ini = ini, section = section, gulag = gulag, loaded = loaded
+        }
+        return true
+    end
+    function xr_logic.switch_to_section(npc, ini, section)
+        state.switched[#state.switched + 1] = { npc = npc, ini = ini, section = section }
+        return true
+    end
+
+    local anchors = {
+        route_a = vector(0, 0, 0),
+        route_b = vector(10, 0, 0),
+        route_c = vector(20, 0, 0)
+    }
+    local adapter, failure = gamma_arena_tactical_adapter.new({
+        clock = function() return state.now end,
+        actor = actor,
+        online_object = function(id) return objects[id] end,
+        resolve_route = function(route_id) return anchors[route_id] end,
+        tactical_ini = tactical_ini,
+        xr_logic = xr_logic,
+        stype_stalker = 77,
+        danger_object = options.danger_namespace or danger_types,
+        director_factory = function() return fake_director, nil end,
+        log_warn = function(code) state.warning = code end
+    })
+    gamma_arena_test_assert.is_true(adapter ~= nil, "valid engine fixture creates tactical adapter")
+    gamma_arena_test_assert.is_true(failure == nil, "valid engine fixture has no adapter failure")
+    state.adapter = adapter
+    state.actor = actor
+    state.objects = objects
+    state.danger_types = danger_types
+    return state
+end
+
+local function context()
+    return {
+        fight_key = "adapter-fight-1",
+        actor_id = 1,
+        opponents = {
+            { slot = 1, id = 101, spawn_path = "route_a" },
+            { slot = 2, id = 102, spawn_path = "route_b" }
+        },
+        routes = { "route_a", "route_b", "route_c" }
+    }
+end
+
+local function begin_binds_exact_spawn_sections()
+    local env = new_fixture()
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "tactical adapter begin succeeds")
+    gamma_arena_test_assert.equals(#env.configured, 2, "configure_schemes runs once per Arena NPC")
+    gamma_arena_test_assert.equals(#env.activated, 2, "activate_by_section runs once per Arena NPC")
+    gamma_arena_test_assert.equals(env.configured[1].section, "logic@ga_route_a", "configure uses validated spawn logic")
+    gamma_arena_test_assert.equals(env.activated[1].section, "walker@ga_route_a", "activation uses validated spawn walker")
+    gamma_arena_test_assert.equals(env.configured[1].gulag, "", "Arena logic has no smart-terrain prefix")
+    gamma_arena_test_assert.is_false(env.activated[1].loaded, "Arena logic is a fresh activation")
+end
+
+local function accepts_non_table_engine_danger_namespace()
+    local env = new_fixture({ danger_namespace = 42 })
+    gamma_arena_test_assert.is_true(env.adapter ~= nil, "engine danger namespace presence does not depend on Lua table type")
+end
+
+local function native_combat_blocks_switches()
+    for _, mode in ipairs({ "best_enemy", "get_enemy", "see" }) do
+        local env = new_fixture({
+            combat_mode = mode,
+            update_value = {
+                commands = { { slot = 1, route_id = "route_b", role = "pressure", reason = "fixture" } },
+                hint_requested = false,
+                next_observation_at = 500
+            }
+        })
+        gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "combat fixture begins: " .. mode)
+        gamma_arena_test_assert.is_true(env.adapter:update().ok, "combat fixture updates: " .. mode)
+        gamma_arena_test_assert.is_true(env.director_update.statuses[1].combat_owned, "native combat is detected: " .. mode)
+        gamma_arena_test_assert.equals(#env.switched, 0, "native combat blocks background switch: " .. mode)
+    end
+end
+
+local function danger(kind, source, position)
+    local value = {}
+    function value:type() return kind end
+    function value:perceive_type() return kind end
+    function value:time() return 250 end
+    function value:position() return position or vector(9, 0, 0) end
+    function value:object() return source end
+    function value:dependent_object() return nil end
+    return value
+end
+
+local function accepts_only_native_arena_danger()
+    local actor_source = { id = function() return 1 end }
+    local env = new_fixture()
+    env.objects[101].best_danger = function() return danger(env.danger_types.attack_sound, actor_source) end
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "danger fixture begins")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "actor danger update succeeds")
+    gamma_arena_test_assert.equals(#env.observed, 1, "actor-related danger becomes evidence")
+    gamma_arena_test_assert.equals(env.observed[1].kind, "attack_sound", "danger kind is normalized")
+    gamma_arena_test_assert.equals(env.observed[1].position.x, 9, "danger position is copied")
+
+    local foreign = { id = function() return 999 end }
+    local ignored = new_fixture()
+    ignored.objects[101].best_danger = function() return danger(ignored.danger_types.attack_sound, foreign) end
+    gamma_arena_test_assert.is_true(ignored.adapter:begin(context()).ok, "foreign danger fixture begins")
+    gamma_arena_test_assert.is_true(ignored.adapter:update().ok, "foreign danger update succeeds")
+    gamma_arena_test_assert.equals(#ignored.observed, 0, "foreign danger is ignored")
+end
+
+local function actor_position_is_evidence_or_hint_only()
+    local idle = new_fixture()
+    gamma_arena_test_assert.is_true(idle.adapter:begin(context()).ok, "idle fixture begins")
+    gamma_arena_test_assert.is_true(idle.adapter:update().ok, "idle fixture updates")
+    gamma_arena_test_assert.equals(idle.actor_position_calls, 0, "no evidence never queries actor position")
+
+    local visual = new_fixture({ combat_mode = "see" })
+    gamma_arena_test_assert.is_true(visual.adapter:begin(context()).ok, "visual fixture begins")
+    gamma_arena_test_assert.is_true(visual.adapter:update().ok, "visual fixture updates")
+    gamma_arena_test_assert.equals(visual.memory_position_calls, 2, "each direct observer samples native target memory once")
+    gamma_arena_test_assert.equals(visual.actor_position_calls, 0, "native target memory avoids omniscient actor-position reads")
+    gamma_arena_test_assert.equals(visual.observed[1].position.x, 7, "visual evidence records the native remembered contact position")
+
+    local env = new_fixture({
+        update_value = { commands = {}, hint_requested = true, next_observation_at = 500 }
+    })
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "hint fixture begins")
+    gamma_arena_test_assert.equals(env.actor_position_calls, 0, "begin never queries actor position")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "authorized hint update succeeds")
+    gamma_arena_test_assert.equals(env.actor_position_calls, 1, "authorized hint queries actor exactly once")
+    gamma_arena_test_assert.equals(#env.accepted_hints, 1, "one ranked hint is accepted")
+    gamma_arena_test_assert.equals(env.accepted_hints[1].routes[1], "route_a", "nearest route ranks first")
+    gamma_arena_test_assert.equals(env.accepted_hints[1].routes[2], "route_b", "route rank is deterministic")
+    gamma_arena_test_assert.equals(type(env.accepted_hints[1].routes[1]), "string", "hint passes IDs, not positions")
+end
+
+
+local function grenade_danger_is_native_evidence()
+    local actor_source = { id = function() return 1 end }
+    local env = new_fixture()
+    env.objects[101].best_danger = function() return danger(env.danger_types.grenade, actor_source, vector(11, 0, 0)) end
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "grenade fixture begins")
+    gamma_arena_test_assert.is_true(env.adapter:update().ok, "grenade fixture updates")
+    gamma_arena_test_assert.equals(env.observed[1].kind, "grenade", "native grenade danger is preserved")
+end
+
+local function failed_stop_retains_adapter_for_retry()
+    local env = new_fixture({ stop_failures = 1 })
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "stop retry fixture begins")
+    gamma_arena_test_assert.is_false(env.adapter:stop().ok, "first stop failure remains observable")
+    gamma_arena_test_assert.equals(env.adapter:snapshot().state, "ACTIVE", "failed stop retains active ownership")
+    gamma_arena_test_assert.is_true(env.adapter:stop().ok, "second stop retries and succeeds")
+    gamma_arena_test_assert.equals(env.stop_calls, 2, "failed stop is retried exactly once")
+end
+
+local function stop_is_idempotent()
+    local env = new_fixture()
+    gamma_arena_test_assert.is_true(env.adapter:begin(context()).ok, "stop fixture begins")
+    gamma_arena_test_assert.is_true(env.adapter:stop().ok, "first adapter stop succeeds")
+    gamma_arena_test_assert.is_true(env.adapter:stop().ok, "second adapter stop succeeds")
+    gamma_arena_test_assert.equals(env.stop_calls, 1, "director stop runs once")
+    gamma_arena_test_assert.equals(env.adapter:snapshot().participant_count, 0, "stop clears participant references")
+end
+
+local cases = {
+    { name = "adapter_begin_binds_spawn_sections", fn = begin_binds_exact_spawn_sections },
+    { name = "adapter_accepts_non_table_engine_danger_namespace", fn = accepts_non_table_engine_danger_namespace },
+    { name = "adapter_native_combat_blocks_switches", fn = native_combat_blocks_switches },
+    { name = "adapter_filters_native_danger", fn = accepts_only_native_arena_danger },
+    { name = "adapter_actor_position_is_evidence_or_hint_only", fn = actor_position_is_evidence_or_hint_only },
+    { name = "adapter_accepts_native_grenade_danger", fn = grenade_danger_is_native_evidence },
+    { name = "adapter_failed_stop_is_retryable", fn = failed_stop_retains_adapter_for_retry },
+    { name = "adapter_stop_is_idempotent", fn = stop_is_idempotent }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end
