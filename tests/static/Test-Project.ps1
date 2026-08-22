@@ -235,6 +235,12 @@ $StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store
 if (Test-Path -LiteralPath $StorePath) {
     $StoreContent = Get-Content -LiteralPath $StorePath -Raw
     Assert-True ($StoreContent -match 'LAUNCH_TOKEN_TTL\s*=\s*600') 'Launch token TTL must be 600 seconds'
+    Assert-True ($StoreContent -match 'DEFEAT_TOKEN_TTL\s*=\s*600') 'Defeat token TTL must be 600 seconds'
+    foreach ($Api in @('arm_defeat','confirm_defeat','peek_defeat','consume_defeat','issue_launch_from_defeat','clear_defeat')) {
+        Assert-True ($StoreContent -match ("function\s+Store:" + $Api)) "Session store must expose defeat API $Api"
+        Assert-True ($StoreContent -match ("function\s+" + $Api + "\s*\(")) "Session module must expose defeat wrapper $Api"
+    }
+    Assert-True ($StoreContent -match 'gad1:') 'Defeat token must use the gad1:<epoch>:<nonce> grammar'
     Assert-True ($StoreContent -match 'ga1:') 'Launch token must use the ga1:<epoch>:<nonce> grammar'
     Assert-True ($StoreContent -match 'volatile_launch_permits') 'Same-VM launch activation must retain its process-local volatile permit fast path'
     Assert-True ($StoreContent -match 'validate_launch_handoff') 'Cross-VM launch activation must validate a persisted bridge lease'
@@ -259,7 +265,7 @@ if (Test-Path -LiteralPath $StorePath) {
     Assert-True ($ConfigTxContent -match 'remove_line') 'Transient and optional character-creation keys must use transactional remove_line operations'
     Assert-True ($StoreContent -notmatch '\btime_global\b') 'Session store must use injected wall-clock/os.time instead of time_global'
     Assert-True ($StoreContent -notmatch '(?is)\bw_value\s*\([^\)]*,\s*nil\s*\)') 'Session store must never use w_value(..., nil)'
-    foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','launch_stage','launch_deferred_level','launch_target_level','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version')) {
+    foreach ($Key in @('launch_pending','launch_token','launch_mode_id','launch_difficulty_id','launch_seed_mode','launch_session_seed','launch_stage','launch_deferred_level','launch_target_level','resume_pending','resume_session_id','resume_session_nonce','resume_next_fight_index','resume_checkpoint_name','resume_schema_version','defeat_pending','defeat_token','defeat_schema_version','defeat_stage','defeat_session_id','defeat_session_nonce','defeat_mode_id','defeat_difficulty_id','defeat_issued_at')) {
         Assert-True ($StoreContent -match [regex]::Escape($Key)) "Session store must cover transient key $Key"
     }
     foreach ($Key in @('new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_character_name','new_game_faction','new_game_map','new_game_money','new_game_loadout','new_game_story_mode','new_game_icon','new_game_hardcore_mode','new_game_hardcore_mode_lives','new_game_hardcore_mode_regenerate','new_game_survival_mode','new_game_azazel_mode','new_game_warfare','new_game_campfire_mode','new_game_conditions_mode','new_game_timer_mode','new_game_opened_routes','new_game_test')) {
@@ -305,6 +311,9 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
     Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
     foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
+    }
+    foreach ($Marker in @('defeat_intent_is_transactional_and_cross_vm_safe','defeat_promotion_is_atomic_and_conflict_safe','gad1:1000:death_1','issue_launch_from_defeat')) {
+        Assert-True ($Task4DevTestContent -match [regex]::Escape($Marker)) "Task 4 Dev tests must cover defeat contract $Marker"
     }
 }
 

@@ -189,6 +189,7 @@ end
 
 local launch_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level" }
 local resume_keys = { "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" }
+local defeat_keys = { "defeat_pending", "defeat_token", "defeat_schema_version", "defeat_stage", "defeat_session_id", "defeat_session_nonce", "defeat_mode_id", "defeat_difficulty_id", "defeat_issued_at" }
 local character_write_values = {
     new_game_difficulty = "2",
     new_game_economy = "2",
@@ -217,6 +218,112 @@ local function valid_request(seed)
         seed_mode = "manual",
         session_seed = seed or 42
     }
+end
+
+local function valid_defeat_context()
+    return {
+        schema_version = 1,
+        session_id = "ga_session_1",
+        session_nonce = "ga_nonce_1",
+        mode_id = "skirmish",
+        difficulty_id = "master"
+    }
+end
+
+local function defeat_intent_is_transactional_and_cross_vm_safe()
+    local config = fake_config()
+    local store = gamma_arena_session_store.new_store()
+    local context = valid_defeat_context()
+    local armed = store:arm_defeat(config, context, {
+        clock = function() return 1000 end,
+        nonce = function() return "death_1" end
+    })
+    gamma_arena_test_assert.is_true(armed.ok, "defeat arms")
+    gamma_arena_test_assert.equals(armed.value.token, "gad1:1000:death_1", "defeat token grammar")
+    gamma_arena_test_assert.equals(store:peek_defeat(config, { clock = function() return 1001 end }).value, false, "armed defeat is not menu-visible")
+    gamma_arena_test_assert.is_true(store:confirm_defeat(config, armed.value.token, { clock = function() return 1001 end }).ok, "death confirms")
+    gamma_arena_test_assert.equals(store:peek_defeat(config, { clock = function() return 1002 end }).value.difficulty_id, "master", "confirmed context survives")
+    gamma_arena_test_assert.is_true(store:confirm_defeat(config, armed.value.token, { clock = function() return 1002 end }).ok, "duplicate confirmation is idempotent")
+    gamma_arena_test_assert.equals(store:arm_defeat(config, context, {
+        clock = function() return 1000 end,
+        nonce = function() return "death_1" end
+    }).value.token, armed.value.token, "duplicate arm is idempotent")
+
+    local process_b = gamma_arena_session_store.new_store()
+    config:corrupt("gamma_arena", "settings_schema_version", "1")
+    config:corrupt("gamma_arena", "last_difficulty_id", "rookie")
+    config:corrupt("gamma_arena", "last_seed_mode", "random")
+    config:corrupt("gamma_arena", "addon_version", "0.1.0")
+    gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(config).ok, "migration preserves confirmed defeat handoff")
+    gamma_arena_test_assert.equals(process_b:peek_defeat(config, { clock = function() return 1600 end }).value.session_id, context.session_id, "confirmed defeat crosses VM boundary")
+    gamma_arena_test_assert.equals(process_b:peek_defeat(config, { clock = function() return 1601 end }).value, false, "defeat expires after 600 seconds")
+    assert_keys_absent(config, defeat_keys, "expired defeat clears all keys")
+
+    local malformed = valid_defeat_context()
+    malformed.session_nonce = "bad nonce!"
+    gamma_arena_test_assert.equals(store:arm_defeat(fake_config(), malformed, { clock = function() return 1000 end }).error.code, "GA_DEFEAT_SESSION_NONCE_INVALID", "malformed defeat context rejects")
+
+    local one_shot = fake_config()
+    local one_shot_store = gamma_arena_session_store.new_store()
+    local armed_one_shot = one_shot_store:arm_defeat(one_shot, context, { clock = function() return 1000 end, nonce = function() return "one_shot" end })
+    gamma_arena_test_assert.is_true(one_shot_store:confirm_defeat(one_shot, armed_one_shot.value.token, { clock = function() return 1001 end }).ok, "one-shot fixture confirms")
+    gamma_arena_test_assert.is_true(one_shot_store:consume_defeat(one_shot, armed_one_shot.value.token).ok, "confirmed defeat consumes")
+    gamma_arena_test_assert.equals(one_shot_store:consume_defeat(one_shot, armed_one_shot.value.token).error.code, "GA_DEFEAT_NOT_PENDING", "defeat is one-shot")
+
+    local armed_only = fake_config()
+    local armed_only_store = gamma_arena_session_store.new_store()
+    local armed_only_token = armed_only_store:arm_defeat(armed_only, context, { clock = function() return 1000 end, nonce = function() return "armed_only" end }).value.token
+    gamma_arena_test_assert.equals(armed_only_store:consume_defeat(armed_only, armed_only_token).error.code, "GA_DEFEAT_NOT_CONFIRMED", "armed defeat cannot consume")
+    gamma_arena_test_assert.is_true(armed_only_store:clear_defeat(armed_only).ok, "armed defeat clears explicitly")
+    assert_keys_absent(armed_only, defeat_keys, "explicit armed clear removes all defeat keys")
+end
+
+local function defeat_promotion_is_atomic_and_conflict_safe()
+    local context = valid_defeat_context()
+    local config = fake_config()
+    local store = gamma_arena_session_store.new_store()
+    local token = store:arm_defeat(config, context, { clock = function() return 1000 end, nonce = function() return "promote" end }).value.token
+    gamma_arena_test_assert.is_true(store:confirm_defeat(config, token, { clock = function() return 1001 end }).ok, "promotion fixture confirms")
+    local request = valid_request(123)
+    request.seed_mode = "random"
+    local promoted = store:issue_launch_from_defeat(config, token, request, { clock = function() return 1002 end, nonce = function() return "launch_from_death" end })
+    gamma_arena_test_assert.is_true(promoted.ok, "confirmed defeat promotes to launch")
+    gamma_arena_test_assert.equals(promoted.value.token, "ga1:1002:launch_from_death", "promotion issues distinct launch token")
+    assert_keys_absent(config, defeat_keys, "promotion atomically removes defeat")
+    gamma_arena_test_assert.equals(config.data.launch_pending, "true", "promotion atomically writes launch marker")
+    gamma_arena_test_assert.equals(store:issue_launch_from_defeat(config, token, request, { clock = function() return 1003 end }).error.code, "GA_DEFEAT_NOT_PENDING", "promoted defeat cannot replay")
+
+    local mismatch = fake_config()
+    local mismatch_store = gamma_arena_session_store.new_store()
+    local mismatch_token = mismatch_store:arm_defeat(mismatch, context, { clock = function() return 1000 end, nonce = function() return "mismatch" end }).value.token
+    gamma_arena_test_assert.is_true(mismatch_store:confirm_defeat(mismatch, mismatch_token, { clock = function() return 1001 end }).ok, "mismatch fixture confirms")
+    local wrong = valid_request(1)
+    wrong.seed_mode = "random"
+    wrong.difficulty_id = "rookie"
+    gamma_arena_test_assert.equals(mismatch_store:issue_launch_from_defeat(mismatch, mismatch_token, wrong, { clock = function() return 1002 end }).error.code, "GA_DEFEAT_REQUEST_MISMATCH", "promotion binds mode and difficulty")
+    gamma_arena_test_assert.equals(mismatch_store:issue_launch(mismatch, request, { clock = function() return 1002 end }).error.code, "GA_INTENT_CONFLICT", "ordinary launch cannot overwrite confirmed defeat")
+    gamma_arena_test_assert.equals(mismatch_store:issue_resume(mismatch, {
+        schema_version = 1, session_id = "session-1", session_nonce = "session_nonce_1", next_fight_index = 0, checkpoint_name = "_gamma_arena_checkpoint"
+    }).error.code, "GA_INTENT_CONFLICT", "resume cannot overwrite confirmed defeat")
+
+    local conflict = fake_config({ launch_pending = "true", defeat_pending = "true" })
+    local inspected = gamma_arena_session_store.inspect_intents(conflict)
+    gamma_arena_test_assert.equals(inspected.error.code, "GA_INTENT_CONFLICT", "launch and defeat conflict rejects")
+    assert_keys_absent(conflict, launch_keys, "launch and defeat conflict clears launch")
+    assert_keys_absent(conflict, defeat_keys, "launch and defeat conflict clears defeat")
+
+    for fault_at = 1, 16 do
+        local faulted = fake_config()
+        local fault_store = gamma_arena_session_store.new_store()
+        local fault_token = fault_store:arm_defeat(faulted, context, { clock = function() return 1000 end, nonce = function() return "fault_" .. tostring(fault_at) end }).value.token
+        gamma_arena_test_assert.is_true(fault_store:confirm_defeat(faulted, fault_token, { clock = function() return 1001 end }).ok, "fault promotion fixture confirms")
+        faulted:arm_fault(fault_at)
+        local result = fault_store:issue_launch_from_defeat(faulted, fault_token, request, { clock = function() return 1002 end, nonce = function() return "retry_" .. tostring(fault_at) end })
+        if not result.ok then
+            assert_keys_absent(faulted, launch_keys, "failed promotion leaves no launch fragment")
+            gamma_arena_test_assert.is_true(faulted.data.defeat_pending == nil or faulted.data.defeat_pending == "true", "failed promotion has no torn defeat marker")
+        end
+    end
 end
 
 local function migrations_cover_absent_v0_v1_and_future()
@@ -1418,7 +1525,9 @@ local cases = {
     { name = "character_creation_bridge_faults", fn = character_creation_bridge_faults_fail_closed },
     { name = "start_game_failures_restore_bridge", fn = start_game_failures_restore_bridge_immediately },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
-    { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift }
+    { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift },
+    { name = "defeat_intent_cross_vm", fn = defeat_intent_is_transactional_and_cross_vm_safe },
+    { name = "defeat_promotion_atomic", fn = defeat_promotion_is_atomic_and_conflict_safe }
 }
 
 function run(run_case_fn)
