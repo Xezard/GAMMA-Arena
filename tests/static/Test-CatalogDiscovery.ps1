@@ -165,8 +165,18 @@ foreach ($Expected in @(
 }
 Write-Host 'PASS: expanded difficulty balance contract passed'
 
-if ($Production -notmatch 'read_string\(source, section, "repair_type"\)\s*==\s*"outfit_exo"[\s\S]{0,180}armor_class\s*=\s*"powered_exo"') {
-    throw 'Dynamic catalog discovery must classify repair_type outfit_exo as powered_exo, never generic heavy'
+$OutfitClassificationStart = $Production.IndexOf('elseif OUTFIT_COST[kind] ~= nil then')
+$OutfitRecordStart = $Production.IndexOf('outfits[#outfits + 1] = {', $OutfitClassificationStart)
+if ($OutfitClassificationStart -lt 0 -or $OutfitRecordStart -le $OutfitClassificationStart) {
+    throw 'Dynamic catalog discovery outfit classification must remain structurally testable'
+}
+$OutfitClassification = $Production.Substring($OutfitClassificationStart, $OutfitRecordStart - $OutfitClassificationStart)
+$OutfitRecord = $Production.Substring($OutfitRecordStart, [Math]::Min(600, $Production.Length - $OutfitRecordStart))
+$OutfitPrecedencePreserved = $OutfitClassification -match 'read_string\(source, section, "repair_type"\)\s*==\s*"outfit_exo"[\s\S]{0,180}armor_class\s*=\s*"powered_exo"'
+$OutfitPrecedencePreserved = $OutfitPrecedencePreserved -and $OutfitClassification -notmatch 'armor_class\s*=\s*"heavy"'
+$OutfitPrecedencePreserved = $OutfitPrecedencePreserved -and $OutfitRecord -match 'armor_class\s*=\s*armor_class'
+if (-not $OutfitPrecedencePreserved) {
+    throw 'Dynamic catalog discovery must preserve repair_type outfit_exo as the emitted powered_exo armor class'
 }
 $PlayerLoadoutStart = $Generator.IndexOf('function player_loadout')
 $PlayerLoadoutEnd = $Generator.IndexOf('local function random_knife', $PlayerLoadoutStart)

@@ -1480,7 +1480,7 @@ if (Test-Path -LiteralPath $Task7BootstrapPath) {
     $Task7BootstrapContent = Get-Content -LiteralPath $Task7BootstrapPath -Raw
     Assert-True ($Task7BootstrapContent -match 'local\s+callback_names\s*=\s*\{[\s\S]{0,600}"actor_on_before_death"[\s\S]{0,160}"actor_on_death"') 'Bootstrap callback registration must retain actor_on_before_death followed by actor_on_death.'
     $Task7ChargeStart = $Task7BootstrapContent.LastIndexOf('if equipment.phase == "CHARGE_OUTFIT" then')
-    $Task7ChargeEnd = $Task7BootstrapContent.IndexOf('equipment.role_index = equipment.role_index + 1', $Task7ChargeStart)
+    $Task7ChargeEnd = if ($Task7ChargeStart -ge 0) { $Task7BootstrapContent.IndexOf('equipment.role_index = equipment.role_index + 1', $Task7ChargeStart) } else { -1 }
     Assert-True ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) 'Powered-exo CHARGE_OUTFIT phase must remain structurally testable.'
     if ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) {
         $Task7ChargeBlock = $Task7BootstrapContent.Substring($Task7ChargeStart, $Task7ChargeEnd - $Task7ChargeStart)
@@ -1490,7 +1490,7 @@ if (Test-Path -LiteralPath $Task7BootstrapPath) {
 if (Test-Path -LiteralPath $Task7OrchestratorPath) {
     $Task7OrchestratorContent = Get-Content -LiteralPath $Task7OrchestratorPath -Raw
     $Task7BeforeDeathStart = $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_before_death')
-    $Task7AfterDeathStart = $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_death', $Task7BeforeDeathStart)
+    $Task7AfterDeathStart = if ($Task7BeforeDeathStart -ge 0) { $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_death', $Task7BeforeDeathStart) } else { -1 }
     Assert-True ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) 'Natural-death callback boundary must remain structurally testable.'
     if ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) {
         $Task7BeforeDeathBlock = $Task7OrchestratorContent.Substring($Task7BeforeDeathStart, $Task7AfterDeathStart - $Task7BeforeDeathStart)
@@ -1498,16 +1498,18 @@ if (Test-Path -LiteralPath $Task7OrchestratorPath) {
         Assert-True ($Task7BeforeDeathBlock -notmatch '\bret_value\s*=\s*(?:false|nil)\b') 'Natural death must not cancel lethal engine damage through flags.ret_value.'
         Assert-True ($Task7BeforeDeathBlock -notmatch 'hold_after_logical_death|release_logical_death_hold') 'Natural death must not invoke logical-death hold or revival behavior.'
     }
-    $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7AfterDeathStart)
-    Assert-True ($Task7DeathBlock -match 'confirm_defeat[\s\S]{0,1200}neutralize_owned_opponents') 'Real actor death must confirm defeat then neutralize owned opponents.'
+    if ($Task7AfterDeathStart -ge 0) {
+        $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7AfterDeathStart)
+        Assert-True ($Task7DeathBlock -match 'confirm_defeat[\s\S]{0,1200}neutralize_owned_opponents') 'Real actor death must confirm defeat then neutralize owned opponents.'
+    }
 }
 if (Test-Path -LiteralPath $Task7StorePath) {
     $Task7StoreContent = Get-Content -LiteralPath $Task7StorePath -Raw
     Assert-True ($Task7StoreContent -match 'local\s+DEFEAT_TOKEN_TTL\s*=\s*600') 'Defeat intents must retain their 600-second TTL.'
     $Task7TokenStart = $Task7StoreContent.IndexOf('local function parse_defeat_token_impl')
-    $Task7TokenEnd = $Task7StoreContent.IndexOf('local function validate_defeat_context', $Task7TokenStart)
+    $Task7TokenEnd = if ($Task7TokenStart -ge 0) { $Task7StoreContent.IndexOf('local function validate_defeat_context', $Task7TokenStart) } else { -1 }
     $Task7ConfirmStart = $Task7StoreContent.IndexOf('function Store:confirm_defeat')
-    $Task7ConfirmEnd = $Task7StoreContent.IndexOf('function Store:peek_defeat', $Task7ConfirmStart)
+    $Task7ConfirmEnd = if ($Task7ConfirmStart -ge 0) { $Task7StoreContent.IndexOf('function Store:peek_defeat', $Task7ConfirmStart) } else { -1 }
     Assert-True ($Task7TokenStart -ge 0 -and $Task7TokenEnd -gt $Task7TokenStart -and $Task7ConfirmStart -ge 0 -and $Task7ConfirmEnd -gt $Task7ConfirmStart) 'Defeat token validation and confirmation boundaries must remain structurally testable.'
     if ($Task7TokenStart -ge 0 -and $Task7TokenEnd -gt $Task7TokenStart) {
         $Task7TokenBlock = $Task7StoreContent.Substring($Task7TokenStart, $Task7TokenEnd - $Task7TokenStart)

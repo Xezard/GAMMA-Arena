@@ -773,7 +773,7 @@ function run() end
     }
 }
 
-function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {
+function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments, [switch]$CaptureOutput) {
     $Target = if ($Arguments.Count -gt 0) { Split-Path -Leaf $Arguments[$Arguments.Count - 1] } else { '' }
     Write-Host ("SMOKE: {0} {1}" -f (Split-Path -Leaf $Path), $Target)
     $PreviousErrorActionPreference = $ErrorActionPreference
@@ -782,6 +782,9 @@ function Invoke-PowerShellFile([string]$Path, [string[]]$Arguments) {
     $ExitCode = $LASTEXITCODE
     if ($env:GAMMA_ARENA_REGRESSION_VERBOSE -eq '1') { $Output | ForEach-Object { Write-Host $_ } }
     $ErrorActionPreference = $PreviousErrorActionPreference
+    if ($CaptureOutput) {
+        return [PSCustomObject]@{ ExitCode = $ExitCode; Output = ($Output | Out-String) }
+    }
     return $ExitCode
 }
 
@@ -802,38 +805,32 @@ try {
         return
     }
 
-    $NestedGammaRandomFixture = New-StaticFixture 'nested-gamma-random'
-    Add-Task2ContractFixture $NestedGammaRandomFixture
+    $NestedGammaRandomFixture = New-Task7Fixture 'nested-gamma-random'
     Write-FixtureFile $NestedGammaRandomFixture 'src\gamedata\scripts\nested\gamma_arena_random.script' 'local value = math.random()'
     $NestedGammaRandomExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NestedGammaRandomFixture)
     Assert-True ($NestedGammaRandomExit -ne 0) 'Static policy must reject a nested gamma_arena_* math.random call.'
 
-    $NestedGaRandomFixture = New-StaticFixture 'nested-ga-random'
-    Add-Task2ContractFixture $NestedGaRandomFixture
+    $NestedGaRandomFixture = New-Task7Fixture 'nested-ga-random'
     Write-FixtureFile $NestedGaRandomFixture 'src\gamedata\scripts\nested\ga_random.script' 'local value = math.randomseed(7)'
     $NestedGaRandomExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NestedGaRandomFixture)
     Assert-True ($NestedGaRandomExit -ne 0) 'Static policy must reject a nested ga_* math.randomseed call.'
 
-    $PrefixedMutantCatalogFixture = New-StaticFixture 'prefixed-mutant-catalog'
-    Add-Task2ContractFixture $PrefixedMutantCatalogFixture
+    $PrefixedMutantCatalogFixture = New-Task7Fixture 'prefixed-mutant-catalog'
     Write-FixtureFile $PrefixedMutantCatalogFixture 'src\gamedata\configs\gamma_arena\arena_population.ltx' 'sim_default_bloodsucker = 1'
     $PrefixedMutantCatalogExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PrefixedMutantCatalogFixture)
     Assert-True ($PrefixedMutantCatalogExit -ne 0) 'Static policy must reject prefixed mutant class tokens in Arena configs.'
 
-    $PositiveOnlyDxmlFixture = New-StaticFixture 'positive-only-dxml'
-    Add-Task2ContractFixture $PositiveOnlyDxmlFixture
+    $PositiveOnlyDxmlFixture = New-Task7Fixture 'positive-only-dxml'
     Write-FixtureFile $PositiveOnlyDxmlFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert></dxml>'
     $PositiveOnlyDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PositiveOnlyDxmlFixture)
     Assert-True ($PositiveOnlyDxmlExit -ne 0) 'Static policy must reject a positive-only DXML duplicate query.'
 
-    $MixedDxmlFixture = New-StaticFixture 'mixed-dxml'
-    Add-Task2ContractFixture $MixedDxmlFixture
+    $MixedDxmlFixture = New-Task7Fixture 'mixed-dxml'
     Write-FixtureFile $MixedDxmlFixture 'src\gamedata\configs\ui\main_menu.xml' '<dxml><insert>if not menu:find("btn_gamma_arena") then add("btn_gamma_arena") end</insert><insert>add("btn_gamma_arena")</insert></dxml>'
     $MixedDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MixedDxmlFixture)
     Assert-True ($MixedDxmlExit -ne 0) 'Static policy must reject an unsafe DXML insert even when another insert is guarded.'
 
-    $MissingLuaDxmlGuardFixture = New-StaticFixture 'missing-lua-dxml-guard'
-    Add-Task2ContractFixture $MissingLuaDxmlGuardFixture
+    $MissingLuaDxmlGuardFixture = New-Task7Fixture 'missing-lua-dxml-guard'
     Write-FixtureFile $MissingLuaDxmlGuardFixture 'src\gamedata\scripts\modxml_gamma_arena.script' @'
 function on_xml_read()
     RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj)
@@ -846,16 +843,14 @@ end
     $MissingLuaDxmlGuardExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingLuaDxmlGuardFixture)
     Assert-True ($MissingLuaDxmlGuardExit -ne 0) 'Static policy must reject a Lua DXML insert without the exact duplicate query guard.'
 
-    $DuplicateLuaDxmlFixture = New-StaticFixture 'duplicate-lua-dxml-button'
-    Add-Task2ContractFixture $DuplicateLuaDxmlFixture
+    $DuplicateLuaDxmlFixture = New-Task7Fixture 'duplicate-lua-dxml-button'
     $DuplicateDxmlPath = Join-Path $DuplicateLuaDxmlFixture 'src\gamedata\scripts\modxml_gamma_arena.script'
     $DuplicateDxmlContent = Get-Content -LiteralPath $DuplicateDxmlPath -Raw
     Write-FixtureFile $DuplicateLuaDxmlFixture 'src\gamedata\scripts\modxml_gamma_arena.script' ($DuplicateDxmlContent + "`nlocal duplicate = [[<btn name=`"btn_gamma_arena`" caption=`"st_gamma_arena_main_menu`" />]]`n")
     $DuplicateLuaDxmlExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DuplicateLuaDxmlFixture)
     Assert-True ($DuplicateLuaDxmlExit -ne 0) 'Static policy must reject duplicate Arena button insertion definitions.'
 
-    $NilWriteFixture = New-StaticFixture 'nil-write'
-    Add-Task2ContractFixture $NilWriteFixture
+    $NilWriteFixture = New-Task7Fixture 'nil-write'
     $NilWritePath = Join-Path $NilWriteFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
     $NilWriteContent = Get-Content -LiteralPath $NilWritePath -Raw
     Write-FixtureFile $NilWriteFixture 'src\gamedata\scripts\gamma_arena_session_store.script' ($NilWriteContent + "`nlocal function bad(config) config:w_value(`"gamma_arena`", `"launch_pending`", nil) end`n")
@@ -870,8 +865,7 @@ end
     $ValidStaticExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $ValidStaticFixture)
     Assert-True ($ValidStaticExit -eq 0) 'Static policy must accept deterministic gamma_arena_/ga_ scripts, a human Arena config, and a guarded DXML insert.'
 
-    $MissingTask2Fixture = New-StaticFixture 'missing-task2-contract'
-    Add-Task2ContractFixture $MissingTask2Fixture
+    $MissingTask2Fixture = New-Task7Fixture 'missing-task2-contract'
     Remove-Item -LiteralPath (Join-Path $MissingTask2Fixture 'src\gamedata\scripts\gamma_arena_rng.script') -Force
     $MissingTask2Exit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingTask2Fixture)
     Assert-True ($MissingTask2Exit -ne 0) 'Static policy must reject a missing required Task 2 contract script.'
@@ -886,46 +880,59 @@ end
     self.death_latched = true
 '@)
     Write-FixtureFile $LogicalDeathFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script' $LogicalDeath
-    $LogicalDeathExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $LogicalDeathFixture)
-    Assert-True ($LogicalDeathExit -ne 0) 'Static policy must reject logical-death cancellation and holds in the production death callback.'
+    $LogicalDeathResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $LogicalDeathFixture) -CaptureOutput
+    Assert-True ($LogicalDeathResult.ExitCode -ne 0 -and $LogicalDeathResult.Output -match 'Natural death must not cancel lethal engine damage through flags\.ret_value\.') 'Static policy must reject logical-death cancellation through its intended policy failure.'
+    Assert-True ($LogicalDeathResult.Output -match 'Natural death must not invoke logical-death hold or revival behavior\.') 'Static policy must reject logical-death holds through its intended policy failure.'
 
     $MissingDeathCallbackFixture = New-Task7Fixture 'missing-actor-death-callback'
     $MissingDeathCallbackPath = Join-Path $MissingDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
     $MissingDeathCallback = [regex]::Replace((Get-Content -LiteralPath $MissingDeathCallbackPath -Raw), '(?m)^\s*"actor_on_death",\r?\n', '', 1)
     Write-FixtureFile $MissingDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $MissingDeathCallback
-    $MissingDeathCallbackExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingDeathCallbackFixture)
-    Assert-True ($MissingDeathCallbackExit -ne 0) 'Static policy must reject a bootstrap that does not register actor_on_death.'
+    $MissingDeathCallbackResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingDeathCallbackFixture) -CaptureOutput
+    Assert-True ($MissingDeathCallbackResult.ExitCode -ne 0 -and $MissingDeathCallbackResult.Output -match 'Bootstrap callback registration must retain actor_on_before_death followed by actor_on_death\.') 'Static policy must reject a missing actor_on_death registration through its intended policy failure.'
 
-    $DefeatValidationFixture = New-Task7Fixture 'defeat-validation-removed'
-    $DefeatValidationPath = Join-Path $DefeatValidationFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
-    $DefeatValidation = Get-Content -LiteralPath $DefeatValidationPath -Raw
-    $DefeatValidation = [regex]::Replace($DefeatValidation, '(?m)^local\s+DEFEAT_TOKEN_TTL\s*=\s*600\r?\n', '', 1)
-    $DefeatValidation = [regex]::Replace($DefeatValidation, 'function\s+Store:confirm_defeat\s*\(', 'function Store:confirm_defeat_unchecked(', 1)
-    Write-FixtureFile $DefeatValidationFixture 'src\gamedata\scripts\gamma_arena_session_store.script' $DefeatValidation
-    $DefeatValidationExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DefeatValidationFixture)
-    Assert-True ($DefeatValidationExit -ne 0) 'Static policy must reject defeat intents without TTL and confirmed-stage validation.'
+    $DefeatStageFixture = New-Task7Fixture 'defeat-confirmation-bypassed'
+    $DefeatStagePath = Join-Path $DefeatStageFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
+    $DefeatStage = (Get-Content -LiteralPath $DefeatStagePath -Raw).Replace('{ "defeat_stage", "confirmed" }', '{ "defeat_stage", "armed" }')
+    Write-FixtureFile $DefeatStageFixture 'src\gamedata\scripts\gamma_arena_session_store.script' $DefeatStage
+    $DefeatStageResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DefeatStageFixture) -CaptureOutput
+    Assert-True ($DefeatStageResult.ExitCode -ne 0 -and $DefeatStageResult.Output -match 'Defeat confirmation must preserve the confirmed-stage transition and idempotence\.') 'Static policy must reject a confirm_defeat implementation that bypasses the confirmed stage.'
+
+    $DefeatTtlFixture = New-Task7Fixture 'defeat-ttl-removed'
+    $DefeatTtlPath = Join-Path $DefeatTtlFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
+    $DefeatTtl = [regex]::Replace((Get-Content -LiteralPath $DefeatTtlPath -Raw), '(?m)^local\s+DEFEAT_TOKEN_TTL\s*=\s*600\r?\n', '', 1)
+    Write-FixtureFile $DefeatTtlFixture 'src\gamedata\scripts\gamma_arena_session_store.script' $DefeatTtl
+    $DefeatTtlResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DefeatTtlFixture) -CaptureOutput
+    Assert-True ($DefeatTtlResult.ExitCode -ne 0 -and $DefeatTtlResult.Output -match 'Defeat intents must retain their 600-second TTL\.') 'Static policy must reject defeat intents without their intended TTL failure.'
 
     $UnverifiedExoFixture = New-Task7Fixture 'unverified-powered-exo'
     $UnverifiedExoPath = Join-Path $UnverifiedExoFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
     $UnverifiedExo = Get-Content -LiteralPath $UnverifiedExoPath -Raw
     $UnverifiedExo = [regex]::Replace($UnverifiedExo, '(?s)\s*local verified = actor_loadout_call\("GA_ACTOR_EXO_VERIFY_FAILED".*?\s*end\r?\n\s*equipment\.outfit_power = 100', "`r`n                equipment.outfit_power = 100", 1)
     Write-FixtureFile $UnverifiedExoFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $UnverifiedExo
-    $UnverifiedExoExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $UnverifiedExoFixture)
-    Assert-True ($UnverifiedExoExit -ne 0) 'Static policy must reject a powered exo write without CHARGE_OUTFIT readback verification.'
+    $UnverifiedExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $UnverifiedExoFixture) -CaptureOutput
+    Assert-True ($UnverifiedExoResult.ExitCode -ne 0 -and $UnverifiedExoResult.Output -match 'Powered-exo CHARGE_OUTFIT must read back and verify 100-percent charge after writing it\.') 'Static policy must reject a powered exo write without CHARGE_OUTFIT readback verification.'
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
     $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, difficulty.player_loadout_budget)')
     Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script' $MaximumCostPlayer
-    $MaximumCostPlayerExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MaximumCostPlayerFixture)
-    Assert-True ($MaximumCostPlayerExit -ne 0) 'Static policy must reject maximum-cost player weapon selection.'
+    $MaximumCostPlayerResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MaximumCostPlayerFixture) -CaptureOutput
+    Assert-True ($MaximumCostPlayerResult.ExitCode -ne 0 -and $MaximumCostPlayerResult.Output -match 'Player loadouts must use weighted class selection, not maximum-cost affordable-band selection') 'Static policy must reject maximum-cost player weapon selection through its intended policy failure.'
 
     $GenericHeavyExoFixture = New-Task7Fixture 'generic-heavy-powered-exo'
     $GenericHeavyExoPath = Join-Path $GenericHeavyExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
-    $GenericHeavyExo = (Get-Content -LiteralPath $GenericHeavyExoPath -Raw).Replace('armor_class = "powered_exo"', 'armor_class = "heavy"')
+    $GenericHeavyExo = (Get-Content -LiteralPath $GenericHeavyExoPath -Raw).Replace('armor_class = "powered_exo"', 'local powered_exo_marker = "powered_exo"' + [Environment]::NewLine + '                    armor_class = "heavy"')
     Write-FixtureFile $GenericHeavyExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script' $GenericHeavyExo
-    $GenericHeavyExoExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $GenericHeavyExoFixture)
-    Assert-True ($GenericHeavyExoExit -ne 0) 'Static policy must reject classifying repair_type outfit_exo as generic heavy armor.'
+    $GenericHeavyExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $GenericHeavyExoFixture) -CaptureOutput
+    Assert-True ($GenericHeavyExoResult.ExitCode -ne 0 -and $GenericHeavyExoResult.Output -match 'Dynamic catalog discovery must preserve repair_type outfit_exo as the emitted powered_exo armor class') 'Static policy must reject generic-heavy powered-exo classification through its semantic precedence failure.'
+
+    $PostClassificationOverwriteFixture = New-Task7Fixture 'powered-exo-post-classification-overwrite'
+    $PostClassificationOverwritePath = Join-Path $PostClassificationOverwriteFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
+    $PostClassificationOverwrite = (Get-Content -LiteralPath $PostClassificationOverwritePath -Raw).Replace('                outfits[#outfits + 1] = {', '                armor_class = "heavy"' + [Environment]::NewLine + '                outfits[#outfits + 1] = {')
+    Write-FixtureFile $PostClassificationOverwriteFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script' $PostClassificationOverwrite
+    $PostClassificationOverwriteResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $PostClassificationOverwriteFixture) -CaptureOutput
+    Assert-True ($PostClassificationOverwriteResult.ExitCode -ne 0 -and $PostClassificationOverwriteResult.Output -match 'Dynamic catalog discovery must preserve repair_type outfit_exo as the emitted powered_exo armor class') 'Static policy must reject post-classification overwrites before emitting the outfit record.'
     }
 
     if ($StaticFixturesOnly) {
