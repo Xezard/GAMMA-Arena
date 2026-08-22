@@ -1,0 +1,114 @@
+local function source(sections, order, throw_enumeration)
+    return {
+        enumerate_sections = function()
+            if throw_enumeration then error("fixture enumeration failure") end
+            local values = {}
+            if type(order) == "table" then
+                for index, section in ipairs(order) do values[index] = section end
+            else
+                for section in pairs(sections) do values[#values + 1] = section end
+            end
+            return values
+        end,
+        read_string = function(section, key)
+            local values = sections[section]
+            return values and values[key] or nil
+        end,
+        read_u32 = function(section, key)
+            local values = sections[section]
+            return values and tonumber(values[key]) or nil
+        end
+    }
+end
+
+local function installed_sections()
+    return {
+        wpn_addon_rifle = {
+            kind = "w_rifle",
+            slot = "2",
+            ammo_mag_size = "30",
+            ammo_class = "ammo_addon_fmj, ammo_addon_ap"
+        },
+        ammo_addon_fmj = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_ap = { kind = "w_ammo", box_size = "30" },
+        addon_medium_outfit = { kind = "o_medium", slot = "6" },
+        wpn_knife_addon = { kind = "w_melee", slot = "0" },
+        wpn_launcher_fixture = {
+            kind = "w_launcher",
+            slot = "2",
+            ammo_mag_size = "1",
+            ammo_class = "ammo_rocket"
+        },
+        ammo_rocket = { kind = "w_ammo", box_size = "1" },
+        wpn_incomplete_fixture = { kind = "w_rifle", slot = "2" },
+        wpn_wrong_slot_fixture = {
+            kind = "w_smg",
+            slot = "4",
+            ammo_mag_size = "20",
+            ammo_class = "ammo_addon_fmj"
+        },
+        addon_helmet_fixture = { kind = "o_helmet", slot = "12" }
+    }
+end
+
+local function discovers_semantic_installed_gear()
+    local result = gamma_arena_catalog_discovery.discover(source(installed_sections()))
+    gamma_arena_test_assert.is_true(result.ok, "semantic discovery returns a Result")
+    gamma_arena_test_assert.equals(result.value.mode, "dynamic", "available enumeration enables dynamic mode")
+    gamma_arena_test_assert.equals(#result.value.weapons, 1, "only complete supported firearm is accepted")
+    gamma_arena_test_assert.equals(result.value.weapons[1].section, "wpn_addon_rifle", "new firearm needs no Arena allowlist entry")
+    gamma_arena_test_assert.equals(result.value.weapons[1].ammo, "ammo_addon_fmj", "first compatible valid ammo is deterministic")
+    gamma_arena_test_assert.equals(result.value.weapons[1].cost, 5, "rifle cost is derived from semantic kind")
+    gamma_arena_test_assert.equals(#result.value.ammo, 1, "only selected compatible ammo is materialized")
+    gamma_arena_test_assert.equals(result.value.ammo[1].section, "ammo_addon_fmj", "selected ammo record is exact")
+    gamma_arena_test_assert.equals(#result.value.outfits, 1, "wearable outfit is discovered")
+    gamma_arena_test_assert.equals(result.value.outfits[1].section, "addon_medium_outfit", "new outfit needs no Arena allowlist entry")
+    gamma_arena_test_assert.equals(#result.value.knives, 1, "usable knife family is discovered")
+    gamma_arena_test_assert.equals(result.value.knives[1].section, "wpn_knife_addon", "knife section is exact")
+    gamma_arena_test_assert.is_true(result.value.skipped >= 3, "unsafe firearm-shaped sections are skipped individually")
+end
+
+local function discovery_order_is_stable()
+    local sections = installed_sections()
+    sections.wpn_second_rifle = {
+        kind = "w_rifle",
+        slot = "2",
+        ammo_mag_size = "20",
+        ammo_class = "ammo_addon_ap"
+    }
+    local forward = {
+        "wpn_second_rifle", "ammo_addon_ap", "wpn_addon_rifle", "ammo_addon_fmj",
+        "addon_medium_outfit", "wpn_knife_addon", "wpn_launcher_fixture", "ammo_rocket",
+        "wpn_incomplete_fixture", "wpn_wrong_slot_fixture", "addon_helmet_fixture"
+    }
+    local reverse = {}
+    for index = #forward, 1, -1 do reverse[#reverse + 1] = forward[index] end
+    local first = gamma_arena_catalog_discovery.discover(source(sections, forward))
+    local second = gamma_arena_catalog_discovery.discover(source(sections, reverse))
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "both enumeration orders discover safely")
+    gamma_arena_test_assert.equals(first.value.weapons[1].section, second.value.weapons[1].section, "weapon order is normalized")
+    gamma_arena_test_assert.equals(first.value.weapons[2].section, second.value.weapons[2].section, "all weapon order is normalized")
+    gamma_arena_test_assert.equals(table.concat(first.value.fingerprint_parts, "|"), table.concat(second.value.fingerprint_parts, "|"), "fingerprint input ignores engine enumeration order")
+end
+
+local function enumeration_failure_falls_back()
+    local result = gamma_arena_catalog_discovery.discover(source({}, nil, true))
+    gamma_arena_test_assert.is_true(result.ok, "third-party enumeration failure stays controlled")
+    gamma_arena_test_assert.equals(result.value.mode, "fallback", "enumeration failure preserves known-good fallback mode")
+    gamma_arena_test_assert.equals(#result.value.weapons, 0, "fallback discovery contributes no unverified weapons")
+    gamma_arena_test_assert.equals(result.value.fingerprint_parts[1], "fallback", "fallback fingerprint is explicit")
+end
+
+local cases = {
+    { name = "catalog_discovery_accepts_semantic_installed_gear", fn = discovers_semantic_installed_gear },
+    { name = "catalog_discovery_is_order_stable", fn = discovery_order_is_stable },
+    { name = "catalog_discovery_enumeration_failure_falls_back", fn = enumeration_failure_falls_back }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

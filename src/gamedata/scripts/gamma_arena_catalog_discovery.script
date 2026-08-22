@@ -1,0 +1,192 @@
+local WEAPON_COST = {
+    w_pistol = 2,
+    w_smg = 4,
+    w_shotgun = 5,
+    w_rifle = 5,
+    w_sniper = 6
+}
+
+local OUTFIT_COST = {
+    o_light = 1,
+    o_medium = 3,
+    o_sci = 4,
+    o_heavy = 5
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_u32(value, minimum)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= (minimum or 0) and value < 4294967296
+end
+
+local function trimmed(value)
+    if type(value) ~= "string" then return nil end
+    local result = string.gsub(value, "^%s*(.-)%s*$", "%1")
+    if result == "" then return nil end
+    return result
+end
+
+local function split_csv(value)
+    local values = {}
+    for token in string.gmatch(value or "", "[^,]+") do
+        local normalized = trimmed(token)
+        if normalized ~= nil then values[#values + 1] = normalized end
+    end
+    return values
+end
+
+local function guarded(source, method_name, ...)
+    local method = type(source) == "table" and source[method_name] or nil
+    if type(method) ~= "function" then return false, nil end
+    local called, value = pcall(method, ...)
+    if not called then return false, value end
+    return true, value
+end
+
+local function read_string(source, section, key)
+    local ok, value = guarded(source, "read_string", section, key)
+    if not ok then return nil end
+    return trimmed(value)
+end
+
+local function read_u32(source, section, key, minimum)
+    local ok, value = guarded(source, "read_u32", section, key)
+    if not ok or not finite_u32(value, minimum) then return nil end
+    return value
+end
+
+local function normalized_sections(source)
+    local ok, values = guarded(source, "enumerate_sections")
+    if not ok or type(values) ~= "table" then return nil end
+    local normalized, seen = {}, {}
+    for _, section in ipairs(values) do
+        local name = trimmed(section)
+        if name ~= nil and not seen[name] then
+            seen[name] = true
+            normalized[#normalized + 1] = name
+        end
+    end
+    table.sort(normalized)
+    return normalized
+end
+
+local function first_valid_ammo(source, raw_ammo)
+    for _, ammo_section in ipairs(split_csv(raw_ammo)) do
+        if read_string(source, ammo_section, "kind") == "w_ammo"
+            and read_u32(source, ammo_section, "box_size", 1) ~= nil then
+            return ammo_section
+        end
+    end
+    return nil
+end
+
+local function sort_records(records)
+    table.sort(records, function(left, right) return left.section < right.section end)
+end
+
+local function fallback()
+    return gamma_arena_result.ok({
+        mode = "fallback",
+        weapons = {},
+        ammo = {},
+        outfits = {},
+        knives = {},
+        fingerprint_parts = { "fallback" },
+        skipped = 0
+    })
+end
+
+function discover(source)
+    if type(source) ~= "table" or type(source.enumerate_sections) ~= "function"
+        or type(source.read_string) ~= "function" or type(source.read_u32) ~= "function" then
+        return failure("GA_CATALOG_DISCOVERY_SOURCE_INVALID", "Dynamic catalog discovery source is invalid")
+    end
+
+    local sections = normalized_sections(source)
+    if sections == nil then return fallback() end
+
+    local weapons, ammo, outfits, knives = {}, {}, {}, {}
+    local ammo_by_section = {}
+    local skipped = 0
+
+    for _, section in ipairs(sections) do
+        local kind = read_string(source, section, "kind")
+        local weapon_cost = WEAPON_COST[kind]
+        if weapon_cost ~= nil then
+            local slot = read_u32(source, section, "slot", 0)
+            local magazine = read_u32(source, section, "ammo_mag_size", 1)
+            local ammo_section = first_valid_ammo(source, read_string(source, section, "ammo_class"))
+            if (slot == 1 or slot == 2) and magazine ~= nil and ammo_section ~= nil then
+                weapons[#weapons + 1] = {
+                    id = section,
+                    section = section,
+                    ammo = ammo_section,
+                    cost = weapon_cost,
+                    ammo_box_min = 1,
+                    ammo_box_max = 2,
+                    kind = kind
+                }
+                if not ammo_by_section[ammo_section] then
+                    local record = { id = ammo_section, section = ammo_section, cost = 1 }
+                    ammo_by_section[ammo_section] = record
+                    ammo[#ammo + 1] = record
+                end
+            else
+                skipped = skipped + 1
+            end
+        elseif OUTFIT_COST[kind] ~= nil then
+            if read_u32(source, section, "slot", 0) == 6 then
+                outfits[#outfits + 1] = {
+                    id = section,
+                    section = section,
+                    cost = OUTFIT_COST[kind],
+                    kind = kind
+                }
+            else
+                skipped = skipped + 1
+            end
+        elseif kind == "w_melee" and string.sub(section, 1, 9) == "wpn_knife" then
+            if read_u32(source, section, "slot", 0) == 0 then
+                knives[#knives + 1] = { id = section, section = section }
+            else
+                skipped = skipped + 1
+            end
+        elseif string.sub(section, 1, 4) == "wpn_" and type(kind) == "string"
+            and kind ~= "w_ammo" and kind ~= "w_melee" then
+            skipped = skipped + 1
+        end
+    end
+
+    sort_records(weapons)
+    sort_records(ammo)
+    sort_records(outfits)
+    sort_records(knives)
+
+    local fingerprint_parts = { "dynamic" }
+    for _, item in ipairs(weapons) do
+        fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "weapon", item.section, item.ammo, item.kind, item.cost }, ":")
+    end
+    for _, item in ipairs(ammo) do
+        fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "ammo", item.section, item.cost }, ":")
+    end
+    for _, item in ipairs(outfits) do
+        fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "outfit", item.section, item.kind, item.cost }, ":")
+    end
+    for _, item in ipairs(knives) do
+        fingerprint_parts[#fingerprint_parts + 1] = "knife:" .. item.section
+    end
+    table.sort(fingerprint_parts)
+
+    return gamma_arena_result.ok({
+        mode = "dynamic",
+        weapons = weapons,
+        ammo = ammo,
+        outfits = outfits,
+        knives = knives,
+        fingerprint_parts = fingerprint_parts,
+        skipped = skipped
+    })
+end
