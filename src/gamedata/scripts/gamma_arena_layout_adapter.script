@@ -1,0 +1,198 @@
+local LayoutAdapter = {}
+LayoutAdapter.__index = LayoutAdapter
+
+local DIRECTIONS = {
+    { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+    { 0.7071067811865476, 0.7071067811865476 },
+    { -0.7071067811865476, 0.7071067811865476 },
+    { 0.7071067811865476, -0.7071067811865476 },
+    { -0.7071067811865476, -0.7071067811865476 }
+}
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function valid_vertex(value)
+    return gamma_arena_number.is_integer(value) and value >= 0 and value < 4294967295
+end
+
+local function copy_position(value)
+    if value == nil then return nil end
+    local ok, x, y, z = pcall(function() return value.x, value.y, value.z end)
+    if not ok or not finite(x) or not finite(y) or not finite(z) then return nil end
+    return { x = x, y = y, z = z }
+end
+
+local function call_result(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required layout dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Layout dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+local function distance_squared(left, right)
+    local dx, dy, dz = left.x - right.x, left.y - right.y, left.z - right.z
+    return dx * dx + dy * dy + dz * dz
+end
+
+local function copy_slot(slot)
+    return {
+        id = slot.id,
+        base_route = slot.base_route,
+        native = slot.native == true,
+        position = copy_position(slot.position),
+        level_vertex_id = slot.level_vertex_id,
+        game_vertex_id = slot.game_vertex_id
+    }
+end
+
+local function copy_layout(layout)
+    local result = {
+        id = layout.id,
+        version = layout.version,
+        level = layout.level,
+        actor_spawn_path = layout.actor_spawn_path,
+        actor_look_path = layout.actor_look_path,
+        capacity = layout.capacity,
+        opponent_spawn_slots = {},
+        tactical_routes = {}
+    }
+    for index, slot in ipairs(layout.opponent_spawn_slots) do result.opponent_spawn_slots[index] = copy_slot(slot) end
+    for index, route in ipairs(layout.tactical_routes) do result.tactical_routes[index] = route end
+    return result
+end
+
+local function valid_layout_config(layout)
+    if type(layout) ~= "table" or type(layout.id) ~= "string" or layout.id == "" or type(layout.level) ~= "string" or layout.level == ""
+        or type(layout.actor_spawn_path) ~= "string" or layout.actor_spawn_path == "" or type(layout.actor_look_path) ~= "string" or layout.actor_look_path == ""
+        or type(layout.opponent_spawn_paths) ~= "table" or #layout.opponent_spawn_paths ~= 6
+        or not gamma_arena_number.is_positive_integer(layout.virtual_capacity) or layout.virtual_capacity < 6 or layout.virtual_capacity > 10
+        or type(layout.virtual_radii) ~= "table" or #layout.virtual_radii ~= 2 then return false end
+    for _, value in ipairs(layout.virtual_radii) do if not finite(value) or value <= 0 then return false end end
+    for _, key in ipairs({ "max_height_delta", "min_opponent_separation", "min_actor_separation", "max_base_distance" }) do
+        if not finite(layout[key]) or layout[key] <= 0 then return false end
+    end
+    local seen = {}
+    for _, path in ipairs(layout.opponent_spawn_paths) do
+        if type(path) ~= "string" or path == "" or seen[path] then return false end
+        seen[path] = true
+    end
+    return true
+end
+
+local function normalized_anchor(value)
+    if type(value) ~= "table" then return nil end
+    local position = copy_position(value.position)
+    if position == nil or not valid_vertex(value.level_vertex_id) or not valid_vertex(value.game_vertex_id) then return nil end
+    return { position = position, level_vertex_id = value.level_vertex_id, game_vertex_id = value.game_vertex_id }
+end
+
+function LayoutAdapter:resolve_anchor(path)
+    local result = call_result("GA_LAYOUT_BASE_ANCHOR_INVALID", self.deps.resolve_anchor, path)
+    if not result.ok then return fail("GA_LAYOUT_BASE_ANCHOR_INVALID", "Required Arena anchor could not be resolved", { path = path, cause = result.error }) end
+    local anchor = normalized_anchor(result.value)
+    if anchor == nil then return fail("GA_LAYOUT_BASE_ANCHOR_INVALID", "Required Arena anchor is malformed", { path = path }) end
+    return gamma_arena_result.ok(anchor)
+end
+
+function LayoutAdapter:candidate_valid(position, base, actor_position, accepted, level_vertex_id)
+    if position == nil or not valid_vertex(level_vertex_id) then return false end
+    if math.abs(position.y - base.position.y) > self.layout.max_height_delta then return false end
+    if distance_squared(position, base.position) > self.layout.max_base_distance * self.layout.max_base_distance then return false end
+    if distance_squared(position, actor_position) < self.layout.min_actor_separation * self.layout.min_actor_separation then return false end
+    for _, slot in ipairs(accepted) do
+        if slot.level_vertex_id == level_vertex_id or distance_squared(position, slot.position) < self.layout.min_opponent_separation * self.layout.min_opponent_separation then return false end
+    end
+    return true
+end
+
+function LayoutAdapter:try_virtual(base, direction, radius, accepted)
+    local projected = call_result("GA_LAYOUT_VERTEX_PROJECTION_FAILED", self.deps.project_vertex, base.level_vertex_id, direction[1], direction[2], radius)
+    if not projected.ok or projected.value == nil or not valid_vertex(projected.value) then return nil end
+    local positioned = call_result("GA_LAYOUT_VERTEX_POSITION_FAILED", self.deps.vertex_position, projected.value)
+    if not positioned.ok then return nil end
+    local position = copy_position(positioned.value)
+    if not self:candidate_valid(position, base, self.actor_anchor.position, accepted, projected.value) then return nil end
+    return {
+        base_route = base.path,
+        native = false,
+        position = position,
+        level_vertex_id = projected.value,
+        game_vertex_id = base.game_vertex_id
+    }
+end
+
+function LayoutAdapter:resolve(layout)
+    if self.cache ~= nil then return gamma_arena_result.ok(copy_layout(self.cache)) end
+    if not valid_layout_config(layout) then return fail("GA_LAYOUT_CONFIG_INVALID", "Arena virtual layout configuration is invalid") end
+    self.layout = layout
+    local actor = self:resolve_anchor(layout.actor_spawn_path)
+    if not actor.ok then return actor end
+    self.actor_anchor = actor.value
+    local bases, accepted, routes = {}, {}, {}
+    for _, path in ipairs(layout.opponent_spawn_paths) do
+        local resolved = self:resolve_anchor(path)
+        if not resolved.ok then return resolved end
+        local base = resolved.value
+        base.path = path
+        bases[#bases + 1] = base
+        routes[#routes + 1] = path
+        accepted[#accepted + 1] = {
+            id = "native:" .. path,
+            base_route = path,
+            native = true,
+            position = copy_position(base.position),
+            level_vertex_id = base.level_vertex_id,
+            game_vertex_id = base.game_vertex_id
+        }
+    end
+    for _, radius in ipairs(layout.virtual_radii) do
+        for _, direction in ipairs(DIRECTIONS) do
+            for _, base in ipairs(bases) do
+                if #accepted >= layout.virtual_capacity then break end
+                local candidate = self:try_virtual(base, direction, radius, accepted)
+                if candidate ~= nil then
+                    candidate.id = "virtual:" .. tostring(#accepted - #bases + 1)
+                    accepted[#accepted + 1] = candidate
+                end
+            end
+            if #accepted >= layout.virtual_capacity then break end
+        end
+        if #accepted >= layout.virtual_capacity then break end
+    end
+    if #accepted < layout.virtual_capacity and not self.capacity_warning_logged then
+        self.capacity_warning_logged = true
+        if type(self.deps.log_warn) == "function" then
+            pcall(self.deps.log_warn, "GA_LAYOUT_CAPACITY_REDUCED", "Arena virtual spawn capacity was reduced to proven graph positions", { requested = layout.virtual_capacity, capacity = #accepted })
+        end
+    end
+    self.cache = {
+        id = layout.id,
+        version = layout.version,
+        level = layout.level,
+        actor_spawn_path = layout.actor_spawn_path,
+        actor_look_path = layout.actor_look_path,
+        capacity = #accepted,
+        opponent_spawn_slots = accepted,
+        tactical_routes = routes
+    }
+    return gamma_arena_result.ok(copy_layout(self.cache))
+end
+
+function LayoutAdapter:snapshot()
+    if self.cache == nil then return fail("GA_LAYOUT_NOT_RESOLVED", "Arena layout has not been resolved") end
+    return gamma_arena_result.ok(copy_layout(self.cache))
+end
+
+function new(deps)
+    if type(deps) ~= "table" or type(deps.resolve_anchor) ~= "function" or type(deps.project_vertex) ~= "function" or type(deps.vertex_position) ~= "function" then
+        return nil, fail("GA_LAYOUT_API_MISSING", "Arena layout runtime dependencies are unavailable")
+    end
+    return setmetatable({ deps = deps, layout = nil, cache = nil, actor_anchor = nil, capacity_warning_logged = false }, LayoutAdapter)
+end

@@ -2588,19 +2588,29 @@ local function entity_spec(opponent_count)
         slot = 0,
         spawn_path = "actor_spawn",
         look_path = "actor_look",
-        loadout = { weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2, outfit = "novice_outfit", consumables = { "bandage" }, cost = 6 }
+        loadout = { weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2, outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6 }
     }
     local opponents = {}
     for index = 1, (opponent_count or 2) do
         opponents[index] = {
             slot = index,
             spawn_path = "opponent_" .. tostring(index),
+            tactical_route = "opponent_" .. tostring(index),
+            spawn_slot_id = "fixture:" .. tostring(index),
+            spawn = {
+                position = { x = index * 2, y = 2, z = 3 },
+                level_vertex_id = 10 + index,
+                game_vertex_id = 22
+            },
+            role = index == 1 and "leader" or "primary",
             profile = index == 1 and "gamma_arena_bandit_novice" or "gamma_arena_bandit_trainee",
+            community = "bandit",
             loadout = {
                 weapon = index == 1 and "wpn_pm" or "wpn_mp5",
                 ammo = index == 1 and "ammo_9x18_fmj" or "ammo_9x19_fmj",
                 ammo_boxes = index == 1 and 3 or 2,
                 outfit = index == 1 and "novice_outfit" or "stalker_outfit",
+                knife = "wpn_knife",
                 consumables = index == 1 and { "bandage", "medkit" } or { "bandage" },
                 cost = 10
             }
@@ -2780,11 +2790,6 @@ local function fake_entity_environment(options)
         clock = function() return env.now end,
         opponent_gate = function() return env.opponents_enabled end,
         allow_numeric_death = options.allow_numeric_death == true,
-        resolve_spawn = function(path)
-            env.events[#env.events + 1] = "resolve:" .. path
-            if options.fail_phase == "resolve" then return gamma_arena_result.err("GA_TEST_RESOLVE_FAIL", "injected patrol failure") end
-            return gamma_arena_result.ok({ position = { x = 1, y = 2, z = 3 }, level_vertex_id = 11, game_vertex_id = 22 })
-        end,
         alife = function() return alife_service end,
         create_npc = function(section, position, level_vertex_id, game_vertex_id)
             env.create_npc_count = env.create_npc_count + 1
@@ -3632,7 +3637,7 @@ end
 
 local function runtime_entity_partial_failures_rollback_in_reverse()
     local phases = {
-        { name = "resolve", opponents = 1 }, { name = "npc", opponents = 1 },
+        { name = "npc", opponents = 1 },
         { name = "hold_offline", opponents = 1 }, { name = "tag", opponents = 1 }, { name = "tag_read", opponents = 1 },
         { name = "children", opponents = 1 }, { name = "item", opponents = 1 },
         { name = "request_online", opponents = 1 }, { name = "alive", opponents = 1 },
@@ -3645,7 +3650,7 @@ local function runtime_entity_partial_failures_rollback_in_reverse()
         begin_entity_apply(adapter, env, entity_spec(phase_case.opponents), "session-fail-" .. phase)
         local _, snapshot = pump_entity(adapter, env, 300)
         gamma_arena_test_assert.equals(snapshot.state, "ERROR", "phase " .. phase .. " must finish rollback before surfacing ERROR")
-        if phase == "resolve" or phase == "npc" then
+        if phase == "npc" then
             gamma_arena_test_assert.equals(#env.release_requests, 0, "pre-creation phase " .. phase .. " has nothing to release")
         elseif phase == "tag" or phase == "tag_read" or phase == "children" then
             gamma_arena_test_assert.equals(#env.release_requests, 0, "unproven ownership in phase " .. phase .. " is protected, never guessed")
@@ -4175,9 +4180,10 @@ end
 local function runtime_validator_rejects_effective_nonhuman_profile()
     local snapshot_result = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
     gamma_arena_test_assert.is_true(snapshot_result.ok, "validator fixture catalog loads")
-    local generated = gamma_arena_generator.generate({ session_seed = 7, mode_id = "skirmish", difficulty_id = "rookie", layout_id = "rostok_arena_v1" }, 0, snapshot_result.value)
+    local resolved_layout = gamma_arena_test_generator.fixture_resolved_layout(snapshot_result.value)
+    local generated = gamma_arena_generator.generate({ session_seed = 7, mode_id = "skirmish", difficulty_id = "rookie", layout_id = "rostok_arena_v1" }, 0, snapshot_result.value, resolved_layout)
     gamma_arena_test_assert.is_true(generated.ok, "validator fixture fight generates")
-    local rejected = gamma_arena_validator.validate_runtime(generated.value, snapshot_result.value, {
+    local rejected = gamma_arena_validator.validate_runtime(generated.value, snapshot_result.value, resolved_layout, {
         effective_profile = function() return { class = "SM_BLOODSUCKER", community = "monster" } end
     })
     gamma_arena_test_assert.is_false(rejected.ok, "effective mutant class cannot pass runtime validation")

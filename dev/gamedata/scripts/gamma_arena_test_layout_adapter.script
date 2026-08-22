@@ -1,0 +1,117 @@
+local function layout_fixture()
+    return {
+        id = "rostok_arena_v1",
+        version = 2,
+        level = "l05_bar",
+        actor_spawn_path = "t_way",
+        actor_look_path = "t_look",
+        opponent_spawn_paths = {
+            "bar_arena_walk_3_1", "bar_arena_walk_3_2", "bar_arena_walk_6_1",
+            "bar_arena_walk_6_3", "bar_arena_walk_6_6", "bar_arena_monstr_walk"
+        },
+        virtual_capacity = 10,
+        virtual_radii = { 1.5, 2.5 },
+        max_height_delta = 1.0,
+        min_opponent_separation = 1.75,
+        min_actor_separation = 8.0,
+        max_base_distance = 3.0
+    }
+end
+
+local function fixture(options)
+    options = options or {}
+    local layout = layout_fixture()
+    local anchors, projected, warnings = {}, {}, {}
+    anchors.t_way = { position = { x = 0, y = 0, z = 0 }, level_vertex_id = 10, game_vertex_id = 77 }
+    for index, path in ipairs(layout.opponent_spawn_paths) do
+        anchors[path] = { position = { x = 20 + index * 10, y = 0, z = 0 }, level_vertex_id = 100 + index, game_vertex_id = 77 }
+    end
+    local project_calls, resolve_calls, next_vertex = 0, 0, 1000
+    local adapter, creation_error = gamma_arena_layout_adapter.new({
+        resolve_anchor = function(path)
+            resolve_calls = resolve_calls + 1
+            if options.missing_anchor == path then return gamma_arena_result.err("GA_TEST_ANCHOR_MISSING", "missing fixture anchor") end
+            return gamma_arena_result.ok(anchors[path])
+        end,
+        project_vertex = function(base_lvid, dx, dz, radius)
+            project_calls = project_calls + 1
+            if options.reject_virtual then return gamma_arena_result.ok(nil) end
+            next_vertex = next_vertex + 1
+            local base
+            for _, value in pairs(anchors) do if value.level_vertex_id == base_lvid then base = value; break end end
+            projected[next_vertex] = { x = base.position.x + dx * radius, y = options.height or 0, z = base.position.z + dz * radius }
+            return gamma_arena_result.ok(next_vertex)
+        end,
+        vertex_position = function(level_vertex_id) return gamma_arena_result.ok(projected[level_vertex_id]) end,
+        log_warn = function(code, message, context) warnings[#warnings + 1] = { code = code, message = message, context = context } end
+    })
+    gamma_arena_test_assert.is_true(adapter ~= nil and creation_error == nil, "layout adapter fixture composes")
+    return adapter, layout, { warnings = warnings, project_calls = function() return project_calls end, resolve_calls = function() return resolve_calls end }
+end
+
+local function layout_adapter_expands_to_ten_deterministically()
+    local adapter, layout = fixture()
+    local result = adapter:resolve(layout)
+    gamma_arena_test_assert.is_true(result.ok, "valid base anchors resolve")
+    gamma_arena_test_assert.equals(#result.value.opponent_spawn_slots, 10, "six base anchors expand to ten physical slots")
+    gamma_arena_test_assert.equals(result.value.opponent_spawn_slots[7].id, "virtual:1", "first virtual slot id is stable")
+    gamma_arena_test_assert.equals(result.value.opponent_spawn_slots[10].id, "virtual:4", "last virtual slot id is stable")
+    local seen = {}
+    for _, slot in ipairs(result.value.opponent_spawn_slots) do
+        gamma_arena_test_assert.is_true(seen[slot.id] == nil, "physical slot ids are unique")
+        seen[slot.id] = true
+    end
+    local second_adapter, second_layout = fixture()
+    local second = second_adapter:resolve(second_layout)
+    for index, slot in ipairs(result.value.opponent_spawn_slots) do
+        gamma_arena_test_assert.equals(slot.id, second.value.opponent_spawn_slots[index].id, "slot order is deterministic")
+        gamma_arena_test_assert.equals(slot.position.x, second.value.opponent_spawn_slots[index].position.x, "slot coordinates are deterministic")
+    end
+end
+
+local function layout_adapter_caches_resolved_layout()
+    local adapter, layout, telemetry = fixture()
+    local first = adapter:resolve(layout)
+    local resolves, projects = telemetry.resolve_calls(), telemetry.project_calls()
+    local second = adapter:resolve(layout)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "cached layout remains available")
+    gamma_arena_test_assert.equals(telemetry.resolve_calls(), resolves, "cached layout does not reopen patrol anchors")
+    gamma_arena_test_assert.equals(telemetry.project_calls(), projects, "cached layout does not reprobe graph vertices")
+end
+
+local function layout_adapter_reduces_optional_capacity()
+    local adapter, layout, telemetry = fixture({ reject_virtual = true })
+    local result = adapter:resolve(layout)
+    gamma_arena_test_assert.is_true(result.ok, "optional virtual rejection is nonfatal")
+    gamma_arena_test_assert.equals(#result.value.opponent_spawn_slots, 6, "capacity clamps to proven base anchors")
+    gamma_arena_test_assert.equals(#telemetry.warnings, 1, "capacity reduction logs once")
+    gamma_arena_test_assert.equals(telemetry.warnings[1].code, "GA_LAYOUT_CAPACITY_REDUCED", "capacity diagnostic is stable")
+end
+
+local function layout_adapter_rejects_broken_base_anchor()
+    local adapter, layout = fixture({ missing_anchor = "bar_arena_walk_6_3" })
+    local result = adapter:resolve(layout)
+    gamma_arena_test_assert.is_false(result.ok, "broken required base anchor fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_LAYOUT_BASE_ANCHOR_INVALID", "base anchor error is stable")
+end
+
+local function layout_adapter_rejects_excessive_height_candidates()
+    local adapter, layout = fixture({ height = 2.0 })
+    local result = adapter:resolve(layout)
+    gamma_arena_test_assert.is_true(result.ok, "invalid optional height candidates are skipped")
+    gamma_arena_test_assert.equals(#result.value.opponent_spawn_slots, 6, "excessive height cannot manufacture capacity")
+end
+
+local cases = {
+    { name = "layout_adapter_expands_to_ten_deterministically", fn = layout_adapter_expands_to_ten_deterministically },
+    { name = "layout_adapter_caches_resolved_layout", fn = layout_adapter_caches_resolved_layout },
+    { name = "layout_adapter_reduces_optional_capacity", fn = layout_adapter_reduces_optional_capacity },
+    { name = "layout_adapter_rejects_broken_base_anchor", fn = layout_adapter_rejects_broken_base_anchor },
+    { name = "layout_adapter_rejects_excessive_height_candidates", fn = layout_adapter_rejects_excessive_height_candidates }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end

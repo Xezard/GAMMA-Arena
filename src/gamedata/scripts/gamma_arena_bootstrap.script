@@ -55,6 +55,7 @@ local function runtime_probes(catalogs)
         se_save_var = se_save_var,
         se_load_var = se_load_var,
         level = level,
+        vector = vector,
         patrol = patrol,
         db = db,
         game_object = game_object,
@@ -256,6 +257,60 @@ local function default_layout()
     local layout = catalogs.value and catalogs.value.layouts and catalogs.value.layouts.rostok_arena_v1
     if type(layout) ~= "table" then return gamma_arena_result.err("GA_ACTOR_LAYOUT_INVALID", "Rostok Arena layout is unavailable") end
     return gamma_arena_result.ok(layout)
+end
+
+local function default_runtime_layout_adapter()
+    return gamma_arena_layout_adapter.new({
+        resolve_anchor = function(path)
+            local called, path_object = pcall(function() return patrol(path) end)
+            if not called or path_object == nil then
+                return gamma_arena_result.err("GA_LAYOUT_BASE_ANCHOR_INVALID", "Required Arena patrol anchor is unavailable", {
+                    path = path,
+                    reason = called and nil or tostring(path_object)
+                })
+            end
+            local resolved, position, level_vertex_id, game_vertex_id = pcall(function()
+                return path_object:point(0), path_object:level_vertex_id(0), path_object:game_vertex_id(0)
+            end)
+            if not resolved then
+                return gamma_arena_result.err("GA_LAYOUT_BASE_ANCHOR_INVALID", "Required Arena patrol anchor could not be read safely", {
+                    path = path,
+                    reason = tostring(position)
+                })
+            end
+            return gamma_arena_result.ok({
+                position = position,
+                level_vertex_id = level_vertex_id,
+                game_vertex_id = game_vertex_id
+            })
+        end,
+        project_vertex = function(level_vertex_id, direction_x, direction_z, radius)
+            local called, projected = pcall(function()
+                local direction = vector()
+                direction:set(direction_x, 0, direction_z)
+                return level.vertex_in_direction(level_vertex_id, direction, radius)
+            end)
+            if not called then
+                return gamma_arena_result.err("GA_LAYOUT_VERTEX_PROJECTION_FAILED", "Arena graph projection failed safely", {
+                    level_vertex_id = level_vertex_id,
+                    radius = radius,
+                    reason = tostring(projected)
+                })
+            end
+            return gamma_arena_result.ok(projected)
+        end,
+        vertex_position = function(level_vertex_id)
+            local called, position = pcall(level.vertex_position, level_vertex_id)
+            if not called then
+                return gamma_arena_result.err("GA_LAYOUT_VERTEX_POSITION_FAILED", "Arena graph vertex position failed safely", {
+                    level_vertex_id = level_vertex_id,
+                    reason = tostring(position)
+                })
+            end
+            return gamma_arena_result.ok(position)
+        end,
+        log_warn = function(code, message, context) gamma_arena_log.warn(code, message, context) end
+    })
 end
 
 local function runtime_object_id(object)
@@ -1184,18 +1239,11 @@ local function default_entity_adapter(actor_adapter, active_instance)
             local instance = active_instance()
             return instance ~= nil and instance:is_opponent_activation_allowed()
         end,
-        resolve_spawn = function(path)
-            local path_object = patrol(path)
-            if path_object == nil then return gamma_arena_result.err("GA_ENTITY_PATROL_FAILED", "Opponent patrol is unavailable", { path = path }) end
-            return gamma_arena_result.ok({
-                position = path_object:point(0),
-                level_vertex_id = path_object:level_vertex_id(0),
-                game_vertex_id = path_object:game_vertex_id(0)
-            })
-        end,
         alife = function() return alife() end,
         create_npc = function(section, position, level_vertex_id, game_vertex_id)
-            return alife_create(section, position, level_vertex_id, game_vertex_id)
+            local runtime_position = vector()
+            runtime_position:set(position.x, position.y, position.z)
+            return alife_create(section, runtime_position, level_vertex_id, game_vertex_id)
         end,
         hold_offline = hold_entity_offline,
         request_online = request_entity_online,
@@ -1249,6 +1297,30 @@ function compose(overrides)
     local config = overrides.config or current_config()
     local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
     local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance)
+    local catalogs_port = overrides.catalogs or function() return gamma_arena_catalog.load() end
+    local layout_adapter = overrides.layout_adapter or default_runtime_layout_adapter()
+    local layout_port = overrides.layout or function(layout_id)
+        local catalogs = catalogs_port()
+        if not catalogs.ok then return catalogs end
+        local layouts = catalogs.value and catalogs.value.layouts
+        local layout = type(layouts) == "table" and layouts[layout_id or "rostok_arena_v1"] or nil
+        if type(layout) ~= "table" then
+            return gamma_arena_result.err("GA_ACTOR_LAYOUT_INVALID", "Requested Arena layout is unavailable", { layout_id = layout_id })
+        end
+        if layout_adapter == nil or type(layout_adapter.resolve) ~= "function" then
+            return gamma_arena_result.err("GA_LAYOUT_API_MISSING", "Arena runtime layout adapter is unavailable")
+        end
+        return layout_adapter:resolve(layout)
+    end
+    local preflight_port = overrides.preflight or function()
+        local catalogs = catalogs_port()
+        if not catalogs.ok then return catalogs end
+        local compatible = gamma_arena_compat.preflight(runtime_probes(catalogs.value))
+        if not compatible.ok then return compatible end
+        local resolved = layout_port("rostok_arena_v1")
+        if not resolved.ok then return resolved end
+        return gamma_arena_result.ok(true)
+    end
     local teardown_clock = overrides.teardown_clock or function() return time_global() end
     local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
     local teardown_max_updates = overrides.teardown_max_updates or 64
@@ -1301,8 +1373,8 @@ function compose(overrides)
             return gamma_arena_result.ok(value)
         end,
         reconcile = overrides.reconcile or function(config) return gamma_arena_migrations.migrate(config) end,
-        compat = overrides.compat or { preflight = overrides.preflight or default_preflight },
-        preflight = overrides.preflight or default_preflight,
+        compat = overrides.compat or { preflight = preflight_port },
+        preflight = preflight_port,
         identity = overrides.identity or default_identity,
         ui = overrides.ui or default_fatal_ui(),
         notify = overrides.notify or default_notify,
@@ -1311,14 +1383,14 @@ function compose(overrides)
         launch_options = overrides.launch_options,
         actor = actor_adapter,
         entities = entity_adapter,
-        layout = overrides.layout or default_layout,
+        layout = layout_port,
         mode_policy = overrides.mode_policy or gamma_arena_mode_skirmish,
-        catalogs = overrides.catalogs or function() return gamma_arena_catalog.load() end,
-        generator = overrides.generator or function(session, fight_index, catalog_snapshot)
-            return gamma_arena_generator.generate(session, fight_index, catalog_snapshot)
+        catalogs = catalogs_port,
+        generator = overrides.generator or function(session, fight_index, catalog_snapshot, resolved_layout)
+            return gamma_arena_generator.generate(session, fight_index, catalog_snapshot, resolved_layout)
         end,
-        validator = overrides.validator or function(spec, catalog_snapshot)
-            return gamma_arena_validator.validate(spec, catalog_snapshot)
+        validator = overrides.validator or function(spec, catalog_snapshot, resolved_layout)
+            return gamma_arena_validator.validate(spec, catalog_snapshot, resolved_layout)
         end,
         clock = overrides.clock or function() return time_global() end,
         result_ui = overrides.result_ui or default_result_ui(),

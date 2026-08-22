@@ -153,7 +153,7 @@ local function copy_participant(participant, expected_slot)
         or (expected_slot ~= 0 and (type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
     local loadout = copy_loadout(participant.loadout)
     if loadout == nil then return nil end
-    return {
+    local copy = {
         slot = expected_slot,
         spawn_path = participant.spawn_path,
         look_path = participant.look_path,
@@ -161,6 +161,23 @@ local function copy_participant(participant, expected_slot)
         community = participant.community,
         loadout = loadout
     }
+    if expected_slot ~= 0 then
+        local position = type(participant.spawn) == "table" and participant.spawn.position or nil
+        if type(participant.spawn_slot_id) ~= "string" or participant.spawn_slot_id == ""
+            or type(participant.tactical_route) ~= "string" or participant.tactical_route == ""
+            or type(participant.spawn) ~= "table" or type(position) ~= "table"
+            or type(position.x) ~= "number" or type(position.y) ~= "number" or type(position.z) ~= "number"
+            or not valid_id(participant.spawn.level_vertex_id) or not valid_id(participant.spawn.game_vertex_id) then return nil end
+        copy.spawn_slot_id = participant.spawn_slot_id
+        copy.tactical_route = participant.tactical_route
+        copy.role = participant.role
+        copy.spawn = {
+            position = { x = position.x, y = position.y, z = position.z },
+            level_vertex_id = participant.spawn.level_vertex_id,
+            game_vertex_id = participant.spawn.game_vertex_id
+        }
+    end
+    return copy
 end
 
 local function resolve_ammo_rounds(loadout, slot, ammo_box_size)
@@ -382,7 +399,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     for index, participant in ipairs(opponents_result.value) do
         opponents[index] = copy_participant(participant, index)
         if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
-        if tactical_route_set[opponents[index].spawn_path] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent spawn route is unavailable to the tactical director", { slot = index, route = opponents[index].spawn_path }) end
+        if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = index, route = opponents[index].tactical_route }) end
         local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, opponents[index].community)
         if not effective.ok then return effective end
     end
@@ -418,13 +435,11 @@ function EntityAdapter:opponent_gate_open()
 end
 
 function EntityAdapter:resolve_spawn(opponent)
-    local resolved = result_call("GA_ENTITY_PATROL_FAILED", self.deps.resolve_spawn, opponent.spawn_path)
-    if not resolved.ok then return resolved end
-    local value = resolved.value
+    local value = opponent.spawn
     if type(value) ~= "table" or value.position == nil or not valid_id(value.level_vertex_id) or not valid_id(value.game_vertex_id) then
-        return fail("GA_ENTITY_PATROL_INVALID", "Opponent patrol did not resolve position/lvid/gvid", { slot = opponent.slot })
+        return fail("GA_ENTITY_SPAWN_INVALID", "Validated opponent physical spawn is unavailable", { slot = opponent.slot })
     end
-    return resolved
+    return gamma_arena_result.ok(value)
 end
 
 function EntityAdapter:spawn_current()
@@ -786,7 +801,7 @@ function EntityAdapter:drive_online()
             tactical_opponents[#tactical_opponents + 1] = {
                 slot = record.slot,
                 id = record.id,
-                spawn_path = opponent.spawn_path
+                spawn_path = opponent.tactical_route
             }
         end
         local tactical = method_result("GA_ENTITY_TACTICAL_BEGIN_FAILED", self.deps.tactical, "begin", {

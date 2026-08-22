@@ -129,8 +129,10 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_layout_adapter.script'; Namespace = 'gamma_arena_layout_adapter'; Required = @('(?m)^function\s+new\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script'; Namespace = 'gamma_arena_test_layout_adapter'; Required = @('(?m)^function\s+run\s*\(') }
 )
 
 $Task4ScriptContracts = @(
@@ -1324,6 +1326,23 @@ foreach ($Task11Marker in @(
     'xr_logic.switch_to_section'
 )) {
     Assert-True ($Task11CompatContent.Contains($Task11Marker)) "Tactical preflight contract is missing marker: $Task11Marker"
+}
+
+$Task12BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+$Task12OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+$Task12EntityContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script') -Raw
+$Task12CompatContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script') -Raw
+Assert-True ($Task12BootstrapContent -match 'gamma_arena_layout_adapter\.new') 'Bootstrap must compose one cached runtime layout adapter'
+foreach ($Task12Marker in @('level.vertex_in_direction', 'level.vertex_position', 'vector()', 'GA_LAYOUT_BASE_ANCHOR_INVALID')) {
+    Assert-True ($Task12BootstrapContent.Contains($Task12Marker)) "Bootstrap resolved-layout port is missing marker: $Task12Marker"
+}
+Assert-True ($Task12BootstrapContent -match 'gamma_arena_generator\.generate\(session,\s*fight_index,\s*catalog_snapshot,\s*resolved_layout\)') 'Bootstrap generator port must receive the resolved physical layout'
+Assert-True ($Task12BootstrapContent -match 'gamma_arena_validator\.validate\(spec,\s*catalog_snapshot,\s*resolved_layout\)') 'Bootstrap validator port must receive the same resolved physical layout'
+Assert-True ($Task12OrchestratorContent -match 'function\s+Orchestrator:prepare_fight\s*\([\s\S]{0,700}layout_snapshot\s*\([\s\S]{0,700}deps\.generator[\s\S]{0,300}layout\.value[\s\S]{0,500}deps\.validator[\s\S]{0,300}layout\.value') 'Fight preparation must thread one resolved layout through generation and validation'
+Assert-True ($Task12EntityContent.Contains('participant.spawn') -and $Task12EntityContent.Contains('tactical_route')) 'Entity adapter must consume validated physical spawns separately from tactical routes'
+Assert-True ($Task12EntityContent -notmatch 'self\.deps\.resolve_spawn') 'Entity spawning must not resolve patrol routes after FightSpec validation'
+foreach ($Task12Marker in @('level.vertex_in_direction', 'level.vertex_position', 'vector')) {
+    Assert-True ($Task12CompatContent.Contains($Task12Marker)) "Preflight must require resolved-layout engine capability: $Task12Marker"
 }
 
 if ($script:Failures.Count -gt 0) {
