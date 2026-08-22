@@ -616,6 +616,8 @@ function new_actor_loadout_port(ports)
         else
             if equipment.phase == "SUBMIT_SLOT" then
                 role = equipment_roles[equipment.role_index]
+            elseif equipment.phase == "CHARGE_OUTFIT" then
+                role = "outfit"
             elseif equipment.phase == "SUBMIT_MAGAZINE" or equipment.phase == "WAIT_MAGAZINE_VERIFY"
                 or equipment.phase == "SUBMIT_ACTIVE" or equipment.phase == "WAIT_ACTIVE_VERIFY" then
                 role = "weapon"
@@ -719,6 +721,43 @@ function new_actor_loadout_port(ports)
             end
             equipment.slots[pending_slot.role] = pending_slot.slot
             equipment.pending_slot = nil
+            if pending_slot.role == "outfit" then
+                equipment.phase = "CHARGE_OUTFIT"
+                return pending_or_rollback(true)
+            end
+            equipment.role_index = equipment.role_index + 1
+            equipment.phase = "SUBMIT_SLOT"
+            return pending_or_rollback(true)
+        end
+
+        if equipment.phase == "CHARGE_OUTFIT" then
+            local outfit = required_equipment(actor, "outfit")
+            if not outfit.ok then return rollback(owned_records, outfit) end
+            if outfit.value.pending == true then return pending_or_rollback() end
+            local requires_power = actor_loadout_call(
+                "GA_ACTOR_EXO_CLASSIFY_FAILED",
+                ports.outfit_requires_power,
+                outfit.value.record.section
+            )
+            if not requires_power.ok then return rollback(owned_records, requires_power) end
+            if requires_power.value == true then
+                local confirmed = actor_loadout_call("GA_ACTOR_EXO_CLASSIFY_FAILED", ports.exo_is_object, outfit.value.object)
+                if not confirmed.ok or confirmed.value ~= true then
+                    return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_CLASSIFY_FAILED", "Powered outfit object was not recognized by Powered Exos"))
+                end
+                local first = actor_loadout_call("GA_ACTOR_EXO_READ_FAILED", ports.exo_get_data, outfit.value.record.id)
+                if not first.ok or type(first.value) ~= "table" then
+                    return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_READ_FAILED", "Powered Exos data is unavailable"))
+                end
+                first.value.power = 100
+                local written = actor_loadout_call("GA_ACTOR_EXO_WRITE_FAILED", ports.exo_set_data, outfit.value.record.id, first.value)
+                if not written.ok then return rollback(owned_records, written) end
+                local verified = actor_loadout_call("GA_ACTOR_EXO_VERIFY_FAILED", ports.exo_get_data, outfit.value.record.id)
+                if not verified.ok or type(verified.value) ~= "table" or verified.value.power ~= 100 then
+                    return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_VERIFY_FAILED", "Powered exoskeleton did not retain full charge"))
+                end
+                equipment.outfit_power = 100
+            end
             equipment.role_index = equipment.role_index + 1
             equipment.phase = "SUBMIT_SLOT"
             return pending_or_rollback(true)
@@ -780,7 +819,8 @@ function new_actor_loadout_port(ports)
             knife_slot = equipment.slots.knife,
             outfit_slot = equipment.slots.outfit,
             magazine_rounds = equipment.magazine_rounds,
-            reserve_rounds = equipment.reserve_rounds
+            reserve_rounds = equipment.reserve_rounds,
+            outfit_power = equipment.outfit_power
         }
         equipment.state = "READY"
         return gamma_arena_result.ok(equipment.summary)
@@ -952,6 +992,29 @@ local function default_actor_adapter(active_instance)
         get_ammo_in_magazine = function(weapon) return weapon:get_ammo_in_magazine() end,
         make_item_active = function(actor, item) return actor:make_item_active(item) end,
         active_item = function(actor) return actor:active_item() end,
+        outfit_requires_power = effective_outfit_requires_power,
+        exo_is_object = function(object)
+            local api = powered_exos_api("is_exo", "GA_ACTOR_EXO_CLASSIFY_FAILED")
+            if not api.ok then return api end
+            local called, value = pcall(api.value, object)
+            if not called then return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Powered Exos object classification failed safely", { reason = tostring(value) }) end
+            return gamma_arena_result.ok(value)
+        end,
+        exo_get_data = function(id)
+            local api = powered_exos_api("get_data", "GA_ACTOR_EXO_READ_FAILED")
+            if not api.ok then return api end
+            local called, value = pcall(api.value, id)
+            if not called then return gamma_arena_result.err("GA_ACTOR_EXO_READ_FAILED", "Powered Exos data read failed safely", { id = id, reason = tostring(value) }) end
+            return gamma_arena_result.ok(value)
+        end,
+        exo_set_data = function(id, data)
+            local api = powered_exos_api("set_data", "GA_ACTOR_EXO_WRITE_FAILED")
+            if not api.ok then return api end
+            local called, value = pcall(api.value, id, data)
+            if not called then return gamma_arena_result.err("GA_ACTOR_EXO_WRITE_FAILED", "Powered Exos data write failed safely", { id = id, reason = tostring(value) }) end
+            if value == false then return gamma_arena_result.err("GA_ACTOR_EXO_WRITE_FAILED", "Powered Exos rejected the data write", { id = id }) end
+            return gamma_arena_result.ok(true)
+        end,
         resolve_entity = function(id)
             local service = type(alife) == "function" and alife() or nil
             if service == nil or type(service.object) ~= "function" then
@@ -1168,6 +1231,36 @@ end
 
 function effective_magazine_size(section)
     return effective_item_u32(section, "ammo_mag_size", 1, "GA_ACTOR_LOADOUT_MAGAZINE_INVALID")
+end
+
+function effective_outfit_requires_power(section)
+    if type(section) ~= "string" or section == "" or type(system_ini) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit section/system_ini is unavailable", { section = section })
+    end
+    local opened, system = pcall(system_ini)
+    if not opened or system == nil then return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective system.ini is unavailable", { section = section }) end
+    local line_ok, line_exist = pcall(function() return system.line_exist end)
+    local read_ok, read = pcall(function() return system.r_string_ex end)
+    if not line_ok or type(line_exist) ~= "function" or not read_ok or type(read) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit repair_type APIs are unavailable", { section = section })
+    end
+    local present_ok, present = pcall(line_exist, system, section, "repair_type")
+    if not present_ok or present ~= true then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit repair_type is missing", { section = section })
+    end
+    local value_ok, repair_type = pcall(read, system, section, "repair_type")
+    if not value_ok or type(repair_type) ~= "string" then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit repair_type is unreadable", { section = section })
+    end
+    return gamma_arena_result.ok(repair_type == "outfit_exo")
+end
+
+function powered_exos_api(method, code)
+    local api_ok, api = pcall(function() return item_exo_device and item_exo_device[method] end)
+    if not api_ok or type(api) ~= "function" then
+        return gamma_arena_result.err(code, "Powered Exos API is unavailable", { method = method })
+    end
+    return gamma_arena_result.ok(api)
 end
 
 function apply_actor_hostility(npc, actor, goodwill, enemy_relation)

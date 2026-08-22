@@ -3246,6 +3246,7 @@ local function runtime_actor_loadout_progress_survives_clock_stalls()
             return true
         end,
         active_item = function() return active end,
+        outfit_requires_power = function() return false end,
         resolve_entity = function(id) return present[id] end,
         release_item = function(id) present[id] = nil; return true end
     })
@@ -3309,6 +3310,136 @@ local function runtime_actor_loadout_no_progress_timeout_has_context()
     gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 101, "timeout context reports inactivity rather than total transaction duration")
     gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 101, "timeout context retains total transaction duration for diagnostics")
     gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 100, "timeout context reports the configured inactivity bound")
+end
+
+local function new_actor_loadout_test_fixture(options)
+    options = options or {}
+    local fixture = { calls = { is_exo = 0, get = 0, set = 0, release = 0 }, stored = options.stored }
+    local next_id, present, tags, slots, magazine = 1600, {}, {}, {}, {}
+    local active = nil
+    local actor = { id = function() return 77 end }
+    local loadout = entity_spec(1).actor().loadout
+    loadout = {
+        weapon = loadout.weapon,
+        ammo = loadout.ammo,
+        ammo_boxes = loadout.ammo_boxes,
+        outfit = options.outfit or loadout.outfit,
+        knife = loadout.knife,
+        consumables = loadout.consumables
+    }
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        present[value.runtime_id] = value
+        return value
+    end
+    fixture.port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return 100 end,
+        actor_id = function(target) return target:id() end,
+        ownership_token = function() return "session-exo-charge" end,
+        ammo_box_size = function() return 20 end,
+        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        entity_id = function(item) return item:id() end,
+        entity_parent_id = function(item) return item.parent_id end,
+        entity_section = function(item) return item.section_name end,
+        item_quantity = function(item) return item.quantity end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        online_item = function(_, id) return present[id] end,
+        item_slot = function(section)
+            if section == loadout.outfit then return 7 end
+            if section == loadout.knife then return 1 end
+            if section == loadout.weapon then return 3 end
+        end,
+        move_to_slot = function(_, item, slot) slots[slot] = item; return true end,
+        item_in_slot = function(_, slot) return slots[slot] end,
+        magazine_capacity = function() return 30 end,
+        set_ammo_elapsed = function(weapon, count) magazine[weapon:id()] = count; return true end,
+        get_ammo_in_magazine = function(weapon) return magazine[weapon:id()] or 0 end,
+        make_item_active = function(_, item) active = item; return true end,
+        active_item = function() return active end,
+        outfit_requires_power = options.outfit_requires_power,
+        exo_is_object = options.exo_is_object,
+        exo_get_data = options.exo_get_data,
+        exo_set_data = options.exo_set_data,
+        resolve_entity = function(id) return present[id] end,
+        release_item = function(id) fixture.calls.release = fixture.calls.release + 1; present[id] = nil; return true end
+    })
+    fixture.actor = actor
+    fixture.applied = fixture.port.apply(actor, loadout)
+    function fixture.drive_to_ready()
+        if not fixture.applied.ok then return fixture.applied end
+        local result
+        for _ = 1, 20 do
+            result = fixture.port.update(actor)
+            if not result.ok or result.value.ready == true then return result end
+        end
+        return result
+    end
+    return fixture
+end
+
+local function runtime_actor_loadout_charges_powered_exo_before_ready()
+    local fixture
+    fixture = new_actor_loadout_test_fixture({
+        outfit = "exo_fixture_outfit",
+        outfit_requires_power = function(section) return section == "exo_fixture_outfit" end,
+        exo_is_object = function()
+            fixture.calls.is_exo = fixture.calls.is_exo + 1
+            return true
+        end,
+        exo_get_data = function()
+            fixture.calls.get = fixture.calls.get + 1
+            return fixture.stored or { power = 0, preserved = "yes" }
+        end,
+        exo_set_data = function(_, data)
+            fixture.calls.set = fixture.calls.set + 1
+            fixture.stored = data
+            return true
+        end
+    })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok, "powered exo loadout reaches READY")
+    gamma_arena_test_assert.equals(fixture.calls.get, 2, "powered exo is read before and after write")
+    gamma_arena_test_assert.equals(fixture.calls.set, 1, "powered exo is written once")
+    gamma_arena_test_assert.equals(fixture.stored.preserved, "yes", "unrelated exo state is preserved")
+    gamma_arena_test_assert.equals(fixture.stored.power, 100, "powered exo is set to exactly full charge")
+    gamma_arena_test_assert.equals(ready.value.outfit_power, 100, "ready summary proves full charge")
+end
+
+local function runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge()
+    local fixture
+    fixture = new_actor_loadout_test_fixture({
+        outfit_requires_power = function() return false end,
+        exo_is_object = function() fixture.calls.is_exo = fixture.calls.is_exo + 1; return true end,
+        exo_get_data = function() fixture.calls.get = fixture.calls.get + 1; return { power = 0 } end,
+        exo_set_data = function() fixture.calls.set = fixture.calls.set + 1; return true end
+    })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok, "ordinary outfit loadout reaches READY")
+    gamma_arena_test_assert.equals(fixture.calls.is_exo, 0, "ordinary outfit never probes Powered Exos")
+    gamma_arena_test_assert.equals(fixture.calls.get, 0, "ordinary outfit is never read from Powered Exos")
+    gamma_arena_test_assert.equals(fixture.calls.set, 0, "ordinary outfit is never written to Powered Exos")
+    gamma_arena_test_assert.equals(ready.value.outfit_power, nil, "ordinary outfit summary does not report exo power")
+end
+
+local function runtime_actor_loadout_exo_charge_failures_rollback()
+    local cases = {
+        { label = "missing classifier", options = {} },
+        { label = "throwing classifier", options = { outfit_requires_power = function() error("injected classifier failure") end } },
+        { label = "unrecognized exo object", options = { outfit_requires_power = function() return true end, exo_is_object = function() return false end } },
+        { label = "throwing exo read", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() error("injected read failure") end } },
+        { label = "failed exo write", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return { power = 0 } end, exo_set_data = function() return false end } },
+        { label = "failed exo readback", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = (function() local reads = 0; return function() reads = reads + 1; return { power = reads == 1 and 0 or 99 } end end)(), exo_set_data = function() return true end } }
+    }
+    for _, case in ipairs(cases) do
+        local fixture = new_actor_loadout_test_fixture(case.options)
+        local result = fixture.drive_to_ready()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " fails the equipment transaction")
+        gamma_arena_test_assert.is_true(fixture.calls.release > 0, case.label .. " enters existing rollback before READY")
+        gamma_arena_test_assert.is_true(fixture.port.state() ~= "READY", case.label .. " never reaches READY")
+    end
 end
 
 local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
@@ -5413,6 +5544,9 @@ local cases = {
     ,{ name = "runtime_actor_loadout_translates_ltx_slots_to_lua_slots", fn = runtime_actor_loadout_translates_ltx_slots_to_lua_slots }
     ,{ name = "runtime_actor_loadout_progress_survives_clock_stalls", fn = runtime_actor_loadout_progress_survives_clock_stalls }
     ,{ name = "runtime_actor_loadout_no_progress_timeout_has_context", fn = runtime_actor_loadout_no_progress_timeout_has_context }
+    ,{ name = "runtime_actor_loadout_charges_powered_exo_before_ready", fn = runtime_actor_loadout_charges_powered_exo_before_ready }
+    ,{ name = "runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge", fn = runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge }
+    ,{ name = "runtime_actor_loadout_exo_charge_failures_rollback", fn = runtime_actor_loadout_exo_charge_failures_rollback }
     ,{ name = "runtime_actor_loadout_derives_unreadable_server_ammo_quantity", fn = runtime_actor_loadout_derives_unreadable_server_ammo_quantity }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
