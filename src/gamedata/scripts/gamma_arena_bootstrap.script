@@ -11,6 +11,7 @@ local callback_names = {
     "actor_on_first_update",
     "actor_on_update",
     "actor_on_before_death",
+    "actor_on_death",
     "npc_on_death_callback",
     "save_state",
     "load_state",
@@ -22,6 +23,7 @@ local callback_names = {
 
 local guarded_callbacks = {
     actor_on_before_death = true,
+    actor_on_death = true,
     npc_on_death_callback = true,
     save_state = true,
     on_before_save_input = true,
@@ -934,25 +936,6 @@ local function default_actor_adapter(active_instance)
         level.enable_input()
         return gamma_arena_result.ok(true)
     end
-    local invulnerability = {}
-    function invulnerability.set(value)
-        local actor = db and db.actor or nil
-        local method_ok, method = pcall(function()
-            if actor and type(actor.set_invulnerable) == "function" then return actor.set_invulnerable end
-            if actor and type(actor.invulnerable) == "function" then return actor.invulnerable end
-            return nil
-        end)
-        if not method_ok or type(method) ~= "function" then
-            return gamma_arena_result.err("GA_ACTOR_DEATH_HOLD_UNAVAILABLE", "Actor invulnerability API is unavailable")
-        end
-        local called, result = pcall(method, actor, value == true)
-        if not called or result == false then
-            return gamma_arena_result.err("GA_ACTOR_DEATH_HOLD_FAILED", "Actor invulnerability update failed safely", {
-                reason = called and "explicit false" or tostring(result)
-            })
-        end
-        return gamma_arena_result.ok(true)
-    end
     local loadout = new_actor_loadout_port({
         clock = function() return time_global() end,
         timeout_ms = 5000,
@@ -1056,8 +1039,7 @@ local function default_actor_adapter(active_instance)
             if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
         end,
         input = input,
-        loadout = loadout,
-        invulnerability = invulnerability
+        loadout = loadout
     })
 end
 
@@ -1434,6 +1416,15 @@ local function default_entity_adapter(actor_adapter, active_instance)
         ammo_box_size = effective_ammo_box_size,
         profile_runtime = { effective_profile = entity_effective_profile },
         actor_object = function() return db and db.actor end,
+        clear_enemy = function(npc)
+            local called, value = pcall(function() return npc:set_enemy(nil) end)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_ENTITY_DEATH_CLEAR_ENEMY_FAILED", "NPC enemy target could not be cleared safely", {
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
         set_pair_friends = function(first, second)
             if game_object == nil or game_object.friend == nil then return gamma_arena_result.err("GA_ENTITY_FRIEND_RELATION_FAILED", "game_object.friend is unavailable") end
             local first_ok, first_result = pcall(function() return first:set_relation(game_object.friend, second) end)

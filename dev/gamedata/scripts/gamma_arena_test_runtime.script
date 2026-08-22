@@ -299,19 +299,6 @@ local function preflight_requires_task6_actor_checkpoint_ports()
     end
 end
 
-local function preflight_requires_task9_death_hold_port()
-    local probes = valid_preflight_probes()
-    probes.db.actor.set_invulnerable = nil
-    probes.db.actor.invulnerable = nil
-    local result = gamma_arena_compat.preflight(probes)
-    gamma_arena_test_assert.is_false(result.ok, "missing logical-death hold API must fail preflight")
-    local found = false
-    for _, item in ipairs(result.error.context.errors or {}) do
-        if item.context and item.context.capability == "db.actor.set_invulnerable/invulnerable" then found = true end
-    end
-    gamma_arena_test_assert.is_true(found, "preflight identifies the Task 9 invulnerability capability")
-end
-
 local function preflight_requires_task7_entity_ports_and_ammo_metadata()
     local cases = {
         { capability = "alife().get_children", mutate = function(probes) probes.alife = function() return { object = function() end, set_switch_online = function() end, set_switch_offline = function() end } end end },
@@ -586,7 +573,6 @@ local function fake_orchestrator_deps(store)
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         enforce_boundary = function() return gamma_arena_result.ok({ breach = false, zone = "bar_arena_sr" }) end,
         release_input = function() return gamma_arena_result.ok(true) end,
-        release_logical_death_hold = function() return gamma_arena_result.ok(true) end,
         cleanup = function() return gamma_arena_result.ok(true) end
     }
     local checkpoint_adapter = { current = "READY" }
@@ -1069,7 +1055,7 @@ local function fatal_main_menu_retries_explicit_false()
 end
 
 local callback_names = {
-    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death",
+    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death", "actor_on_death",
     "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
     "on_before_load_input", "actor_on_net_destroy", "on_before_level_changing"
 }
@@ -2512,7 +2498,7 @@ end
 
 local function runtime_actor_future_seams_are_injected_and_total()
     local env, adapter = fake_actor_adapter_env()
-    local loadout_seen, invulnerability_values = nil, {}
+    local loadout_seen = nil
     adapter.deps.loadout = {
         apply = function(actor, loadout)
             gamma_arena_test_assert.is_true(actor == env.actor, "loadout seam receives only the owned Arena actor")
@@ -2520,21 +2506,10 @@ local function runtime_actor_future_seams_are_injected_and_total()
             return gamma_arena_result.ok(true)
         end
     }
-    adapter.deps.invulnerability = {
-        set = function(value) invulnerability_values[#invulnerability_values + 1] = value; return gamma_arena_result.ok(true) end
-    }
     local loadout = { primary = "wpn_pm" }
     gamma_arena_test_assert.is_true(adapter:apply_loadout(loadout).ok, "Task 7 loadout seam is injectable")
     gamma_arena_test_assert.is_true(loadout_seen == loadout, "loadout seam preserves immutable spec identity")
-    gamma_arena_test_assert.is_true(adapter:hold_after_logical_death().ok, "Task 9 logical-death seam is injectable")
-    gamma_arena_test_assert.equals(env.actor.health_value, 1, "logical death holds the actor at health 1")
-    gamma_arena_test_assert.equals(env.input_acquires, 1, "logical death disables input through the owned idempotent port")
-    gamma_arena_test_assert.equals(invulnerability_values[1], true, "logical death acquires invulnerability")
-    gamma_arena_test_assert.is_true(adapter:release_logical_death_hold().ok, "restored actor releases logical-death invulnerability independently")
-    gamma_arena_test_assert.equals(invulnerability_values[2], false, "restore releases owned invulnerability")
-    gamma_arena_test_assert.equals(env.input_releases, 0, "restore keeps input disabled through re-hide and countdown")
-    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "death hold cleanup is total")
-    gamma_arena_test_assert.equals(#invulnerability_values, 2, "cleanup does not release an already-released hold twice")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "loadout seam cleanup is total")
 end
 
 local function runtime_dedicated_start_reaches_preparing_without_checkpoint()
@@ -4630,7 +4605,6 @@ local function task8_environment(options)
         countdown_models = {},
         victory_dialogs = {},
         defeat_dialogs = {},
-        death_holds = 0,
         restore_calls = 0,
         actor_loadout_owned = false,
         actor_loadout_cleanup = 0,
@@ -4642,17 +4616,12 @@ local function task8_environment(options)
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         acquire_input = function() env.acquired_input = env.acquired_input + 1; return gamma_arena_result.ok(true) end,
         release_input = function() env.released_input = env.released_input + 1; return gamma_arena_result.ok(true) end,
-        hold_after_logical_death = function()
-            env.death_holds = env.death_holds + 1
-            return gamma_arena_result.ok(true)
-        end,
         cleanup_loadout_for_restore = function()
             env.actor_loadout_cleanup = env.actor_loadout_cleanup + 1
             env.events[#env.events + 1] = "actor_cleanup"
             env.actor_loadout_owned = false
             return gamma_arena_result.ok(true)
         end,
-        release_logical_death_hold = function() env.death_hold_releases = (env.death_hold_releases or 0) + 1; return gamma_arena_result.ok(true) end,
         reset_for_rematch = function()
             env.reset_actor = env.reset_actor + 1
             env.actor_loadout_owned = false
@@ -4965,15 +4934,6 @@ local function runtime_result_modal_releases_global_input()
     victory.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(victory.acquired_input, victory_acquired, "victory result never globally disables mouse input")
     gamma_arena_test_assert.equals(#victory.victory_dialogs, 1, "victory modal is shown with engine input available")
-
-    local defeat = task8_environment(); task8_pump_to_active(defeat)
-    local released_before = defeat.released_input
-    local flags = { ret_value = true }
-    gamma_arena_bootstrap.make_callbacks(defeat.orchestrator).actor_on_before_death(77, flags)
-    defeat.orchestrator:actor_on_update()
-    gamma_arena_test_assert.is_false(flags.ret_value, "defeat regression follows the real intercepted logical-death callback")
-    gamma_arena_test_assert.equals(defeat.released_input, released_before + 1, "logical-death hold releases global input before defeat modal")
-    gamma_arena_test_assert.equals(#defeat.defeat_dialogs, 1, "defeat modal is shown after input release")
 end
 
 local function runtime_task8_victory_next_cleans_heals_and_increments_once()
@@ -5091,18 +5051,6 @@ local function runtime_fight_index_max_minus_one_advances_once()
     gamma_arena_test_assert.is_true(advanced.ok, "max-1 victory continuation reaches the next preparation")
     gamma_arena_test_assert.equals(victory.orchestrator.session.fight_index, 4294967295, "max-1 victory advances exactly to uint32 max")
 
-    local defeat = task8_environment()
-    defeat.orchestrator.session.fight_index = 4294967294
-    task8_pump_to_active(defeat)
-    defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
-    defeat.orchestrator:actor_on_update()
-    local requested = defeat.orchestrator:defeat_next_action()
-    gamma_arena_test_assert.is_true(requested.ok, "max-1 defeat retry starts once")
-    for _ = 1, 4 do gamma_arena_test_assert.is_true(defeat.orchestrator:actor_on_update().ok, "max-1 defeat retry remains bounded") end
-    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "max-1 defeat retry never submits checkpoint restore")
-    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967294, "max-1 defeat retry retains the current index")
-    gamma_arena_test_assert.is_true(defeat.orchestrator:defeat_next_action().ok, "repeated defeat continuation is an idempotent Result")
-    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "repeated max-1 defeat never submits restore")
 end
 
 local function runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal()
@@ -5118,17 +5066,6 @@ local function runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal
     gamma_arena_test_assert.equals(victory.orchestrator.runtime_stage, "RESULT", "victory exhaustion does not leave RESULT")
     gamma_arena_test_assert.is_false(victory.orchestrator.result_action_locked, "victory exhaustion does not acquire the result-action latch")
     gamma_arena_test_assert.equals(victory.reset_actor, 0, "victory exhaustion precedes actor mutation")
-
-    local defeat = task8_environment()
-    defeat.orchestrator.session.fight_index = 4294967295
-    task8_pump_to_active(defeat)
-    defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
-    defeat.orchestrator:actor_on_update()
-    local defeat_retry = defeat.orchestrator:defeat_next_action()
-    gamma_arena_test_assert.is_true(defeat_retry.ok, "uint32-max defeat can retry the same fight")
-    for _ = 1, 4 do gamma_arena_test_assert.is_true(defeat.orchestrator:actor_on_update().ok, "uint32-max defeat retry remains bounded") end
-    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967295, "uint32-max defeat retry retains the current index")
-    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "uint32-max defeat retry never mutates a checkpoint")
 
     local routed = task8_environment()
     routed.orchestrator.session.fight_index = 4294967295
@@ -5238,48 +5175,201 @@ local function runtime_task8_one_hundred_fights_leave_empty_registries()
     gamma_arena_test_assert.equals(env.reset_actor, 99, "actor reset remains responsive across every next-fight transition")
 end
 
-local function runtime_task9_ordinary_death_is_inert()
-    local env = task8_environment()
-    env.orchestrator.active = false
-    local flags = { ret_value = true }
-    gamma_arena_bootstrap.make_callbacks(env.orchestrator).actor_on_before_death(77, flags)
-    gamma_arena_test_assert.is_true(flags.ret_value, "ordinary campaign death remains owned by the stock binder")
-    gamma_arena_test_assert.equals(env.death_holds, 0, "ordinary death never mutates the actor")
+local function natural_death_environment(options)
+    options = options or {}
+    local env = { arm = 0, confirm = 0, tactical_stop = 0, neutralize = 0, actor_mutations = 0 }
+    local store = fake_store()
+    function store:arm_defeat(_, context)
+        env.arm = env.arm + 1
+        env.armed_context = clone(context)
+        if options.arm_failure then return gamma_arena_result.err("GA_TEST_ARM", "injected defeat arm failure") end
+        return gamma_arena_result.ok({ token = "gad1:1000:natural" })
+    end
+    function store:confirm_defeat(_, token)
+        env.confirm = env.confirm + 1
+        env.confirmed_token = token
+        if options.confirm_failure then return gamma_arena_result.err("GA_TEST_CONFIRM", "injected defeat confirm failure") end
+        return gamma_arena_result.ok(true)
+    end
+    local deps = fake_orchestrator_deps(store)
+    deps.actor.hold_after_logical_death = function()
+        env.actor_mutations = env.actor_mutations + 1
+        return gamma_arena_result.ok(true)
+    end
+    deps.entities = {
+        stop_tactical = function()
+            env.tactical_stop = env.tactical_stop + 1
+            return gamma_arena_result.ok(true)
+        end,
+        neutralize_owned_opponents = function()
+            env.neutralize = env.neutralize + 1
+            return gamma_arena_result.ok(true)
+        end
+    }
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.active = true
+    orchestrator.runtime_stage = "ACTIVE"
+    orchestrator.session = {
+        schema_version = 1,
+        session_id = "ga_natural_session",
+        session_nonce = "ga_natural_nonce",
+        mode_id = "skirmish",
+        difficulty_id = "master",
+        fight_index = 7
+    }
+    env.orchestrator = orchestrator
+    return env
 end
 
-local function runtime_task9_active_death_latches_and_defers_defeat()
-    local env = task8_environment(); task8_pump_to_active(env)
-    local first = { ret_value = true }
-    local duplicate = { ret_value = true }
+local function runtime_natural_death_arms_confirms_and_neutralizes_once()
+    local env = natural_death_environment()
+    local flags = { ret_value = true }
+    local before = env.orchestrator:actor_on_before_death(77, flags)
+    local duplicate_before = env.orchestrator:actor_on_before_death(77, { ret_value = true })
+    local post_lethal_victory = env.orchestrator:queue_victory()
+    gamma_arena_test_assert.is_true(before.ok, "Arena death arms")
+    gamma_arena_test_assert.is_true(duplicate_before.ok and duplicate_before.value == false, "duplicate lethal callback is inert")
+    gamma_arena_test_assert.equals(flags.ret_value, true, "Arena never cancels lethal damage")
+    gamma_arena_test_assert.equals(env.actor_mutations, 0, "Arena never heals or holds the dying actor")
+    gamma_arena_test_assert.equals(env.arm, 1, "one defeat intent is armed")
+    gamma_arena_test_assert.equals(env.tactical_stop, 1, "before-death stops tactical control once")
+    gamma_arena_test_assert.equals(env.armed_context.difficulty_id, "master", "defeat handoff preserves difficulty")
+    gamma_arena_test_assert.is_true(post_lethal_victory.ok and post_lethal_victory.value == false, "lethal arm wins any later same-frame victory callback")
+    gamma_arena_test_assert.equals(env.orchestrator.pending_victory, false, "post-lethal victory cannot reopen in-level result flow")
+
     local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
-    callbacks.actor_on_before_death(77, first)
-    callbacks.actor_on_before_death(77, duplicate)
-    gamma_arena_test_assert.is_false(first.ret_value, "first ACTIVE death is intercepted")
-    gamma_arena_test_assert.is_true(duplicate.ret_value, "latched duplicate death is not intercepted twice")
-    gamma_arena_test_assert.equals(env.death_holds, 1, "logical death hold is acquired exactly once")
-    gamma_arena_test_assert.equals(#env.defeat_dialogs, 0, "death callback never opens UI synchronously")
-    callbacks.actor_on_update()
-    gamma_arena_test_assert.equals(#env.defeat_dialogs, 1, "defeat opens on the next update")
-    gamma_arena_test_assert.equals(env.defeat_dialogs[1].kind, "defeat", "single result model identifies defeat")
-    gamma_arena_test_assert.equals(env.defeat_dialogs[1].title_key, "st_gamma_arena_result_defeat", "defeat title key is exact")
+    local dead = callbacks.actor_on_death()
+    local duplicate_dead = callbacks.actor_on_death()
+    gamma_arena_test_assert.is_true(dead.ok, "real death confirms")
+    gamma_arena_test_assert.equals(duplicate_dead, nil, "inactive duplicate actor_on_death callback is guarded")
+    gamma_arena_test_assert.equals(env.confirm, 1, "one defeat intent is confirmed")
+    gamma_arena_test_assert.equals(env.confirmed_token, "gad1:1000:natural", "confirmation reuses the armed token")
+    gamma_arena_test_assert.equals(env.neutralize, 1, "owned opponents are neutralized")
+    gamma_arena_test_assert.is_false(env.orchestrator:is_active(), "dead actor clears in-level Arena activity")
+    gamma_arena_test_assert.equals(env.orchestrator.pending_victory, false, "death clears a queued victory")
 end
 
-local function runtime_task9_death_outside_active_is_not_a_defeat()
-    local env = task8_environment(); task8_pump_to_countdown(env)
-    local flags = { ret_value = true }
-    env.orchestrator:actor_on_before_death(77, flags)
-    gamma_arena_test_assert.is_true(flags.ret_value, "COUNTDOWN death callback remains inert")
-    gamma_arena_test_assert.equals(env.death_holds, 0, "non-ACTIVE callback cannot acquire a death hold")
+local function runtime_natural_death_failures_never_cancel_engine_death()
+    local arm = natural_death_environment({ arm_failure = true })
+    local arm_flags = { ret_value = true }
+    local arm_failed = gamma_arena_bootstrap.make_callbacks(arm.orchestrator).actor_on_before_death(77, arm_flags)
+    gamma_arena_test_assert.is_false(arm_failed.ok, "defeat arm failure remains observable")
+    gamma_arena_test_assert.equals(arm_flags.ret_value, true, "arm failure never cancels engine death")
+    gamma_arena_test_assert.equals(arm.actor_mutations, 0, "arm failure never heals the dying actor")
+    local arm_dead = gamma_arena_bootstrap.make_callbacks(arm.orchestrator).actor_on_death()
+    gamma_arena_test_assert.is_false(arm_dead.ok, "missing armed token remains observable after real death")
+    gamma_arena_test_assert.equals(arm.neutralize, 1, "arm failure cannot prevent dead-actor opponent neutralization")
+    gamma_arena_test_assert.is_false(arm.orchestrator:is_active(), "arm failure still clears dead in-level state")
+
+    local confirm = natural_death_environment({ confirm_failure = true })
+    local confirm_flags = { ret_value = true }
+    gamma_arena_bootstrap.make_callbacks(confirm.orchestrator).actor_on_before_death(77, confirm_flags)
+    local confirmed = gamma_arena_bootstrap.make_callbacks(confirm.orchestrator).actor_on_death()
+    gamma_arena_test_assert.is_false(confirmed.ok, "post-mortem confirm failure remains observable")
+    gamma_arena_test_assert.equals(confirm_flags.ret_value, true, "confirm failure cannot retroactively cancel death")
+    gamma_arena_test_assert.equals(confirm.neutralize, 1, "opponents are neutralized even when defeat confirmation fails")
+    gamma_arena_test_assert.is_false(confirm.orchestrator:is_active(), "post-mortem failure still clears in-level Arena state")
 end
 
-local function runtime_task9_single_result_contract_maps_both_kinds()
-    local victory = task8_environment(); task8_pump_to_active(victory)
-    victory.orchestrator:npc_on_death_callback({ id = function() return victory.registry.npcs[1].id end })
-    victory.orchestrator:actor_on_update()
-    gamma_arena_test_assert.equals(victory.victory_dialogs[1].kind, "victory", "single result model identifies victory")
-    gamma_arena_test_assert.equals(victory.victory_dialogs[1].title_key, "st_gamma_arena_result_victory", "victory title key is exact")
-    gamma_arena_test_assert.is_true(type(victory.victory_dialogs[1].on_next) == "function", "victory exposes the shared next action")
-    gamma_arena_test_assert.is_true(type(victory.victory_dialogs[1].on_main_menu) == "function", "victory exposes the shared main-menu action")
+local function runtime_natural_death_outside_active_arena_is_inert()
+    for _, stage in ipairs({ "INACTIVE", "COUNTDOWN" }) do
+        local env = natural_death_environment()
+        env.orchestrator.runtime_stage = stage
+        if stage == "INACTIVE" then env.orchestrator.active = false end
+        local flags = { ret_value = true }
+        local before = env.orchestrator:actor_on_before_death(77, flags)
+        local dead = env.orchestrator:actor_on_death()
+        gamma_arena_test_assert.is_true(before.ok and before.value == false, stage .. " before-death is inert")
+        gamma_arena_test_assert.is_true(dead.ok and dead.value == false, stage .. " actor death is inert")
+        gamma_arena_test_assert.equals(flags.ret_value, true, stage .. " never mutates stock death flags")
+        gamma_arena_test_assert.equals(env.arm + env.confirm + env.neutralize, 0, stage .. " writes no Arena defeat state")
+    end
+end
+
+local function death_neutralization_fixture(actor)
+    local env = { stops = 0, cleared = {}, held = {}, tags = {}, online = {} }
+    local tactical = {}
+    function tactical:stop() env.stops = env.stops + 1; return gamma_arena_result.ok(true) end
+    local deps = {
+        tactical = tactical,
+        load_tag = function(id) return env.tags[id] end,
+        online_object = function(id) return env.online[id] end,
+        actor_object = function() return actor end,
+        clear_enemy = function(npc) env.cleared[#env.cleared + 1] = npc.runtime_id; return gamma_arena_result.ok(true) end,
+        set_actor_hold = function(npc) env.held[#env.held + 1] = npc.runtime_id; return gamma_arena_result.ok(true) end
+    }
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    adapter.session_id = "ga_owned_session"
+    adapter.tactical_started = true
+    adapter.registry.npcs = {
+        { id = 1, released = false },
+        { id = 2, released = false },
+        { id = 3, released = true },
+        { id = 4, released = false }
+    }
+    env.tags = { [1] = "ga_owned_session", [2] = "ga_owned_session", [3] = "ga_owned_session", [4] = "ambient_session" }
+    local function object(id, alive)
+        return { runtime_id = id, alive = function() return alive end }
+    end
+    env.online = { [1] = object(1, true), [2] = object(2, false), [3] = object(3, true), [4] = object(4, true) }
+    env.adapter = adapter
+    return env
+end
+
+local function runtime_entity_death_neutralization_is_owned_living_and_idempotent()
+    local env = death_neutralization_fixture({ runtime_id = 99 })
+    local first = env.adapter:neutralize_owned_opponents()
+    local second = env.adapter:neutralize_owned_opponents()
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "owned opponent neutralization is a total idempotent operation")
+    gamma_arena_test_assert.equals(table.concat(env.cleared, ","), "1", "only the registered living owned NPC clears its enemy")
+    gamma_arena_test_assert.equals(table.concat(env.held, ","), "1", "only the registered living owned NPC receives actor hold")
+    gamma_arena_test_assert.equals(env.stops, 1, "tactical stop is idempotent")
+    gamma_arena_test_assert.is_true(env.adapter.registry.npcs[1].death_neutralized, "attempted owned living NPC is latched")
+    gamma_arena_test_assert.equals(env.adapter.registry.npcs[4].death_neutralized, nil, "foreign-tag ambient NPC record remains untouched")
+end
+
+local function runtime_entity_death_neutralization_without_actor_still_clears_enemy()
+    local env = death_neutralization_fixture(nil)
+    local result = env.adapter:neutralize_owned_opponents()
+    gamma_arena_test_assert.is_true(result.ok, "missing dead actor object is benign")
+    gamma_arena_test_assert.equals(table.concat(env.cleared, ","), "1", "enemy target clears without an actor object")
+    gamma_arena_test_assert.equals(#env.held, 0, "relation calls are skipped without an actor object")
+end
+
+local function runtime_entity_death_neutralization_aggregates_every_failure()
+    local env = death_neutralization_fixture({ runtime_id = 99 })
+    env.adapter.registry.npcs = {
+        { id = 1, released = false }, { id = 2, released = false }, { id = 3, released = false },
+        { id = 4, released = false }, { id = 5, released = false }
+    }
+    env.tags = { [1] = "ga_owned_session", [2] = "ga_owned_session", [3] = "ga_owned_session", [4] = "ga_owned_session", [5] = "ga_owned_session" }
+    env.adapter.deps.load_tag = function(id)
+        if id == 2 then return gamma_arena_result.err("GA_TEST_TAG", "tag failure") end
+        return env.tags[id]
+    end
+    local function living(id) return { runtime_id = id, alive = function() return true end } end
+    env.adapter.deps.online_object = function(id)
+        if id == 3 then return gamma_arena_result.err("GA_TEST_ONLINE", "online failure") end
+        if id == 4 then return { runtime_id = id, alive = function() error("alive failure") end } end
+        return living(id)
+    end
+    env.adapter.deps.tactical.stop = function() return gamma_arena_result.err("GA_TEST_STOP", "stop failure") end
+    env.adapter.deps.clear_enemy = function(npc)
+        env.cleared[#env.cleared + 1] = npc.runtime_id
+        if npc.runtime_id == 1 then return gamma_arena_result.err("GA_TEST_CLEAR", "clear failure") end
+        return gamma_arena_result.ok(true)
+    end
+    env.adapter.deps.set_actor_hold = function(npc)
+        env.held[#env.held + 1] = npc.runtime_id
+        if npc.runtime_id == 1 then return gamma_arena_result.err("GA_TEST_HOLD", "hold failure") end
+        return gamma_arena_result.ok(true)
+    end
+    local result = env.adapter:neutralize_owned_opponents()
+    gamma_arena_test_assert.is_false(result.ok, "neutralization reports aggregate failure only after all records")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ENTITY_DEATH_NEUTRALIZE_FAILED", "aggregate failure code is stable")
+    gamma_arena_test_assert.equals(#result.error.context.errors, 6, "stop, tag, online, alive, clear, and hold failures are all retained")
+    gamma_arena_test_assert.equals(table.concat(env.cleared, ","), "1,5", "later owned living records are attempted after earlier failures")
+    gamma_arena_test_assert.equals(table.concat(env.held, ","), "1,5", "relation attempts continue independently of clear failures")
 end
 
 local function runtime_task9_countdown_escape_model_routes_main_menu_cleanup()
@@ -5415,91 +5505,6 @@ local function runtime_task9_resume_completion_transition_failure_normalizes()
     gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_TEST_RESUME_TRANSITION", "resume completion transition preserves its exact cause")
 end
 
-local function runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint()
-    local env = task8_environment(); task8_pump_to_active(env)
-    local spec_before = env.orchestrator.fight_spec
-    local index_before = env.orchestrator.session.fight_index
-    local generated_before = env.generated
-    local death_hold_releases_before = env.death_hold_releases or 0
-    local flags = { ret_value = true }
-    env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
-    env.defeat_dialogs[1].on_next(); env.defeat_dialogs[1].on_next()
-    for _ = 1, 4 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "defeat rematch cleanup remains structured") end
-    gamma_arena_test_assert.equals(env.restore_calls, 0, "defeat rematch never submits checkpoint restore")
-    gamma_arena_test_assert.equals(env.cleanup_calls, 1, "repeated retry actions start one cleanup generation")
-    gamma_arena_test_assert.equals(env.reset_actor, 1, "defeat rematch resets the actor exactly once")
-    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, index_before, "defeat rematch retains fight_index")
-    gamma_arena_test_assert.equals(env.generated, generated_before, "defeat rematch consumes no new RNG generation")
-    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec == spec_before, "defeat rematch retains the immutable FightSpec facade")
-    gamma_arena_test_assert.equals(env.applied, 2, "defeat rematch reapplies the retained FightSpec exactly once")
-    gamma_arena_test_assert.equals(env.death_hold_releases or 0, death_hold_releases_before, "logical-death hold remains owned throughout rematch cleanup and countdown")
-    gamma_arena_test_assert.is_true(env.orchestrator.death_latched, "defeat latch remains set until fresh opponents are ACTIVE")
-    env.now = env.now + 3000
-    for _ = 1, 3 do
-        gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "fresh rematch activation remains structured")
-        if env.orchestrator:runtime_stage_snapshot() == "ACTIVE" then break end
-    end
-    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "fresh rematch reaches ACTIVE without a reload")
-    gamma_arena_test_assert.equals(env.death_hold_releases or 0, death_hold_releases_before + 1, "fresh ACTIVE releases the logical-death hold exactly once")
-    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "fresh ACTIVE clears the defeat latch")
-    gamma_arena_test_assert.is_false(env.orchestrator.result_action_locked, "fresh ACTIVE unlocks the next result action")
-end
-
-local function runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active()
-    local env = task8_environment(); task8_pump_to_active(env)
-    local owned = actor_loadout_ownership_fixture({ next_id = 1200 })
-    gamma_arena_test_assert.is_true(owned.applied.ok and #owned.applied.value.created_ids > 0, "integrated defeat fixture owns a non-empty tagged actor loadout")
-    for id in pairs(owned.current) do owned.current[id] = nil end
-    env.deps.actor.cleanup_loadout_for_restore = function()
-        env.actor_loadout_cleanup = env.actor_loadout_cleanup + 1
-        env.events[#env.events + 1] = "actor_cleanup"
-        local cleaned = owned.port.cleanup()
-        if cleaned.ok and not (type(cleaned.value) == "table" and cleaned.value.pending == true) then env.actor_loadout_owned = false end
-        return cleaned
-    end
-    local saved = env.orchestrator:session_snapshot()
-    local flags = { ret_value = true }
-    env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
-    env.defeat_dialogs[1].on_next()
-    env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
-    env.orchestrator:actor_on_net_destroy()
-    env.orchestrator:load_state({ gamma_arena_session = saved })
-    env.orchestrator:on_game_load()
-    env.orchestrator:actor_on_first_update()
-    for _ = 1, 4 do env.orchestrator:actor_on_update() end
-    env.now = env.now + 3000
-    env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
-    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, saved.fight_index + 1, "restored session uses ResumeIntent next index")
-    gamma_arena_test_assert.equals(env.generated, 2, "clean reload generates exactly one new FightSpec")
-    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "defeat-next reaches a new ACTIVE fight")
-    gamma_arena_test_assert.equals(env.death_hold_releases, 1, "restored actor releases only logical-death invulnerability")
-    gamma_arena_test_assert.is_true(env.actor_loadout_owned, "new ACTIVE fight owns only its newly applied actor loadout")
-    gamma_arena_test_assert.equals(#owned.releases, 0, "defeat recovery retires consumed absent actor ids without submitting a release")
-end
-
-local function runtime_task9_defeat_and_victory_share_main_menu_cleanup()
-    local env = task8_environment(); task8_pump_to_active(env)
-    local flags = { ret_value = true }
-    env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
-    env.defeat_dialogs[1].on_main_menu(); env.orchestrator:actor_on_update()
-    gamma_arena_test_assert.equals(env.registry.state, "CLEAN", "defeat main menu drains the same exact registry")
-    gamma_arena_test_assert.equals(env.deps.checkpoint.current, "NONE", "defeat main menu removes the same checkpoint")
-    gamma_arena_test_assert.equals(env.clear_intent, 1, "defeat main menu clears matching intent")
-    gamma_arena_test_assert.equals(env.disconnected, 1, "defeat main menu disconnects only after cleanup")
-end
-
-local function runtime_task9_restore_failure_enters_error_with_safe_menu_only()
-    local env = task8_environment({ restore_error = true }); task8_pump_to_active(env)
-    local flags = { ret_value = true }
-    env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
-    local failed = env.defeat_dialogs[1].on_next()
-    gamma_arena_test_assert.is_false(failed.ok, "checkpoint restore failure remains observable")
-    gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "restore failure enters ERROR")
-    gamma_arena_test_assert.equals(env.fatal_shown, 1, "ERROR exposes only the fatal main-menu recovery")
-    gamma_arena_test_assert.is_true(type(env.orchestrator.fatal_dialog.callback) == "function", "fatal recovery retains the safe main-menu callback")
-    gamma_arena_test_assert.equals(env.orchestrator.fatal_dialog.on_next, nil, "fatal recovery cannot retry a failed load")
-end
-
 local cases = {
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_accepts_callable_engine_objects", fn = preflight_accepts_callable_engine_objects },
@@ -5508,7 +5513,6 @@ local cases = {
     { name = "runtime_preflight_requires_tactical_director_config", fn = preflight_requires_tactical_director_config },
     { name = "runtime_preflight_aggregates_in_stable_order", fn = preflight_aggregates_in_stable_order },
     { name = "runtime_preflight_requires_task6_actor_checkpoint_ports", fn = preflight_requires_task6_actor_checkpoint_ports },
-    { name = "runtime_preflight_requires_task9_death_hold_port", fn = preflight_requires_task9_death_hold_port },
     { name = "runtime_preflight_requires_task7_entity_ports_and_ammo_metadata", fn = preflight_requires_task7_entity_ports_and_ammo_metadata },
     { name = "runtime_wrong_level_skips_patrol_resolution", fn = wrong_level_skips_patrol_resolution },
     { name = "runtime_preflight_requires_arena_boundary_restrictor", fn = preflight_requires_arena_boundary_restrictor },
@@ -5661,13 +5665,13 @@ local cases = {
     ,{ name = "runtime_task8_clean_registry_requires_exact_empty_arrays", fn = runtime_task8_clean_registry_requires_exact_empty_arrays }
     ,{ name = "runtime_task8_duplicate_result_clicks_are_idempotent", fn = runtime_task8_duplicate_result_clicks_are_idempotent }
     ,{ name = "runtime_task8_one_hundred_fights_leave_empty_registries", fn = runtime_task8_one_hundred_fights_leave_empty_registries }
-    ,{ name = "runtime_task9_ordinary_death_is_inert", fn = runtime_task9_ordinary_death_is_inert }
-    ,{ name = "runtime_task9_active_death_latches_and_defers_defeat", fn = runtime_task9_active_death_latches_and_defers_defeat }
-    ,{ name = "runtime_task9_death_outside_active_is_not_a_defeat", fn = runtime_task9_death_outside_active_is_not_a_defeat }
-    ,{ name = "runtime_task9_single_result_contract_maps_both_kinds", fn = runtime_task9_single_result_contract_maps_both_kinds }
+    ,{ name = "runtime_natural_death_arms_confirms_and_neutralizes_once", fn = runtime_natural_death_arms_confirms_and_neutralizes_once }
+    ,{ name = "runtime_natural_death_failures_never_cancel_engine_death", fn = runtime_natural_death_failures_never_cancel_engine_death }
+    ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
+    ,{ name = "runtime_entity_death_neutralization_is_owned_living_and_idempotent", fn = runtime_entity_death_neutralization_is_owned_living_and_idempotent }
+    ,{ name = "runtime_entity_death_neutralization_without_actor_still_clears_enemy", fn = runtime_entity_death_neutralization_without_actor_still_clears_enemy }
+    ,{ name = "runtime_entity_death_neutralization_aggregates_every_failure", fn = runtime_entity_death_neutralization_aggregates_every_failure }
     ,{ name = "runtime_task9_countdown_escape_model_routes_main_menu_cleanup", fn = runtime_task9_countdown_escape_model_routes_main_menu_cleanup }
-    ,{ name = "runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint", fn = runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint }
-    ,{ name = "runtime_task9_defeat_and_victory_share_main_menu_cleanup", fn = runtime_task9_defeat_and_victory_share_main_menu_cleanup }
 }
 
 function run(run_case_fn)

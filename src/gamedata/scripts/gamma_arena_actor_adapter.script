@@ -60,7 +60,6 @@ function ActorAdapter:__init(deps)
     self.update_tick = 0
     self.purge_tick = nil
     self.inventory_clean = false
-    self.held_after_death = false
     self.victory_reset_started = false
 end
 
@@ -325,33 +324,6 @@ function ActorAdapter:reset_for_rematch(layout)
     return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" })
 end
 
-function ActorAdapter:hold_after_logical_death()
-    local owned = self:owned_actor()
-    if not owned.ok then return owned end
-    local acquired = self:acquire_input()
-    if not acquired.ok then return acquired end
-    local normalized = self:normalize_status(owned.value)
-    if not normalized.ok then self:release_input(); return normalized end
-    local invulnerability = self.deps.invulnerability
-    if type(invulnerability) ~= "table" or type(invulnerability.set) ~= "function" then
-        self:release_input()
-        return fail("GA_ACTOR_DEATH_HOLD_UNAVAILABLE", "Logical-death invulnerability port is deferred until the result-flow integration")
-    end
-    local held = dependency_result("GA_ACTOR_DEATH_HOLD_FAILED", invulnerability.set, true)
-    if not held.ok then self:release_input(); return held end
-    self.held_after_death = true
-    return gamma_arena_result.ok(true)
-end
-
-function ActorAdapter:release_logical_death_hold()
-    if not self.held_after_death then return gamma_arena_result.ok(false) end
-    local invulnerability = self.deps.invulnerability
-    local released = dependency_result("GA_ACTOR_DEATH_HOLD_RELEASE_FAILED", invulnerability and invulnerability.set, false)
-    if not released.ok then return released end
-    self.held_after_death = false
-    return gamma_arena_result.ok(true)
-end
-
 function ActorAdapter:cleanup()
     local errors = {}
     local loadout_pending = false
@@ -363,10 +335,6 @@ function ActorAdapter:cleanup()
         elseif type(result.value) == "table" and result.value.pending == true then
             loadout_pending = true
         end
-    end
-    if self.held_after_death then
-        local result = self:release_logical_death_hold()
-        if not result.ok then errors[#errors + 1] = result.error end
     end
     local input = self:release_input()
     if not input.ok then errors[#errors + 1] = input.error end

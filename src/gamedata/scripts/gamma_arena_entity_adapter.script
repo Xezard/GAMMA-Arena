@@ -307,6 +307,50 @@ function EntityAdapter:stop_tactical()
     return stopped
 end
 
+function EntityAdapter:neutralize_owned_opponents()
+    local errors = {}
+    local stopped = self:stop_tactical()
+    if not stopped.ok then errors[#errors + 1] = stopped.error end
+
+    for _, record in ipairs(self.registry.npcs) do
+        if not record.released and record.death_neutralized ~= true then
+            local owner = self:load_owner_tag(record.id)
+            if not owner.ok then
+                errors[#errors + 1] = owner.error
+            elseif owner.value == self.session_id then
+                local online = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
+                if not online.ok then
+                    errors[#errors + 1] = online.error
+                elseif online.value ~= nil then
+                    local alive = self:is_alive(online.value)
+                    if not alive.ok then
+                        errors[#errors + 1] = alive.error
+                    elseif alive.value then
+                        record.death_neutralized = true
+                        local cleared = result_call("GA_ENTITY_DEATH_CLEAR_ENEMY_FAILED", self.deps.clear_enemy, online.value)
+                        if not cleared.ok then errors[#errors + 1] = cleared.error end
+                        local actor = result_call("GA_ENTITY_ACTOR_MISSING", self.deps.actor_object)
+                        if not actor.ok then
+                            errors[#errors + 1] = actor.error
+                        elseif actor.value ~= nil then
+                            local held = result_call("GA_ENTITY_DEATH_ACTOR_HOLD_FAILED", self.deps.set_actor_hold, online.value, actor.value)
+                            if not held.ok then errors[#errors + 1] = held.error end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #errors > 0 then
+        return fail("GA_ENTITY_DEATH_NEUTRALIZE_FAILED", "Arena-owned opponents could not all be neutralized safely", {
+            session_id = self.session_id,
+            errors = errors
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
 function EntityAdapter:clock()
     local result = result_call("GA_ENTITY_CLOCK_FAILED", self.deps.clock)
     if not result.ok then return result end

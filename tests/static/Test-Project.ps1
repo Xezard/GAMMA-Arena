@@ -429,7 +429,7 @@ foreach ($RelativePath in $Task5RuntimeFiles) {
 $Task5BootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
     $Task5BootstrapContent = Get-Content -LiteralPath $Task5BootstrapPath -Raw
-    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
+    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','actor_on_death','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
         Assert-True ($Task5BootstrapContent -match ('"' + [regex]::Escape($Callback) + '"')) "Bootstrap registration table must contain $Callback"
     }
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_quit') 'Bootstrap must not treat closing MCM/main menu as quitting Arena'
@@ -504,6 +504,11 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Production event diagnostics must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'deferred_level_logged') 'Wrong-level launch diagnostics must be deduplicated instead of logging every frame'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_death\s*\(\s*\)') 'Natural actor death callback must expose the no-argument Anomaly signature'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,1200}arm_defeat') 'Before-death handling must arm the persisted cross-VM defeat intent'
+    $Task5BeforeDeathBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:actor_on_before_death[\s\S]*?[\r\n]+end').Value
+    Assert-True ($Task5BeforeDeathBlock -notmatch 'ret_value|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
+    Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:(show_defeat|defeat_next_action)') 'Natural death must remove the in-level logical-defeat UI and retry path'
 }
 
 $Task5StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
@@ -559,14 +564,12 @@ if (Test-Path -LiteralPath $Task9UiXmlPath) {
     } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
 }
 if (Test-Path -LiteralPath $Task5OrchestratorPath) {
-    foreach ($Marker in @('death_latched','pending_result','ret_value','hold_after_logical_death','release_logical_death_hold','show_defeat','defeat_next_action','NEXT_AFTER_DEFEAT','drive_continuation')) {
-        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 9 orchestrator must cover $Marker"
+    foreach ($Marker in @('death_latched','defeat_token','arm_defeat','confirm_defeat','neutralize_owned_opponents','NEXT_AFTER_DEFEAT','drive_continuation')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Natural-death orchestrator must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'show_countdown["'']\s*,\s*\{[\s\S]{0,500}on_main_menu') 'Task 9 countdown model must route the common Arena main-menu cleanup'
     $Task9VictoryBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:show_victory\(\)[\s\S]*?[\r\n]+end').Value
-    $Task9DefeatBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:show_defeat\(\)[\s\S]*?[\r\n]+end').Value
     Assert-True ($Task9VictoryBlock -notmatch 'acquire_input') 'Victory result modal must not globally disable mouse input'
-    Assert-True ($Task9DefeatBlock -match 'release_input') 'Defeat result modal must release logical-death global input before showing UI'
     Assert-True ($Task5OrchestratorContent -match 'if\s+state\.resume_pending\s+then[\s\S]{0,300}GA_RESUME_UNSUPPORTED') 'Legacy ResumeIntent must fail safely without checkpoint recovery'
     Assert-True ($Task5OrchestratorContent -notmatch 'checkpoint_restore_failure|normalize_resume_preparation') 'Checkpoint recovery normalizers must be absent from dedicated Arena runtime'
 }
@@ -574,18 +577,16 @@ $Task9ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_ad
 if (Test-Path -LiteralPath $Task9ActorPath) {
     $Task9ActorContent = Get-Content -LiteralPath $Task9ActorPath -Raw
     Assert-True ($Task9ActorContent -match [regex]::Escape('cleanup_loadout_for_restore')) 'Task 9 actor adapter must expose owned-loadout-only cleanup before restore'
+    Assert-True ($Task9ActorContent -notmatch 'hold_after_logical_death|release_logical_death_hold|held_after_death') 'Actor adapter must not retain logical-death hold or revival state'
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_preflight_requires_task9_death_hold_port','runtime_task9_ordinary_death_is_inert','runtime_task9_active_death_latches_and_defers_defeat','runtime_task9_death_outside_active_is_not_a_defeat','runtime_task9_single_result_contract_maps_both_kinds','runtime_task9_countdown_escape_model_routes_main_menu_cleanup','runtime_task9_resume_failures_normalize_to_restore_failed','runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint','runtime_task9_defeat_and_victory_share_main_menu_cleanup','runtime_task9_restore_failure_enters_error_with_safe_menu_only','runtime_fight_index_max_minus_one_advances_once','runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal','runtime_actor_loadout_consumed_absent_id_retires_without_release','runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released','runtime_actor_loadout_post_submit_reuse_is_never_released_twice','runtime_actor_loadout_malformed_ownership_proof_fails_closed','runtime_actor_loadout_exact_owned_match_releases_once','runtime_actor_loadout_apply_failures_never_drop_valid_created_ids','runtime_actor_loadout_failed_tag_write_never_manufactures_ownership','runtime_task9_resume_pending_invalid_loaded_session_normalizes','runtime_task9_restoring_state_read_failure_normalizes','runtime_task9_resume_completion_transition_failure_normalizes')) {
+    foreach ($Marker in @('runtime_natural_death_arms_confirms_and_neutralizes_once','runtime_natural_death_failures_never_cancel_engine_death','runtime_natural_death_outside_active_arena_is_inert','runtime_entity_death_neutralization_is_owned_living_and_idempotent','runtime_entity_death_neutralization_without_actor_still_clears_enemy','runtime_entity_death_neutralization_aggregates_every_failure','runtime_task9_countdown_escape_model_routes_main_menu_cleanup','runtime_task9_resume_failures_normalize_to_restore_failed','runtime_fight_index_max_minus_one_advances_once','runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal','runtime_actor_loadout_consumed_absent_id_retires_without_release','runtime_actor_loadout_pre_release_reused_foreign_id_is_never_released','runtime_actor_loadout_post_submit_reuse_is_never_released_twice','runtime_actor_loadout_malformed_ownership_proof_fails_closed','runtime_actor_loadout_exact_owned_match_releases_once','runtime_actor_loadout_apply_failures_never_drop_valid_created_ids','runtime_actor_loadout_failed_tag_write_never_manufactures_ownership','runtime_task9_resume_pending_invalid_loaded_session_normalizes','runtime_task9_restoring_state_read_failure_normalizes','runtime_task9_resume_completion_transition_failure_normalizes')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 9 Dev tests must cover $Marker"
     }
 }
-if (Test-Path -LiteralPath $Task5CompatPath) {
-    Assert-True ($Task5CompatContent -match [regex]::Escape('db.actor.set_invulnerable/invulnerable')) 'Task 9 preflight must require a proven logical-death hold API'
-}
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
-    Assert-True ($Task5BootstrapContent -match 'actor\.set_invulnerable') 'Task 9 bootstrap must bind the proven actor logical-death hold API'
     Assert-True ($Task5BootstrapContent -match 'gamma_arena_ui_result\.new\s*\(') 'Task 9 bootstrap must replace the Task 8 UI placeholder with the real adapter'
+    Assert-True ($Task5BootstrapContent -match 'clear_enemy\s*=\s*function\s*\(\s*npc\s*\)[\s\S]{0,220}set_enemy\s*\(\s*nil\s*\)') 'Runtime entity composition must clear only a provided registered NPC enemy target'
     foreach ($Marker in @('ownership_token','save_owner_tag','load_owner_tag','resolve_entity','GA_ACTOR_LOADOUT_OWNERSHIP_MISMATCH')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Task 9 actor loadout cleanup must cover reuse-safe ownership proof: $Marker"
     }
@@ -605,7 +606,7 @@ foreach ($RelativePath in $Task6RuntimeFiles) {
 $Task6ActorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
 if (Test-Path -LiteralPath $Task6ActorPath) {
     $Task6ActorContent = Get-Content -LiteralPath $Task6ActorPath -Raw
-    foreach ($Marker in @('normalize_for_arena','verify_inventory_empty','apply_loadout','reset_for_rematch','hold_after_logical_death','release_logical_death_hold','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_actor_condition','power','radiation','bleeding','psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
+    foreach ($Marker in @('normalize_for_arena','verify_inventory_empty','apply_loadout','reset_for_rematch','begin_update','iterate_inventory','"parent"','release_item_id','set_health_ex','set_actor_condition','power','radiation','bleeding','psy_health','give_money','disable_effects_timer','set_actor_position','set_actor_direction','input_owned','GA_ACTOR_INACTIVE')) {
         Assert-True ($Task6ActorContent -match [regex]::Escape($Marker)) "Actor adapter must cover $Marker"
     }
     Assert-True ($Task6ActorContent -notmatch 'function\s+ActorAdapter:enforce_boundary') 'Closed Rostok Arena must not run a per-update actor boundary teleport guard'
@@ -690,11 +691,10 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:enforce_actor_boundary') 'Closed Rostok Arena orchestration must not perform runtime boundary correction'
     Assert-True ($Task5OrchestratorContent -match 'if\s+self\.runtime_stage\s*==\s*"WAIT_INVENTORY"[\s\S]{0,900}self:set_runtime_stage\("PREPARING"\)') 'Empty dedicated Arena inventory must advance directly to PREPARING'
     Assert-True ($Task5OrchestratorContent -notmatch 'GA_CHECKPOINT_CREATE_FAILED') 'Dedicated Arena startup must never create a save checkpoint'
-    Assert-True ($Task5OrchestratorContent -match 'pending_continuation_kind\s*=\s*"defeat_retry"') 'Defeat retry must select the in-memory continuation path'
-    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:drive_continuation') 'Victory and defeat must share one bounded continuation transaction'
-    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:drive_continuation[\s\S]{0,5000}pending_continuation_kind[\s\S]{0,5000}begin_apply[\s\S]{0,1500}fight_spec') 'Defeat retry must retain and reapply the immutable FightSpec'
-    Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:defeat_next_action[\s\S]{0,1800}resolve_next_fight_index') 'Defeat retry must not advance fight_index'
-    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,900}release_logical_death_hold[\s\S]{0,600}release_input') 'Fresh ACTIVE must release the logical-death hold before returning player input'
+    Assert-True ($Task5OrchestratorContent -match 'pending_continuation_kind\s*=\s*"integrity_retry"') 'Integrity retry must select the bounded exact-fight continuation path'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:drive_continuation') 'Victory and integrity retry must share one bounded continuation transaction'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:drive_continuation[\s\S]{0,5000}pending_continuation_kind[\s\S]{0,5000}begin_apply[\s\S]{0,1500}fight_spec') 'Integrity retry must retain and reapply the immutable FightSpec'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,900}release_input') 'Fresh ACTIVE must return player input without a logical-death revival step'
     Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,1800}death_latched\s*=\s*false[\s\S]{0,600}result_action_locked\s*=\s*false') 'Fresh ACTIVE must clear the repeated-rematch latches'
     Assert-True ($Task5BootstrapContent -notmatch 'gamma_arena_checkpoint_adapter|default_checkpoint_adapter|checkpoint_adapter|stage\s*=\s*"checkpoint"') 'Dedicated Arena composition and teardown must not bind the checkpoint adapter'
     Assert-True ($Task5OrchestratorContent -notmatch 'deps\.checkpoint|CHECKPOINTING|RESTORING|RESUME_REHIDING|request_checkpoint_restore|expect_checkpoint_reload|checkpoint_ready') 'Dedicated Arena runtime must not contain active checkpoint stages or dependencies'
@@ -736,7 +736,7 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
 }
 if (Test-Path -LiteralPath $Task7EntityPath) {
     $Task7EntityContent = Get-Content -LiteralPath $Task7EntityPath -Raw
-    foreach ($Marker in @('begin_apply','update','on_npc_death','living_opponent_count','cleanup','registry_snapshot','gamma_arena_owner','se_load_var','get_children','parent_id','safe_release_manager','set_relation','game_object.enemy','game_object.friend','-5000','AI_STL_S','bandit','persist_death_dropped','GA_ENTITY_DEATH_DROPPED_VERIFY_FAILED','hold_offline','request_online','online_requested','held_offline','staged_friendly','set_actor_hold','GA_ENTITY_ACTIVATION_HOLD_FAILED','GA_ENTITY_ONLINE_REQUEST_FAILED','GA_ENTITY_ONLINE_TIMEOUT','GA_ENTITY_RELEASE_TIMEOUT','GA_ENTITY_PARENT_RELEASE_BLOCKED','GA_ENTITY_CHILD_PARENT_UNPROVEN','register_and_tag_created_item','profile_runtime','ammo_box_size','ammo_rounds')) {
+    foreach ($Marker in @('begin_apply','update','on_npc_death','living_opponent_count','neutralize_owned_opponents','death_neutralized','clear_enemy','GA_ENTITY_DEATH_NEUTRALIZE_FAILED','cleanup','registry_snapshot','gamma_arena_owner','se_load_var','get_children','parent_id','safe_release_manager','set_relation','game_object.enemy','game_object.friend','-5000','AI_STL_S','bandit','persist_death_dropped','GA_ENTITY_DEATH_DROPPED_VERIFY_FAILED','hold_offline','request_online','online_requested','held_offline','staged_friendly','set_actor_hold','GA_ENTITY_ACTIVATION_HOLD_FAILED','GA_ENTITY_ONLINE_REQUEST_FAILED','GA_ENTITY_ONLINE_TIMEOUT','GA_ENTITY_RELEASE_TIMEOUT','GA_ENTITY_PARENT_RELEASE_BLOCKED','GA_ENTITY_CHILD_PARENT_UNPROVEN','register_and_tag_created_item','profile_runtime','ammo_box_size','ammo_rounds')) {
         Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Task 7 entity adapter must cover $Marker"
     }
     Assert-True ($Task7EntityContent -match 'type\([^\r\n]*\)\s*==\s*"function"') 'Task 7 child snapshots must support the real GAMMA iterator contract'
@@ -747,6 +747,9 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -notmatch '\balife_release_id\s*\(') 'Entity adapter must never directly release a standalone stalker'
     Assert-True ($Task7EntityContent -notmatch '\bmath\.(random|randomseed)\b') 'Entity adapter must not consume global randomness'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:on_npc_death[\s\S]{0,900}if\s+not\s+owner\.ok\s+then\s+return\s+owner\s+end') 'Registered death owner-tag read failures must propagate instead of looking like benign mismatches'
+    $Task5NeutralizeBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:neutralize_owned_opponents[\s\S]*?function\s+EntityAdapter:clock').Value
+    Assert-True ($Task5NeutralizeBlock -match 'self\.registry\.npcs[\s\S]{0,700}self:load_owner_tag[\s\S]{0,900}self\.deps\.online_object') 'Death neutralization must remain registry-, persisted-owner-, and online-object-bounded'
+    Assert-True ($Task5NeutralizeBlock -notmatch 'level\.object_by_id|alife\(\)\.object|for\s+[^\r\n]+\s+in\s+pairs\s*\(\s*db') 'Death neutralization must never fall back to a global NPC scan'
     Assert-True ($Task7EntityContent -match 'expected_created_quantity') 'Opponent loadout must derive exact ammo allocation when server quantity is unavailable'
     Assert-True ($Task7EntityContent -match 'community\s*=\s*participant\.community') 'Entity adapter participant copies must preserve dynamic FightSpec community'
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
