@@ -2805,9 +2805,15 @@ local function fake_entity_environment(options)
                 env:add_entity("random_weapon", npc:id(), 1)
                 env:add_entity("random_ammo", npc:id(), 8)
             end
-            local object = { runtime_id = npc:id(), alive_value = options.fail_phase ~= "alive", critical_value = false }
+            local object = {
+                runtime_id = npc:id(),
+                alive_value = options.fail_phase ~= "alive",
+                critical_value = false,
+                position_value = { x = position.x, y = position.y, z = position.z }
+            }
             function object:id() return self.runtime_id end
             function object:alive() return self.alive_value end
+            function object:position() return self.position_value end
             env.online_candidates[npc:id()] = object
             env.online[npc:id()] = object
             return npc
@@ -2894,6 +2900,7 @@ local function fake_entity_environment(options)
             if options.fail_phase == "online" then return nil end
             return env.online[id]
         end,
+        object_position = function(object) return object:position() end,
         is_critically_wounded = function(object) return object.critical_value == true end,
         actor_object = function() return { runtime_id = 1 } end,
         item_quantity = function(entity, is_ammo)
@@ -3891,6 +3898,21 @@ local function runtime_entity_parent_release_blocks_unproven_children()
     for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= npc_id, "blocked NPC is never submitted to safe release") end
 end
 
+local function runtime_entity_cleanup_retires_vanished_owned_child()
+    local env, deps = fake_entity_environment({ cascade_parent_release = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-owned-child-vanished"); pump_entity(adapter, env)
+    local snapshot = adapter:registry_snapshot()
+    local npc_id = snapshot.npcs[1].id
+    local child_id = snapshot.items[1].id
+    env.objects[child_id] = nil
+    env.online[child_id] = nil
+    adapter:cleanup(); local result, final_snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and final_snapshot.state == "CLEAN", "vanished registered tagged child cannot block actor-death cleanup")
+    gamma_arena_test_assert.equals(env.objects[npc_id], nil, "parent NPC is released after proved owned child retirement")
+    for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= child_id, "already absent owned child is never submitted for release") end
+end
+
 local function runtime_entity_parent_release_blocks_unreadable_child_parent()
     local cases = {
         { label = "missing", mutate = function(env, child) env.objects[child:id()] = nil end, child_remains = false },
@@ -4066,6 +4088,55 @@ local function runtime_entity_missing_uses_grace_but_absence_is_immediate()
     absent_env.objects[absent.id] = nil
     absent_env:advance(250); absent_adapter:update()
     gamma_arena_test_assert.equals(absent_adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_MISSING", "proved ALife absence is terminal immediately")
+end
+
+local function runtime_entity_vertical_escape_requires_grace()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-vertical-integrity"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    local object = env.online[victim.id]
+    object.position_value.y = 6
+    env:advance(250); gamma_arena_test_assert.is_true(adapter:update().ok, "first vertical anomaly remains pending")
+    gamma_arena_test_assert.is_false(adapter:integrity_status().value, "transient vertical anomaly cannot restart a fight")
+    object.position_value.y = 2
+    env:advance(250); gamma_arena_test_assert.is_true(adapter:update().ok, "returning to the floor clears pending escape evidence")
+    gamma_arena_test_assert.is_false(adapter:integrity_status().value, "recovered vertical anomaly remains healthy")
+    object.position_value.y = 6
+    env:advance(250); adapter:update()
+    env:advance(1250); adapter:update()
+    env:advance(250); adapter:update()
+    local fault = adapter:integrity_status()
+    gamma_arena_test_assert.is_true(fault.ok and type(fault.value) == "table", "stable vertical escape becomes an integrity fault")
+    gamma_arena_test_assert.equals(fault.value.cause, "vertical_escape", "vertical escape cause is stable")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "escaped living opponent is never manufactured into a defeat")
+end
+
+local function runtime_entity_missing_is_integrity_not_victory()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-missing-integrity"); pump_entity(adapter, env)
+    local victim = adapter:registry_snapshot().npcs[1]
+    env.online[victim.id] = nil
+    env:advance(250); adapter:update()
+    env:advance(1500); adapter:update()
+    local fault = adapter:integrity_status()
+    gamma_arena_test_assert.is_true(fault.ok and type(fault.value) == "table", "stable missing opponent becomes an integrity fault")
+    gamma_arena_test_assert.equals(fault.value.cause, "opponent_missing", "missing opponent cause is stable")
+    gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "missing opponent can never satisfy the victory count")
+end
+
+local function runtime_entity_early_self_death_is_integrity()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-self-death-integrity"); pump_entity(adapter, env)
+    local victim_id = adapter:registry_snapshot().npcs[1].id
+    local victim = { id = function() return victim_id end }
+    local accepted = adapter:on_npc_death(victim, victim)
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value, "registered self-death remains authoritative death evidence")
+    local fault = adapter:integrity_status()
+    gamma_arena_test_assert.is_true(fault.ok and type(fault.value) == "table", "early self-death also marks the round corrupted")
+    gamma_arena_test_assert.equals(fault.value.cause, "early_self_death", "self-death cause is stable")
 end
 
 local function runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only()
@@ -4354,7 +4425,8 @@ local function task8_environment(options)
         death_holds = 0,
         restore_calls = 0,
         actor_loadout_owned = false,
-        actor_loadout_cleanup = 0
+        actor_loadout_cleanup = 0,
+        integrity_fault = nil
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
@@ -4387,6 +4459,7 @@ local function task8_environment(options)
         env.events[#env.events + 1] = "apply"
         env.applied = env.applied + 1
         env.living = #spec.opponents()
+        env.integrity_fault = nil
         env.registry = { state = "COUNTDOWN", session_id = session_id, npcs = {}, items = {}, error = nil }
         for index = 1, env.living do
             env.next_id = env.next_id + 1
@@ -4412,6 +4485,7 @@ local function task8_environment(options)
         return gamma_arena_result.ok(false)
     end
     function entities:living_opponent_count() return env.living end
+    function entities:integrity_status() return gamma_arena_result.ok(env.integrity_fault or false) end
     function entities:cleanup()
         env.events[#env.events + 1] = "cleanup"
         env.cleanup_calls = env.cleanup_calls + 1
@@ -4632,6 +4706,48 @@ local function runtime_active_poll_queues_victory_without_death_callback()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 0, "ACTIVE reconciliation queues and never opens result UI synchronously")
     env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "zero reconciled opponents opens victory without relying on the external death callback")
+end
+
+local function task8_pump_integrity_retry_to_active(env)
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "integrity fault queues bounded recovery")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "NEXT_CLEANUP", "integrity recovery bypasses result UI")
+    for _ = 1, 4 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "integrity cleanup and exact reapply remain frame-driven") end
+    env.now = env.now + 3000
+    for _ = 1, 3 do
+        gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "integrity retry countdown remains structured")
+        if env.orchestrator:runtime_stage_snapshot() == "ACTIVE" then break end
+    end
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "integrity retry returns the same fight to ACTIVE")
+end
+
+local function runtime_orchestrator_integrity_retries_same_spec_twice()
+    local env = task8_environment(); task8_pump_to_active(env)
+    local spec_before = env.orchestrator.fight_spec
+    local index_before = env.orchestrator.session.fight_index
+    local generated_before = env.generated
+    env.integrity_fault = { cause = "vertical_escape", opponent_id = env.registry.npcs[1].id }
+    task8_pump_integrity_retry_to_active(env)
+    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec == spec_before, "first integrity retry retains the immutable FightSpec")
+    env.integrity_fault = { cause = "opponent_missing", opponent_id = env.registry.npcs[1].id }
+    task8_pump_integrity_retry_to_active(env)
+    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec == spec_before, "second integrity retry retains the immutable FightSpec")
+    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, index_before, "integrity retries never advance fight index")
+    gamma_arena_test_assert.equals(env.generated, generated_before, "integrity retries consume no new generation")
+    gamma_arena_test_assert.equals(env.applied, 3, "initial fight plus two retries apply the same spec three times")
+    gamma_arena_test_assert.equals(#env.victory_dialogs + #env.defeat_dialogs, 0, "integrity retries never display a result dialog")
+end
+
+local function runtime_orchestrator_integrity_retry_exhaustion_fails()
+    local env = task8_environment(); task8_pump_to_active(env)
+    for attempt = 1, 2 do
+        env.integrity_fault = { cause = "vertical_escape", attempt = attempt }
+        task8_pump_integrity_retry_to_active(env)
+    end
+    env.integrity_fault = { cause = "vertical_escape", attempt = 3 }
+    local failed = env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "third integrity fault cannot loop forever")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_FIGHT_INTEGRITY_RETRY_EXHAUSTED", "retry exhaustion code is stable")
+    gamma_arena_test_assert.equals(#env.victory_dialogs + #env.defeat_dialogs, 0, "retry exhaustion never manufactures a combat result")
 end
 
 local function runtime_result_modal_releases_global_input()
@@ -5278,6 +5394,7 @@ local cases = {
     ,{ name = "runtime_entity_forged_tag_is_ignored", fn = runtime_entity_forged_tag_is_ignored }
     ,{ name = "runtime_entity_tag_loss_fails_safe", fn = runtime_entity_tag_loss_fails_safe }
     ,{ name = "runtime_entity_parent_release_blocks_unproven_children", fn = runtime_entity_parent_release_blocks_unproven_children }
+    ,{ name = "runtime_entity_cleanup_retires_vanished_owned_child", fn = runtime_entity_cleanup_retires_vanished_owned_child }
     ,{ name = "runtime_entity_parent_release_blocks_unreadable_child_parent", fn = runtime_entity_parent_release_blocks_unreadable_child_parent }
     ,{ name = "runtime_entity_cleanup_is_idempotent", fn = runtime_entity_cleanup_is_idempotent }
     ,{ name = "runtime_entity_lifecycle_cleanup_takes_over_mid_rollback", fn = runtime_entity_lifecycle_cleanup_takes_over_mid_rollback }
@@ -5289,6 +5406,9 @@ local cases = {
     ,{ name = "runtime_entity_wounded_requires_grace_before_defeat", fn = runtime_entity_wounded_requires_grace_before_defeat }
     ,{ name = "runtime_entity_wounded_and_missing_pending_can_recover", fn = runtime_entity_wounded_and_missing_pending_can_recover }
     ,{ name = "runtime_entity_missing_uses_grace_but_absence_is_immediate", fn = runtime_entity_missing_uses_grace_but_absence_is_immediate }
+    ,{ name = "runtime_entity_vertical_escape_requires_grace", fn = runtime_entity_vertical_escape_requires_grace }
+    ,{ name = "runtime_entity_missing_is_integrity_not_victory", fn = runtime_entity_missing_is_integrity_not_victory }
+    ,{ name = "runtime_entity_early_self_death_is_integrity", fn = runtime_entity_early_self_death_is_integrity }
     ,{ name = "runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only", fn = runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only }
     ,{ name = "runtime_entity_numeric_death_requires_test_injection", fn = runtime_entity_numeric_death_requires_test_injection }
     ,{ name = "runtime_entity_release_is_async_and_never_direct", fn = runtime_entity_release_is_async_and_never_direct }
@@ -5312,6 +5432,8 @@ local cases = {
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
     ,{ name = "runtime_active_poll_queues_victory_without_death_callback", fn = runtime_active_poll_queues_victory_without_death_callback }
+    ,{ name = "runtime_orchestrator_integrity_retries_same_spec_twice", fn = runtime_orchestrator_integrity_retries_same_spec_twice }
+    ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }

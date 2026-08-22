@@ -3,6 +3,7 @@ Orchestrator.__index = Orchestrator
 local UINT32_MOD = 4294967296
 local UINT32_MAX = UINT32_MOD - 1
 local COUNTDOWN_DURATION_MS = 3000
+local MAX_INTEGRITY_RETRIES = 2
 
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
@@ -133,6 +134,7 @@ function Orchestrator:__init(deps)
     self.pending_disconnect = false
     self.pending_callback_error = nil
     self.deferred_level_logged = nil
+    self.integrity_retry_count = 0
     self.machine_state = gamma_arena_state_machine.states.IDLE
 end
 
@@ -419,6 +421,7 @@ function Orchestrator:on_game_load()
     self.pending_disconnect = false
     self.pending_callback_error = nil
     self.deferred_level_logged = nil
+    self.integrity_retry_count = 0
     return gamma_arena_result.ok(true)
 end
 
@@ -616,6 +619,7 @@ function Orchestrator:prepare_fight()
     self.fight_spec = spec
     self.countdown_value = nil
     self.pending_victory = false
+    self.integrity_retry_count = 0
     self.result_action_locked = false
     self:set_runtime_stage("EQUIPPING")
     return gamma_arena_result.ok({ stage = "EQUIPPING" })
@@ -792,6 +796,63 @@ function Orchestrator:queue_victory()
     return gamma_arena_result.ok(true)
 end
 
+function Orchestrator:active_integrity_fault()
+    if not self:is_active() or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
+    local status = call_method("GA_FIGHT_INTEGRITY_STATUS_FAILED", self.deps.entities, "integrity_status")
+    if not status.ok then return status end
+    if status.value == false or status.value == nil then return gamma_arena_result.ok(false) end
+    if type(status.value) ~= "table" or type(status.value.cause) ~= "string" or status.value.cause == "" then
+        return fail("GA_FIGHT_INTEGRITY_STATUS_FAILED", "Arena integrity status returned malformed evidence")
+    end
+    return status
+end
+
+function Orchestrator:queue_integrity_retry(fault)
+    if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.pending_result == "defeat" then
+        return gamma_arena_result.ok(false)
+    end
+    if type(self.fight_spec) ~= "table" or self.session == nil then
+        return fail("GA_FIGHT_SPEC_MISSING", "Integrity recovery requires the immutable current FightSpec")
+    end
+    if self.integrity_retry_count >= MAX_INTEGRITY_RETRIES then
+        return fail("GA_FIGHT_INTEGRITY_RETRY_EXHAUSTED", "Arena round integrity failed after bounded exact retries", {
+            attempts = self.integrity_retry_count,
+            fight_index = self.session.fight_index,
+            fault = fault
+        })
+    end
+    local attempt = self.integrity_retry_count + 1
+    local logged = self:emit_log("GA_FIGHT_INTEGRITY_RETRY", "attempt=" .. tostring(attempt)
+        .. " cause=" .. tostring(fault and fault.cause), {
+            attempt = attempt,
+            max_attempts = MAX_INTEGRITY_RETRIES,
+            fight_index = self.session.fight_index,
+            fault = fault
+        })
+    if not logged.ok then return logged end
+    local advanced = self:advance(gamma_arena_state_machine.events.DEFEAT)
+    if not advanced.ok then return advanced end
+    self.integrity_retry_count = attempt
+    self.pending_victory = false
+    self.pending_result = nil
+    self.result_kind = nil
+    self.result_action_locked = true
+    self.next_cleanup_started = false
+    self.pending_next_fight_index = self.session.fight_index
+    self.pending_continuation_kind = "integrity_retry"
+    self:set_runtime_stage("NEXT_CLEANUP")
+    return gamma_arena_result.ok({ stage = self.runtime_stage, attempt = attempt })
+end
+
+function Orchestrator:reconcile_active_integrity()
+    if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.pending_result == "defeat" then
+        return gamma_arena_result.ok(false)
+    end
+    local fault = self:active_integrity_fault()
+    if not fault.ok or fault.value == false then return fault end
+    return self:queue_integrity_retry(fault.value)
+end
+
 function Orchestrator:resolve_next_fight_index(result_kind)
     local current_index = self.session and self.session.fight_index or nil
     if type(current_index) ~= "number" or current_index ~= math.floor(current_index) or current_index < 0 or current_index > UINT32_MAX then
@@ -903,9 +964,9 @@ function Orchestrator:drive_continuation()
         self.fight_spec = nil
         self.catalog_snapshot = nil
         self:set_runtime_stage("PREPARING")
-    elseif continuation_kind == "defeat_retry" then
+    elseif continuation_kind == "defeat_retry" or continuation_kind == "integrity_retry" then
         if next_index ~= self.session.fight_index or type(self.fight_spec) ~= "table" then
-            return fail("GA_MODE_POLICY_FAILED", "Arena defeat retry did not retain the exact fight identity")
+            return fail("GA_MODE_POLICY_FAILED", "Arena exact retry did not retain the current fight identity", { continuation = continuation_kind })
         end
         local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id)
         if not applied.ok then return applied end
@@ -1005,6 +1066,8 @@ function Orchestrator:update_runtime()
         local updated = call_method("GA_ENTITY_UPDATE_FAILED", entities, "update")
         if not updated.ok then return updated end
     end
+    local integrity = self:reconcile_active_integrity()
+    if not integrity.ok then return integrity end
     local reconciled = self:reconcile_active_victory()
     if not reconciled.ok then return reconciled end
     return runtime
@@ -1045,8 +1108,11 @@ function Orchestrator:npc_on_death_callback(victim, killer)
     if not self:is_active() then return gamma_arena_result.ok(false) end
     local entities = self.deps.entities
     if entities == nil or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
-    local accepted = call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim)
+    local accepted = call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim, killer)
     if not accepted.ok or accepted.value ~= true then return accepted end
+    local integrity = self:active_integrity_fault()
+    if not integrity.ok then return integrity end
+    if integrity.value ~= false then return gamma_arena_result.ok(true) end
     local living = self:living_opponent_count()
     if not living.ok then return living end
     if living.value == 0 then return self:queue_victory() end

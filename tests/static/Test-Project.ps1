@@ -731,7 +731,7 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'type\([^\r\n]*\)\s*==\s*"function"') 'Task 7 child snapshots must support the real GAMMA iterator contract'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:register_and_tag_created_item[\s\S]{0,1200}self:register_record[\s\S]{0,800}self:tag_record') 'Every valid returned item id must be registered and tagged before later return values are inspected'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:create_descriptor[\s\S]{0,1800}for\s+index,\s*entity\s+in\s+ipairs\(entities\)\s+do[\s\S]{0,400}self:register_and_tag_created_item') 'Multi-return item creation must authorize each entity inside the validation loop'
-    Assert-True ($Task7EntityContent -match 'if\s+entity\.value\s*==\s*nil\s+then[\s\S]{0,500}GA_ENTITY_CHILD_PARENT_UNPROVEN') 'Missing authoritative child re-reads must block parent release'
+    Assert-True ($Task7EntityContent -match 'if\s+entity\.value\s*==\s*nil\s+then[\s\S]{0,900}record_by_id[\s\S]{0,900}GA_ENTITY_CHILD_PARENT_UNPROVEN') 'Missing child re-reads may retire only a proved registered Arena child and must otherwise block parent release'
     Assert-True ($Task7EntityContent -match 'if\s+parent_id\s*==\s*nil\s+then[\s\S]{0,500}GA_ENTITY_CHILD_PARENT_UNPROVEN') 'Unreadable authoritative child parents must block parent release'
     Assert-True ($Task7EntityContent -notmatch '\balife_release_id\s*\(') 'Entity adapter must never directly release a standalone stalker'
     Assert-True ($Task7EntityContent -notmatch '\bmath\.(random|randomseed)\b') 'Entity adapter must not consume global randomness'
@@ -1358,6 +1358,20 @@ Assert-True ($Task12EntityContent -match 'function\s+EntityAdapter:terminal_summ
 Assert-True ($Task12BootstrapContent.Contains('critically_wounded') -and $Task12BootstrapContent.Contains('log_info')) 'Bootstrap must bind wound evidence and terminal transition diagnostics'
 Assert-True ($Task12CompatContent.Contains('game_object.critically_wounded')) 'Preflight must require the critical-wound query used by victory reconciliation'
 Assert-True ($Task12OrchestratorContent -match 'show_victory[\s\S]{0,900}terminal_summary') 'Victory logging must include authoritative terminal counts'
+
+foreach ($IntegrityMarker in @('VERTICAL_ESCAPE_GRACE_MS', 'EARLY_SELF_DEATH_WINDOW_MS', 'GA_FIGHT_INTEGRITY_FAILED', 'integrity_status', 'vertical_escape', 'early_self_death')) {
+    Assert-True ($Task12EntityContent.Contains($IntegrityMarker)) "Arena integrity evidence is missing marker: $IntegrityMarker"
+}
+Assert-True ($Task12EntityContent.Contains('VICTORY_DEFEATED_STATES') -and $Task12EntityContent -match 'VICTORY_DEFEATED_STATES\[record\.terminal_state\]') 'Missing opponents must remain non-victory-qualified until integrity recovery starts'
+foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reconcile_active_integrity', 'GA_FIGHT_INTEGRITY_RETRY_EXHAUSTED')) {
+    Assert-True ($Task12OrchestratorContent.Contains($IntegrityMarker)) "Arena integrity recovery is missing marker: $IntegrityMarker"
+}
+Assert-True ($Task12OrchestratorContent -match 'reconcile_active_integrity\s*\([\s\S]{0,500}reconcile_active_victory\s*\(') 'Integrity recovery must be reconciled before victory'
+Assert-True ($Task12BootstrapContent.Contains('object_position')) 'Bootstrap must bind guarded opponent position evidence'
+$Task13RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
+    Assert-True ($Task13RuntimeTests.Contains($IntegrityTest)) "Runtime integrity suite is missing case: $IntegrityTest"
+}
 
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {

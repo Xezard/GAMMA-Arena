@@ -7,6 +7,9 @@ local DEFAULT_RELEASE_TIMEOUT_MS = 10000
 local DEFAULT_ONLINE_TIMEOUT_MS = 10000
 local DEATH_RECONCILE_INTERVAL_MS = 250
 local TERMINAL_GRACE_MS = 1500
+local VERTICAL_ESCAPE_GRACE_MS = 1500
+local VERTICAL_ESCAPE_DELTA_METERS = 2.5
+local EARLY_SELF_DEATH_WINDOW_MS = 20000
 local EXPECTED_HUMAN_CLASS = "AI_STL_S"
 local EXPECTED_COMMUNITY = "bandit"
 local ACTOR_GOODWILL = -5000
@@ -23,6 +26,10 @@ local DEFEATED_STATES = {
     DEFEATED_DEAD = true,
     DEFEATED_WOUNDED = true,
     DEFEATED_MISSING = true
+}
+local VICTORY_DEFEATED_STATES = {
+    DEFEATED_DEAD = true,
+    DEFEATED_WOUNDED = true
 }
 
 -- Production composition binds safe_release_manager.release and the exact
@@ -41,6 +48,10 @@ end
 local function finite_integer(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
         and value == math.floor(value)
+end
+
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
 local function valid_id(value)
@@ -268,6 +279,9 @@ function EntityAdapter:__init(deps)
     self.tactical_disabled = false
     self.tactical_warning_logged = false
     self.last_death_reconcile_at = nil
+    self.active_started_at = nil
+    self.integrity_fault = nil
+    self.position_warning_logged = false
 end
 
 function EntityAdapter:set_state(value)
@@ -354,6 +368,8 @@ function EntityAdapter:register_record(kind, id, values)
         proved_online = false,
         terminal_notified = false,
         wound_query_warning_logged = false,
+        spawn_y = values.spawn_y,
+        vertical_escape_since = nil,
         equipped = false,
         held_offline = false,
         online_requested = false,
@@ -479,7 +495,13 @@ function EntityAdapter:spawn_current()
     end
     local id = read_entity_id(created.value)
     if id == nil then return fail("GA_ENTITY_NPC_CREATE_FAILED", "alife_create returned an invalid server entity", { slot = opponent.slot }) end
-    local registered = self:register_record("npc", id, { slot = opponent.slot, section = opponent.profile, quantity = 1, role = "opponent" })
+    local registered = self:register_record("npc", id, {
+        slot = opponent.slot,
+        section = opponent.profile,
+        quantity = 1,
+        role = "opponent",
+        spawn_y = resolved.value.position.y
+    })
     if not registered.ok then return registered end
     local held = result_call("GA_ENTITY_OFFLINE_HOLD_FAILED", self.deps.hold_offline, created.value)
     if not held.ok then
@@ -545,14 +567,30 @@ function EntityAdapter:verify_npc_has_no_current_children(record)
         local entity = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, id)
         if not entity.ok then return entity end
         if entity.value == nil then
-            return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because an authoritative child snapshot cannot be re-read", { npc_id = record.id, child_id = id })
-        end
-        local parent_id = read_parent_id(entity.value)
-        if parent_id == nil then
-            return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because the current child parent cannot be proved", { npc_id = record.id, child_id = id })
-        end
-        if parent_id == record.id then
-            return fail("GA_ENTITY_PARENT_RELEASE_BLOCKED", "Arena NPC release is blocked by an extant child that must not be deleted indirectly", { npc_id = record.id, child_id = id })
+            local child_record = self.record_by_id[id]
+            if child_record ~= nil and child_record.kind == "item" and child_record.parent_id == record.id
+                and child_record.tagged == true and self.session_id ~= nil then
+                child_record.released = true
+                child_record.protected = false
+                if type(self.deps.log_info) == "function" then
+                    pcall(self.deps.log_info, "GA_ENTITY_CHILD_ALREADY_ABSENT", "Registered Arena child disappeared before parent release verification", {
+                        session_id = self.session_id,
+                        npc_id = record.id,
+                        child_id = id,
+                        section = child_record.section
+                    })
+                end
+            else
+                return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because an authoritative child snapshot cannot be re-read", { npc_id = record.id, child_id = id })
+            end
+        else
+            local parent_id = read_parent_id(entity.value)
+            if parent_id == nil then
+                return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC release is blocked because the current child parent cannot be proved", { npc_id = record.id, child_id = id })
+            end
+            if parent_id == record.id then
+                return fail("GA_ENTITY_PARENT_RELEASE_BLOCKED", "Arena NPC release is blocked by an extant child that must not be deleted indirectly", { npc_id = record.id, child_id = id })
+            end
         end
     end
     return gamma_arena_result.ok(true)
@@ -840,6 +878,9 @@ function EntityAdapter:drive_online()
         local hostile = result_call("GA_ENTITY_HOSTILE_RELATION_FAILED", self.deps.set_actor_hostile, object, actor.value, ACTOR_GOODWILL)
         if not hostile.ok then return hostile end
     end
+    local active_clock = self:clock()
+    if not active_clock.ok then return active_clock end
+    self.active_started_at = active_clock.value
     self:set_state("ACTIVE")
     return gamma_arena_result.ok({ state = "ACTIVE" })
 end
@@ -1068,6 +1109,58 @@ function EntityAdapter:warn_wound_query_once(record, result)
     end
 end
 
+function EntityAdapter:declare_integrity_fault(record, cause, context)
+    if self.integrity_fault ~= nil then return gamma_arena_result.ok(false) end
+    local fault = {
+        cause = cause,
+        opponent_id = record and record.id or nil,
+        slot = record and record.slot or nil,
+        fight_key = self.fight_key,
+        context = context or {}
+    }
+    self.integrity_fault = fault
+    if type(self.deps.log_warn) == "function" then
+        pcall(self.deps.log_warn, "GA_FIGHT_INTEGRITY_FAILED", "Arena round integrity evidence requires an exact retry", fault)
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:check_vertical_integrity(record, object, now)
+    if type(self.deps.object_position) ~= "function" or not finite_number(record.spawn_y) then
+        return gamma_arena_result.ok(false)
+    end
+    local queried = result_call("GA_ENTITY_POSITION_FAILED", self.deps.object_position, object)
+    local position = queried.ok and queried.value or nil
+    if not queried.ok or type(position) ~= "table" or not finite_number(position.y) then
+        if not self.position_warning_logged and type(self.deps.log_warn) == "function" then
+            self.position_warning_logged = true
+            pcall(self.deps.log_warn, "GA_ENTITY_POSITION_UNAVAILABLE", "Opponent position evidence is unavailable; vanilla restrictor remains authoritative", {
+                id = record.id,
+                cause = queried.ok and nil or queried.error
+            })
+        end
+        return gamma_arena_result.ok(false)
+    end
+    local delta = position.y - record.spawn_y
+    if math.abs(delta) <= VERTICAL_ESCAPE_DELTA_METERS then
+        record.vertical_escape_since = nil
+        return gamma_arena_result.ok(false)
+    end
+    if record.vertical_escape_since == nil then
+        record.vertical_escape_since = now
+        return gamma_arena_result.ok(false)
+    end
+    if elapsed_ms(record.vertical_escape_since, now) < VERTICAL_ESCAPE_GRACE_MS then
+        return gamma_arena_result.ok(false)
+    end
+    return self:declare_integrity_fault(record, "vertical_escape", {
+        spawn_y = record.spawn_y,
+        observed_y = position.y,
+        delta_y = delta,
+        grace_ms = VERTICAL_ESCAPE_GRACE_MS
+    })
+end
+
 function EntityAdapter:reconcile_active_deaths()
     if self.state_value ~= "ACTIVE" then return gamma_arena_result.ok(0) end
     local now = self:clock()
@@ -1091,6 +1184,8 @@ function EntityAdapter:reconcile_active_deaths()
                     if not accepted.ok then return accepted end
                     if accepted.value then reconciled = reconciled + 1 end
                 else
+                    local vertical = self:check_vertical_integrity(record, object.value, now.value)
+                    if not vertical.ok then return vertical end
                     local wounded = self:is_critically_wounded(object.value)
                     if not wounded.ok then
                         self:warn_wound_query_once(record, wounded)
@@ -1114,12 +1209,16 @@ function EntityAdapter:reconcile_active_deaths()
                 if not exists.value then
                     local accepted = self:transition_opponent(record, OPPONENT_STATES.DEFEATED_MISSING, "alife_absent", now.value)
                     if accepted.value then reconciled = reconciled + 1 end
+                    local integrity = self:declare_integrity_fault(record, "opponent_missing", { evidence = "alife_absent" })
+                    if not integrity.ok then return integrity end
                 elseif record.proved_online then
                     if record.terminal_state ~= OPPONENT_STATES.MISSING_PENDING then
                         self:transition_opponent(record, OPPONENT_STATES.MISSING_PENDING, "online_missing", now.value)
                     elseif record.terminal_since ~= nil and elapsed_ms(record.terminal_since, now.value) >= TERMINAL_GRACE_MS then
                         local accepted = self:transition_opponent(record, OPPONENT_STATES.DEFEATED_MISSING, "online_missing_stable", now.value)
                         if accepted.value then reconciled = reconciled + 1 end
+                        local integrity = self:declare_integrity_fault(record, "opponent_missing", { evidence = "online_missing_stable", grace_ms = TERMINAL_GRACE_MS })
+                        if not integrity.ok then return integrity end
                     end
                 end
             end
@@ -1128,27 +1227,55 @@ function EntityAdapter:reconcile_active_deaths()
     return gamma_arena_result.ok(reconciled)
 end
 
-function EntityAdapter:on_npc_death(victim_or_id)
-    local function normalize()
-        if type(victim_or_id) == "number" then
-            if valid_id(victim_or_id) then return victim_or_id end
+function EntityAdapter:on_npc_death(victim_or_id, killer_or_id)
+    local function normalize(value)
+        if type(value) == "number" then
+            if valid_id(value) then return value end
             return nil
         end
-        return read_entity_id(victim_or_id)
+        return read_entity_id(value)
     end
-    local called, id = pcall(normalize)
+    local called, id = pcall(normalize, victim_or_id)
     if not called or id == nil or self.state_value ~= "ACTIVE" then return gamma_arena_result.ok(false) end
     local record = self.npc_by_id[id]
     if record == nil or defeated_state(record.terminal_state) then return gamma_arena_result.ok(false) end
     local owner = self:load_owner_tag(id)
     if not owner.ok then return owner end
     if owner.value ~= self.session_id then return gamma_arena_result.ok(false) end
-    return self:accept_registered_death(record)
+    local killer_called, killer_id = pcall(normalize, killer_or_id)
+    if not killer_called then killer_id = nil end
+    local early_self_death = false
+    local self_death_elapsed = nil
+    if killer_id == id and self.active_started_at ~= nil then
+        local now = self:clock()
+        if not now.ok then return now end
+        self_death_elapsed = elapsed_ms(self.active_started_at, now.value)
+        early_self_death = self_death_elapsed <= EARLY_SELF_DEATH_WINDOW_MS
+    end
+    local accepted = self:accept_registered_death(record)
+    if not accepted.ok then return accepted end
+    if accepted.value and early_self_death then
+        local integrity = self:declare_integrity_fault(record, "early_self_death", {
+            elapsed_ms = self_death_elapsed,
+            window_ms = EARLY_SELF_DEATH_WINDOW_MS
+        })
+        if not integrity.ok then return integrity end
+    end
+    return accepted
+end
+
+function EntityAdapter:integrity_status()
+    if self.integrity_fault == nil then return gamma_arena_result.ok(false) end
+    local copied, value = pcall(copy_plain, self.integrity_fault)
+    if not copied then return fail("GA_FIGHT_INTEGRITY_STATUS_FAILED", "Arena integrity evidence could not be copied safely", { reason = tostring(value) }) end
+    return gamma_arena_result.ok(value)
 end
 
 function EntityAdapter:living_opponent_count()
     local count = 0
-    for _, record in ipairs(self.registry.npcs) do if not defeated_state(record.terminal_state) and not record.released then count = count + 1 end end
+    for _, record in ipairs(self.registry.npcs) do
+        if VICTORY_DEFEATED_STATES[record.terminal_state] ~= true and not record.released then count = count + 1 end
+    end
     return count
 end
 
