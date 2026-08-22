@@ -241,6 +241,7 @@ if (Test-Path -LiteralPath $StorePath) {
         Assert-True ($StoreContent -match ("function\s+" + $Api + "\s*\(")) "Session module must expose defeat wrapper $Api"
     }
     Assert-True ($StoreContent -match 'gad1:') 'Defeat token must use the gad1:<epoch>:<nonce> grammar'
+    Assert-True ($StoreContent -match 'function Store:arm_defeat[\s\S]{0,900}local existing = self:read_defeat[\s\S]{0,900}if existing\.value then[\s\S]{0,900}self:defeat_nonce_value') 'Duplicate defeat arm must return the persisted intent before allocating a nonce'
     Assert-True ($StoreContent -match 'ga1:') 'Launch token must use the ga1:<epoch>:<nonce> grammar'
     Assert-True ($StoreContent -match 'volatile_launch_permits') 'Same-VM launch activation must retain its process-local volatile permit fast path'
     Assert-True ($StoreContent -match 'validate_launch_handoff') 'Cross-VM launch activation must validate a persisted bridge lease'
@@ -315,6 +316,7 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
     foreach ($Marker in @('defeat_intent_is_transactional_and_cross_vm_safe','defeat_promotion_is_atomic_and_conflict_safe','gad1:1000:death_1','issue_launch_from_defeat')) {
         Assert-True ($Task4DevTestContent -match [regex]::Escape($Marker)) "Task 4 Dev tests must cover defeat contract $Marker"
     }
+    Assert-True ($Task4DevTestContent -match 'defeat_duplicate_arm_uses_persisted_token') 'Task 4 Dev tests must cover default-nonce duplicate defeat arm idempotency'
 }
 
 $MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
