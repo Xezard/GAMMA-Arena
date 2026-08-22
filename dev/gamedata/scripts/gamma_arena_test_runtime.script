@@ -5463,6 +5463,177 @@ local function runtime_defeat_menu_post_consume_restore_failure_is_recoverable()
     gamma_arena_test_assert.equals(menu.shown, 1, "restore retry restores owner visibility")
 end
 
+local function runtime_defeat_recovery_dialog_waits_for_owner_restore()
+    local menu = defeat_menu_test_owner()
+    function menu:ShowDialog() error("injected persistent owner restore failure") end
+    local model
+    local recovery_result
+    local recovery_dialog = { hides = 0, hidden = 0 }
+    function recovery_dialog:HideDialog() self.hides = self.hides + 1 end
+    function recovery_dialog:Show(value) if not value then self.hidden = self.hidden + 1 end end
+    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:visible_recovery" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_result.ok(true) end,
+        clear_transient = function() return gamma_arena_result.ok(true) end,
+        random_session_seed = function() return gamma_arena_result.err("GA_TEST_SEED", "seed") end,
+        show_fatal = function(_, _, callback, context)
+            recovery_result = callback(context, recovery_dialog)
+            return recovery_dialog
+        end
+    })
+    gamma_arena_test_assert.is_true(displayed.ok, "persistent recovery fixture displays")
+    gamma_arena_test_assert.is_false(model.on_next().ok, "fresh failure remains structured")
+    gamma_arena_test_assert.is_false(recovery_result.ok, "failed owner restoration remains retryable")
+    gamma_arena_test_assert.equals(recovery_dialog.hides + recovery_dialog.hidden, 0, "failed owner restoration keeps the recovery dialog visible")
+end
+
+local function runtime_defeat_partial_clear_never_reconsumes_token()
+    local menu = defeat_menu_test_owner()
+    local model
+    local window
+    local consumes = 0
+    local result_panel = { visible = true }
+    function result_panel:Show(value) self.visible = value end
+    local countdown = {}
+    function countdown:Show() end
+    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_clear" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        consume_defeat = function() consumes = consumes + 1; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_ui_result.dismiss_result_window(window) end
+    })
+    gamma_arena_test_assert.is_true(displayed.ok, "partial clear fixture displays")
+    local dismiss_attempts = 0
+    window = {
+        action_locked = false,
+        kind = "defeat",
+        on_next = model.on_next,
+        on_main_menu = model.on_main_menu,
+        result_panel = result_panel,
+        countdown = countdown,
+        restored = 0
+    }
+    function window:HideDialog() end
+    function window:ShowDialog(value) if value then self.restored = self.restored + 1 end end
+    function window:Show(value)
+        dismiss_attempts = dismiss_attempts + 1
+        if dismiss_attempts == 1 and not value then error("injected result Show(false) failure") end
+    end
+    window.ClearOwnedWidgets = gamma_arena_ui_result.UIResult.ClearOwnedWidgets
+    gamma_arena_test_assert.is_false(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "first partial dismissal remains structured")
+    gamma_arena_test_assert.equals(window.kind, "defeat", "failed dismissal retains the result model")
+    gamma_arena_test_assert.equals(type(window.on_main_menu), "function", "failed dismissal retains the retry callback")
+    gamma_arena_test_assert.is_false(window.action_locked, "failed dismissal leaves the real result action retryable")
+    gamma_arena_test_assert.equals(window.restored, 1, "failed dismissal restores the visible result window")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "second real Main menu event completes dismissal")
+    gamma_arena_test_assert.equals(consumes, 1, "partial result clearing can never replay the consumed defeat token")
+    gamma_arena_test_assert.equals(menu.show_dialog, 2, "partial clear retry performs dismissal/restore only")
+    gamma_arena_test_assert.equals(menu.shown, 2, "partial clear retry keeps owner visible")
+    gamma_arena_test_assert.equals(window.kind, nil, "successful retry clears the result model")
+    gamma_arena_test_assert.is_false(result_panel.visible, "successful retry clears the visible result panel")
+end
+
+local function runtime_defeat_partial_owned_widget_clear_never_reconsumes_token()
+    local menu = defeat_menu_test_owner()
+    local model
+    local window
+    local consumes = 0
+    local clear_attempts = 0
+    local countdown = {}
+    function countdown:Show()
+        clear_attempts = clear_attempts + 1
+        if clear_attempts == 1 then error("injected partial ClearOwnedWidgets failure") end
+    end
+    local result_panel = { visible = true }
+    function result_panel:Show(value) self.visible = value end
+    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_widgets" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        consume_defeat = function() consumes = consumes + 1; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_ui_result.dismiss_result_window(window) end
+    })
+    gamma_arena_test_assert.is_true(displayed.ok, "partial owned-widget clear fixture displays")
+    window = {
+        action_locked = false,
+        kind = "defeat",
+        on_next = model.on_next,
+        on_main_menu = model.on_main_menu,
+        result_panel = result_panel,
+        countdown = countdown
+    }
+    function window:HideDialog() end
+    function window:ShowDialog() end
+    function window:Show() end
+    window.ClearOwnedWidgets = gamma_arena_ui_result.UIResult.ClearOwnedWidgets
+    gamma_arena_test_assert.is_false(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "partial owned-widget clear remains structured")
+    gamma_arena_test_assert.equals(type(window.on_main_menu), "function", "partial owned-widget clear retains callback state")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "owned-widget clear retry completes")
+    gamma_arena_test_assert.equals(consumes, 1, "partial owned-widget clearing never reconsumes defeat")
+    gamma_arena_test_assert.equals(menu.show_dialog, 2, "partial owned-widget clear always restores owner")
+end
+
+local function runtime_defeat_partial_hide_restores_or_retains_recovery()
+    local restored_menu = defeat_menu_test_owner()
+    function restored_menu:Show(value)
+        if not value then error("injected partial hide failure") end
+        self.shown = self.shown + 1
+    end
+    local restored = gamma_arena_main_menu.show_confirmed_defeat(restored_menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_hide_restore" }) end
+    })
+    gamma_arena_test_assert.is_false(restored.ok, "partial hide failure remains structured")
+    gamma_arena_test_assert.equals(restored_menu.show_dialog, 1, "partial hide immediately restores owner dialog")
+    gamma_arena_test_assert.equals(restored_menu.shown, 1, "partial hide immediately restores owner visibility")
+
+    local recovery_menu = defeat_menu_test_owner()
+    function recovery_menu:ShowDialog() error("injected partial-hide restore failure") end
+    function recovery_menu:Show(value)
+        if not value then error("injected partial hide failure") end
+        self.shown = self.shown + 1
+    end
+    local fatal_calls = 0
+    local recovery_visible = false
+    local retained = gamma_arena_main_menu.show_confirmed_defeat(recovery_menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_hide_recovery" }) end,
+        show_fatal = function(_, errors)
+            fatal_calls = fatal_calls + 1
+            gamma_arena_test_assert.equals(errors[1].error.code, "GA_DEFEAT_MENU_HIDE_FAILED", "partial hide recovery reports original failure")
+            recovery_visible = true
+            return true
+        end
+    })
+    gamma_arena_test_assert.is_false(retained.ok, "partial hide plus restore failure remains structured")
+    gamma_arena_test_assert.equals(fatal_calls, 1, "partial hide plus restore failure opens one recovery surface")
+    gamma_arena_test_assert.is_true(recovery_visible, "partial hide plus restore failure retains a visible recovery surface")
+
+    local fallback_menu = defeat_menu_test_owner()
+    local restore_attempts = 0
+    function fallback_menu:ShowDialog(value)
+        restore_attempts = restore_attempts + 1
+        if restore_attempts == 1 then error("injected first partial-hide restore failure") end
+        if value then self.show_dialog = self.show_dialog + 1 end
+    end
+    function fallback_menu:Show(value)
+        if not value then error("injected partial hide failure") end
+        self.shown = self.shown + 1
+    end
+    local fallback = gamma_arena_main_menu.show_confirmed_defeat(fallback_menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_hide_fatal_throw" }) end,
+        show_fatal = function() error("injected fatal recovery construction failure") end
+    })
+    gamma_arena_test_assert.is_false(fallback.ok, "fatal construction failure preserves the original hide failure")
+    gamma_arena_test_assert.equals(restore_attempts, 2, "fatal construction failure retries owner restoration")
+    gamma_arena_test_assert.equals(fallback_menu.show_dialog, 1, "fatal construction fallback restores owner dialog")
+    gamma_arena_test_assert.equals(fallback_menu.shown, 1, "fatal construction fallback restores owner visibility")
+end
+
 local function runtime_defeat_result_keyboard_and_lock_are_behavioral()
     local pressed = ui_events.WINDOW_KEY_PRESSED
     gamma_arena_test_assert.equals(gamma_arena_ui_result.resolve_result_keyboard_action("defeat", DIK_keys.DIK_RETURN, pressed, false), "next", "defeat Enter maps to New fight")
@@ -5871,6 +6042,10 @@ local cases = {
     ,{ name = "runtime_defeat_menu_fatal_ui_failure_restores_owner", fn = runtime_defeat_menu_fatal_ui_failure_restores_owner }
     ,{ name = "runtime_defeat_menu_post_consume_ui_failure_restores_owner", fn = runtime_defeat_menu_post_consume_ui_failure_restores_owner }
     ,{ name = "runtime_defeat_menu_post_consume_restore_failure_is_recoverable", fn = runtime_defeat_menu_post_consume_restore_failure_is_recoverable }
+    ,{ name = "runtime_defeat_recovery_dialog_waits_for_owner_restore", fn = runtime_defeat_recovery_dialog_waits_for_owner_restore }
+    ,{ name = "runtime_defeat_partial_clear_never_reconsumes_token", fn = runtime_defeat_partial_clear_never_reconsumes_token }
+    ,{ name = "runtime_defeat_partial_owned_widget_clear_never_reconsumes_token", fn = runtime_defeat_partial_owned_widget_clear_never_reconsumes_token }
+    ,{ name = "runtime_defeat_partial_hide_restores_or_retains_recovery", fn = runtime_defeat_partial_hide_restores_or_retains_recovery }
     ,{ name = "runtime_defeat_result_keyboard_and_lock_are_behavioral", fn = runtime_defeat_result_keyboard_and_lock_are_behavioral }
     ,{ name = "runtime_entity_death_neutralization_is_owned_living_and_idempotent", fn = runtime_entity_death_neutralization_is_owned_living_and_idempotent }
     ,{ name = "runtime_entity_death_neutralization_without_actor_still_clears_enemy", fn = runtime_entity_death_neutralization_without_actor_still_clears_enemy }

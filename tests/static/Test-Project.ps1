@@ -578,6 +578,10 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
     Assert-True ($Task6MainMenuContent -notmatch 'Anomaly|load_game|load_save|checkpoint|resume|revive') 'Task 6 fresh-fight action must use only the engine new-game handoff'
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\s+then[\s\S]{0,500}restore_main_menu\s*\(\s*menu') 'Task 6 fatal-UI construction failure must restore the owner menu as a fallback'
     Assert-True ($Task6MainMenuContent -match 'model\.on_main_menu\s*=\s*function\(\)[\s\S]{0,900}local\s+cleared[\s\S]{0,500}local\s+restored\s*=\s*restore_main_menu') 'Task 6 post-consume UI handling must attempt owner restoration even when result dismissal fails'
+    Assert-True ($Task6MainMenuContent -match 'local\s+defeat_consumed\s*=\s*false') 'Task 6 main-menu action must latch successful defeat consumption across UI retries'
+    Assert-True ($Task6MainMenuContent -match 'restore_main_menu[\s\S]{0,500}menu:ShowDialog\(true\)[\s\S]{0,180}menu:Show\(true\)[\s\S]{0,350}dialog:HideDialog\(\)') 'Task 6 owner restoration must succeed before dismissing its recovery dialog'
+    Assert-True ($Task6MainMenuContent -match 'GA_DEFEAT_MENU_HIDE_FAILED[\s\S]{0,900}show_fatal') 'Task 6 partial menu-hide failure must retain fatal recovery when owner restoration fails'
+    Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\s+then[\s\S]{0,260}local\s+fallback\s*=\s*restore_main_menu\s*\(\s*menu\s*\)[\s\S]{0,500}Partial main-menu hide recovery') 'Task 6 fatal construction failure after partial hide must retry owner restoration'
     $Task6BindIndex = $Task6MainMenuContent.IndexOf('bind(menu)')
     $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('show_confirmed_defeat(menu', $Task6BindIndex + 1)
     Assert-True ($Task6BindIndex -ge 0 -and $Task6DefeatIndex -gt $Task6BindIndex) 'Task 6 main-menu init must bind normally before checking the confirmed defeat'
@@ -588,6 +592,8 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
     Assert-True ($Task9UiContent -match 'next_button:SetText\s*\(') 'Task 6 result UI must apply the translated primary-action label'
     Assert-True ($Task9UiContent -match 'if\s+self\.action_locked[\s\S]{0,180}return\s+gamma_arena_result\.ok\(false\)') 'Task 6 result actions must retain the repeated-click lock'
     Assert-True ($Task9UiContent -match '(?m)^function\s+resolve_result_keyboard_action\s*\(') 'Task 6 result keyboard routing must expose a behavioral test seam'
+    Assert-True ($Task9UiContent -match '(?m)^function\s+dismiss_result_window\s*\(') 'Task 6 result dismissal must expose its retry-safe behavioral seam'
+    Assert-True ($Task9UiContent -match 'function\s+dismiss_result_window[\s\S]{0,900}HideDialog[\s\S]{0,300}Show\(false\)[\s\S]{0,900}ClearOwnedWidgets') 'Task 6 result dismissal must preserve its model until engine hiding succeeds'
 }
 if (Test-Path -LiteralPath $Task6UiStartPath) {
     $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
@@ -603,7 +609,7 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
     }
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_result_keyboard_and_lock_are_behavioral')) {
+    foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_recovery_dialog_waits_for_owner_restore','runtime_defeat_partial_clear_never_reconsumes_token','runtime_defeat_partial_owned_widget_clear_never_reconsumes_token','runtime_defeat_partial_hide_restores_or_retains_recovery','runtime_defeat_result_keyboard_and_lock_are_behavioral')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 runtime tests must cover $Marker"
     }
 }
