@@ -832,11 +832,13 @@ $NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
-    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*3\s*$') 'Catalog must declare schema_version = 3'
-    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*3\s*$') 'Catalog must declare revision = 3'
-    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*4\s*$') 'Catalog must declare generator_version = 4'
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*4\s*$') 'Catalog must declare schema_version = 4'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*4\s*$') 'Catalog must declare revision = 4'
+    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*5\s*$') 'Catalog must declare generator_version = 5'
     Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
-    Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s*$') 'Novice outfit must cost 1 so every maximum-count envelope is feasible'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s+armor_class\s*=\s*light\s*$') 'Novice outfit must declare the light armor class'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_stalker\]\s+section\s*=\s*stalker_outfit\s+cost\s*=\s*3\s+armor_class\s*=\s*medium\s*$') 'Stalker outfit must declare the medium armor class'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_banditmerc\]\s+section\s*=\s*banditmerc_outfit\s+cost\s*=\s*4\s+armor_class\s*=\s*scientific\s*$') 'Banditmerc outfit must declare the scientific armor class'
     foreach ($Profile in @('gamma_arena_bandit_novice', 'gamma_arena_bandit_trainee', 'gamma_arena_bandit_experienced', 'gamma_arena_bandit_veteran')) {
         Assert-True ($CatalogContent -match [regex]::Escape($Profile)) "Human profile catalog must include $Profile"
     }
@@ -850,9 +852,13 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'r_line') 'Runtime catalog enumeration must use r_line'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_SECTION_CHECK_FAILED') 'Catalog section checks must return structured errors'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
-    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v3 semantic manifest'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v4 semantic manifest'
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
-    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v2') 'Catalog loader must bind exact v2 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v4') 'Catalog loader must bind exact v4 catalog semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v3') 'Catalog loader must bind exact v3 difficulty semantics'
+    foreach ($Marker in @('armor_class','player_weapon_weights','player_armor_weights','w_pistol','w_smg','w_shotgun','w_rifle','w_sniper','light','medium','scientific','heavy','powered_exo')) {
+        Assert-True ($Task3CatalogScriptContent -match [regex]::Escape($Marker)) "Catalog loader must cover $Marker"
+    }
     Assert-True ($Task3CatalogScriptContent -match 'layout_manifest_v2') 'Catalog loader must bind exact ordered v2 layout semantics'
     Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
 }
