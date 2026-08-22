@@ -5538,40 +5538,86 @@ end
 
 local function runtime_defeat_partial_owned_widget_clear_never_reconsumes_token()
     local menu = defeat_menu_test_owner()
-    local model
-    local window
     local consumes = 0
-    local clear_attempts = 0
-    local countdown = {}
-    function countdown:Show()
-        clear_attempts = clear_attempts + 1
-        if clear_attempts == 1 then error("injected partial ClearOwnedWidgets failure") end
+    local constructor_calls = 0
+    local countdown_false_calls = 0
+    local fail_owned_clear = true
+    local countdown = { visible = false }
+    function countdown:Show(value)
+        self.visible = value
+        if value == false then
+            countdown_false_calls = countdown_false_calls + 1
+            if fail_owned_clear and countdown_false_calls > 1 then
+                fail_owned_clear = false
+                error("injected real ClearOwnedWidgets failure")
+            end
+        end
     end
-    local result_panel = { visible = true }
+    local result_panel = { visible = false }
     function result_panel:Show(value) self.visible = value end
-    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
-        config = {},
-        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_widgets" }) end,
-        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
-        consume_defeat = function() consumes = consumes + 1; return gamma_arena_result.ok(true) end,
-        clear_result = function() return gamma_arena_ui_result.dismiss_result_window(window) end
-    })
-    gamma_arena_test_assert.is_true(displayed.ok, "partial owned-widget clear fixture displays")
-    window = {
+    local title = { text = nil }
+    function title:SetText(value) self.text = value end
+    local next_button = { text = nil }
+    function next_button:SetText(value) self.text = value end
+    local window = {
         action_locked = false,
-        kind = "defeat",
-        on_next = model.on_next,
-        on_main_menu = model.on_main_menu,
+        kind = nil,
+        on_next = nil,
+        on_main_menu = nil,
         result_panel = result_panel,
-        countdown = countdown
+        countdown = countdown,
+        title = title,
+        next_button = next_button,
+        dialog_visible = false,
+        visible = false
     }
-    function window:HideDialog() end
-    function window:ShowDialog() end
-    function window:Show() end
+    function window:HideDialog() self.dialog_visible = false end
+    function window:ShowDialog(value) self.dialog_visible = value end
+    function window:Show(value) self.visible = value end
+    window.ShowResult = gamma_arena_ui_result.UIResult.ShowResult
     window.ClearOwnedWidgets = gamma_arena_ui_result.UIResult.ClearOwnedWidgets
-    gamma_arena_test_assert.is_false(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "partial owned-widget clear remains structured")
-    gamma_arena_test_assert.equals(type(window.on_main_menu), "function", "partial owned-widget clear retains callback state")
-    gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnMainMenu(window).ok, "owned-widget clear retry completes")
+    window.OnMainMenu = gamma_arena_ui_result.UIResult.OnMainMenu
+
+    gamma_arena_ui_result.clear_result()
+    local original_constructor = gamma_arena_ui_result.UIResult
+    gamma_arena_ui_result.UIResult = function()
+        constructor_calls = constructor_calls + 1
+        return window
+    end
+    local displayed
+    local first
+    local retained_kind
+    local retained_callback
+    local visible_after_failure
+    local retryable_after_failure
+    local second
+    local ran, reason = pcall(function()
+        displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+            config = {},
+            peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:partial_widgets" }) end,
+            show_result = function(value) return gamma_arena_ui_result.show_result(value) end,
+            consume_defeat = function() consumes = consumes + 1; return gamma_arena_result.ok(true) end,
+            clear_result = function() return gamma_arena_ui_result.clear_result() end
+        })
+        first = gamma_arena_ui_result.invoke_active_main_menu()
+        retained_kind = window.kind
+        retained_callback = type(window.on_main_menu)
+        visible_after_failure = window.dialog_visible and window.visible and result_panel.visible
+        retryable_after_failure = window.action_locked == false
+        second = gamma_arena_ui_result.invoke_active_main_menu()
+    end)
+    gamma_arena_ui_result.UIResult = original_constructor
+    if not ran then error(reason) end
+
+    gamma_arena_test_assert.is_true(displayed.ok, "public active-window clear fixture displays")
+    gamma_arena_test_assert.is_false(first.ok, "real partial ClearOwnedWidgets failure remains structured")
+    gamma_arena_test_assert.equals(constructor_calls, 1, "ClearOwnedWidgets failure retains the module active window")
+    gamma_arena_test_assert.equals(retained_kind, "defeat", "ClearOwnedWidgets failure retains the active result kind")
+    gamma_arena_test_assert.equals(retained_callback, "function", "ClearOwnedWidgets failure retains the active retry callback")
+    gamma_arena_test_assert.is_true(visible_after_failure, "ClearOwnedWidgets failure restores a visible nonblank result")
+    gamma_arena_test_assert.is_true(retryable_after_failure, "ClearOwnedWidgets failure leaves the active action unlocked for retry")
+    gamma_arena_test_assert.equals(window.kind, nil, "successful second event clears the active result model")
+    gamma_arena_test_assert.is_true(second.ok, "second active OnMainMenu event completes recovery")
     gamma_arena_test_assert.equals(consumes, 1, "partial owned-widget clearing never reconsumes defeat")
     gamma_arena_test_assert.equals(menu.show_dialog, 2, "partial owned-widget clear always restores owner")
 end

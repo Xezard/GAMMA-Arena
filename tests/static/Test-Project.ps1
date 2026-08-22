@@ -593,7 +593,12 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
     Assert-True ($Task9UiContent -match 'if\s+self\.action_locked[\s\S]{0,180}return\s+gamma_arena_result\.ok\(false\)') 'Task 6 result actions must retain the repeated-click lock'
     Assert-True ($Task9UiContent -match '(?m)^function\s+resolve_result_keyboard_action\s*\(') 'Task 6 result keyboard routing must expose a behavioral test seam'
     Assert-True ($Task9UiContent -match '(?m)^function\s+dismiss_result_window\s*\(') 'Task 6 result dismissal must expose its retry-safe behavioral seam'
+    Assert-True ($Task9UiContent -match '(?m)^function\s+invoke_active_main_menu\s*\(') 'Task 6 runtime tests must drive Main menu through the public active-result action'
     Assert-True ($Task9UiContent -match 'function\s+dismiss_result_window[\s\S]{0,900}HideDialog[\s\S]{0,300}Show\(false\)[\s\S]{0,900}ClearOwnedWidgets') 'Task 6 result dismissal must preserve its model until engine hiding succeeds'
+    $Task6DismissStart = $Task9UiContent.IndexOf('function dismiss_result_window')
+    $Task6DismissClear = $Task9UiContent.IndexOf('window:ClearOwnedWidgets()', $Task6DismissStart)
+    $Task6DismissActiveClear = $Task9UiContent.IndexOf('active_window = nil', $Task6DismissStart)
+    Assert-True ($Task6DismissStart -ge 0 -and $Task6DismissClear -gt $Task6DismissStart -and $Task6DismissActiveClear -gt $Task6DismissClear) 'Task 6 result dismissal must retain the module active window until owned-widget cleanup succeeds'
 }
 if (Test-Path -LiteralPath $Task6UiStartPath) {
     $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
