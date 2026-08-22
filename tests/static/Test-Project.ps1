@@ -902,7 +902,8 @@ if (Test-Path -LiteralPath $LayoutPath) {
     Assert-True ($LayoutContent -match '(?m)^actor_spawn_path\s*=\s*t_way\s*$') 'Actor must spawn at the vanilla Rostok Arena ingress patrol'
     Assert-True ($LayoutContent -match '(?m)^actor_look_path\s*=\s*t_look\s*$') 'Actor must face the vanilla Rostok Arena ingress look patrol'
     Assert-True ($LayoutContent -notmatch '(?m)^actor_boundary_zone\s*=') 'Closed Rostok Arena must not declare a runtime boundary restrictor'
-    Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_monstr_walk') 'Layout must retain the six unique opponent paths'
+    Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_1_1') 'Layout must retain the vanilla six-human Arena patrol set'
+    Assert-True ($LayoutContent -notmatch 'bar_arena_monstr_walk') 'Human Arena layouts must never assign the monster patrol'
     foreach ($Marker in @('virtual_capacity = 10','virtual_radii = 1.5,2.5','max_height_delta = 1.0','min_opponent_separation = 1.75','min_actor_separation = 8.0','max_base_distance = 3.0')) {
         Assert-True ($LayoutContent.Contains($Marker)) "Layout v2 must declare $Marker"
     }
@@ -1315,6 +1316,10 @@ Assert-True ($Task11BootstrapContent -match 'function\s+TacticalProxy:begin[\s\S
 Assert-True ($Task11BootstrapContent -match 'function\s+TacticalProxy:stop[\s\S]{0,400}adapter:stop[\s\S]{0,200}if\s+stopped\.ok[\s\S]{0,100}self\.active\s*=\s*nil') 'Tactical proxy must retain a failed adapter stop for retry'
 $Task11TacticalConfigPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'
 Assert-True (Test-Path -LiteralPath $Task11TacticalConfigPath) 'Tactical director LTX is missing'
+$Task11TacticalConfigContent = Get-Content -LiteralPath $Task11TacticalConfigPath -Raw
+Assert-True ($Task11TacticalConfigContent -notmatch 'bar_arena_monstr_walk') 'Tactical human walkers must never use the monster patrol'
+Assert-True ($Task11TacticalConfigContent -match '\[walker@ga_bar_arena_walk_1_1\][\s\S]{0,300}path_walk\s*=\s*bar_arena_walk_1_1') 'Tactical config must include the vanilla sixth human patrol'
+Assert-True (([regex]::Matches($Task11TacticalConfigContent, '(?m)^out_restr\s*=\s*bar_arena_restrictor\s*$')).Count -eq 6) 'Every tactical human walker must use the vanilla Arena restrictor'
 $Task11CompatContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script') -Raw
 foreach ($Task11Marker in @(
     'GA_PREFLIGHT_DIRECTOR_API_MISSING',
