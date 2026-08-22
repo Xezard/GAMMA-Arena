@@ -789,8 +789,11 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Marker in @('WAIT_ACTOR_LOADOUT','move_to_slot','item_in_slot','set_ammo_elapsed','get_ammo_in_magazine','ammo_mag_size','update_loadout','GA_ACTOR_LOADOUT_EQUIP_TIMEOUT')) {
         Assert-True (($Task5BootstrapContent + $Task7EntityContent + $Task6ActorContent) -match [regex]::Escape($Marker)) "Equipped actor loadout must cover $Marker"
     }
-    foreach ($Marker in @('runtime_actor_loadout_derives_unreadable_server_ammo_quantity','runtime_entity_derives_unreadable_server_ammo_quantity','runtime_actor_loadout_translates_ltx_slots_to_lua_slots','runtime_actor_loadout_waits_across_frames_for_engine_equipment')) {
+    foreach ($Marker in @('runtime_actor_loadout_derives_unreadable_server_ammo_quantity','runtime_entity_derives_unreadable_server_ammo_quantity','runtime_actor_loadout_translates_ltx_slots_to_lua_slots','runtime_actor_loadout_progress_survives_clock_stalls','runtime_actor_loadout_no_progress_timeout_has_context')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime ammo allocation regression must cover $Marker"
+    }
+    foreach ($Marker in @('last_progress_at','elapsed_since_progress_ms','total_elapsed_ms')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment inactivity timeout must expose $Marker"
     }
     Assert-True ($Task5DevTestContent -match [regex]::Escape('runtime_result_modal_releases_global_input')) 'Runtime result modal must prove global input ownership is released'
 }

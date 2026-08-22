@@ -3194,7 +3194,7 @@ local function runtime_actor_loadout_translates_ltx_slots_to_lua_slots()
     gamma_arena_test_assert.equals(invalid.error.code, "GA_ACTOR_LOADOUT_SLOT_INVALID", "invalid slot translation preserves the actor loadout code")
 end
 
-local function runtime_actor_loadout_waits_across_frames_for_engine_equipment()
+local function runtime_actor_loadout_progress_survives_clock_stalls()
     local now, next_id = 100, 1200
     local present, tags, slots, pending_slots = {}, {}, {}, {}
     local magazine, pending_magazine, active, pending_active = {}, {}, nil, nil
@@ -3256,7 +3256,7 @@ local function runtime_actor_loadout_waits_across_frames_for_engine_equipment()
         result = port.update(actor)
         gamma_arena_test_assert.is_true(result.ok, "uncommitted engine equipment remains pending rather than failing verification")
         if result.value.ready == true then break end
-        now = now + 1
+        now = now + 101
         for slot, item in pairs(pending_slots) do slots[slot] = item; pending_slots[slot] = nil end
         for id, count in pairs(pending_magazine) do magazine[id] = count; pending_magazine[id] = nil end
         if pending_active ~= nil then active = pending_active; pending_active = nil end
@@ -3265,6 +3265,50 @@ local function runtime_actor_loadout_waits_across_frames_for_engine_equipment()
     gamma_arena_test_assert.equals(move_calls, 3, "outfit, knife and weapon moves are each submitted once")
     gamma_arena_test_assert.equals(magazine_calls, 1, "magazine fill is submitted once")
     gamma_arena_test_assert.equals(active_calls, 1, "active weapon selection is submitted once")
+end
+
+local function runtime_actor_loadout_no_progress_timeout_has_context()
+    local now, next_id = 100, 1400
+    local present, tags = {}, {}
+    local actor = { id = function() return 77 end }
+    local loadout = entity_spec(1).actor().loadout
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        present[value.runtime_id] = value
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return now end,
+        timeout_ms = 100,
+        actor_id = function(target) return target:id() end,
+        ownership_token = function() return "session-stalled-equipment" end,
+        ammo_box_size = function() return 20 end,
+        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        entity_id = function(item) return item:id() end,
+        entity_parent_id = function(item) return item.parent_id end,
+        entity_section = function(item) return item.section_name end,
+        item_quantity = function(item) return item.quantity end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        online_item = function() return nil end,
+        resolve_entity = function(id) return present[id] end,
+        release_item = function(id) present[id] = nil; return true end
+    })
+    gamma_arena_test_assert.is_true(port.apply(actor, loadout).ok, "stalled equipment fixture creates the exact actor loadout")
+    local waiting = port.update(actor)
+    gamma_arena_test_assert.is_true(waiting.ok and waiting.value.pending == true, "offline required equipment waits within the inactivity deadline")
+    now = now + 101
+    local timed_out = port.update(actor)
+    gamma_arena_test_assert.is_false(timed_out.ok, "a phase with no observable progress remains bounded")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_LOADOUT_EQUIP_TIMEOUT", "stalled actor equipment preserves its public timeout code")
+    gamma_arena_test_assert.equals(timed_out.error.context.phase, "SUBMIT_SLOT", "timeout context identifies the stalled phase")
+    gamma_arena_test_assert.equals(timed_out.error.context.role, "outfit", "timeout context identifies the stalled equipment role")
+    gamma_arena_test_assert.equals(timed_out.error.context.section, loadout.outfit, "timeout context identifies the stalled section")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 101, "timeout context reports inactivity rather than total transaction duration")
+    gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 101, "timeout context retains total transaction duration for diagnostics")
+    gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 100, "timeout context reports the configured inactivity bound")
 end
 
 local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
@@ -5367,7 +5411,8 @@ local cases = {
     ,{ name = "runtime_entity_active_defers_input_release_to_task8", fn = runtime_entity_active_defers_input_release_to_task8 }
     ,{ name = "runtime_bootstrap_actor_loadout_port_is_bound_and_exact", fn = runtime_bootstrap_actor_loadout_port_is_bound_and_exact }
     ,{ name = "runtime_actor_loadout_translates_ltx_slots_to_lua_slots", fn = runtime_actor_loadout_translates_ltx_slots_to_lua_slots }
-    ,{ name = "runtime_actor_loadout_waits_across_frames_for_engine_equipment", fn = runtime_actor_loadout_waits_across_frames_for_engine_equipment }
+    ,{ name = "runtime_actor_loadout_progress_survives_clock_stalls", fn = runtime_actor_loadout_progress_survives_clock_stalls }
+    ,{ name = "runtime_actor_loadout_no_progress_timeout_has_context", fn = runtime_actor_loadout_no_progress_timeout_has_context }
     ,{ name = "runtime_actor_loadout_derives_unreadable_server_ammo_quantity", fn = runtime_actor_loadout_derives_unreadable_server_ammo_quantity }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }

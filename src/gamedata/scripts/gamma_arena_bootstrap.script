@@ -588,12 +588,14 @@ function new_actor_loadout_port(ports)
             actor = actor,
             actor_id = actor_id.value,
             started_at = started.value,
+            last_progress_at = started.value,
             timeout_ms = timeout_ms,
             reserve_rounds = ammo_rounds,
             summary = nil
         }
         return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
     end
+    local equipment_roles = { "outfit", "knife", "weapon" }
     local function equipment_record(role)
         local found = nil
         for _, record in ipairs(owned_records) do
@@ -604,19 +606,57 @@ function new_actor_loadout_port(ports)
         end
         return found
     end
-    local function pending_equipment()
+    local function equipment_wait_context(elapsed_since_progress_ms, total_elapsed_ms)
+        local pending_slot = equipment.pending_slot
+        local role, section, slot
+        if type(pending_slot) == "table" then
+            role = pending_slot.role
+            section = pending_slot.section
+            slot = pending_slot.slot
+        else
+            if equipment.phase == "SUBMIT_SLOT" then
+                role = equipment_roles[equipment.role_index]
+            elseif equipment.phase == "SUBMIT_MAGAZINE" or equipment.phase == "WAIT_MAGAZINE_VERIFY"
+                or equipment.phase == "SUBMIT_ACTIVE" or equipment.phase == "WAIT_ACTIVE_VERIFY" then
+                role = "weapon"
+            end
+            local record = role ~= nil and equipment_record(role) or nil
+            section = record and record.section or nil
+            slot = role ~= nil and equipment.slots[role] or nil
+        end
+        return {
+            phase = equipment.phase,
+            role = role,
+            section = section,
+            slot = slot,
+            elapsed_since_progress_ms = elapsed_since_progress_ms,
+            total_elapsed_ms = total_elapsed_ms,
+            timeout_ms = equipment.timeout_ms
+        }
+    end
+    local function pending_equipment(progressed)
         local now = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
         if not now.ok then return now end
         if type(now.value) ~= "number" or now.value ~= math.floor(now.value) or now.value < 0 or now.value >= UINT32_MOD then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_CLOCK_FAILED", "Actor loadout clock must return uint32 milliseconds")
         end
-        if teardown_elapsed(equipment.started_at, now.value) > equipment.timeout_ms then
-            return actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_TIMEOUT", "Actor equipment did not become ready before deadline")
+        local total_elapsed_ms = teardown_elapsed(equipment.started_at, now.value)
+        if progressed == true then
+            equipment.last_progress_at = now.value
+        else
+            local elapsed_since_progress_ms = teardown_elapsed(equipment.last_progress_at, now.value)
+            if elapsed_since_progress_ms > equipment.timeout_ms then
+                return actor_loadout_failure(
+                    "GA_ACTOR_LOADOUT_EQUIP_TIMEOUT",
+                    "Actor equipment made no progress before deadline",
+                    equipment_wait_context(elapsed_since_progress_ms, total_elapsed_ms)
+                )
+            end
         end
         return gamma_arena_result.ok({ ready = false, pending = true, state = "WAIT_ACTOR_LOADOUT" })
     end
-    local function pending_or_rollback()
-        local pending = pending_equipment()
+    local function pending_or_rollback(progressed)
+        local pending = pending_equipment(progressed)
         if pending.ok then return pending end
         return rollback(owned_records, pending)
     end
@@ -646,12 +686,11 @@ function new_actor_loadout_port(ports)
             return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Actor changed during equipment transaction") or actor_id
         end
 
-        local roles = { "outfit", "knife", "weapon" }
         if equipment.phase == "SUBMIT_SLOT" then
-            local role = roles[equipment.role_index]
+            local role = equipment_roles[equipment.role_index]
             if role == nil then
                 equipment.phase = "SUBMIT_MAGAZINE"
-                return pending_or_rollback()
+                return pending_or_rollback(true)
             end
             local item = required_equipment(actor, role)
             if not item.ok then return rollback(owned_records, item) end
@@ -662,7 +701,7 @@ function new_actor_loadout_port(ports)
             if not moved.ok then return rollback(owned_records, moved) end
             equipment.pending_slot = { role = role, id = item.value.record.id, section = item.value.record.section, slot = slot.value }
             equipment.phase = "WAIT_SLOT_VERIFY"
-            return pending_or_rollback()
+            return pending_or_rollback(true)
         end
 
         if equipment.phase == "WAIT_SLOT_VERIFY" then
@@ -682,7 +721,7 @@ function new_actor_loadout_port(ports)
             equipment.pending_slot = nil
             equipment.role_index = equipment.role_index + 1
             equipment.phase = "SUBMIT_SLOT"
-            return pending_or_rollback()
+            return pending_or_rollback(true)
         end
 
         local weapon = required_equipment(actor, "weapon")
@@ -699,7 +738,7 @@ function new_actor_loadout_port(ports)
             if not loaded.ok then return rollback(owned_records, loaded) end
             equipment.magazine_rounds = capacity.value
             equipment.phase = "WAIT_MAGAZINE_VERIFY"
-            return pending_or_rollback()
+            return pending_or_rollback(true)
         end
 
         if equipment.phase == "WAIT_MAGAZINE_VERIFY" then
@@ -707,14 +746,14 @@ function new_actor_loadout_port(ports)
             if not magazine.ok then return rollback(owned_records, magazine) end
             if magazine.value ~= equipment.magazine_rounds then return pending_or_rollback() end
             equipment.phase = "SUBMIT_ACTIVE"
-            return pending_or_rollback()
+            return pending_or_rollback(true)
         end
 
         if equipment.phase == "SUBMIT_ACTIVE" then
             local activated = actor_loadout_call("GA_ACTOR_LOADOUT_ACTIVE_FAILED", ports.make_item_active, actor, weapon.value.object)
             if not activated.ok then return rollback(owned_records, activated) end
             equipment.phase = "WAIT_ACTIVE_VERIFY"
-            return pending_or_rollback()
+            return pending_or_rollback(true)
         end
 
         if equipment.phase ~= "WAIT_ACTIVE_VERIFY" then
