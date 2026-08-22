@@ -1503,6 +1503,22 @@ if (Test-Path -LiteralPath $Task7OrchestratorPath) {
         Assert-True ($Task7DeathBlock -match 'confirm_defeat[\s\S]{0,1200}neutralize_owned_opponents') 'Real actor death must confirm defeat then neutralize owned opponents.'
     }
 }
+$Task7DeathControlScripts = @(
+    'src\gamedata\scripts\gamma_arena_orchestrator.script',
+    'src\gamedata\scripts\gamma_arena_bootstrap.script',
+    'src\gamedata\scripts\gamma_arena_actor_adapter.script',
+    'src\gamedata\scripts\gamma_arena_main_menu.script'
+)
+foreach ($Task7DeathControlRelativePath in $Task7DeathControlScripts) {
+    $Task7DeathControlPath = Join-Path $RepoRoot $Task7DeathControlRelativePath
+    if (Test-Path -LiteralPath $Task7DeathControlPath) {
+        $Task7DeathControlContent = Get-Content -LiteralPath $Task7DeathControlPath -Raw
+        Assert-True ($Task7DeathControlContent -notmatch '(?i)hold_after_logical_death|release_logical_death_hold|held_after_death|logical[_-]?death|\brevive\b|set_invulnerable|\.invulnerable\b') 'Production Arena death control must not invoke logical-death hold, revival, invulnerability, or healing APIs.'
+        if ($Task7DeathControlRelativePath -ne 'src\gamedata\scripts\gamma_arena_actor_adapter.script') {
+            Assert-True ($Task7DeathControlContent -notmatch '(?i)\b(?:heal|set_health(?:_ex)?)\s*\(') 'Production Arena death control must not invoke logical-death hold, revival, invulnerability, or healing APIs.'
+        }
+    }
+}
 if (Test-Path -LiteralPath $Task7StorePath) {
     $Task7StoreContent = Get-Content -LiteralPath $Task7StorePath -Raw
     Assert-True ($Task7StoreContent -match 'local\s+DEFEAT_TOKEN_TTL\s*=\s*600') 'Defeat intents must retain their 600-second TTL.'

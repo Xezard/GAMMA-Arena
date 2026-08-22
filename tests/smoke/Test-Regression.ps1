@@ -884,6 +884,13 @@ end
     Assert-True ($LogicalDeathResult.ExitCode -ne 0 -and $LogicalDeathResult.Output -match 'Natural death must not cancel lethal engine damage through flags\.ret_value\.') 'Static policy must reject logical-death cancellation through its intended policy failure.'
     Assert-True ($LogicalDeathResult.Output -match 'Natural death must not invoke logical-death hold or revival behavior\.') 'Static policy must reject logical-death holds through its intended policy failure.'
 
+    $PostDeathHoldFixture = New-Task7Fixture 'post-death-logical-hold'
+    $PostDeathHoldPath = Join-Path $PostDeathHoldFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script'
+    $PostDeathHold = (Get-Content -LiteralPath $PostDeathHoldPath -Raw).Replace('    local errors = {}', '    self.deps.actor:hold_after_logical_death()' + [Environment]::NewLine + '    local errors = {}')
+    Write-FixtureFile $PostDeathHoldFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script' $PostDeathHold
+    $PostDeathHoldResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PostDeathHoldFixture) -CaptureOutput
+    Assert-True ($PostDeathHoldResult.ExitCode -ne 0 -and $PostDeathHoldResult.Output -match 'Production Arena death control must not invoke logical-death hold, revival, invulnerability, or healing APIs\.') 'Static policy must reject logical-death holds introduced outside actor_on_before_death.'
+
     $MissingDeathCallbackFixture = New-Task7Fixture 'missing-actor-death-callback'
     $MissingDeathCallbackPath = Join-Path $MissingDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
     $MissingDeathCallback = [regex]::Replace((Get-Content -LiteralPath $MissingDeathCallbackPath -Raw), '(?m)^\s*"actor_on_death",\r?\n', '', 1)
@@ -900,10 +907,10 @@ end
 
     $DefeatTtlFixture = New-Task7Fixture 'defeat-ttl-removed'
     $DefeatTtlPath = Join-Path $DefeatTtlFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
-    $DefeatTtl = [regex]::Replace((Get-Content -LiteralPath $DefeatTtlPath -Raw), '(?m)^local\s+DEFEAT_TOKEN_TTL\s*=\s*600\r?\n', '', 1)
+    $DefeatTtl = (Get-Content -LiteralPath $DefeatTtlPath -Raw).Replace('if now - issued_at > DEFEAT_TOKEN_TTL then', 'if false then')
     Write-FixtureFile $DefeatTtlFixture 'src\gamedata\scripts\gamma_arena_session_store.script' $DefeatTtl
     $DefeatTtlResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DefeatTtlFixture) -CaptureOutput
-    Assert-True ($DefeatTtlResult.ExitCode -ne 0 -and $DefeatTtlResult.Output -match 'Defeat intents must retain their 600-second TTL\.') 'Static policy must reject defeat intents without their intended TTL failure.'
+    Assert-True ($DefeatTtlResult.ExitCode -ne 0 -and $DefeatTtlResult.Output -match 'Defeat token parsing must enforce the defeat TTL\.') 'Static policy must reject defeat token parsing that bypasses the TTL comparison.'
 
     $UnverifiedExoFixture = New-Task7Fixture 'unverified-powered-exo'
     $UnverifiedExoPath = Join-Path $UnverifiedExoFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
