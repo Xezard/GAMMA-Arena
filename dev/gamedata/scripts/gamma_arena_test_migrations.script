@@ -376,6 +376,66 @@ local function launch_survives_vm_reload_with_matching_bridge_lease()
     gamma_arena_test_assert.equals(second_config.data.bridge_pending, nil, "cross-VM bridge lease clears")
 end
 
+local function launch_bridge_survives_fake_start_and_target_migrations()
+    local backend = fake_backend()
+    local menu_config = fake_config(nil, backend)
+    gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(menu_config).ok, "menu VM migration initializes current settings")
+
+    local menu_store = gamma_arena_session_store.new_store()
+    local issued = menu_store:issue_launch(menu_config, valid_request(43), {
+        clock = function() return 1000 end,
+        nonce = function() return "migration_handoff" end
+    })
+    gamma_arena_test_assert.is_true(issued.ok, "migration handoff launch issues")
+    gamma_arena_test_assert.is_true(menu_store:write_character_creation(menu_config).ok, "migration handoff bridge persists")
+
+    local fake_start_config = fake_config(nil, backend)
+    gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(fake_start_config).ok, "fake_start VM migration succeeds")
+    gamma_arena_test_assert.equals(fake_start_config.data.bridge_pending, "true", "fake_start migration preserves the active bridge lease")
+    gamma_arena_test_assert.is_true(
+        gamma_arena_session_store.new_store():mark_launch_deferred(fake_start_config, "fake_start", "l05_bar").ok,
+        "fake_start VM records the serialized target-level handoff"
+    )
+
+    local target_config = fake_config(nil, backend)
+    gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(target_config).ok, "target VM migration succeeds")
+    gamma_arena_test_assert.equals(target_config.data.bridge_pending, "true", "target migration preserves the active bridge lease")
+    local target_store = gamma_arena_session_store.new_store()
+    local activation = target_store:validate_launch_activation(target_config, { serialized = true, current_level = "l05_bar", expected_level = "l05_bar" })
+    gamma_arena_test_assert.is_true(activation.ok, "target VM accepts exact l05_bar serialized proof")
+    gamma_arena_test_assert.equals(activation.value.route, "deferred", "target VM retains deferred activation route")
+    local consumed = gamma_arena_session_store.new_store():consume_launch(target_config, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_true(consumed.ok, "target VM consumes the launch after both migrations")
+    gamma_arena_test_assert.equals(consumed.value.session_seed, 43, "migration handoff request remains exact")
+end
+
+local function migration_invalidation_restores_active_bridge()
+    local backend = fake_backend({
+        settings_schema_version = "1",
+        addon_version = "0.0.9",
+        last_difficulty_id = "stalker",
+        last_seed_mode = "manual",
+        new_game_character_name = "Original_Stalker",
+        new_game_faction = "loner"
+    })
+    local menu_config = fake_config(nil, backend)
+    local menu_store = gamma_arena_session_store.new_store()
+    local issued = menu_store:issue_launch(menu_config, valid_request(44), {
+        clock = function() return 1000 end,
+        nonce = function() return "invalidated_handoff" end
+    })
+    gamma_arena_test_assert.is_true(issued.ok, "old-version launch issues")
+    gamma_arena_test_assert.is_true(menu_store:write_character_creation(menu_config).ok, "old-version bridge persists")
+
+    local target_config = fake_config(nil, backend)
+    local migrated = gamma_arena_migrations.migrate(target_config)
+    gamma_arena_test_assert.is_true(migrated.ok, "version transition succeeds")
+    gamma_arena_test_assert.equals(target_config.data.launch_pending, nil, "version transition invalidates launch")
+    gamma_arena_test_assert.equals(target_config.data.bridge_pending, nil, "version transition consumes invalidated bridge")
+    gamma_arena_test_assert.equals(target_config.data.new_game_character_name, "Original_Stalker", "version transition restores character name")
+    gamma_arena_test_assert.equals(target_config.data.new_game_faction, "loner", "version transition restores faction")
+end
+
 local function launch_handoff_rejects_mismatched_or_expired_lease()
     local mismatch_backend = fake_backend()
     local mismatch_config = fake_config(nil, mismatch_backend)
@@ -1122,6 +1182,23 @@ local function bridge_fixture(label)
     return config, store, character_snapshot(initial)
 end
 
+local function character_creation_reconcile_rejects_malformed_matching_lease()
+    local missing_config = bridge_fixture("missing_snapshot_field")
+    missing_config:corrupt("gamma_arena", "bridge_new_game_character_name_present", nil)
+    local missing = gamma_arena_session_store.new_store():reconcile_character_creation(missing_config)
+    gamma_arena_test_assert.is_false(missing.ok, "matching lease with a missing snapshot field rejects")
+    gamma_arena_test_assert.equals(missing.error.code, "GA_CHARACTER_CREATION_LEASE_INVALID", "missing snapshot field uses the lease error taxonomy")
+    gamma_arena_test_assert.equals(missing_config.data.bridge_pending, "true", "invalid snapshot remains fail-closed")
+
+    local empty_token_config = bridge_fixture("empty_matching_token")
+    empty_token_config:corrupt("gamma_arena", "bridge_launch_token", "")
+    empty_token_config:corrupt("gamma_arena", "launch_token", "")
+    local empty_token = gamma_arena_session_store.new_store():reconcile_character_creation(empty_token_config)
+    gamma_arena_test_assert.is_false(empty_token.ok, "matching empty lease token rejects")
+    gamma_arena_test_assert.equals(empty_token.error.code, "GA_CHARACTER_CREATION_LEASE_INVALID", "empty lease token uses the lease error taxonomy")
+    gamma_arena_test_assert.equals(empty_token_config.data.bridge_pending, "true", "empty-token lease remains fail-closed")
+end
+
 local function character_creation_bridge_restores_exactly_from_fresh_store()
     local config, _, expected = bridge_fixture("fresh_bridge")
     local restored = gamma_arena_session_store.new_store():restore_character_creation(config)
@@ -1313,6 +1390,8 @@ local cases = {
     { name = "durable_preferences", fn = durable_preferences_are_exact },
     { name = "launch_token_one_shot", fn = launch_token_is_volatile_ttl_bound_and_one_shot },
     { name = "launch_cross_vm_handoff", fn = launch_survives_vm_reload_with_matching_bridge_lease },
+    { name = "launch_migration_handoff", fn = launch_bridge_survives_fake_start_and_target_migrations },
+    { name = "launch_migration_invalidation", fn = migration_invalidation_restores_active_bridge },
     { name = "launch_cross_vm_handoff_rejects_invalid", fn = launch_handoff_rejects_mismatched_or_expired_lease },
     { name = "launch_serialized_route_phase_proof", fn = serialized_launch_requires_fake_start_phase_proof },
     { name = "stale_launch_recovery", fn = stale_launch_is_recovered_by_new_store },
@@ -1332,6 +1411,7 @@ local cases = {
     { name = "dxml_placement_failures", fn = dxml_placement_failures_are_structured },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
     { name = "character_creation_bridge_fresh_store_restore", fn = character_creation_bridge_restores_exactly_from_fresh_store },
+    { name = "character_creation_bridge_malformed_reconcile", fn = character_creation_reconcile_rejects_malformed_matching_lease },
     { name = "character_creation_bridge_engine_empty_restore", fn = character_creation_bridge_accepts_engine_nil_for_present_empty_values },
     { name = "ordinary_character_creation_without_lease", fn = ordinary_character_creation_without_lease_is_untouched },
     { name = "character_creation_bridge_terminal_routes", fn = character_creation_bridge_restores_on_every_launch_terminal_route },

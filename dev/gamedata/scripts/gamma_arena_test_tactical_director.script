@@ -1,0 +1,259 @@
+local function vector(x, y, z)
+    return { x = x, y = y, z = z }
+end
+
+local function config(overrides)
+    local value = {
+        observation_interval_ms = 500,
+        report_delay_min_ms = 1000,
+        report_delay_max_ms = 3000,
+        assignment_dwell_ms = 5000,
+        visual_aging_ms = 20000,
+        evidence_expiry_ms = 60000,
+        hint_delay_ms = 60000,
+        hint_cooldown_ms = 60000
+    }
+    for key, item in pairs(overrides or {}) do value[key] = item end
+    return value
+end
+
+local function routes()
+    return {
+        { id = "route_a", anchor = vector(0, 0, 0) },
+        { id = "route_b", anchor = vector(10, 0, 0) },
+        { id = "route_c", anchor = vector(20, 0, 0) },
+        { id = "route_d", anchor = vector(30, 0, 0) }
+    }
+end
+
+local function participants(count)
+    local value = {}
+    local route_ids = { "route_a", "route_b", "route_c", "route_d" }
+    for slot = 1, count or 4 do
+        value[slot] = { slot = slot, id = 100 + slot, spawn_route = route_ids[slot] }
+    end
+    return value
+end
+
+local function statuses(count, combat_slot)
+    local value = {}
+    for slot = 1, count or 4 do value[slot] = { alive = true, combat_owned = slot == combat_slot } end
+    return value
+end
+
+local function new_director(overrides)
+    local director, failure = gamma_arena_tactical_director.new(config(overrides))
+    gamma_arena_test_assert.is_true(director ~= nil, "valid tactical configuration creates a director")
+    gamma_arena_test_assert.is_true(failure == nil, "valid tactical configuration has no failure")
+    return director
+end
+
+local function begin_fixture(director, now_ms, count, fight_key)
+    local begun = director:begin(fight_key or "fight-seed-1", routes(), participants(count), now_ms or 0)
+    gamma_arena_test_assert.is_true(begun.ok, "director fixture begins")
+    return begun
+end
+
+local function no_hint_before_sixty_seconds()
+    local director = new_director()
+    begin_fixture(director, 1000)
+    local update = director:update(60999, statuses())
+    gamma_arena_test_assert.is_true(update.ok, "pre-hint update succeeds")
+    gamma_arena_test_assert.is_false(update.value.hint_requested, "actor hint stays forbidden before 60 seconds")
+end
+
+local function hint_is_requested_at_sixty_seconds_and_rate_limited()
+    local director = new_director()
+    begin_fixture(director, 1000)
+    local first = director:update(61000, statuses())
+    gamma_arena_test_assert.is_true(first.value.hint_requested, "60 seconds requests one coarse hint")
+    local accepted = director:accept_hint(61000, { "route_a", "route_b", "route_c", "route_d" })
+    gamma_arena_test_assert.is_true(accepted.ok, "coarse hint is accepted")
+    gamma_arena_test_assert.is_false(director:update(120999, statuses()).value.hint_requested, "hint cooldown is exclusive")
+    gamma_arena_test_assert.is_true(director:update(121000, statuses()).value.hint_requested, "a complete further minute permits another hint")
+end
+
+local function evidence_resets_hint_timer_immediately()
+    local director = new_director()
+    begin_fixture(director, 1000)
+    local observed = director:observe({ kind = "enemy_sound", observer_slot = 1, at_ms = 60500, position = vector(10, 0, 0) })
+    gamma_arena_test_assert.is_true(observed.ok, "credible sound is accepted")
+    gamma_arena_test_assert.is_false(director:update(61000, statuses()).value.hint_requested, "new local evidence resets anti-stall before squad delivery")
+end
+
+local function stale_evidence_never_rewinds_privacy_clock()
+    local director = new_director()
+    begin_fixture(director, 1000, 1)
+    gamma_arena_test_assert.is_true(director:observe({ kind = "visual", observer_slot = 1, at_ms = 50000, position = vector(20, 0, 0) }).ok, "fresh visual evidence is accepted")
+    gamma_arena_test_assert.is_true(director:observe({ kind = "enemy_sound", observer_slot = 1, at_ms = 10000, position = vector(0, 0, 0) }).ok, "persisted stale danger is accepted without throwing")
+    gamma_arena_test_assert.equals(director:snapshot().last_credible_at, 50000, "stale danger never rewinds the privacy clock")
+    gamma_arena_test_assert.is_false(director:update(109999, statuses(1)).value.hint_requested, "stale danger cannot authorize an early actor hint")
+    gamma_arena_test_assert.is_true(director:update(110000, statuses(1)).value.hint_requested, "hint remains available after a complete minute from fresh evidence")
+end
+
+local function squad_report_delay_is_deterministic_and_bounded()
+    local first, second = new_director(), new_director()
+    begin_fixture(first, 0)
+    begin_fixture(second, 0)
+    local evidence = { kind = "visual", observer_slot = 2, at_ms = 100, position = vector(19, 0, 0) }
+    local queued_first, queued_second = first:observe(evidence), second:observe(evidence)
+    gamma_arena_test_assert.equals(queued_first.value.deliver_at, queued_second.value.deliver_at, "equal evidence has equal report delay")
+    local delay = queued_first.value.deliver_at - evidence.at_ms
+    gamma_arena_test_assert.is_true(delay >= 1000 and delay <= 3000, "report delay remains within 1-3 seconds")
+    first:update(queued_first.value.deliver_at - 1, statuses())
+    gamma_arena_test_assert.equals(first:snapshot().shared_evidence_count, 0, "report is private before delivery")
+    first:update(queued_first.value.deliver_at, statuses())
+    gamma_arena_test_assert.equals(first:snapshot().shared_evidence_count, 1, "report becomes shared at delivery")
+end
+
+local function observer_uses_private_evidence_before_report_delivery()
+    local director = new_director({ assignment_dwell_ms = 0 })
+    begin_fixture(director, 0, 1)
+    local observed = director:observe({ kind = "visual", observer_slot = 1, at_ms = 100, position = vector(29, 0, 0) })
+    local update = director:update(100, statuses(1))
+    gamma_arena_test_assert.equals(director:snapshot().shared_evidence_count, 0, "squad report remains delayed")
+    gamma_arena_test_assert.equals(#update.value.commands, 1, "observer may search its own credible evidence immediately after native combat releases")
+    gamma_arena_test_assert.equals(update.value.commands[1].route_id, "route_d", "private evidence uses the observed sector")
+    gamma_arena_test_assert.is_true(observed.value.deliver_at ~= 100, "private use does not bypass report delay")
+end
+
+local function report_delivery_is_uint32_wrap_safe()
+    local director = new_director({ report_delay_min_ms = 1000, report_delay_max_ms = 1000 })
+    begin_fixture(director, 4294966800, 1)
+    local observed = director:observe({ kind = "enemy_sound", observer_slot = 1, at_ms = 4294967000, position = vector(10, 0, 0) })
+    gamma_arena_test_assert.equals(observed.value.deliver_at, 704, "report deadline wraps modulo uint32")
+    director:update(703, statuses(1))
+    gamma_arena_test_assert.equals(director:snapshot().shared_evidence_count, 0, "wrapped report stays pending before its deadline")
+    director:update(704, statuses(1))
+    gamma_arena_test_assert.equals(director:snapshot().shared_evidence_count, 1, "wrapped report delivers exactly at its deadline")
+end
+
+local function native_combat_blocks_route_commands()
+    local director = new_director()
+    begin_fixture(director, 0, 1)
+    local queued = director:observe({ kind = "visual", observer_slot = 1, at_ms = 100, position = vector(29, 0, 0) })
+    local update = director:update(queued.value.deliver_at, statuses(1, 1))
+    gamma_arena_test_assert.equals(#update.value.commands, 0, "director cannot command native combat owner")
+end
+
+local function initial_roles_and_routes_are_distributed()
+    local expected = {
+        [1] = { "pressure" },
+        [2] = { "pressure", "flank" },
+        [3] = { "pressure", "flank", "support" },
+        [4] = { "pressure", "flank", "support", "anchor" }
+    }
+    for count = 1, 4 do
+        local begun = begin_fixture(new_director(), 0, count, "roles-" .. tostring(count))
+        local seen_routes = {}
+        for slot = 1, count do
+            local command = begun.value.commands[slot]
+            gamma_arena_test_assert.equals(command.role, expected[count][slot], "role allocation for survivor count")
+            gamma_arena_test_assert.is_false(seen_routes[command.route_id] == true, "initial routes stay distinct")
+            seen_routes[command.route_id] = true
+        end
+    end
+end
+
+local function weak_evidence_respects_dwell_but_visual_preempts()
+    local director = new_director({ assignment_dwell_ms = 10000 })
+    begin_fixture(director, 0, 1)
+    local sound = director:observe({ kind = "enemy_sound", observer_slot = 1, at_ms = 100, position = vector(29, 0, 0) })
+    gamma_arena_test_assert.equals(#director:update(sound.value.deliver_at, statuses(1)).value.commands, 0, "weak evidence cannot break dwell")
+    local visual = director:observe({ kind = "visual", observer_slot = 1, at_ms = sound.value.deliver_at + 1, position = vector(29, 0, 0) })
+    local strong = director:update(visual.value.deliver_at, statuses(1))
+    gamma_arena_test_assert.equals(#strong.value.commands, 1, "strong visual evidence may preempt dwell")
+    gamma_arena_test_assert.equals(strong.value.commands[1].reason, "visual", "visual preemption remains explicit")
+end
+
+local function equal_strength_evidence_cannot_oscillate_inside_dwell()
+    local director = new_director({ assignment_dwell_ms = 10000, report_delay_min_ms = 1000, report_delay_max_ms = 1000 })
+    begin_fixture(director, 0, 1)
+    local first = director:observe({ kind = "visual", observer_slot = 1, at_ms = 100, position = vector(29, 0, 0) })
+    gamma_arena_test_assert.equals(#director:update(first.value.deliver_at, statuses(1)).value.commands, 1, "first stronger visual may replace the initial assault")
+    local equal = director:observe({ kind = "visual", observer_slot = 1, at_ms = 1200, position = vector(0, 0, 0) })
+    gamma_arena_test_assert.equals(#director:update(equal.value.deliver_at, statuses(1)).value.commands, 0, "equal-strength visual cannot oscillate the route inside dwell")
+end
+
+local function evidence_ages_and_expires()
+    local director = new_director()
+    begin_fixture(director, 0, 1)
+    local visual = director:observe({ kind = "visual", observer_slot = 1, at_ms = 100, position = vector(20, 0, 0) })
+    director:update(visual.value.deliver_at, statuses(1))
+    director:update(20100, statuses(1))
+    gamma_arena_test_assert.is_true(director:snapshot().best_evidence_aged, "visual evidence ages after 20 seconds")
+    director:update(60100, statuses(1))
+    gamma_arena_test_assert.equals(director:snapshot().shared_evidence_count, 0, "shared evidence expires after 60 seconds")
+end
+
+local function anti_stall_hint_uses_imprecise_ranked_route()
+    local director = new_director()
+    begin_fixture(director, 0, 1)
+    gamma_arena_test_assert.is_true(director:update(60000, statuses(1)).value.hint_requested, "hint is due")
+    local accepted = director:accept_hint(60000, { "route_a", "route_b", "route_c", "route_d" })
+    local selected = accepted.value.commands[1].route_id
+    gamma_arena_test_assert.is_true(selected == "route_b" or selected == "route_c", "hint selects second- or third-ranked route")
+    gamma_arena_test_assert.is_true(selected ~= "route_a", "hint never selects exact nearest route when alternatives exist")
+end
+
+local function deterministic_replay_produces_equal_decisions()
+    local function replay()
+        local director = new_director()
+        local begun = begin_fixture(director, 0, 3, "replay-key")
+        local observed = director:observe({ kind = "attack_sound", observer_slot = 2, at_ms = 500, position = vector(25, 0, 0) })
+        local updated = director:update(observed.value.deliver_at, statuses(3))
+        director:update(60500, statuses(3))
+        local hint = director:accept_hint(60500, { "route_a", "route_b", "route_c", "route_d" })
+        return begun.value.commands, observed.value.deliver_at, updated.value.commands, hint.value.commands
+    end
+    local a, b, c, d = replay()
+    local e, f, g, h = replay()
+    gamma_arena_test_assert.equals(b, f, "deterministic replay delay")
+    gamma_arena_test_assert.equals(a[2].route_id, e[2].route_id, "deterministic initial route")
+    gamma_arena_test_assert.equals(c[1] and c[1].route_id, g[1] and g[1].route_id, "deterministic evidence route")
+    gamma_arena_test_assert.equals(d[1].route_id, h[1].route_id, "deterministic hint route")
+end
+
+local function invalid_configuration_fails_closed()
+    local director, failure = gamma_arena_tactical_director.new(config({ report_delay_min_ms = 4000, report_delay_max_ms = 3000 }))
+    gamma_arena_test_assert.is_true(director == nil, "invalid delay range has no director")
+    gamma_arena_test_assert.is_false(failure.ok, "invalid delay range returns failure")
+    gamma_arena_test_assert.equals(failure.error.code, "GA_DIRECTOR_CONFIG_INVALID", "invalid config code")
+end
+
+local function stop_is_idempotent_and_clears_state()
+    local director = new_director()
+    begin_fixture(director, 0)
+    gamma_arena_test_assert.is_true(director:stop().ok, "first stop succeeds")
+    gamma_arena_test_assert.is_true(director:stop().ok, "second stop succeeds")
+    gamma_arena_test_assert.equals(director:snapshot().state, "STOPPED", "stopped state is explicit")
+    gamma_arena_test_assert.equals(director:snapshot().participant_count, 0, "stop clears participants")
+end
+
+local cases = {
+    { name = "director_no_hint_before_sixty_seconds", fn = no_hint_before_sixty_seconds },
+    { name = "director_hint_at_sixty_seconds_is_rate_limited", fn = hint_is_requested_at_sixty_seconds_and_rate_limited },
+    { name = "director_evidence_resets_hint_timer", fn = evidence_resets_hint_timer_immediately },
+    { name = "director_stale_evidence_preserves_privacy_clock", fn = stale_evidence_never_rewinds_privacy_clock },
+    { name = "director_report_delay_is_deterministic", fn = squad_report_delay_is_deterministic_and_bounded },
+    { name = "director_observer_uses_private_evidence", fn = observer_uses_private_evidence_before_report_delivery },
+    { name = "director_report_delivery_is_wrap_safe", fn = report_delivery_is_uint32_wrap_safe },
+    { name = "director_native_combat_blocks_commands", fn = native_combat_blocks_route_commands },
+    { name = "director_roles_and_routes_are_distributed", fn = initial_roles_and_routes_are_distributed },
+    { name = "director_dwell_allows_only_strong_preemption", fn = weak_evidence_respects_dwell_but_visual_preempts },
+    { name = "director_equal_strength_respects_dwell", fn = equal_strength_evidence_cannot_oscillate_inside_dwell },
+    { name = "director_evidence_ages_and_expires", fn = evidence_ages_and_expires },
+    { name = "director_hint_is_imprecise", fn = anti_stall_hint_uses_imprecise_ranked_route },
+    { name = "director_replay_is_deterministic", fn = deterministic_replay_produces_equal_decisions },
+    { name = "director_invalid_config_fails_closed", fn = invalid_configuration_fails_closed },
+    { name = "director_stop_is_idempotent", fn = stop_is_idempotent_and_clears_state }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        local case = cases[index]
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

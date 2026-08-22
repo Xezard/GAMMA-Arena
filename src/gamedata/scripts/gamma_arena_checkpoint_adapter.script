@@ -711,18 +711,36 @@ end
 
 function engine_fs_port(fs)
     local port = {}
+    local relative_names = {}
+    local allowed_names = {}
+    for _, extension in ipairs({ "scop", "scoc", "dds" }) do
+        allowed_names[file_names[extension]] = true
+        allowed_names[file_names[extension] .. HIDDEN_SUFFIX] = true
+    end
     function port:resolve(name)
         if fs == nil or type(fs.update_path) ~= "function" then return fail("GA_CHECKPOINT_PATH_RESOLVE_FAILED", "getFS update_path is unavailable") end
         local called, value = pcall(fs.update_path, fs, "$game_saves$", name)
         if not called then return fail("GA_CHECKPOINT_PATH_RESOLVE_FAILED", "getFS update_path failed safely", { reason = tostring(value) }) end
-        return canonicalize_engine_path(value)
+        local canonical = canonicalize_engine_path(value)
+        if canonical.ok and allowed_names[name] == true then relative_names[canonical.value] = name end
+        return canonical
     end
     function port:exists(path)
+        local engine_probe_available = false
         if fs ~= nil and type(fs.exist) == "function" then
-            local called, value = pcall(fs.exist, fs, path)
-            if called then return gamma_arena_result.ok(value and true or false) end
+            local relative_name = relative_names[path]
+            if type(relative_name) == "string" then
+                local called, value = pcall(fs.exist, fs, "$game_saves$", relative_name)
+                if called then
+                    engine_probe_available = true
+                    if value then return gamma_arena_result.ok(true) end
+                end
+            end
         end
-        if io == nil or type(io.open) ~= "function" then return fail("GA_CHECKPOINT_FS_FAILED", "No reliable file existence binding is available") end
+        if io == nil or type(io.open) ~= "function" then
+            if engine_probe_available then return gamma_arena_result.ok(false) end
+            return fail("GA_CHECKPOINT_FS_FAILED", "No reliable file existence binding is available")
+        end
         local called, file = pcall(io.open, path, "rb")
         if not called then return fail("GA_CHECKPOINT_FS_FAILED", "File existence fallback failed safely", { reason = tostring(file) }) end
         if file == nil then return gamma_arena_result.ok(false) end
@@ -744,6 +762,10 @@ function engine_fs_port(fs)
         return gamma_arena_result.ok(reason ~= false)
     end
     function port:delete(path)
+        local relative_name = relative_names[path]
+        if type(relative_name) ~= "string" or allowed_names[relative_name] ~= true then
+            return fail("GA_CHECKPOINT_UNSAFE_PATH", "Checkpoint delete rejected a path outside the fixed checkpoint set")
+        end
         if fs == nil or type(fs.file_delete) ~= "function" then return fail("GA_CHECKPOINT_DELETE_FAILED", "getFS file_delete is unavailable") end
         local called, reason = pcall(fs.file_delete, fs, path)
         if not called then return fail("GA_CHECKPOINT_DELETE_FAILED", "getFS file_delete failed safely", { reason = tostring(reason) }) end

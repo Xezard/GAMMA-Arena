@@ -34,18 +34,6 @@ local function pack_values(...)
     return { n = select("#", ...), ... }
 end
 
-local function module_store_port()
-    return {
-        inspect_intents = function(_, config) return gamma_arena_session_store.inspect_intents(config) end,
-        consume_launch = function(_, config, options) return gamma_arena_session_store.consume_launch(config, options) end,
-        prepare_resume = function(_, config, expected) return gamma_arena_session_store.prepare_resume(config, expected) end,
-        issue_resume = function(_, config, intent) return gamma_arena_session_store.issue_resume(config, intent) end,
-        consume_resume = function(_, config, expected, prepared) return gamma_arena_session_store.consume_resume(config, expected, prepared) end,
-        clear_resume_if_matches = function(_, config, expected) return gamma_arena_session_store.clear_resume_if_matches(config, expected) end,
-        clear_transient = function(_, config) return gamma_arena_session_store.clear_transient(config) end
-    }
-end
-
 local function current_config()
     local ok, config = pcall(function() return axr_main and axr_main.config end)
     return ok and config or nil
@@ -70,6 +58,9 @@ local function runtime_probes(catalogs)
         patrol = patrol,
         db = db,
         game_object = game_object,
+        xr_logic = xr_logic,
+        modules = modules,
+        tactical_ini = function() return ini_file("gamma_arena\\gamma_arena_tactical.ltx") end,
         axr_main = axr_main,
         safe_release_manager = safe_release_manager,
         catalogs = catalogs
@@ -155,86 +146,22 @@ local function teardown_elapsed(started, current)
     return (UINT32_MOD - started) + current
 end
 
-local function teardown_method(adapter, method_name, ...)
+local function teardown_adapter_method(adapter, method_name, ...)
     local method_ok, method = pcall(function() return adapter and adapter[method_name] end)
     if not method_ok or type(method) ~= "function" then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method is unavailable", { method = method_name })
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Runtime teardown adapter method is unavailable", { method = method_name })
     end
     local called, result = pcall(method, adapter, ...)
     if not called then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method raised an exception", {
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Runtime teardown adapter method raised an exception", {
             method = method_name,
             reason = tostring(result)
         })
     end
     if type(result) ~= "table" or type(result.ok) ~= "boolean" then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown method returned an invalid Result", { method = method_name })
+        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Runtime teardown adapter method returned an invalid Result", { method = method_name })
     end
     return result
-end
-
-local function teardown_state(adapter)
-    local method_ok, method = pcall(function() return adapter and adapter.state end)
-    if not method_ok or type(method) ~= "function" then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown state method is unavailable")
-    end
-    local called, state = pcall(method, adapter)
-    if not called or type(state) ~= "string" then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint teardown state could not be read safely", {
-            reason = called and "invalid state" or tostring(state)
-        })
-    end
-    return gamma_arena_result.ok(state)
-end
-
-function drain_checkpoint_cleanup(checkpoint_adapter, session, options)
-    options = options or {}
-    local timeout_ms = options.timeout_ms or 10000
-    local max_updates = options.max_updates or 64
-    if type(timeout_ms) ~= "number" or timeout_ms ~= math.floor(timeout_ms) or timeout_ms < 0 or timeout_ms >= UINT32_MOD
-        or type(max_updates) ~= "number" or max_updates ~= math.floor(max_updates) or max_updates < 1
-        or max_updates > MAX_TEARDOWN_UPDATES then
-        return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_INVALID", "Teardown bounds are invalid")
-    end
-    local clock = options.clock
-    local cleanup = teardown_method(checkpoint_adapter, "cleanup", session)
-    if not cleanup.ok then return cleanup end
-    local started = teardown_clock_value(clock)
-    if not started.ok then return started end
-    local updates = 0
-    while true do
-        local state = teardown_state(checkpoint_adapter)
-        if not state.ok then return state end
-        if state.value == "NONE" then
-            return gamma_arena_result.ok({ state = "NONE", updates = updates })
-        end
-        if state.value == "ERROR" then
-            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint cleanup terminated in ERROR", { updates = updates })
-        end
-        if state.value ~= "CLEANING" then
-            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_FAILED", "Checkpoint cleanup entered an unexpected state", {
-                state = state.value,
-                updates = updates
-            })
-        end
-        if updates >= max_updates then
-            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_EXHAUSTED", "Checkpoint cleanup exhausted its bounded update budget", {
-                updates = updates,
-                max_updates = max_updates
-            })
-        end
-        local current = teardown_clock_value(clock)
-        if not current.ok then return current end
-        if teardown_elapsed(started.value, current.value) > timeout_ms then
-            return gamma_arena_result.err("GA_RUNTIME_TEARDOWN_TIMEOUT", "Checkpoint cleanup exceeded its wrap-safe deadline", {
-                updates = updates,
-                timeout_ms = timeout_ms
-            })
-        end
-        local updated = teardown_method(checkpoint_adapter, "update")
-        if not updated.ok then return updated end
-        updates = updates + 1
-    end
 end
 
 function step_entity_cleanup(entity_adapter, context, options)
@@ -248,7 +175,7 @@ function step_entity_cleanup(entity_adapter, context, options)
         return gamma_arena_result.err("GA_ENTITY_TEARDOWN_INVALID", "Entity teardown bounds are invalid")
     end
     if context.started ~= true then
-        local cleanup = teardown_method(entity_adapter, "cleanup")
+        local cleanup = teardown_adapter_method(entity_adapter, "cleanup")
         if not cleanup.ok then return cleanup end
         local started = teardown_clock_value(options.clock)
         if not started.ok then return started end
@@ -280,7 +207,7 @@ function step_entity_cleanup(entity_adapter, context, options)
     end
     -- safe_release_manager advances on later engine frames. Exactly one entity
     -- update is permitted per callback; the composition retains this context.
-    local updated = teardown_method(entity_adapter, "update")
+    local updated = teardown_adapter_method(entity_adapter, "update")
     if not updated.ok then return updated end
     context.updates = context.updates + 1
     context.last_update_at = current.value
@@ -313,7 +240,7 @@ function step_actor_cleanup(actor_adapter, context, options)
     if context.last_update_at == current.value then
         return gamma_arena_result.ok({ pending = true, stage = "actor", updates = context.updates })
     end
-    local actor = teardown_method(actor_adapter, "cleanup")
+    local actor = teardown_adapter_method(actor_adapter, "cleanup")
     if not actor.ok then return actor end
     context.updates = context.updates + 1
     context.last_update_at = current.value
@@ -378,6 +305,15 @@ local function runtime_ammo_quantity(object, is_ammo)
     return nil
 end
 
+local function expected_created_quantity(descriptor, index, entity_count, ammo_box_size)
+    if descriptor.ammo ~= true then return nil end
+    local expected_entities = math.floor((descriptor.count + ammo_box_size - 1) / ammo_box_size)
+    if entity_count ~= expected_entities then return nil end
+    local remaining = descriptor.count - ((index - 1) * ammo_box_size)
+    if remaining < 1 then return nil end
+    return math.min(ammo_box_size, remaining)
+end
+
 function new_runtime_entity_exists_port(provider, error_code)
     local code = error_code or "GA_ACTOR_LOADOUT_EXISTENCE_FAILED"
     return function(id)
@@ -413,6 +349,7 @@ function new_actor_loadout_port(ports)
     ports = ports or {}
     local owned_records = {}
     local token_sequence = 0
+    local equipment = { state = "IDLE" }
     local cleanup
     local function normalize_entities(value)
         local single = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, value)
@@ -430,6 +367,7 @@ function new_actor_loadout_port(ports)
                 parent_id = record.parent_id,
                 section = record.section,
                 token = record.token,
+                role = record.role,
                 authorized = record.authorized == true,
                 release_submitted = record.release_submitted == true
             }
@@ -498,7 +436,17 @@ function new_actor_loadout_port(ports)
         if type(ownership.value) ~= "string" or ownership.value == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Arena actor loadout requires a non-empty session ownership token")
         end
-        if type(loadout) ~= "table" or type(loadout.consumables) ~= "table" then return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed") end
+        if type(loadout) ~= "table" or type(loadout.consumables) ~= "table" or type(loadout.knife) ~= "string" or loadout.knife == "" then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed")
+        end
+        local started = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
+        if not started.ok or type(started.value) ~= "number" or started.value ~= math.floor(started.value) or started.value < 0 or started.value >= UINT32_MOD then
+            return started.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_CLOCK_FAILED", "Actor loadout clock must return uint32 milliseconds") or started
+        end
+        local timeout_ms = ports.timeout_ms or 5000
+        if type(timeout_ms) ~= "number" or timeout_ms ~= math.floor(timeout_ms) or timeout_ms < 0 or timeout_ms >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_TIMEOUT_INVALID", "Actor equipment timeout must be a bounded uint32 duration")
+        end
         local box_size = actor_loadout_call("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", ports.ammo_box_size, loadout.ammo)
         if not box_size.ok then return box_size end
         if type(box_size.value) ~= "number" or box_size.value ~= math.floor(box_size.value) or box_size.value < 1 or box_size.value >= UINT32_MOD
@@ -509,12 +457,29 @@ function new_actor_loadout_port(ports)
         if ammo_rounds ~= math.floor(ammo_rounds) or ammo_rounds < 1 or ammo_rounds >= UINT32_MOD then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor ammo boxes cannot be translated to a bounded exact round count", { section = loadout.ammo, ammo_boxes = loadout.ammo_boxes, box_size = box_size.value })
         end
+        if ports.reserve_magazines ~= nil then
+            if type(ports.reserve_magazines) ~= "number" or ports.reserve_magazines ~= math.floor(ports.reserve_magazines)
+                or ports.reserve_magazines < 1 or ports.reserve_magazines >= UINT32_MOD then
+                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazine policy must be a positive bounded integer")
+            end
+            local capacity = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", ports.magazine_capacity, loadout.weapon)
+            if not capacity.ok then return capacity end
+            if type(capacity.value) ~= "number" or capacity.value ~= math.floor(capacity.value) or capacity.value < 1 or capacity.value >= UINT32_MOD then
+                return actor_loadout_failure("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", "Weapon ammo_mag_size must be a positive bounded integer", { section = loadout.weapon })
+            end
+            local reserve_rounds = ports.reserve_magazines * capacity.value
+            if reserve_rounds ~= math.floor(reserve_rounds) or reserve_rounds < 1 or reserve_rounds >= UINT32_MOD then
+                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazines cannot be translated to a bounded exact round count", { section = loadout.weapon })
+            end
+            ammo_rounds = math.max(ammo_rounds, reserve_rounds)
+        end
         local descriptors = {
-            { section = loadout.weapon, count = 1, ammo = false },
-            { section = loadout.ammo, count = ammo_rounds, ammo = true },
-            { section = loadout.outfit, count = 1, ammo = false }
+            { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
+            { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo" },
+            { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
+            { section = loadout.knife, count = 1, ammo = false, role = "knife" }
         }
-        for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false } end
+        for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "consumable" } end
         local created, seen = {}, {}
         for _, descriptor in ipairs(descriptors) do
             if type(descriptor.section) ~= "string" or descriptor.section == "" or type(descriptor.count) ~= "number" or descriptor.count ~= math.floor(descriptor.count) or descriptor.count < 1 then
@@ -532,7 +497,7 @@ function new_actor_loadout_port(ports)
                 else
                     seen[id.value] = true
                     token_sequence = token_sequence + 1
-                    local entry = { id = id.value, parent_id = actor_id.value, section = descriptor.section, token = ownership.value .. ":" .. tostring(token_sequence) .. ":" .. tostring(id.value), authorized = false, release_submitted = false }
+                    local entry = { id = id.value, parent_id = actor_id.value, section = descriptor.section, role = descriptor.role, token = ownership.value .. ":" .. tostring(token_sequence) .. ":" .. tostring(id.value), authorized = false, release_submitted = false }
                     created[#created + 1] = entry
                     local tagged = save_and_verify_tag(entry)
                     if tagged.ok then entry.authorized = true else descriptor_failure = descriptor_failure or tagged end
@@ -540,13 +505,17 @@ function new_actor_loadout_port(ports)
                     local section = actor_loadout_call("GA_ACTOR_LOADOUT_SECTION_INVALID", ports.entity_section, entity)
                     local quantity = actor_loadout_call("GA_ACTOR_LOADOUT_QUANTITY_INVALID", ports.item_quantity, entity, descriptor.ammo)
                     local proof_failure = not parent.ok and parent or (not section.ok and section or (not quantity.ok and quantity or nil))
+                    local quantity_value = quantity.value
+                    if proof_failure == nil and quantity_value == nil then
+                        quantity_value = expected_created_quantity(descriptor, index, #entities, box_size.value)
+                    end
                     if proof_failure == nil and parent.value ~= actor_id.value then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_OWNER_INVALID", "Created actor item has a foreign parent", { id = id.value }) end
                     if proof_failure == nil and section.value ~= descriptor.section then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_SECTION_INVALID", "Created actor item section differs from FightSpec", { id = id.value }) end
-                    if proof_failure == nil and (type(quantity.value) ~= "number" or quantity.value ~= math.floor(quantity.value) or quantity.value < 1) then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_INVALID", "Created actor item quantity is invalid", { id = id.value }) end
+                    if proof_failure == nil and (type(quantity_value) ~= "number" or quantity_value ~= math.floor(quantity_value) or quantity_value < 1) then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_INVALID", "Created actor item quantity is invalid", { id = id.value }) end
                     if proof_failure ~= nil then
                         descriptor_failure = descriptor_failure or proof_failure
                     else
-                        descriptor_entries[#descriptor_entries + 1] = { record = entry, quantity = quantity.value }
+                        descriptor_entries[#descriptor_entries + 1] = { record = entry, quantity = quantity_value }
                     end
                 end
             end
@@ -556,10 +525,174 @@ function new_actor_loadout_port(ports)
             if total ~= descriptor.count then return rollback(created, actor_loadout_failure("GA_ACTOR_LOADOUT_QUANTITY_MISMATCH", "Created actor item quantity differs from FightSpec", { section = descriptor.section, expected = descriptor.count, actual = total })) end
         end
         owned_records = copy_records(created)
+        equipment = {
+            state = "WAIT_ACTOR_LOADOUT",
+            phase = "SUBMIT_SLOT",
+            role_index = 1,
+            slots = {},
+            actor = actor,
+            actor_id = actor_id.value,
+            started_at = started.value,
+            timeout_ms = timeout_ms,
+            reserve_rounds = ammo_rounds,
+            summary = nil
+        }
         return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
     end
+    local function equipment_record(role)
+        local found = nil
+        for _, record in ipairs(owned_records) do
+            if record.role == role then
+                if found ~= nil then return nil end
+                found = record
+            end
+        end
+        return found
+    end
+    local function pending_equipment()
+        local now = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
+        if not now.ok then return now end
+        if type(now.value) ~= "number" or now.value ~= math.floor(now.value) or now.value < 0 or now.value >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_CLOCK_FAILED", "Actor loadout clock must return uint32 milliseconds")
+        end
+        if teardown_elapsed(equipment.started_at, now.value) > equipment.timeout_ms then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_TIMEOUT", "Actor equipment did not become ready before deadline")
+        end
+        return gamma_arena_result.ok({ ready = false, pending = true, state = "WAIT_ACTOR_LOADOUT" })
+    end
+    local function pending_or_rollback()
+        local pending = pending_equipment()
+        if pending.ok then return pending end
+        return rollback(owned_records, pending)
+    end
+    local function required_equipment(actor, role)
+        local record = equipment_record(role)
+        if record == nil then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Required equipped item record is missing", { role = role })
+        end
+        local online = actor_loadout_call("GA_ACTOR_LOADOUT_ONLINE_LOOKUP_FAILED", ports.online_item, actor, record.id)
+        if not online.ok then return online end
+        if online.value == nil then return gamma_arena_result.ok({ pending = true, record = record }) end
+        return gamma_arena_result.ok({ record = record, object = online.value })
+    end
+    local function effective_equipment_slot(record)
+        local slot = actor_loadout_call("GA_ACTOR_LOADOUT_SLOT_INVALID", ports.item_slot, record.section)
+        if not slot.ok then return slot end
+        if type(slot.value) ~= "number" or slot.value ~= math.floor(slot.value) or slot.value < 0 or slot.value >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_SLOT_INVALID", "Equipped actor item has an invalid effective slot", { section = record.section })
+        end
+        return slot
+    end
+    local function update(actor)
+        if equipment.state == "READY" then return gamma_arena_result.ok(equipment.summary) end
+        if equipment.state ~= "WAIT_ACTOR_LOADOUT" then return actor_loadout_failure("GA_ACTOR_LOADOUT_STATE_INVALID", "Actor loadout is not waiting for equipment", { state = equipment.state }) end
+        local actor_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTOR_INVALID", ports.actor_id, actor)
+        if not actor_id.ok or actor_id.value ~= equipment.actor_id then
+            return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Actor changed during equipment transaction") or actor_id
+        end
+
+        local roles = { "outfit", "knife", "weapon" }
+        if equipment.phase == "SUBMIT_SLOT" then
+            local role = roles[equipment.role_index]
+            if role == nil then
+                equipment.phase = "SUBMIT_MAGAZINE"
+                return pending_or_rollback()
+            end
+            local item = required_equipment(actor, role)
+            if not item.ok then return rollback(owned_records, item) end
+            if item.value.pending == true then return pending_or_rollback() end
+            local slot = effective_equipment_slot(item.value.record)
+            if not slot.ok then return rollback(owned_records, slot) end
+            local moved = actor_loadout_call("GA_ACTOR_LOADOUT_EQUIP_FAILED", ports.move_to_slot, actor, item.value.object, slot.value)
+            if not moved.ok then return rollback(owned_records, moved) end
+            equipment.pending_slot = { role = role, id = item.value.record.id, section = item.value.record.section, slot = slot.value }
+            equipment.phase = "WAIT_SLOT_VERIFY"
+            return pending_or_rollback()
+        end
+
+        if equipment.phase == "WAIT_SLOT_VERIFY" then
+            local pending_slot = equipment.pending_slot
+            if type(pending_slot) ~= "table" then
+                return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_STATE_INVALID", "Pending actor slot proof is missing"))
+            end
+            local current = actor_loadout_call("GA_ACTOR_LOADOUT_EQUIP_VERIFY_FAILED", ports.item_in_slot, actor, pending_slot.slot)
+            if not current.ok then return rollback(owned_records, current) end
+            if current.value == nil then return pending_or_rollback() end
+            local current_id = actor_loadout_call("GA_ACTOR_LOADOUT_EQUIP_VERIFY_FAILED", ports.entity_id, current.value)
+            if not current_id.ok then return rollback(owned_records, current_id) end
+            if current_id.value ~= pending_slot.id then
+                return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_VERIFY_FAILED", "Actor slot contains a different item", { section = pending_slot.section, slot = pending_slot.slot, expected_id = pending_slot.id, actual_id = current_id.value }))
+            end
+            equipment.slots[pending_slot.role] = pending_slot.slot
+            equipment.pending_slot = nil
+            equipment.role_index = equipment.role_index + 1
+            equipment.phase = "SUBMIT_SLOT"
+            return pending_or_rollback()
+        end
+
+        local weapon = required_equipment(actor, "weapon")
+        if not weapon.ok then return rollback(owned_records, weapon) end
+        if weapon.value.pending == true then return pending_or_rollback() end
+
+        if equipment.phase == "SUBMIT_MAGAZINE" then
+            local capacity = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", ports.magazine_capacity, weapon.value.record.section)
+            if not capacity.ok then return rollback(owned_records, capacity) end
+            if type(capacity.value) ~= "number" or capacity.value ~= math.floor(capacity.value) or capacity.value < 1 or capacity.value >= UINT32_MOD then
+                return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", "Weapon ammo_mag_size must be a positive bounded integer", { section = weapon.value.record.section }))
+            end
+            local loaded = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_FAILED", ports.set_ammo_elapsed, weapon.value.object, capacity.value)
+            if not loaded.ok then return rollback(owned_records, loaded) end
+            equipment.magazine_rounds = capacity.value
+            equipment.phase = "WAIT_MAGAZINE_VERIFY"
+            return pending_or_rollback()
+        end
+
+        if equipment.phase == "WAIT_MAGAZINE_VERIFY" then
+            local magazine = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_VERIFY_FAILED", ports.get_ammo_in_magazine, weapon.value.object)
+            if not magazine.ok then return rollback(owned_records, magazine) end
+            if magazine.value ~= equipment.magazine_rounds then return pending_or_rollback() end
+            equipment.phase = "SUBMIT_ACTIVE"
+            return pending_or_rollback()
+        end
+
+        if equipment.phase == "SUBMIT_ACTIVE" then
+            local activated = actor_loadout_call("GA_ACTOR_LOADOUT_ACTIVE_FAILED", ports.make_item_active, actor, weapon.value.object)
+            if not activated.ok then return rollback(owned_records, activated) end
+            equipment.phase = "WAIT_ACTIVE_VERIFY"
+            return pending_or_rollback()
+        end
+
+        if equipment.phase ~= "WAIT_ACTIVE_VERIFY" then
+            return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_STATE_INVALID", "Actor equipment entered an unknown phase", { phase = equipment.phase }))
+        end
+        local active = actor_loadout_call("GA_ACTOR_LOADOUT_ACTIVE_VERIFY_FAILED", ports.active_item, actor)
+        if not active.ok then return rollback(owned_records, active) end
+        if active.value == nil then return pending_or_rollback() end
+        local active_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTIVE_VERIFY_FAILED", ports.entity_id, active.value)
+        if not active_id.ok then return rollback(owned_records, active_id) end
+        if active_id.value ~= weapon.value.record.id then return pending_or_rollback() end
+        local outfit = equipment_record("outfit")
+        local knife = equipment_record("knife")
+        if outfit == nil or knife == nil then
+            return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Required equipped item record is missing at readiness"))
+        end
+        equipment.summary = {
+            ready = true,
+            state = "READY",
+            weapon = weapon.value.record.section,
+            knife = knife.section,
+            outfit = outfit.section,
+            weapon_slot = equipment.slots.weapon,
+            knife_slot = equipment.slots.knife,
+            outfit_slot = equipment.slots.outfit,
+            magazine_rounds = equipment.magazine_rounds,
+            reserve_rounds = equipment.reserve_rounds
+        }
+        equipment.state = "READY"
+        return gamma_arena_result.ok(equipment.summary)
+    end
     cleanup = function()
-        if #owned_records == 0 then return gamma_arena_result.ok(false) end
+        if #owned_records == 0 then equipment = { state = "CLEAN" }; return gamma_arena_result.ok(false) end
         local remaining = {}
         local errors = {}
         for index = #owned_records, 1, -1 do
@@ -607,9 +740,42 @@ function new_actor_loadout_port(ports)
             local pending = {}; for index, record in ipairs(owned_records) do pending[index] = record.id end
             return gamma_arena_result.ok({ pending = true, remaining_ids = pending })
         end
+        equipment = { state = "CLEAN" }
         return gamma_arena_result.ok(true)
     end
-    return { apply = apply, cleanup = cleanup }
+    return { apply = apply, update = update, state = function() return equipment.state end, cleanup = cleanup }
+end
+
+local BHS_PARTS = { "head", "torso", "rightarm", "leftarm", "rightleg", "leftleg" }
+
+local function reset_gamma_body_health(actor)
+    local bhs = zzz_player_injuries
+    if type(bhs) ~= "table" then return gamma_arena_result.ok(false) end
+    if type(bhs.health) ~= "table" or type(bhs.maxhp) ~= "table" or type(bhs.timedhp) ~= "table"
+        or type(utils_obj) ~= "table" or type(utils_obj.save_var) ~= "function" or type(utils_obj.load_var) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Installed Body Health System API is incomplete")
+    end
+    for _, part in ipairs(BHS_PARTS) do
+        local maximum = bhs.maxhp[part]
+        if type(maximum) ~= "number" or maximum ~= maximum or maximum <= 0 or maximum == math.huge then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System maximum is invalid", { part = part })
+        end
+        local assigned, reason = pcall(function()
+            bhs.health[part] = maximum
+            bhs.timedhp[part] = 0
+            utils_obj.save_var(actor, "health." .. part, maximum)
+            utils_obj.save_var(actor, "timedhp." .. part, 0)
+        end)
+        if not assigned then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset failed safely", { part = part, reason = tostring(reason) })
+        end
+        local loaded_health_ok, loaded_health = pcall(utils_obj.load_var, actor, "health." .. part)
+        local loaded_timed_ok, loaded_timed = pcall(utils_obj.load_var, actor, "timedhp." .. part)
+        if not loaded_health_ok or loaded_health ~= maximum or not loaded_timed_ok or loaded_timed ~= 0 then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset did not round-trip", { part = part })
+        end
+    end
+    return gamma_arena_result.ok(true)
 end
 
 local function default_actor_adapter(active_instance)
@@ -654,6 +820,9 @@ local function default_actor_adapter(active_instance)
         return gamma_arena_result.ok(true)
     end
     local loadout = new_actor_loadout_port({
+        clock = function() return time_global() end,
+        timeout_ms = 5000,
+        reserve_magazines = 3,
         actor_id = runtime_object_id,
         ownership_token = function()
             local instance = active_instance()
@@ -673,6 +842,22 @@ local function default_actor_adapter(active_instance)
         entity_parent_id = runtime_parent_id,
         entity_section = runtime_section_name,
         item_quantity = runtime_ammo_quantity,
+        online_item = function(_, id)
+            if level == nil or type(level.object_by_id) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_LOADOUT_ONLINE_LOOKUP_FAILED", "level.object_by_id is unavailable", { id = id })
+            end
+            local called, value = pcall(level.object_by_id, id)
+            if not called then return gamma_arena_result.err("GA_ACTOR_LOADOUT_ONLINE_LOOKUP_FAILED", "Actor item online lookup failed safely", { id = id, reason = tostring(value) }) end
+            return gamma_arena_result.ok(value)
+        end,
+        item_slot = function(section) return effective_item_slot(section) end,
+        magazine_capacity = function(section) return effective_magazine_size(section) end,
+        move_to_slot = function(actor, item, slot) return actor:move_to_slot(item, slot) end,
+        item_in_slot = function(actor, slot) return actor:item_in_slot(slot) end,
+        set_ammo_elapsed = function(weapon, count) return weapon:set_ammo_elapsed(count) end,
+        get_ammo_in_magazine = function(weapon) return weapon:get_ammo_in_magazine() end,
+        make_item_active = function(actor, item) return actor:make_item_active(item) end,
+        active_item = function(actor) return actor:active_item() end,
         resolve_entity = function(id)
             local service = type(alife) == "function" and alife() or nil
             if service == nil or type(service.object) ~= "function" then
@@ -708,23 +893,8 @@ local function default_actor_adapter(active_instance)
             return gamma_arena_result.ok(true)
         end,
         patrol = function(path) return patrol(path) end,
-        boundary_contains = function(actor, zone_name)
-            local zones_ok, zones = pcall(function() return db and db.zone_by_name end)
-            local zone = zones_ok and type(zones) == "table" and zones[zone_name] or nil
-            if zone == nil then
-                return gamma_arena_result.err("GA_ARENA_BOUNDARY_CHECK_FAILED", "Arena boundary restrictor is unavailable", { zone = zone_name })
-            end
-            local position_ok, position = pcall(function() return actor:position() end)
-            if not position_ok or position == nil then
-                return gamma_arena_result.err("GA_ARENA_BOUNDARY_CHECK_FAILED", "Arena actor position is unavailable", { zone = zone_name })
-            end
-            local inside_ok, inside = pcall(function() return zone:inside(position) end)
-            if not inside_ok or type(inside) ~= "boolean" then
-                return gamma_arena_result.err("GA_ARENA_BOUNDARY_CHECK_FAILED", "Arena boundary restrictor check failed", { zone = zone_name })
-            end
-            return gamma_arena_result.ok(inside)
-        end,
         effects = effects,
+        mod_body_health_reset = reset_gamma_body_health,
         mod_psy_reset = function()
             if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
         end,
@@ -762,7 +932,7 @@ local function entity_ammo_quantity(entity, is_ammo)
             return value
         end
     end
-    return gamma_arena_result.err("GA_ENTITY_ITEM_QUANTITY_FAILED", "Ammo server entity does not expose its exact round count")
+    return nil
 end
 
 local function entity_online_lookup(id)
@@ -869,24 +1039,41 @@ function effective_ammo_box_size(section)
     return gamma_arena_result.ok(value)
 end
 
-local function ensure_entity_weapon_equipped(npc, weapon_id)
-    local active_ok, active_method = pcall(function() return npc and npc.active_item end)
-    local equip_ok, equip_method = pcall(function() return npc and npc.make_item_active end)
-    if not active_ok or type(active_method) ~= "function" or not equip_ok or type(equip_method) ~= "function" then
-        return gamma_arena_result.err("GA_ENTITY_EQUIP_API_MISSING", "NPC weapon equip/verification methods are unavailable", { weapon_id = weapon_id })
+local function effective_item_u32(section, key, minimum, code)
+    if type(section) ~= "string" or section == "" or type(system_ini) ~= "function" then
+        return gamma_arena_result.err(code, "Effective item section/system_ini is unavailable", { section = section, key = key })
     end
-    local inspected, active = pcall(active_method, npc)
-    if not inspected then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC active weapon lookup failed", { weapon_id = weapon_id }) end
-    if runtime_object_id(active) == weapon_id then return gamma_arena_result.ok(true) end
-    local weapon_lookup = entity_online_lookup(weapon_id)
-    if not weapon_lookup.ok then return weapon_lookup end
-    local weapon = weapon_lookup.value
-    if weapon == nil then return gamma_arena_result.ok(false) end
-    local activated, reason = pcall(equip_method, npc, weapon)
-    if not activated then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC weapon activation failed", { weapon_id = weapon_id, reason = tostring(reason) }) end
-    local verified, current = pcall(active_method, npc)
-    if not verified then return gamma_arena_result.err("GA_ENTITY_EQUIP_FAILED", "NPC active weapon verification failed", { weapon_id = weapon_id }) end
-    return gamma_arena_result.ok(runtime_object_id(current) == weapon_id)
+    local opened, system = pcall(system_ini)
+    if not opened or system == nil then return gamma_arena_result.err(code, "Effective system.ini is unavailable", { section = section, key = key }) end
+    local line_ok, line_exist = pcall(function() return system.line_exist end)
+    local read_ok, read = pcall(function() return system.r_u32 end)
+    if not line_ok or type(line_exist) ~= "function" or not read_ok or type(read) ~= "function" then
+        return gamma_arena_result.err(code, "Effective item metadata APIs are unavailable", { section = section, key = key })
+    end
+    local present_ok, present = pcall(line_exist, system, section, key)
+    if not present_ok or present ~= true then return gamma_arena_result.err(code, "Effective item metadata is missing", { section = section, key = key }) end
+    local value_ok, value = pcall(read, system, section, key)
+    if not value_ok or type(value) ~= "number" or value ~= math.floor(value) or value < minimum or value >= UINT32_MOD then
+        return gamma_arena_result.err(code, "Effective item metadata is invalid", { section = section, key = key, value = value })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function engine_inventory_slot(ltx_slot)
+    if type(ltx_slot) ~= "number" or ltx_slot ~= math.floor(ltx_slot) or ltx_slot < 0 or ltx_slot >= UINT32_MOD - 1 then
+        return gamma_arena_result.err("GA_ACTOR_LOADOUT_SLOT_INVALID", "LTX item slot cannot be translated to the Lua inventory API", { ltx_slot = ltx_slot })
+    end
+    return gamma_arena_result.ok(ltx_slot + 1)
+end
+
+function effective_item_slot(section)
+    local configured = effective_item_u32(section, "slot", 0, "GA_ACTOR_LOADOUT_SLOT_INVALID")
+    if not configured.ok then return configured end
+    return engine_inventory_slot(configured.value)
+end
+
+function effective_magazine_size(section)
+    return effective_item_u32(section, "ammo_mag_size", 1, "GA_ACTOR_LOADOUT_MAGAZINE_INVALID")
 end
 
 function apply_actor_hostility(npc, actor, goodwill, enemy_relation)
@@ -897,7 +1084,7 @@ function apply_actor_hostility(npc, actor, goodwill, enemy_relation)
     local relation_ok, relation_method = pcall(function() return npc and npc.set_relation end)
     local goodwill_ok, goodwill_method = pcall(function() return npc and npc.force_set_goodwill end)
     if enemy_relation == nil or not relation_ok or type(relation_method) ~= "function" or not goodwill_ok or type(goodwill_method) ~= "function" then
-        return gamma_arena_result.err("GA_ENTITY_HOSTILE_API_MISSING", "NPC set_relation/force_set_goodwill hostility APIs are unavailable")
+        return gamma_arena_result.err("GA_ENTITY_HOSTILE_API_MISSING", "NPC hostility relation APIs are unavailable")
     end
     local related, relation_result = pcall(relation_method, npc, enemy_relation, actor)
     if not related or relation_result == false then
@@ -928,9 +1115,70 @@ local function apply_actor_activation_hold(npc, actor)
     return gamma_arena_result.ok(true)
 end
 
+local TacticalProxy = {}
+TacticalProxy.__index = TacticalProxy
+
+function TacticalProxy:ensure_adapter()
+    if self.active ~= nil then return gamma_arena_result.ok(self.active) end
+    local actor = db and db.actor
+    if actor == nil then return gamma_arena_result.err("GA_TACTICAL_DEPS_INVALID", "Arena actor is unavailable for tactical composition") end
+    local ini_ok, tactical_ini = pcall(function() return ini_file("gamma_arena\\gamma_arena_tactical.ltx") end)
+    if not ini_ok or tactical_ini == nil then
+        return gamma_arena_result.err("GA_TACTICAL_CONFIG_INVALID", "Tactical director LTX could not be opened")
+    end
+    local adapter, failure = gamma_arena_tactical_adapter.new({
+        clock = function() return time_global() end,
+        actor = actor,
+        online_object = entity_online_lookup,
+        resolve_route = function(path)
+            local path_object = patrol(path)
+            return path_object and path_object:point(0) or nil
+        end,
+        tactical_ini = tactical_ini,
+        xr_logic = xr_logic,
+        stype_stalker = modules and modules.stype_stalker,
+        danger_object = danger_object,
+        log_warn = function(code, message, context) gamma_arena_log.warn(code, message, context) end
+    })
+    if adapter == nil then return failure or gamma_arena_result.err("GA_TACTICAL_DEPS_INVALID", "Tactical director could not be composed") end
+    self.active = adapter
+    return gamma_arena_result.ok(adapter)
+end
+
+function TacticalProxy:begin(context)
+    local ensured = self:ensure_adapter()
+    if not ensured.ok then return ensured end
+    return ensured.value:begin(context)
+end
+
+function TacticalProxy:update()
+    if self.active == nil then return gamma_arena_result.err("GA_TACTICAL_NOT_ACTIVE", "Tactical director is not active") end
+    return self.active:update()
+end
+
+function TacticalProxy:record_death(slot)
+    if self.active == nil then return gamma_arena_result.err("GA_TACTICAL_NOT_ACTIVE", "Tactical director is not active") end
+    return self.active:record_death(slot)
+end
+
+function TacticalProxy:stop()
+    if self.active == nil then return gamma_arena_result.ok(true) end
+    local adapter = self.active
+    local stopped = adapter:stop()
+    if stopped.ok then self.active = nil end
+    return stopped
+end
+
+local function default_tactical_adapter()
+    return setmetatable({ active = nil }, TacticalProxy)
+end
+
 local function default_entity_adapter(actor_adapter, active_instance)
+    local tactical = default_tactical_adapter()
     return gamma_arena_entity_adapter.new({
         actor = actor_adapter,
+        tactical = tactical,
+        log_warn = function(code, message, context) gamma_arena_log.warn(code, message, context) end,
         clock = function() return time_global() end,
         opponent_gate = function()
             local instance = active_instance()
@@ -973,7 +1221,6 @@ local function default_entity_adapter(actor_adapter, active_instance)
         item_quantity = entity_ammo_quantity,
         ammo_box_size = effective_ammo_box_size,
         profile_runtime = { effective_profile = entity_effective_profile },
-        ensure_weapon_equipped = ensure_entity_weapon_equipped,
         actor_object = function() return db and db.actor end,
         set_pair_friends = function(first, second)
             if game_object == nil or game_object.friend == nil then return gamma_arena_result.err("GA_ENTITY_FRIEND_RELATION_FAILED", "game_object.friend is unavailable") end
@@ -994,39 +1241,14 @@ local function default_entity_adapter(actor_adapter, active_instance)
     })
 end
 
-local function default_checkpoint_adapter(store, config, active_instance)
-    local fs = nil
-    local fs_ok, fs_value = pcall(function() return getFS() end)
-    if fs_ok then fs = fs_value end
-    return gamma_arena_checkpoint_adapter.new({
-        fs = gamma_arena_checkpoint_adapter.engine_fs_port(fs),
-        clock = function() return time_global() end,
-        console = function(command)
-            local submitted = exec_console_cmd(command)
-            if submitted == false then return gamma_arena_result.err("GA_CHECKPOINT_COMMAND_FAILED", "Checkpoint console command reported failure") end
-            return gamma_arena_result.ok(true)
-        end,
-        store = store,
-        config = config,
-        expect_unload = function()
-            local instance = active_instance()
-            if instance == nil then return gamma_arena_result.err("GA_CHECKPOINT_RELOAD_INACTIVE", "Arena orchestrator is unavailable") end
-            return instance:expect_checkpoint_reload()
-        end,
-        settle_ms = 250,
-        timeout_ms = 10000
-    })
-end
-
 function compose(overrides)
     overrides = overrides or {}
     local instance = nil
     local function active_instance() return instance end
-    local store = overrides.store or module_store_port()
+    local store = overrides.store or gamma_arena_session_store.new_store()
     local config = overrides.config or current_config()
     local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
     local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance)
-    local checkpoint_adapter = overrides.checkpoint or default_checkpoint_adapter(store, config, active_instance)
     local teardown_clock = overrides.teardown_clock or function() return time_global() end
     local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
     local teardown_max_updates = overrides.teardown_max_updates or 64
@@ -1048,15 +1270,6 @@ function compose(overrides)
                 })
                 if not entities.ok then return entities end
                 if entities.value.pending == true then return gamma_arena_result.ok({ pending = true, stage = "entities" }) end
-                teardown_context.stage = "checkpoint"
-            end
-            if teardown_context.stage == "checkpoint" then
-                local checkpoint = drain_checkpoint_cleanup(checkpoint_adapter, teardown_context.session, {
-                    clock = teardown_clock,
-                    timeout_ms = teardown_timeout_ms,
-                    max_updates = teardown_max_updates
-                })
-                if not checkpoint.ok then return checkpoint end
                 teardown_context.stage = "actor"
             end
             if teardown_context.stage == "actor" then
@@ -1098,7 +1311,6 @@ function compose(overrides)
         launch_options = overrides.launch_options,
         actor = actor_adapter,
         entities = entity_adapter,
-        checkpoint = checkpoint_adapter,
         layout = overrides.layout or default_layout,
         mode_policy = overrides.mode_policy or gamma_arena_mode_skirmish,
         catalogs = overrides.catalogs or function() return gamma_arena_catalog.load() end,

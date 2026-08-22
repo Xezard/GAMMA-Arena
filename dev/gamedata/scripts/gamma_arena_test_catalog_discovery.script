@@ -1,4 +1,4 @@
-local function source(sections, order, throw_enumeration)
+local function source(sections, order, throw_enumeration, telemetry)
     return {
         enumerate_sections = function()
             if throw_enumeration then error("fixture enumeration failure") end
@@ -11,6 +11,7 @@ local function source(sections, order, throw_enumeration)
             return values
         end,
         read_string = function(section, key)
+            if telemetry ~= nil then telemetry.string_reads = (telemetry.string_reads or 0) + 1 end
             local values = sections[section]
             return values and values[key] or nil
         end,
@@ -19,6 +20,16 @@ local function source(sections, order, throw_enumeration)
             return values and tonumber(values[key]) or nil
         end
     }
+end
+
+local function discovery_prefilters_irrelevant_system_sections()
+    local sections = installed_sections()
+    for index = 1, 2000 do sections["unrelated_system_section_" .. index] = { kind = "script" } end
+    local telemetry = {}
+    local result = gamma_arena_catalog_discovery.discover(source(sections, nil, false, telemetry))
+    gamma_arena_test_assert.is_true(result.ok, "candidate prefilter preserves semantic discovery")
+    gamma_arena_test_assert.equals(#result.value.weapons, 1, "candidate prefilter preserves discovered firearm")
+    gamma_arena_test_assert.is_true(telemetry.string_reads < 40, "irrelevant system sections do not trigger metadata reads")
 end
 
 local function installed_sections()
@@ -101,6 +112,7 @@ end
 
 local cases = {
     { name = "catalog_discovery_accepts_semantic_installed_gear", fn = discovers_semantic_installed_gear },
+    { name = "catalog_discovery_prefilters_irrelevant_system_sections", fn = discovery_prefilters_irrelevant_system_sections },
     { name = "catalog_discovery_is_order_stable", fn = discovery_order_is_stable },
     { name = "catalog_discovery_enumeration_failure_falls_back", fn = enumeration_failure_falls_back }
 }

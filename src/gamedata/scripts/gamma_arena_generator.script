@@ -9,10 +9,77 @@ local function pick_affordable(rng, values, maximum)
     return rng:pick(choices)
 end
 
-local function loadout(rng, combinations, budget, code)
+local function combination_loadout(rng, combinations, budget, code)
     local choice = pick_affordable(rng, combinations, budget)
     if not choice then return gamma_arena_result.err(code, "No valid loadout fits the requested budget", { budget = budget }) end
     return gamma_arena_result.ok({ weapon = choice.weapon, ammo = choice.ammo, ammo_boxes = choice.ammo_boxes, outfit = choice.outfit, consumables = { choice.consumables[1] }, cost = choice.cost })
+end
+
+local function minimum_cost(values)
+    local minimum
+    for _, value in ipairs(values or {}) do
+        if type(value) == "table" and gamma_arena_number.is_positive_integer(value.cost) then
+            minimum = minimum and math.min(minimum, value.cost) or value.cost
+        end
+    end
+    return minimum
+end
+
+local function staged_loadout(rng, catalogs, budget, code, preferred_weapons)
+    local bandage = catalogs.consumables and catalogs.consumables.bandage
+    local minimum_outfit = minimum_cost(catalogs.outfit_list)
+    if type(bandage) ~= "table" or minimum_outfit == nil then
+        return gamma_arena_result.err(code, "Dynamic catalog has no viable mandatory equipment", { budget = budget })
+    end
+    local source = type(preferred_weapons) == "table" and #preferred_weapons > 0 and preferred_weapons or catalogs.weapon_list
+    local affordable = {}
+    for _, weapon in ipairs(source or {}) do
+        local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
+        if type(ammo) == "table" then
+            local minimum = weapon.cost + ammo.cost * weapon.ammo_box_min + minimum_outfit + bandage.cost
+            if minimum <= budget then affordable[#affordable + 1] = weapon end
+        end
+    end
+    if #affordable == 0 and source ~= catalogs.weapon_list then
+        return staged_loadout(rng, catalogs, budget, code, catalogs.weapon_list)
+    end
+    if #affordable == 0 then return gamma_arena_result.err(code, "No valid dynamic weapon fits the requested budget", { budget = budget }) end
+    local weapon = rng:pick(affordable)
+    local ammo = catalogs.ammo[weapon.ammo]
+    local maximum_boxes = math.min(
+        weapon.ammo_box_max,
+        math.floor((budget - weapon.cost - minimum_outfit - bandage.cost) / ammo.cost)
+    )
+    if maximum_boxes < weapon.ammo_box_min then return gamma_arena_result.err(code, "Dynamic ammo reserve does not fit the requested budget", { budget = budget }) end
+    local ammo_boxes = rng:next_int(weapon.ammo_box_min, maximum_boxes)
+    local remaining = budget - weapon.cost - ammo.cost * ammo_boxes - bandage.cost
+    local outfit = pick_affordable(rng, catalogs.outfit_list, remaining)
+    if outfit == nil then return gamma_arena_result.err(code, "No valid dynamic outfit fits the requested budget", { budget = budget }) end
+    local cost = weapon.cost + ammo.cost * ammo_boxes + outfit.cost + bandage.cost
+    return gamma_arena_result.ok({
+        weapon = weapon.section,
+        ammo = ammo.section,
+        ammo_boxes = ammo_boxes,
+        outfit = outfit.section,
+        consumables = { bandage.section },
+        cost = cost
+    })
+end
+
+local function loadout(rng, catalogs, budget, code, preferred_weapons)
+    if catalogs.selection_mode == "staged" then
+        return staged_loadout(rng, catalogs, budget, code, preferred_weapons)
+    end
+    return combination_loadout(rng, catalogs.combinations, budget, code)
+end
+
+local function random_knife(rng, knives)
+    if type(knives) ~= "table" or #knives < 1 then return gamma_arena_result.err("GA_NO_VALID_KNIFE", "Knife catalog is empty") end
+    local choice = rng:pick(knives)
+    if type(choice) ~= "table" or type(choice.section) ~= "string" or choice.section == "" then
+        return gamma_arena_result.err("GA_NO_VALID_KNIFE", "Knife catalog returned an invalid section")
+    end
+    return gamma_arena_result.ok(choice.section)
 end
 
 local function shuffled_paths(rng, values, count)
@@ -36,16 +103,26 @@ function generate(start_request, fight_index, catalogs)
     if maximum < difficulty.enemy_min then return gamma_arena_result.err("GA_SPAWN_CAPACITY_INVALID", "Layout cannot support difficulty minimum", { capacity = #layout.opponent_spawn_paths }) end
     local enemy_count = stream(normalized_request, fight_index, catalogs, "enemy_count"):next_int(difficulty.enemy_min, maximum)
     local paths = shuffled_paths(stream(normalized_request, fight_index, catalogs, "spawn_path"), layout.opponent_spawn_paths, enemy_count)
-    local actor = loadout(stream(normalized_request, fight_index, catalogs, "actor_loadout"), catalogs.combinations, difficulty.player_loadout_budget, "GA_NO_VALID_PLAYER_LOADOUT"); if not actor.ok then return actor end
-    local spec = { schema_version = 1, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = layout.level, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV1 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local actor = loadout(stream(normalized_request, fight_index, catalogs, "actor_loadout"), catalogs, difficulty.player_loadout_budget, "GA_NO_VALID_PLAYER_LOADOUT"); if not actor.ok then return actor end
+    local actor_knife = random_knife(stream(normalized_request, fight_index, catalogs, "actor_knife"), catalogs.knife_list); if not actor_knife.ok then return actor_knife end
+    actor.value.knife = actor_knife.value
+    local spec = { schema_version = 2, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = layout.level, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV2 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local profile_pool = catalogs.profile_list
+    if catalogs.selection_mode == "staged" and type(catalogs.faction_ids) == "table" and #catalogs.faction_ids > 0 then
+        local enemy_faction = stream(normalized_request, fight_index, catalogs, "enemy_faction"):pick(catalogs.faction_ids)
+        profile_pool = catalogs.profiles_by_faction[enemy_faction] or profile_pool
+    end
     local base, remainder = math.floor(difficulty.enemy_total_budget / enemy_count), difficulty.enemy_total_budget % enemy_count
     for index = 1, enemy_count do
         local slot_budget = base + (index <= remainder and 1 or 0)
         local profile_rng = stream(normalized_request, fight_index, catalogs, "enemy_profile:" .. index)
-        local profile = pick_affordable(profile_rng, catalogs.profile_list, slot_budget - catalogs.combinations[1].cost)
+        local profile = pick_affordable(profile_rng, profile_pool, slot_budget - catalogs.minimum_loadout_cost)
         if not profile then return gamma_arena_result.err("GA_NO_VALID_ENEMY_PROFILE", "No human profile fits enemy slot", { slot = index, budget = slot_budget }) end
-        local gear = loadout(stream(normalized_request, fight_index, catalogs, "enemy_loadout:" .. index), catalogs.combinations, slot_budget - profile.cost, "GA_NO_VALID_ENEMY_LOADOUT"); if not gear.ok then return gear end
-        spec.opponents[index] = { slot = index, spawn_path = paths[index], profile = profile.section, profile_cost = profile.cost, loadout = gear.value, total_cost = profile.cost + gear.value.cost }
+        local preferred_weapons = type(catalogs.weapons_by_profile) == "table" and catalogs.weapons_by_profile[profile.section] or nil
+        local gear = loadout(stream(normalized_request, fight_index, catalogs, "enemy_loadout:" .. index), catalogs, slot_budget - profile.cost, "GA_NO_VALID_ENEMY_LOADOUT", preferred_weapons); if not gear.ok then return gear end
+        local knife = random_knife(stream(normalized_request, fight_index, catalogs, "enemy_knife:" .. index), catalogs.knife_list); if not knife.ok then return knife end
+        gear.value.knife = knife.value
+        spec.opponents[index] = { slot = index, spawn_path = paths[index], profile = profile.section, community = profile.community, profile_cost = profile.cost, loadout = gear.value, total_cost = profile.cost + gear.value.cost }
     end
     return gamma_arena_result.ok(spec)
 end
@@ -53,10 +130,14 @@ end
 function stable_encode(spec)
     if type(spec) ~= "table" or type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return "invalid" end
     local function gear(value)
-        return value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
+        return value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
     end
     local parts = { "schema_version=" .. spec.schema_version, "generator_version=" .. spec.generator_version, "catalog_revision=" .. spec.catalog_revision, "layout_version=" .. spec.layout_version, "session_seed=" .. spec.session_seed, "fight_index=" .. spec.fight_index, "fight_id=" .. spec.fight_id, "mode_id=" .. spec.mode_id, "difficulty_id=" .. spec.difficulty_id, "layout_id=" .. spec.layout_id, "level=" .. spec.level, "actor=" .. spec.actor.spawn_path .. "," .. spec.actor.look_path .. "," .. gear(spec.actor.loadout), "opponents=" }
-    for index, opponent in ipairs(spec.opponents) do parts[#parts + 1] = index .. ":" .. opponent.slot .. "," .. opponent.spawn_path .. "," .. opponent.profile .. "," .. opponent.profile_cost .. "," .. gear(opponent.loadout) .. "," .. opponent.total_cost end
+    for index, opponent in ipairs(spec.opponents) do
+        local profile = opponent.profile
+        if type(opponent.community) == "string" and opponent.community ~= "" then profile = profile .. "," .. opponent.community end
+        parts[#parts + 1] = index .. ":" .. opponent.slot .. "," .. opponent.spawn_path .. "," .. profile .. "," .. opponent.profile_cost .. "," .. gear(opponent.loadout) .. "," .. opponent.total_cost
+    end
     parts[#parts + 1] = "diagnostic=" .. spec.diagnostic
     return table.concat(parts, "|")
 end

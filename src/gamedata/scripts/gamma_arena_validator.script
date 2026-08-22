@@ -35,13 +35,15 @@ local function loadout_combination_exists(loadout, combinations)
 end
 
 local function validate_loadout(loadout, catalogs, budget)
-    if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.cost) then
+    if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or type(loadout.knife) ~= "string" or loadout.knife == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.cost) then
         return failure("GA_LOADOUT_TYPE_INVALID", "Loadout fields have invalid types", {})
     end
     local consumable_count = array_length(loadout.consumables)
     if consumable_count == nil then return failure("GA_LOADOUT_TYPE_INVALID", "Loadout consumables must be an array", {}) end
-    if consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v1 catalog combination", {}) end
+    if consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v2 catalog combination", {}) end
     local weapon = item_exists(catalogs.weapons, loadout.weapon); local ammo = item_exists(catalogs.ammo, loadout.ammo); local outfit = item_exists(catalogs.outfits, loadout.outfit)
+    local knife = item_exists(catalogs.knives, loadout.knife)
+    if not knife then return failure("GA_LOADOUT_KNIFE_INVALID", "Loadout knife is not cataloged", { section = loadout.knife }) end
     if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
     if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
     local cost = weapon.cost + ammo.cost * loadout.ammo_boxes + outfit.cost
@@ -53,17 +55,23 @@ local function validate_loadout(loadout, catalogs, budget)
         cost = cost + consumable.cost
     end
     if cost ~= loadout.cost or cost > budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout cost exceeds budget", { cost = cost, budget = budget }) end
-    if not loadout_combination_exists(loadout, catalogs.combinations) then return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v1 catalog combination", {}) end
+    if catalogs.selection_mode == "staged" then
+        if not positive_integer(catalogs.minimum_loadout_cost) then
+            return failure("GA_LOADOUT_COMBINATION_INVALID", "Dynamic catalog minimum loadout cost is invalid", {})
+        end
+    elseif not loadout_combination_exists(loadout, catalogs.combinations) then
+        return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a v2 catalog combination", {})
+    end
     return gamma_arena_result.ok(true)
 end
 
 local function copy_loadout(loadout)
     local consumables = {}; for index, section in ipairs(loadout.consumables) do consumables[index] = section end
-    return { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, consumables = consumables, cost = loadout.cost }
+    return { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, knife = loadout.knife, consumables = consumables, cost = loadout.cost }
 end
 
 local function copy_participant(participant)
-    return { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost }
+    return { slot = participant.slot, spawn_path = participant.spawn_path, look_path = participant.look_path, profile = participant.profile, community = participant.community, profile_cost = participant.profile_cost, loadout = copy_loadout(participant.loadout), total_cost = participant.total_cost }
 end
 
 local function normalized_community(value)
@@ -71,7 +79,7 @@ local function normalized_community(value)
     return string.lower((string.gsub(value, "^%s*(.-)%s*$", "%1")))
 end
 
-function validate_effective_profile(section, slot, runtime)
+function validate_effective_profile(section, slot, runtime, expected_community)
     if type(runtime) ~= "table" then
         return failure("GA_ENEMY_EFFECTIVE_PROFILE_API_MISSING", "Effective NPC profile validation is unavailable", { slot = slot, section = section })
     end
@@ -93,8 +101,9 @@ function validate_effective_profile(section, slot, runtime)
     if value.class ~= "AI_STL_S" then
         return failure("GA_ENEMY_EFFECTIVE_CLASS_INVALID", "Effective Arena opponent class must be human AI_STL_S", { slot = slot, section = section, class = value.class })
     end
-    if normalized_community(value.community) ~= "bandit" then
-        return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community must be bandit", { slot = slot, section = section, community = value.community })
+    expected_community = normalized_community(expected_community) or "bandit"
+    if normalized_community(value.community) ~= expected_community then
+        return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community does not match FightSpec", { slot = slot, section = section, community = value.community, expected_community = expected_community })
     end
     return gamma_arena_result.ok(true)
 end
@@ -105,7 +114,7 @@ local function validate_impl(spec, catalogs, runtime)
     if type(spec.layout_id) ~= "string" or type(catalogs.layouts[spec.layout_id]) ~= "table" then return failure("GA_LAYOUT_UNKNOWN", "FightSpec layout is unknown", { layout_id = spec.layout_id }) end
     if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
-    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 1 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 2 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
     if not gamma_arena_number.is_integer(spec.layout_version) or not gamma_arena_number.is_integer(layout.version) or spec.layout_version ~= layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
     if spec.level ~= layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
@@ -130,8 +139,12 @@ local function validate_impl(spec, catalogs, runtime)
         end
         local profile = item_exists(catalogs.profiles, opponent.profile)
         if not profile then return failure("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
+        local expected_community = normalized_community(profile.community) or "bandit"
+        if catalogs.selection_mode == "staged" and normalized_community(opponent.community) ~= expected_community then
+            return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "FightSpec opponent community does not match catalog profile", { slot = index, section = opponent.profile, community = opponent.community, expected_community = expected_community })
+        end
         if runtime ~= nil then
-            local effective = validate_effective_profile(opponent.profile, index, runtime)
+            local effective = validate_effective_profile(opponent.profile, index, runtime, expected_community)
             if not effective.ok then return effective end
         end
         if not valid_paths[opponent.spawn_path] then return failure("GA_SPAWN_PATH_INVALID", "Opponent spawn path is not in the selected layout", { path = opponent.spawn_path }) end
@@ -144,9 +157,10 @@ local function validate_impl(spec, catalogs, runtime)
         spent = spent + opponent.total_cost
     end
     if spent > difficulty.enemy_total_budget then return failure("GA_ENEMY_BUDGET_INVALID", "Enemy total cost exceeds difficulty budget", {}) end
-    local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, session_seed = spec.session_seed, fight_index = spec.fight_index, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, diagnostic = spec.diagnostic }
+    local private = { schema_version = spec.schema_version, generator_version = spec.generator_version, catalog_revision = spec.catalog_revision, layout_version = spec.layout_version, session_seed = spec.session_seed, fight_index = spec.fight_index, fight_id = spec.fight_id, mode_id = spec.mode_id, difficulty_id = spec.difficulty_id, layout_id = spec.layout_id, level = spec.level, actor = copy_participant(spec.actor), opponents = {}, tactical_routes = {}, diagnostic = spec.diagnostic }
     for index = 1, opponent_count do private.opponents[index] = copy_participant(spec.opponents[index]) end
-    return gamma_arena_result.ok({ session_seed = function() return private.session_seed end, fight_index = function() return private.fight_index end, fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
+    for index, path in ipairs(layout.opponent_spawn_paths) do private.tactical_routes[index] = path end
+    return gamma_arena_result.ok({ session_seed = function() return private.session_seed end, fight_index = function() return private.fight_index end, fight_id = function() return private.fight_id end, actor = function() return copy_participant(private.actor) end, opponents = function() local copy = {}; for index, value in ipairs(private.opponents) do copy[index] = copy_participant(value) end; return copy end, tactical_routes = function() local copy = {}; for index, value in ipairs(private.tactical_routes) do copy[index] = value end; return copy end, stable_encode = function() return gamma_arena_generator.stable_encode(private) end })
 end
 
 function validate(spec, catalogs)

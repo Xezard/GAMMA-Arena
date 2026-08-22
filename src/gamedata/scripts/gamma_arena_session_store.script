@@ -91,6 +91,35 @@ Store.__index = Store
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
 end
+local function validate_character_creation_lease(lease)
+    if type(lease) ~= "table" then
+        return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease is unavailable")
+    end
+    if lease.bridge_schema_version ~= "1" or type(lease.bridge_launch_token) ~= "string" or lease.bridge_launch_token == "" then
+        return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease metadata is invalid")
+    end
+
+    local operations = {}
+    for _, descriptor in ipairs(character_bridge) do
+        local key = descriptor.key
+        local present = lease["bridge_" .. key .. "_present"]
+        local value = lease["bridge_" .. key .. "_value"]
+        if present == "true" then
+            if value == nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease value is missing", { key = key }) end
+            operations[#operations + 1] = { action = "write", key = key, value = value }
+        elseif present == "false" then
+            if value ~= nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Absent character-creation bridge key retained a value", { key = key }) end
+            operations[#operations + 1] = { action = "remove", key = key }
+        else
+            return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease presence is invalid", { key = key })
+        end
+    end
+    return gamma_arena_result.ok({
+        launch_token = lease.bridge_launch_token,
+        restore_operations = operations
+    })
+end
+
 
 local function adapter_boolean_returns(config)
     local ok, declared = pcall(function() return config.gamma_arena_boolean_returns end)
@@ -248,10 +277,10 @@ local function validate_expected_session(session)
     if session.checkpoint_name ~= CHECKPOINT_NAME then
         return fail("GA_RESUME_CHECKPOINT_MISMATCH", "ArenaSession checkpoint name is not the reserved checkpoint", { value = session.checkpoint_name })
     end
-    if session.generator_version ~= 1 then
+    if session.generator_version ~= 2 then
         return fail("GA_SESSION_GENERATOR_VERSION_INVALID", "ArenaSession generator version is incompatible", { value = session.generator_version })
     end
-    if session.catalog_revision ~= 1 then
+    if session.catalog_revision ~= 2 then
         return fail("GA_SESSION_CATALOG_REVISION_INVALID", "ArenaSession catalog revision is incompatible", { value = session.catalog_revision })
     end
     if session.layout_id ~= "rostok_arena_v1" then
@@ -284,8 +313,8 @@ local function validate_expected_session(session)
         difficulty_id = session.difficulty_id,
         session_seed = session.session_seed,
         fight_index = session.fight_index,
-        generator_version = 1,
-        catalog_revision = 1,
+        generator_version = 2,
+        catalog_revision = 2,
         layout_id = "rostok_arena_v1",
         checkpoint_name = CHECKPOINT_NAME,
         phase = session.phase
@@ -574,7 +603,9 @@ function Store:validate_launch_handoff(config, token)
     if pending.value ~= true then
         return fail("GA_LAUNCH_HANDOFF_REQUIRED", "Cross-VM Arena launch requires a pending character-creation bridge lease")
     end
-    if lease.bridge_schema_version ~= "1" or lease.bridge_launch_token ~= token then
+    local validated = validate_character_creation_lease(lease)
+    if not validated.ok then return validated end
+    if validated.value.launch_token ~= token then
         return fail("GA_LAUNCH_HANDOFF_INVALID", "Character-creation bridge lease does not match the Arena launch token")
     end
     return gamma_arena_result.ok({ route = "bridge" })
@@ -866,6 +897,31 @@ function Store:clear_transient(config)
     })
 end
 
+function Store:reconcile_character_creation(config)
+    local lease_result = self:read_all(config, bridge_lease_keys)
+    if not lease_result.ok then return lease_result end
+    local lease = lease_result.value
+    local bridge_pending = self:pending_value(lease.bridge_pending, "BRIDGE")
+    if not bridge_pending.ok then return bridge_pending end
+    if not bridge_pending.value then return gamma_arena_result.ok(false) end
+    local validated = validate_character_creation_lease(lease)
+    if not validated.ok then return validated end
+
+    local launch_result = self:read_all(config, { "launch_pending", "launch_token" })
+    if not launch_result.ok then return launch_result end
+    local launch = launch_result.value
+    local launch_pending = self:pending_value(launch.launch_pending, "LAUNCH")
+    if not launch_pending.ok then
+        local restored = self:restore_character_creation(config)
+        if not restored.ok then return restored end
+        return launch_pending
+    end
+    if launch_pending.value == true and launch.launch_token == validated.value.launch_token then
+        return gamma_arena_result.ok(false)
+    end
+    return self:restore_character_creation(config)
+end
+
 function Store:restore_character_creation(config)
     local lease_result = self:read_all(config, bridge_lease_keys)
     if not lease_result.ok then return lease_result end
@@ -873,26 +929,9 @@ function Store:restore_character_creation(config)
     local pending = self:pending_value(lease.bridge_pending, "BRIDGE")
     if not pending.ok then return pending end
     if not pending.value then return gamma_arena_result.ok(false) end
-    if lease.bridge_schema_version ~= "1" or type(lease.bridge_launch_token) ~= "string" or lease.bridge_launch_token == "" then
-        return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease metadata is invalid")
-    end
-
-    local operations = {}
-    for _, descriptor in ipairs(character_bridge) do
-        local key = descriptor.key
-        local present = lease["bridge_" .. key .. "_present"]
-        local value = lease["bridge_" .. key .. "_value"]
-        if present == "true" then
-            if value == nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease value is missing", { key = key }) end
-            operations[#operations + 1] = { action = "write", key = key, value = value }
-        elseif present == "false" then
-            if value ~= nil then return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Absent character-creation bridge key retained a value", { key = key }) end
-            operations[#operations + 1] = { action = "remove", key = key }
-        else
-            return fail("GA_CHARACTER_CREATION_LEASE_INVALID", "Character-creation bridge lease presence is invalid", { key = key })
-        end
-    end
-    local restored = self:transaction(config, CHARACTER_SECTION, operations, { error_code = "GA_CHARACTER_CREATION_RESTORE_FAILED" })
+    local validated = validate_character_creation_lease(lease)
+    if not validated.ok then return validated end
+    local restored = self:transaction(config, CHARACTER_SECTION, validated.value.restore_operations, { error_code = "GA_CHARACTER_CREATION_RESTORE_FAILED" })
     if not restored.ok then return restored end
     local cleared = self:transaction(config, SECTION, operations_for_removals(bridge_lease_keys), {
         commit_remove_keys = { "bridge_pending" },
@@ -978,3 +1017,4 @@ function clear_resume_if_matches(config, expected) return default_store:clear_re
 function clear_transient(config) return default_store:clear_transient(config) end
 function write_character_creation(config) return default_store:write_character_creation(config) end
 function restore_character_creation(config) return default_store:restore_character_creation(config) end
+function reconcile_character_creation(config) return default_store:reconcile_character_creation(config) end

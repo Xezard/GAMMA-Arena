@@ -37,6 +37,17 @@ local function call_actor(actor, method_name, ...)
     return gamma_arena_result.ok(value)
 end
 
+local function set_actor_condition(actor, field_name, value)
+    if actor == nil then
+        return fail("GA_ACTOR_API_MISSING", "Required actor condition property is unavailable", { property = field_name })
+    end
+    local assigned, reason = pcall(function() actor[field_name] = value end)
+    if not assigned then
+        return fail("GA_ACTOR_EFFECT_FAILED", "Actor condition write failed safely", { property = field_name, reason = tostring(reason) })
+    end
+    return gamma_arena_result.ok(true)
+end
+
 local function point_coordinates(point)
     local ok, x, y, z = pcall(function() return point.x, point.y, point.z end)
     if not ok or not finite(x) or not finite(y) or not finite(z) then return nil end
@@ -172,13 +183,17 @@ function ActorAdapter:normalize_status(actor)
         if not health.ok then return health end
     end
     for _, entry in ipairs({
-        { "set_power", 1 },
-        { "set_radiation", 0 },
-        { "set_bleeding", 1 },
-        { "set_psy_health", 1 }
+        { "power", 1 },
+        { "radiation", 0 },
+        { "bleeding", 1 },
+        { "psy_health", 1 }
     }) do
-        local applied = call_actor(actor, entry[1], entry[2])
+        local applied = set_actor_condition(actor, entry[1], entry[2])
         if not applied.ok then return applied end
+    end
+    if type(self.deps.mod_body_health_reset) == "function" then
+        local body_health = dependency_result("GA_ACTOR_BODY_HEALTH_RESET_FAILED", self.deps.mod_body_health_reset, actor)
+        if not body_health.ok then return body_health end
     end
     if type(self.deps.mod_psy_reset) == "function" then
         local ok, reason = pcall(self.deps.mod_psy_reset, actor)
@@ -231,22 +246,6 @@ function ActorAdapter:position_actor(actor, layout)
     })
 end
 
-function ActorAdapter:enforce_boundary(layout)
-    local layout_ok, zone_name = pcall(function() return layout.actor_boundary_zone end)
-    if type(layout) ~= "table" or not layout_ok or type(zone_name) ~= "string" or zone_name == "" then
-        return fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no actor boundary zone")
-    end
-    local owned = self:owned_actor()
-    if not owned.ok then return owned end
-    local checked = dependency_result("GA_ARENA_BOUNDARY_CHECK_FAILED", self.deps.boundary_contains, owned.value, zone_name)
-    if not checked.ok then return checked end
-    if checked.value == true then return gamma_arena_result.ok({ breach = false, zone = zone_name }) end
-    if checked.value ~= false then return fail("GA_ARENA_BOUNDARY_CHECK_FAILED", "Arena boundary check must return a boolean", { zone = zone_name }) end
-    local repositioned = self:position_actor(owned.value, layout)
-    if not repositioned.ok then return repositioned end
-    return gamma_arena_result.ok({ breach = true, zone = zone_name, position = repositioned.value })
-end
-
 function ActorAdapter:zero_money(actor)
     local money = call_actor(actor, "money")
     if not money.ok or not finite(money.value) then return fail("GA_ACTOR_MONEY_INVALID", "Arena actor money value is invalid") end
@@ -254,7 +253,7 @@ function ActorAdapter:zero_money(actor)
     return call_actor(actor, "give_money", -money.value)
 end
 
-function ActorAdapter:normalize_for_checkpoint(layout)
+function ActorAdapter:normalize_for_arena(layout)
     local owned = self:owned_actor()
     if not owned.ok then return owned end
     local acquired = self:acquire_input()
@@ -291,6 +290,13 @@ function ActorAdapter:apply_loadout(loadout)
     return dependency_result("GA_ACTOR_LOADOUT_UNAVAILABLE", port and port.apply, owned.value, loadout)
 end
 
+function ActorAdapter:update_loadout()
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local port = self.deps.loadout
+    return dependency_result("GA_ACTOR_LOADOUT_UPDATE_FAILED", port and port.update, owned.value)
+end
+
 function ActorAdapter:cleanup_loadout_for_restore()
     local loadout = self.deps.loadout
     if type(loadout) ~= "table" or type(loadout.cleanup) ~= "function" then
@@ -299,7 +305,7 @@ function ActorAdapter:cleanup_loadout_for_restore()
     return dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
 end
 
-function ActorAdapter:reset_after_victory(layout)
+function ActorAdapter:reset_for_rematch(layout)
     if self.victory_reset_started then
         local empty = self:verify_inventory_empty()
         if not empty.ok then return empty end
@@ -313,7 +319,7 @@ function ActorAdapter:reset_after_victory(layout)
         if not cleaned.ok then return cleaned end
         if type(cleaned.value) == "table" and cleaned.value.pending == true then return cleaned end
     end
-    local normalized = self:normalize_for_checkpoint(layout)
+    local normalized = self:normalize_for_arena(layout)
     if not normalized.ok then return normalized end
     self.victory_reset_started = true
     return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" })

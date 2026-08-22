@@ -41,13 +41,22 @@ local function all_sections(snapshot)
     return sections
 end
 
+local function callable_object(fn)
+    return setmetatable({}, {
+        __call = function(_, ...)
+            return fn(...)
+        end
+    })
+end
+
 local function valid_preflight_probes()
     local snapshot = catalogs()
     local sections = all_sections(snapshot)
     local positions = {}
     local paths = {
         snapshot.layouts.rostok_arena_v1.actor_spawn_path,
-        snapshot.layouts.rostok_arena_v1.actor_look_path
+        snapshot.layouts.rostok_arena_v1.actor_look_path,
+        bar_arena_walk_attack
     }
     for _, path in ipairs(snapshot.layouts.rostok_arena_v1.opponent_spawn_paths) do paths[#paths + 1] = path end
     for index, path in ipairs(paths) do
@@ -76,6 +85,28 @@ local function valid_preflight_probes()
     function config:remove_line() return true end
     function config:save() return true end
 
+    local tactical_values = {
+        observation_interval_ms = 500,
+        report_delay_min_ms = 1000,
+        report_delay_max_ms = 3000,
+        assignment_dwell_ms = 5000,
+        visual_aging_ms = 20000,
+        evidence_expiry_ms = 60000,
+        hint_delay_ms = 60000,
+        hint_cooldown_ms = 60000,
+        look_path = "bar_arena_walk_attack"
+    }
+    local tactical_sections = { meta = true, director = true }
+    for _, path in ipairs(snapshot.layouts.rostok_arena_v1.opponent_spawn_paths) do
+        tactical_sections["logic@ga_" .. path] = true
+        tactical_sections["walker@ga_" .. path] = true
+    end
+    local tactical_ini = {}
+    function tactical_ini:section_exist(section) return tactical_sections[section] == true end
+    function tactical_ini:line_exist(section, key) return section == "director" and tactical_values[key] ~= nil end
+    function tactical_ini:r_u32(section, key) return section == "director" and tactical_values[key] or nil end
+    function tactical_ini:r_string_ex(section, key) return section == "director" and tactical_values[key] or nil end
+
     local fs = {}
     function fs:update_path() return "C:\\fake\\appdata\\savedgames\\" end
     function fs:exist() return false end
@@ -88,10 +119,10 @@ local function valid_preflight_probes()
     function actor:money() return 0 end
     function actor:give_money() return true end
     function actor:set_health_ex() return true end
-    function actor:set_power() return true end
-    function actor:set_radiation() return true end
-    function actor:set_bleeding() return true end
-    function actor:set_psy_health() return true end
+    actor.power = 0.25
+    actor.radiation = 0.5
+    actor.bleeding = 0.75
+    actor.psy_health = 0.5
     function actor:set_actor_position() return true end
     function actor:set_actor_direction() return true end
     function actor:set_invulnerable() return true end
@@ -129,12 +160,21 @@ local function valid_preflight_probes()
         },
         db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
         game_object = { friend = 1, enemy = 2 },
+        xr_logic = {
+            configure_schemes = function() return true end,
+            activate_by_section = function() return true end,
+            switch_to_section = function() return true end
+        },
+        modules = { stype_stalker = 1 },
+        tactical_ini = function() return tactical_ini end,
         relation_registry = { set_goodwill = function() return true end },
         axr_main = { config = config },
         safe_release_manager = { release = function() return true end },
         catalogs = snapshot,
         _sections = sections,
-        _positions = positions
+        _positions = positions,
+        _tactical_values = tactical_values,
+        _tactical_sections = tactical_sections
     }
     return probes
 end
@@ -149,6 +189,78 @@ end
 local function preflight_accepts_complete_environment()
     local result = gamma_arena_compat.preflight(valid_preflight_probes())
     gamma_arena_test_assert.is_true(result.ok, "complete injected environment must pass preflight")
+end
+
+local function preflight_accepts_callable_engine_objects()
+    local probes = valid_preflight_probes()
+    probes.ini_file = callable_object(probes.ini_file)
+    probes.patrol = callable_object(probes.patrol)
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_true(result.ok, "callable engine objects must pass preflight even when Lua type is not function")
+end
+
+local function preflight_accepts_actor_condition_properties()
+    local probes = valid_preflight_probes()
+    probes.db.actor.set_power = nil
+    probes.db.actor.set_radiation = nil
+    probes.db.actor.set_bleeding = nil
+    probes.db.actor.set_psy_health = nil
+    probes.db.actor.power = 0.25
+    probes.db.actor.radiation = 0.5
+    probes.db.actor.bleeding = 0.75
+    probes.db.actor.psy_health = 0.5
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_true(result.ok, "real Anomaly actor condition properties must satisfy preflight")
+end
+
+local function preflight_requires_tactical_director_apis()
+    local cases = {
+        { label = "configure", mutate = function(p) p.xr_logic.configure_schemes = nil end },
+        { label = "activate", mutate = function(p) p.xr_logic.activate_by_section = nil end },
+        { label = "switch", mutate = function(p) p.xr_logic.switch_to_section = nil end },
+        { label = "stalker type", mutate = function(p) p.modules.stype_stalker = nil end },
+        { label = "tactical ini", mutate = function(p) p.tactical_ini = nil end }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "missing tactical API fails: " .. case.label)
+        gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_DIRECTOR_API_MISSING", 1, true) ~= nil, "stable tactical API code: " .. case.label)
+    end
+end
+
+local function preflight_requires_tactical_director_config()
+    local cases = {
+        {
+            label = "invalid observation interval",
+            code = "GA_PREFLIGHT_DIRECTOR_CONFIG_INVALID",
+            mutate = function(p) p._tactical_values.observation_interval_ms = 0 end
+        },
+        {
+            label = "missing route section",
+            code = "GA_PREFLIGHT_DIRECTOR_SECTION_MISSING",
+            mutate = function(p) p._tactical_sections["walker@ga_bar_arena_walk_3_1"] = nil end
+        },
+        {
+            label = "missing look path",
+            code = "GA_PREFLIGHT_DIRECTOR_LOOK_PATH_MISSING",
+            mutate = function(p)
+                local original = p.level.patrol_path_exists
+                p.level.patrol_path_exists = function(path)
+                    if path == "bar_arena_walk_attack" then return false end
+                    return original(path)
+                end
+            end
+        }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "invalid tactical config fails: " .. case.label)
+        gamma_arena_test_assert.is_true(string.find(error_codes(result), case.code, 1, true) ~= nil, "stable tactical config code: " .. case.label)
+    end
 end
 
 local function preflight_aggregates_in_stable_order()
@@ -470,7 +582,7 @@ end
 local function fake_orchestrator_deps(store)
     local actor_adapter = {
         begin_update = function() return gamma_arena_result.ok(true) end,
-        normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
+        normalize_for_arena = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         enforce_boundary = function() return gamma_arena_result.ok({ breach = false, zone = "bar_arena_sr" }) end,
         release_input = function() return gamma_arena_result.ok(true) end,
@@ -619,10 +731,39 @@ local function ordinary_no_intent_activation_latches_once()
     gamma_arena_test_assert.is_false(orchestrator.awaiting_activation, "ordinary game clears activation wait")
 end
 
+local function bootstrap_default_store_exposes_complete_launch_contract()
+    local overrides = fake_orchestrator_deps(fake_store())
+    overrides.store = nil
+    local orchestrator = gamma_arena_bootstrap.compose(overrides)
+    local store = orchestrator.deps.store
+    gamma_arena_test_assert.is_true(type(store.mark_launch_deferred) == 'function', 'production store exposes launch deferral')
+    gamma_arena_test_assert.is_true(type(store.validate_launch_activation) == 'function', 'production store exposes launch validation')
+end
+
+local function missing_dependency_method_routes_fatal_once()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    store.validate_launch_activation = nil
+    local deps = fake_orchestrator_deps(store)
+    local fatal_count = 0
+    deps.ui.show_fatal = function()
+        fatal_count = fatal_count + 1
+        return {}
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local first = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(first.ok, 'missing dependency method must fail activation')
+    gamma_arena_test_assert.equals(first.error.code, 'GA_DEPENDENCY_METHOD_UNAVAILABLE', 'dependency wiring uses dedicated code')
+    gamma_arena_test_assert.equals(first.error.context.requested_code, 'GA_LAUNCH_REQUIRES_NEW_GAME', 'requested operation code is preserved')
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(store.inspect_count, 1, 'fatal activation never retries intent inspection')
+    gamma_arena_test_assert.equals(fatal_count, 1, 'fatal UI is shown once')
+end
+
 local function first_activation_failure_routes_fatal()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local deps = fake_orchestrator_deps(store)
-    deps.actor.normalize_for_checkpoint = function()
+    deps.actor.normalize_for_arena = function()
         return gamma_arena_result.err("GA_TEST_FIRST_ACTIVATION", "injected first activation failure")
     end
     local orchestrator = gamma_arena_orchestrator.new(deps)
@@ -1249,6 +1390,12 @@ local function fake_actor_adapter_env()
         input_acquires = 0,
         input_releases = 0,
         effect_calls = 0,
+        body_health_reset_calls = 0,
+        bhs = {
+            maxhp = { head = 11, torso = 11, leftarm = 5, rightarm = 5, leftleg = 5, rightleg = 5 },
+            health = { head = 2, torso = 3, leftarm = 1, rightarm = 2, leftleg = 1, rightleg = 2 },
+            timedhp = { head = 1, torso = 1, leftarm = 1, rightarm = 1, leftleg = 1, rightleg = 1 }
+        },
         boundary_inside = true,
         boundary_checks = 0,
         positions = {
@@ -1268,10 +1415,10 @@ local function fake_actor_adapter_env()
         env.iterating = false
     end
     function actor:set_health_ex(value) self.health_value = value end
-    function actor:set_power(value) self.power_value = value end
-    function actor:set_radiation(value) self.radiation_value = value end
-    function actor:set_bleeding(value) self.bleeding_value = value end
-    function actor:set_psy_health(value) self.psy_value = value end
+    actor.power = 0.25
+    actor.radiation = 0.5
+    actor.bleeding = 0.75
+    actor.psy_health = 0.5
     function actor:set_actor_position(value) self.position_value = value; env.boundary_inside = true end
     function actor:set_actor_direction(value) self.direction_value = value end
     function actor:set_invulnerable(value) self.invulnerable_value = value end
@@ -1319,6 +1466,15 @@ local function fake_actor_adapter_env()
             return gamma_arena_result.ok(env.boundary_inside)
         end,
         effects = { disable_effects_timer = function() env.effect_calls = env.effect_calls + 1 end },
+        mod_body_health_reset = function(candidate)
+            gamma_arena_test_assert.is_true(candidate == actor, "body-health reset only touches the owned Arena actor")
+            env.body_health_reset_calls = env.body_health_reset_calls + 1
+            for part, maximum in pairs(env.bhs.maxhp) do
+                env.bhs.health[part] = maximum
+                env.bhs.timedhp[part] = 0
+            end
+            return gamma_arena_result.ok(true)
+        end,
         input = {
             acquire = function() env.input_acquires = env.input_acquires + 1; return gamma_arena_result.ok(true) end,
             release = function() env.input_releases = env.input_releases + 1; return gamma_arena_result.ok(true) end
@@ -1332,7 +1488,7 @@ local function runtime_actor_inventory_release_is_deferred_and_verified()
     local first = env:add_item(12)
     local second = env:add_item(13)
     adapter:begin_update()
-    local normalized = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local normalized = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_true(normalized.ok, "owned Arena actor normalization must start")
     gamma_arena_test_assert.equals(env.released[1], 12, "inventory IDs retain deterministic iteration order")
     gamma_arena_test_assert.equals(env.released[2], 13, "equipped/inventory items are released after collection")
@@ -1348,13 +1504,13 @@ end
 local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
     local env, adapter = fake_actor_adapter_env()
     adapter:begin_update()
-    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_true(result.ok, "normalization succeeds")
     gamma_arena_test_assert.equals(env.actor.health_value, 1, "health normalized")
-    gamma_arena_test_assert.equals(env.actor.power_value, 1, "power normalized")
-    gamma_arena_test_assert.equals(env.actor.radiation_value, 0, "radiation normalized")
-    gamma_arena_test_assert.equals(env.actor.bleeding_value, 1, "GAMMA cured bleeding sentinel is one")
-    gamma_arena_test_assert.equals(env.actor.psy_value, 1, "psy health normalized")
+    gamma_arena_test_assert.equals(env.actor.power, 1, "power normalized through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.radiation, 0, "radiation normalized through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.bleeding, 1, "GAMMA cured bleeding sentinel is written through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.psy_health, 1, "psy health normalized through the real actor property")
     gamma_arena_test_assert.equals(env.actor.money_delta, -2500, "Arena actor money is zeroed by delta")
     gamma_arena_test_assert.equals(env.effect_calls, 1, "optional animation timer feature is invoked when present")
     gamma_arena_test_assert.equals(env.actor.position_value.x, 1, "actor is teleported to the spawn anchor x")
@@ -1363,11 +1519,23 @@ local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
     gamma_arena_test_assert.equals(env.actor.direction_value, -10, "actor direction uses the negative spawn-to-look heading")
 end
 
+local function runtime_actor_rematch_resets_gamma_body_health()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    local reset = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(reset.ok, "rematch normalization invokes optional GAMMA body health integration")
+    gamma_arena_test_assert.equals(env.body_health_reset_calls, 1, "body health is reset once per rematch normalization")
+    for part, maximum in pairs(env.bhs.maxhp) do
+        gamma_arena_test_assert.equals(env.bhs.health[part], maximum, "rematch fully heals BHS part " .. part)
+        gamma_arena_test_assert.equals(env.bhs.timedhp[part], 0, "rematch clears pending BHS treatment for " .. part)
+    end
+end
+
 local function runtime_actor_input_ownership_is_idempotent()
     local env, adapter = fake_actor_adapter_env()
     adapter:begin_update()
-    adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
-    adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.equals(env.input_acquires, 1, "global input is acquired once by this adapter")
     adapter:release_input()
     adapter:release_input()
@@ -1381,10 +1549,10 @@ local function runtime_actor_victory_reset_waits_for_inventory_absence()
         cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end
     }
     adapter:begin_update()
-    local first = adapter:reset_after_victory({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_true(first.ok and type(first.value) == "table" and first.value.pending == true, "victory reset remains pending until a later update proves inventory absence")
     adapter:begin_update()
-    local second = adapter:reset_after_victory({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local second = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_true(second.ok and second.value == true, "later update completes victory reset after absence proof")
     gamma_arena_test_assert.equals(cleanup_calls, 1, "owned loadout cleanup begins once per victory reset")
     gamma_arena_test_assert.equals(env.input_acquires, 1, "victory reset retains one input ownership lease")
@@ -1394,7 +1562,7 @@ local function runtime_actor_rejects_coincident_patrol_points()
     local env, adapter = fake_actor_adapter_env()
     env.positions.actor_look = fake_vector(1, 2, 3)
     adapter:begin_update()
-    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_false(result.ok, "coincident spawn/look anchors fail closed")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_PATROL_COINCIDENT", "coincident patrol error code")
     gamma_arena_test_assert.equals(env.input_releases, 1, "normalization failure releases owned input")
@@ -1403,7 +1571,7 @@ end
 local function runtime_actor_rejects_campaign_actor()
     local env, adapter = fake_actor_adapter_env()
     env.active = false
-    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_false(result.ok, "inactive/campaign actor must never be normalized")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INACTIVE", "campaign guard code")
 end
@@ -2260,6 +2428,26 @@ local function runtime_engine_checkpoint_port_canonicalizes_xray_alias()
     assert_engine_path_rejected([[\\server\share\..\]], "UNC share root escape")
 end
 
+local function runtime_engine_checkpoint_port_uses_xray_alias_for_existence()
+    local engine_fs = { calls = 0 }
+    function engine_fs:update_path(alias, name)
+        gamma_arena_test_assert.equals(alias, "$game_saves$", "checkpoint path resolves through the save alias")
+        return "D:\\Anomaly\\appdata\\savedgames\\" .. name
+    end
+    function engine_fs:exist(alias, name)
+        self.calls = self.calls + 1
+        gamma_arena_test_assert.equals(alias, "$game_saves$", "exist receives the X-Ray save alias")
+        gamma_arena_test_assert.equals(name, "_gamma_arena_checkpoint.scop", "exist receives the relative checkpoint filename")
+        return true
+    end
+    local fs = gamma_arena_checkpoint_adapter.engine_fs_port(engine_fs)
+    local resolved = fs:resolve("_gamma_arena_checkpoint.scop")
+    gamma_arena_test_assert.is_true(resolved.ok, "checkpoint existence fixture resolves safely")
+    local exists = fs:exists(resolved.value)
+    gamma_arena_test_assert.is_true(exists.ok and exists.value, "alias-plus-name existence detects a real save")
+    gamma_arena_test_assert.equals(engine_fs.calls, 1, "engine existence is probed exactly once")
+end
+
 local function runtime_checkpoint_command_throw_fails_safely()
     local env = fake_checkpoint_env()
     env.command_throw = true
@@ -2287,7 +2475,7 @@ local function runtime_actor_rejects_foreign_inventory_children()
     function foreign_parent:id() return self.object_id end
     local item = env:add_item(44, { parent = foreign_parent })
     adapter:begin_update()
-    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_false(result.ok, "foreign inventory child must never be released")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "foreign item guard code")
     gamma_arena_test_assert.equals(#env.released, 0, "foreign object remains untouched")
@@ -2298,7 +2486,7 @@ local function runtime_actor_rejects_nil_inventory_parent()
     local env, adapter = fake_actor_adapter_env()
     local item = env:add_item(45, { parent_missing = true })
     adapter:begin_update()
-    local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
     gamma_arena_test_assert.is_false(result.ok, "nil inventory parent fails closed")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "nil parent guard code")
     gamma_arena_test_assert.equals(item.id_calls, 0, "nil parent is rejected before item id lookup")
@@ -2315,7 +2503,7 @@ local function runtime_actor_rejects_throwing_inventory_accessors()
         local env, adapter = fake_actor_adapter_env()
         env:add_item(46, case.options)
         adapter:begin_update()
-        local result = adapter:normalize_for_checkpoint({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+        local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
         gamma_arena_test_assert.is_false(result.ok, case.label .. " exception fails closed")
         gamma_arena_test_assert.equals(result.error.code, case.code, case.label .. " structured error")
         gamma_arena_test_assert.equals(#env.released, 0, case.label .. " failure occurs before mutation")
@@ -2349,18 +2537,18 @@ local function runtime_actor_future_seams_are_injected_and_total()
     gamma_arena_test_assert.equals(#invulnerability_values, 2, "cleanup does not release an already-released hold twice")
 end
 
-local function runtime_checkpoint_ready_gates_generation()
+local function runtime_dedicated_start_reaches_preparing_without_checkpoint()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
-        normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
+        normalize_for_arena = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         release_input = function() return gamma_arena_result.ok(true) end
     }
-    local checkpoint = { current = "WAITING_STABLE", create_count = 0, updates = 0 }
+    local checkpoint = { create_count = 0, updates = 0 }
     function checkpoint:create() self.create_count = self.create_count + 1; return gamma_arena_result.ok(true) end
-    function checkpoint:update() self.updates = self.updates + 1; return gamma_arena_result.ok({ state = self.current }) end
-    function checkpoint:state() return self.current end
+    function checkpoint:update() self.updates = self.updates + 1; return gamma_arena_result.ok(true) end
+    function checkpoint:state() return "READY" end
     function checkpoint:on_game_load() return gamma_arena_result.ok(false) end
     function checkpoint:cleanup() return gamma_arena_result.ok(true) end
     local deps = fake_orchestrator_deps(store)
@@ -2368,11 +2556,12 @@ local function runtime_checkpoint_ready_gates_generation()
     deps.checkpoint = checkpoint
     deps.layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end
     local orchestrator = gamma_arena_orchestrator.new(deps)
-    orchestrator:on_game_load(); orchestrator:actor_on_first_update(); orchestrator:actor_on_update()
-    gamma_arena_test_assert.is_false(orchestrator:is_checkpoint_ready(), "generation gate stays closed while required files are unstable")
-    checkpoint.current = "READY"; orchestrator:actor_on_update()
-    gamma_arena_test_assert.is_true(orchestrator:is_checkpoint_ready(), "generation gate opens only on verified READY")
-    gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "READY", "Task 6 stops before FightSpec generation")
+    gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok, "dedicated launch accepts the game-load boundary")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "dedicated launch normalizes the actor")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "dedicated launch verifies empty inventory")
+    gamma_arena_test_assert.equals(checkpoint.create_count, 0, "dedicated startup never creates a checkpoint")
+    gamma_arena_test_assert.equals(checkpoint.updates, 0, "dedicated startup never polls a checkpoint")
+    gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "PREPARING", "inventory readiness advances directly to FightSpec preparation")
 end
 
 local function runtime_checkpoint_resume_applies_index_after_ready()
@@ -2420,7 +2609,14 @@ local function entity_spec(opponent_count)
     return {
         actor = function() return actor end,
         opponents = function() return opponents end,
-        fight_id = function() return "ga-entity-test" end
+        tactical_routes = function()
+            return {
+                "opponent_1", "opponent_2", "opponent_3",
+                "opponent_4", "opponent_5", "opponent_6"
+            }
+        end,
+        fight_id = function() return "ga-entity-test" end,
+        stable_encode = function() return "stable:ga-entity-test" end
     }
 end
 
@@ -2451,7 +2647,12 @@ local function fake_entity_environment(options)
         opponents_enabled = false,
         equip_attempts = {},
         hostile_calls = 0,
-        actor_input_releases = 0
+        actor_input_releases = 0,
+        tactical_begin_calls = 0,
+        tactical_update_calls = 0,
+        tactical_death_slots = {},
+        tactical_stop_calls = 0,
+        tactical_warnings = {}
     }
 
     local function server_entity(id, section, parent_id, quantity)
@@ -2541,8 +2742,41 @@ local function fake_entity_environment(options)
         return gamma_arena_result.ok(true)
     end
 
+    local tactical = {}
+    function tactical:begin(context)
+        env.tactical_begin_calls = env.tactical_begin_calls + 1
+        env.tactical_context = clone(context)
+        env.events[#env.events + 1] = "tactical_begin"
+        if options.fail_phase == "tactical_begin" then return gamma_arena_result.err("GA_TEST_TACTICAL_BEGIN", "injected tactical bind failure") end
+        return gamma_arena_result.ok(true)
+    end
+    function tactical:update()
+        env.tactical_update_calls = env.tactical_update_calls + 1
+        env.events[#env.events + 1] = "tactical_update"
+        if options.fail_phase == "tactical_update" then return gamma_arena_result.err("GA_TEST_TACTICAL_UPDATE", "injected tactical runtime failure") end
+        return gamma_arena_result.ok(true)
+    end
+    function tactical:record_death(slot)
+        env.tactical_death_slots[#env.tactical_death_slots + 1] = slot
+        env.events[#env.events + 1] = "tactical_death:" .. tostring(slot)
+        return gamma_arena_result.ok(true)
+    end
+    function tactical:stop()
+        env.tactical_stop_calls = env.tactical_stop_calls + 1
+        env.events[#env.events + 1] = "tactical_stop"
+        if env.tactical_stop_calls <= (options.tactical_stop_failures or 0) then
+            return gamma_arena_result.err("GA_TEST_TACTICAL_STOP", "injected tactical stop failure")
+        end
+        return gamma_arena_result.ok(true)
+    end
+
     local deps = {
         actor = actor_port,
+        tactical = tactical,
+        log_warn = function(code)
+            env.tactical_warnings[#env.tactical_warnings + 1] = code
+            env.events[#env.events + 1] = "tactical_warn:" .. tostring(code)
+        end,
         clock = function() return env.now end,
         opponent_gate = function() return env.opponents_enabled end,
         allow_numeric_death = options.allow_numeric_death == true,
@@ -2595,6 +2829,16 @@ local function fake_entity_environment(options)
                 local entity = env:add_entity(section, parent:id(), count)
                 return { entity, entity }
             end
+            if is_ammo and options.engine_split_ammo then
+                local entities, remaining = {}, count
+                local box_size = options.ammo_box_size or 20
+                while remaining > 0 do
+                    local quantity = math.min(box_size, remaining)
+                    entities[#entities + 1] = env:add_entity(section, parent:id(), quantity)
+                    remaining = remaining - quantity
+                end
+                return entities
+            end
             if options.multi_return_ammo and string.find(section, "^ammo_") then
                 local first = math.floor(count / 2)
                 local second = count - first
@@ -2642,7 +2886,10 @@ local function fake_entity_environment(options)
             return env.online[id]
         end,
         actor_object = function() return { runtime_id = 1 } end,
-        item_quantity = function(entity, is_ammo) return is_ammo and entity.quantity or 1 end,
+        item_quantity = function(entity, is_ammo)
+            if is_ammo and options.ammo_quantity_unavailable then return nil end
+            return is_ammo and entity.quantity or 1
+        end,
         ammo_box_size = function(section)
             if options.ammo_box_size_throw then error("injected ammo box-size failure") end
             if options.ammo_box_sizes then return options.ammo_box_sizes[section] end
@@ -2818,12 +3065,15 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         return value
     end
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-exact" end,
+        reserve_magazines = 3,
         ammo_box_size = function(section)
             gamma_arena_test_assert.equals(section, "ammo_9x18_fmj", "actor adapter resolves the exact effective ammo section")
             return 20
         end,
+        magazine_capacity = function() return 30 end,
         create_item = function(section, actor, count, is_ammo)
             calls[#calls + 1] = { section = section, count = count, is_ammo = is_ammo }
             if is_ammo then return { entity(section, actor:id(), 1), entity(section, actor:id(), count - 1) } end
@@ -2843,7 +3093,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     gamma_arena_test_assert.is_true(result.ok, "production-shaped actor loadout port applies exact descriptors")
     gamma_arena_test_assert.equals(#calls, 5, "actor receives weapon, ammo, outfit and two consumables exactly once")
     gamma_arena_test_assert.equals(calls[2].section, "ammo_9x18_fmj", "actor ammo section is exact")
-    gamma_arena_test_assert.equals(calls[2].count, 40, "actor ammo boxes are translated to exact rounds through effective box_size")
+    gamma_arena_test_assert.equals(calls[2].count, 90, "actor reserve is raised to three full magazines when catalog boxes are insufficient")
     gamma_arena_test_assert.is_true(calls[2].is_ammo, "actor ammo uses the ammo property path")
     gamma_arena_test_assert.equals(#released, 0, "successful actor loadout has no rollback")
 
@@ -2909,6 +3159,95 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     gamma_arena_test_assert.equals(retry_ids[#retry_ids], 601, "only the previously failed actor release is resubmitted")
     advance_retry_frame()
     gamma_arena_test_assert.is_true(rollback_failing_port.cleanup().ok, "retried actor rollback completes after deferred absence")
+end
+
+local function runtime_actor_loadout_translates_ltx_slots_to_lua_slots()
+    local cases = {
+        { label = "knife", ltx_slot = 0, lua_slot = 1 },
+        { label = "primary weapon", ltx_slot = 2, lua_slot = 3 },
+        { label = "outfit", ltx_slot = 6, lua_slot = 7 }
+    }
+    for _, case in ipairs(cases) do
+        local result = gamma_arena_bootstrap.engine_inventory_slot(case.ltx_slot)
+        gamma_arena_test_assert.is_true(result.ok, case.label .. " LTX slot translates safely")
+        gamma_arena_test_assert.equals(result.value, case.lua_slot, case.label .. " uses the one-based Lua inventory API slot")
+    end
+    local invalid = gamma_arena_bootstrap.engine_inventory_slot(-1)
+    gamma_arena_test_assert.is_false(invalid.ok, "negative LTX slots fail closed")
+    gamma_arena_test_assert.equals(invalid.error.code, "GA_ACTOR_LOADOUT_SLOT_INVALID", "invalid slot translation preserves the actor loadout code")
+end
+
+local function runtime_actor_loadout_waits_across_frames_for_engine_equipment()
+    local now, next_id = 100, 1200
+    local present, tags, slots, pending_slots = {}, {}, {}, {}
+    local magazine, pending_magazine, active, pending_active = {}, {}, nil, nil
+    local move_calls, magazine_calls, active_calls = 0, 0, 0
+    local actor = { id = function() return 77 end }
+    local loadout = entity_spec(1).actor().loadout
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        present[value.runtime_id] = value
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return now end,
+        timeout_ms = 100,
+        actor_id = function(target) return target:id() end,
+        ownership_token = function() return "session-delayed-equipment" end,
+        ammo_box_size = function() return 20 end,
+        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        entity_id = function(item) return item:id() end,
+        entity_parent_id = function(item) return item.parent_id end,
+        entity_section = function(item) return item.section_name end,
+        item_quantity = function(item) return item.quantity end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        online_item = function(_, id) return present[id] end,
+        item_slot = function(section)
+            if section == loadout.outfit then return 7 end
+            if section == loadout.knife then return 1 end
+            if section == loadout.weapon then return 3 end
+        end,
+        move_to_slot = function(_, item, slot)
+            move_calls = move_calls + 1
+            pending_slots[slot] = item
+            return true
+        end,
+        item_in_slot = function(_, slot) return slots[slot] end,
+        magazine_capacity = function() return 30 end,
+        set_ammo_elapsed = function(weapon, count)
+            magazine_calls = magazine_calls + 1
+            pending_magazine[weapon:id()] = count
+            return true
+        end,
+        get_ammo_in_magazine = function(weapon) return magazine[weapon:id()] or 0 end,
+        make_item_active = function(_, item)
+            active_calls = active_calls + 1
+            pending_active = item
+            return true
+        end,
+        active_item = function() return active end,
+        resolve_entity = function(id) return present[id] end,
+        release_item = function(id) present[id] = nil; return true end
+    })
+    local applied = port.apply(actor, loadout)
+    gamma_arena_test_assert.is_true(applied.ok, "delayed equipment fixture creates the exact actor loadout")
+    local result
+    for _ = 1, 20 do
+        result = port.update(actor)
+        gamma_arena_test_assert.is_true(result.ok, "uncommitted engine equipment remains pending rather than failing verification")
+        if result.value.ready == true then break end
+        now = now + 1
+        for slot, item in pairs(pending_slots) do slots[slot] = item; pending_slots[slot] = nil end
+        for id, count in pairs(pending_magazine) do magazine[id] = count; pending_magazine[id] = nil end
+        if pending_active ~= nil then active = pending_active; pending_active = nil end
+    end
+    gamma_arena_test_assert.is_true(result.ok and result.value.ready == true, "equipment reaches READY only after later-frame slot, magazine and active-item proofs")
+    gamma_arena_test_assert.equals(move_calls, 3, "outfit, knife and weapon moves are each submitted once")
+    gamma_arena_test_assert.equals(magazine_calls, 1, "magazine fill is submitted once")
+    gamma_arena_test_assert.equals(active_calls, 1, "active weapon selection is submitted once")
 end
 
 local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
@@ -3281,8 +3620,9 @@ local function runtime_bootstrap_hostility_port_is_feature_probed()
     gamma_arena_test_assert.is_true(applied.ok, "installed-GAMMA hostility methods are accepted")
     gamma_arena_test_assert.equals(calls[1], "relation:enemy", "enemy relation is applied first")
     gamma_arena_test_assert.equals(calls[2], "goodwill:-5000", "exact negative goodwill follows relation")
+    gamma_arena_test_assert.equals(#calls, 2, "hostility does not seed omniscient memory or force a current target")
     local missing = gamma_arena_bootstrap.apply_actor_hostility({ set_relation = npc.set_relation }, actor, -5000, "enemy")
-    gamma_arena_test_assert.is_false(missing.ok, "missing force_set_goodwill fails closed")
+    gamma_arena_test_assert.is_false(missing.ok, "missing goodwill API fails closed")
     gamma_arena_test_assert.equals(missing.error.code, "GA_ENTITY_HOSTILE_API_MISSING", "missing hostility API code")
     local false_result = gamma_arena_bootstrap.apply_actor_hostility({ set_relation = npc.set_relation, force_set_goodwill = function() return false end }, actor, -5000, "enemy")
     gamma_arena_test_assert.is_false(false_result.ok, "explicit false goodwill result fails closed")
@@ -3380,6 +3720,56 @@ local function runtime_entity_multi_return_ammo_is_exact()
         gamma_arena_test_assert.equals(call.count, descriptor.count, "descriptor quantity stays exact")
         gamma_arena_test_assert.equals(call.is_ammo, descriptor.is_ammo, "only ammo uses the engine ammo property path")
     end
+end
+
+local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
+    local next_id, ammo_entities, tags = 700, 0, {}
+    local function entity(section, parent_id)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return 100 end,
+        actor_id = function(actor) return actor:id() end,
+        ownership_token = function() return "session-unreadable-ammo" end,
+        ammo_box_size = function() return 20 end,
+        create_item = function(section, actor, count, is_ammo)
+            if is_ammo then
+                ammo_entities = ammo_entities + 2
+                return { entity(section, actor:id()), entity(section, actor:id()) }
+            end
+            return entity(section, actor:id())
+        end,
+        entity_id = function(value) return value:id() end,
+        entity_parent_id = function(value) return value.parent_id end,
+        entity_section = function(value) return value.section_name end,
+        item_quantity = function(_, is_ammo) return is_ammo and nil or 1 end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end
+    })
+    local actor = { id = function() return 77 end }
+    local result = port.apply(actor, entity_spec(1).actor().loadout)
+    gamma_arena_test_assert.is_true(result.ok, "actor loadout derives exact ammo allocation when server quantity is unavailable")
+    gamma_arena_test_assert.equals(ammo_entities, 2, "forty actor rounds are represented by two effective twenty-round boxes")
+end
+
+local function runtime_entity_derives_unreadable_server_ammo_quantity()
+    local env, deps = fake_entity_environment({ engine_split_ammo = true, ammo_quantity_unavailable = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-unreadable-ammo")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "opponent loadout derives exact ammo allocation when server quantity is unavailable")
+    local ammo_records, ammo_quantity = 0, 0
+    for _, item in ipairs(snapshot.items) do
+        if item.section == "ammo_9x18_fmj" then
+            ammo_records = ammo_records + 1
+            ammo_quantity = ammo_quantity + item.quantity
+        end
+    end
+    gamma_arena_test_assert.equals(ammo_records, 3, "every unreadable server ammo entity is registered")
+    gamma_arena_test_assert.equals(ammo_quantity, 60, "derived opponent ammo quantities still total the exact FightSpec rounds")
 end
 
 local function runtime_entity_death_dropped_is_persisted_and_round_tripped()
@@ -3663,30 +4053,100 @@ local function runtime_entity_relations_friend_first_then_actor_hostile()
     gamma_arena_test_assert.is_true(first_friend ~= nil and first_hostile ~= nil and first_friend < first_hostile, "all NPC friendship is established before actor hostility")
 end
 
-local function runtime_entity_equipment_delays_active_and_times_out()
-    local env, deps = fake_entity_environment({ equip_delay = 2 })
+local function runtime_entity_tactical_begin_precedes_hostility()
+    local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
-    begin_entity_apply(adapter, env, entity_spec(1), "session-equip-delay")
-    local observed_wait = false
-    for _ = 1, 100 do
-        local result = adapter:update(); gamma_arena_test_assert.is_true(result.ok, "delayed equip remains retryable")
-        local snapshot = adapter:registry_snapshot()
-        if env.equip_attempts[100] and env.equip_attempts[100] < 3 then
-            observed_wait = snapshot.state == "WAIT_ONLINE"
-            for _, event in ipairs(env.events) do gamma_arena_test_assert.is_true(not string.find(event, "^hostile:"), "actor hostility waits for equipment verification") end
-        end
-        if snapshot.state == "ACTIVE" then break end
-        env:advance(1)
+    begin_entity_apply(adapter, env, entity_spec(2), "session-tactical-order")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "tactical bind completes before ACTIVE")
+    local first_friend, tactical_begin, first_hostile = nil, nil, nil
+    for index, event in ipairs(env.events) do
+        if first_friend == nil and string.find(event, "^friend:") then first_friend = index end
+        if tactical_begin == nil and event == "tactical_begin" then tactical_begin = index end
+        if first_hostile == nil and string.find(event, "^hostile:") then first_hostile = index end
     end
-    gamma_arena_test_assert.is_true(observed_wait, "ACTIVE is withheld while the validated weapon is not equipped")
-    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "ACTIVE", "ACTIVE begins only after equip verification")
+    gamma_arena_test_assert.is_true(first_friend < tactical_begin and tactical_begin < first_hostile, "friendship then tactical bind then hostility is exact")
+    gamma_arena_test_assert.equals(env.tactical_context.fight_key, "stable:ga-entity-test", "tactical fight key is the validated stable encoding")
+    gamma_arena_test_assert.equals(env.tactical_context.opponents[1].slot, 1, "tactical context retains stable participant slot")
+    gamma_arena_test_assert.equals(env.tactical_context.opponents[1].spawn_path, "opponent_1", "tactical context retains validated spawn route")
+    gamma_arena_test_assert.equals(#env.tactical_context.routes, 6, "tactical context exposes every validated Arena search route")
+    gamma_arena_test_assert.equals(env.tactical_context.routes[6], "opponent_6", "unused Arena routes remain available for broad search")
+end
 
-    local stuck_env, stuck_deps = fake_entity_environment({ equip_never = true, online_timeout_ms = 3 })
-    local stuck = gamma_arena_entity_adapter.new(stuck_deps)
-    begin_entity_apply(stuck, stuck_env, entity_spec(1), "session-equip-timeout")
-    local result, snapshot = pump_entity(stuck, stuck_env, 100)
-    gamma_arena_test_assert.is_false(result.ok, "never-equipped opponent fails boundedly")
-    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "equipment timeout rolls back before ACTIVE")
+local function runtime_entity_tactical_bind_failure_rolls_back()
+    local env, deps = fake_entity_environment({ fail_phase = "tactical_begin" })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-tactical-bind-fail")
+    local result, snapshot = pump_entity(adapter, env, 300)
+    gamma_arena_test_assert.is_false(result.ok, "tactical bind failure remains observable after rollback")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "tactical bind failure reaches transactional ERROR")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "failed tactical bind never exposes hostility")
+    gamma_arena_test_assert.is_true(#env.release_requests > 0, "failed tactical bind releases Arena-owned entities")
+end
+
+local function runtime_entity_tactical_active_failure_is_fail_soft_once()
+    local env, deps = fake_entity_environment({ fail_phase = "tactical_update" })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-tactical-runtime-fail")
+    local active, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(active.ok and snapshot.state == "ACTIVE", "fixture reaches ACTIVE before tactical runtime failure")
+    local first = adapter:update()
+    local second = adapter:update()
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "tactical runtime failure keeps combat playable")
+    gamma_arena_test_assert.equals(first.value.state, "ACTIVE", "fail-soft result remains ACTIVE")
+    gamma_arena_test_assert.is_true(first.value.tactical_disabled, "fail-soft result reports tactical disable")
+    gamma_arena_test_assert.equals(env.tactical_update_calls, 1, "disabled tactical runtime is never retried")
+    gamma_arena_test_assert.equals(#env.tactical_warnings, 1, "tactical runtime failure logs exactly once")
+    gamma_arena_test_assert.equals(env.tactical_warnings[1], "GA_DIRECTOR_RUNTIME_DISABLED", "fail-soft warning code is stable")
+end
+
+local function runtime_entity_tactical_death_and_stop_are_ordered()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-tactical-death")
+    pump_entity(adapter, env)
+    local victim_id = adapter:registry_snapshot().npcs[1].id
+    gamma_arena_test_assert.is_true(adapter:on_npc_death({ id = function() return victim_id end }).value, "registered death is accepted")
+    gamma_arena_test_assert.equals(env.tactical_death_slots[1], 1, "tactical death notification uses stable participant slot")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "tactical cleanup begins")
+    local stop_index, release_index = nil, nil
+    for index, event in ipairs(env.events) do
+        if event == "tactical_stop" then stop_index = stop_index or index end
+        if string.find(event, "^release:") then release_index = release_index or index end
+    end
+    gamma_arena_test_assert.equals(env.tactical_stop_calls, 1, "tactical stop runs exactly once")
+    gamma_arena_test_assert.is_true(stop_index ~= nil and release_index == nil, "tactical stop completes before cleanup may submit a release")
+    adapter:update()
+    for index, event in ipairs(env.events) do if release_index == nil and string.find(event, "^release:") then release_index = index end end
+    gamma_arena_test_assert.is_true(release_index == nil or stop_index < release_index, "tactical stop precedes the first release")
+end
+
+local function runtime_entity_tactical_stop_failure_is_retried_before_release()
+    local env, deps = fake_entity_environment({ tactical_stop_failures = 1 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-tactical-stop-retry")
+    pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "cleanup owns a transient tactical stop failure")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "STOPPING", "failed stop enters a retryable teardown state")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "entity release cannot start before tactical stop succeeds")
+    gamma_arena_test_assert.is_true(adapter:update().ok, "next update retries tactical stop")
+    gamma_arena_test_assert.equals(env.tactical_stop_calls, 2, "transient tactical stop is retried")
+    gamma_arena_test_assert.is_true(#env.release_requests > 0, "release begins only after the retry succeeds")
+end
+
+local function runtime_entity_activation_does_not_wait_for_precombat_active_item()
+    local env, deps = fake_entity_environment({ equip_never = true, online_timeout_ms = 3 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-ai-equip")
+    local result, snapshot = pump_entity(adapter, env, 100)
+    gamma_arena_test_assert.is_true(result.ok, "validated inventory reaches combat without a pre-combat active item")
+    gamma_arena_test_assert.equals(snapshot.state, "ACTIVE", "AI weapon selection begins only after atomic hostility activation")
+    gamma_arena_test_assert.equals(env.equip_attempts[100], nil, "adapter does not force actor-style item activation on an NPC")
+    local hostile = false
+    for _, event in ipairs(env.events) do
+        if string.find(event, "^hostile:100:") then hostile = true end
+    end
+    gamma_arena_test_assert.is_true(hostile, "validated NPC becomes hostile so engine combat AI can select its weapon")
 end
 
 local function runtime_entity_callbacks_fail_closed()
@@ -3790,7 +4250,7 @@ local function task8_environment(options)
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
-        normalize_for_checkpoint = function() return gamma_arena_result.ok(true) end,
+        normalize_for_arena = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         acquire_input = function() env.acquired_input = env.acquired_input + 1; return gamma_arena_result.ok(true) end,
         release_input = function() env.released_input = env.released_input + 1; return gamma_arena_result.ok(true) end,
@@ -3805,7 +4265,7 @@ local function task8_environment(options)
             return gamma_arena_result.ok(true)
         end,
         release_logical_death_hold = function() env.death_hold_releases = (env.death_hold_releases or 0) + 1; return gamma_arena_result.ok(true) end,
-        reset_after_victory = function()
+        reset_for_rematch = function()
             env.reset_actor = env.reset_actor + 1
             env.actor_loadout_owned = false
             return gamma_arena_result.ok(true)
@@ -3978,14 +4438,12 @@ local function task8_environment(options)
     env.orchestrator.active = true
     env.orchestrator.session = valid_session()
     env.orchestrator.session.session_id = "ga_task8_session"
-    env.orchestrator.runtime_stage = "READY"
-    env.orchestrator.checkpoint_ready = true
+    env.orchestrator.runtime_stage = "PREPARING"
     env.orchestrator.machine_state = gamma_arena_state_machine.states.PREPARING
     return env
 end
 
 local function task8_pump_to_countdown(env)
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "READY update enters PREPARING")
     gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "PREPARING creates one immutable validated spec")
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "COUNTDOWN", "preparation reaches COUNTDOWN")
 end
@@ -4054,6 +4512,24 @@ local function runtime_task8_only_registered_deaths_queue_victory()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 0, "death callback queues and never opens result UI")
     env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "registered final death opens result UI on next update")
+end
+
+local function runtime_result_modal_releases_global_input()
+    local victory = task8_environment(); task8_pump_to_active(victory)
+    local victory_acquired = victory.acquired_input
+    victory.orchestrator:npc_on_death_callback({ id = function() return victory.registry.npcs[1].id end })
+    victory.orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(victory.acquired_input, victory_acquired, "victory result never globally disables mouse input")
+    gamma_arena_test_assert.equals(#victory.victory_dialogs, 1, "victory modal is shown with engine input available")
+
+    local defeat = task8_environment(); task8_pump_to_active(defeat)
+    local released_before = defeat.released_input
+    local flags = { ret_value = true }
+    gamma_arena_bootstrap.make_callbacks(defeat.orchestrator).actor_on_before_death(77, flags)
+    defeat.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(flags.ret_value, "defeat regression follows the real intercepted logical-death callback")
+    gamma_arena_test_assert.equals(defeat.released_input, released_before + 1, "logical-death hold releases global input before defeat modal")
+    gamma_arena_test_assert.equals(#defeat.defeat_dialogs, 1, "defeat modal is shown after input release")
 end
 
 local function runtime_task8_victory_next_cleans_heals_and_increments_once()
@@ -4177,11 +4653,12 @@ local function runtime_fight_index_max_minus_one_advances_once()
     defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
     defeat.orchestrator:actor_on_update()
     local requested = defeat.orchestrator:defeat_next_action()
-    gamma_arena_test_assert.is_true(requested.ok, "max-1 defeat continuation persists once")
-    gamma_arena_test_assert.equals(defeat.restore_calls, 1, "max-1 defeat submits one checkpoint restore")
-    gamma_arena_test_assert.equals(defeat.restore_next_fight_index, 4294967295, "max-1 defeat targets uint32 max")
+    gamma_arena_test_assert.is_true(requested.ok, "max-1 defeat retry starts once")
+    for _ = 1, 4 do gamma_arena_test_assert.is_true(defeat.orchestrator:actor_on_update().ok, "max-1 defeat retry remains bounded") end
+    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "max-1 defeat retry never submits checkpoint restore")
+    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967294, "max-1 defeat retry retains the current index")
     gamma_arena_test_assert.is_true(defeat.orchestrator:defeat_next_action().ok, "repeated defeat continuation is an idempotent Result")
-    gamma_arena_test_assert.equals(defeat.restore_calls, 1, "repeated max-1 defeat never resubmits restore")
+    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "repeated max-1 defeat never submits restore")
 end
 
 local function runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal()
@@ -4203,12 +4680,11 @@ local function runtime_fight_index_exhaustion_precedes_mutation_and_routes_fatal
     task8_pump_to_active(defeat)
     defeat.orchestrator:actor_on_before_death(77, { ret_value = true })
     defeat.orchestrator:actor_on_update()
-    local defeat_failed = defeat.orchestrator:defeat_next_action()
-    gamma_arena_test_assert.is_false(defeat_failed.ok, "uint32-max defeat is rejected")
-    gamma_arena_test_assert.equals(defeat_failed.error.code, "GA_FIGHT_INDEX_EXHAUSTED", "defeat exhaustion code is stable")
-    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967295, "defeat exhaustion does not mutate session index")
-    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "defeat exhaustion precedes checkpoint mutation")
-    gamma_arena_test_assert.is_false(defeat.orchestrator.result_action_locked, "defeat exhaustion does not acquire the result-action latch")
+    local defeat_retry = defeat.orchestrator:defeat_next_action()
+    gamma_arena_test_assert.is_true(defeat_retry.ok, "uint32-max defeat can retry the same fight")
+    for _ = 1, 4 do gamma_arena_test_assert.is_true(defeat.orchestrator:actor_on_update().ok, "uint32-max defeat retry remains bounded") end
+    gamma_arena_test_assert.equals(defeat.orchestrator.session.fight_index, 4294967295, "uint32-max defeat retry retains the current index")
+    gamma_arena_test_assert.equals(defeat.restore_calls, 0, "uint32-max defeat retry never mutates a checkpoint")
 
     local routed = task8_environment()
     routed.orchestrator.session.fight_index = 4294967295
@@ -4495,20 +4971,34 @@ local function runtime_task9_resume_completion_transition_failure_normalizes()
     gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_TEST_RESUME_TRANSITION", "resume completion transition preserves its exact cause")
 end
 
-local function runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec()
+local function runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint()
     local env = task8_environment(); task8_pump_to_active(env)
+    local spec_before = env.orchestrator.fight_spec
+    local index_before = env.orchestrator.session.fight_index
     local generated_before = env.generated
+    local death_hold_releases_before = env.death_hold_releases or 0
     local flags = { ret_value = true }
     env.orchestrator:actor_on_before_death(77, flags); env.orchestrator:actor_on_update()
     env.defeat_dialogs[1].on_next(); env.defeat_dialogs[1].on_next()
-    gamma_arena_test_assert.equals(env.restore_calls, 1, "repeated actions start one checkpoint load")
-    gamma_arena_test_assert.equals(env.restore_next_fight_index, env.orchestrator.session.fight_index + 1, "intent carries the next fight index")
-    env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
-    gamma_arena_test_assert.is_true(env.events[#env.events - 4] == "intent", "ResumeIntent is persisted before recovery mutation")
-    gamma_arena_test_assert.equals(table.concat(env.events, ",", #env.events - 3, #env.events), "clear_ui,cleanup,actor_cleanup,load", "UI, entity, and actor-loadout cleanup all precede checkpoint load")
-    gamma_arena_test_assert.equals(env.actor_loadout_cleanup, 1, "lost actor loadout cleanup is proven exactly once before load")
-    gamma_arena_test_assert.is_false(env.actor_loadout_owned, "no stale owned actor item id survives into checkpoint load")
-    gamma_arena_test_assert.equals(env.generated, generated_before, "lost FightSpec is never regenerated before clean reload")
+    for _ = 1, 4 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "defeat rematch cleanup remains structured") end
+    gamma_arena_test_assert.equals(env.restore_calls, 0, "defeat rematch never submits checkpoint restore")
+    gamma_arena_test_assert.equals(env.cleanup_calls, 1, "repeated retry actions start one cleanup generation")
+    gamma_arena_test_assert.equals(env.reset_actor, 1, "defeat rematch resets the actor exactly once")
+    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, index_before, "defeat rematch retains fight_index")
+    gamma_arena_test_assert.equals(env.generated, generated_before, "defeat rematch consumes no new RNG generation")
+    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec == spec_before, "defeat rematch retains the immutable FightSpec facade")
+    gamma_arena_test_assert.equals(env.applied, 2, "defeat rematch reapplies the retained FightSpec exactly once")
+    gamma_arena_test_assert.equals(env.death_hold_releases or 0, death_hold_releases_before, "logical-death hold remains owned throughout rematch cleanup and countdown")
+    gamma_arena_test_assert.is_true(env.orchestrator.death_latched, "defeat latch remains set until fresh opponents are ACTIVE")
+    env.now = env.now + 3000
+    for _ = 1, 3 do
+        gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "fresh rematch activation remains structured")
+        if env.orchestrator:runtime_stage_snapshot() == "ACTIVE" then break end
+    end
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "fresh rematch reaches ACTIVE without a reload")
+    gamma_arena_test_assert.equals(env.death_hold_releases or 0, death_hold_releases_before + 1, "fresh ACTIVE releases the logical-death hold exactly once")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "fresh ACTIVE clears the defeat latch")
+    gamma_arena_test_assert.is_false(env.orchestrator.result_action_locked, "fresh ACTIVE unlocks the next result action")
 end
 
 local function runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active()
@@ -4568,6 +5058,10 @@ end
 
 local cases = {
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
+    { name = "runtime_preflight_accepts_callable_engine_objects", fn = preflight_accepts_callable_engine_objects },
+    { name = "runtime_preflight_accepts_actor_condition_properties", fn = preflight_accepts_actor_condition_properties },
+    { name = "runtime_preflight_requires_tactical_director_apis", fn = preflight_requires_tactical_director_apis },
+    { name = "runtime_preflight_requires_tactical_director_config", fn = preflight_requires_tactical_director_config },
     { name = "runtime_preflight_aggregates_in_stable_order", fn = preflight_aggregates_in_stable_order },
     { name = "runtime_preflight_requires_task6_actor_checkpoint_ports", fn = preflight_requires_task6_actor_checkpoint_ports },
     { name = "runtime_preflight_requires_task9_death_hold_port", fn = preflight_requires_task9_death_hold_port },
@@ -4614,13 +5108,11 @@ local cases = {
     { name = "runtime_bootstrap_registration_rolls_back_every_position", fn = bootstrap_registration_rolls_back_every_position },
     { name = "runtime_bootstrap_registration_poison_blocks_retry", fn = bootstrap_registration_poison_blocks_retry },
     { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
-    { name = "runtime_net_destroy_teardown_honors_checkpoint_latch", fn = net_destroy_teardown_honors_checkpoint_latch },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
-    ,{ name = "runtime_fatal_recovery_waits_for_cleanup_before_disconnect", fn = runtime_fatal_recovery_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
-    ,{ name = "runtime_prepare_resume_legacy_mismatch_is_normalized", fn = runtime_prepare_resume_legacy_mismatch_is_normalized }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }
     ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
+    ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
     ,{ name = "runtime_actor_victory_reset_waits_for_inventory_absence", fn = runtime_actor_victory_reset_waits_for_inventory_absence }
     ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }
@@ -4630,45 +5122,17 @@ local cases = {
     ,{ name = "runtime_actor_rejects_nil_inventory_parent", fn = runtime_actor_rejects_nil_inventory_parent }
     ,{ name = "runtime_actor_rejects_throwing_inventory_accessors", fn = runtime_actor_rejects_throwing_inventory_accessors }
     ,{ name = "runtime_actor_future_seams_are_injected_and_total", fn = runtime_actor_future_seams_are_injected_and_total }
-    ,{ name = "runtime_checkpoint_requires_stable_required_files", fn = runtime_checkpoint_requires_stable_required_files }
-    ,{ name = "runtime_checkpoint_allows_absent_or_late_dds", fn = runtime_checkpoint_allows_absent_or_late_dds }
-    ,{ name = "runtime_checkpoint_wrap_clock_times_out", fn = runtime_checkpoint_wrap_clock_times_out }
-    ,{ name = "runtime_checkpoint_load_wait_is_bounded_and_wrap_safe", fn = runtime_checkpoint_load_wait_is_bounded_and_wrap_safe }
-    ,{ name = "runtime_checkpoint_transient_mutation_failures_retry_to_success", fn = runtime_checkpoint_transient_mutation_failures_retry_to_success }
-    ,{ name = "runtime_checkpoint_zero_required_target_waits_for_timeout", fn = runtime_checkpoint_zero_required_target_waits_for_timeout }
-    ,{ name = "runtime_checkpoint_late_dds_retries_throw_then_succeeds", fn = runtime_checkpoint_late_dds_retries_throw_then_succeeds }
-    ,{ name = "runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe", fn = runtime_checkpoint_late_dds_permanent_failures_are_bounded_and_wrap_safe }
-    ,{ name = "runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently", fn = runtime_bootstrap_teardown_drains_transient_exact_cleanup_idempotently }
-    ,{ name = "runtime_bootstrap_teardown_resets_across_sessions", fn = runtime_bootstrap_teardown_resets_across_sessions }
-    ,{ name = "runtime_completed_teardown_allows_next_loaded_launch_activation", fn = runtime_completed_teardown_allows_next_loaded_launch_activation }
-    ,{ name = "runtime_bootstrap_teardown_permanent_failures_are_bounded", fn = runtime_bootstrap_teardown_permanent_failures_are_bounded }
-    ,{ name = "runtime_bootstrap_teardown_rejects_unbounded_update_limits", fn = runtime_bootstrap_teardown_rejects_unbounded_update_limits }
-    ,{ name = "runtime_bootstrap_teardown_override_budgets_route_exactly", fn = runtime_bootstrap_teardown_override_budgets_route_exactly }
     ,{ name = "runtime_failed_teardown_retries_then_latches_success", fn = runtime_failed_teardown_retries_then_latches_success }
-    ,{ name = "runtime_checkpoint_permanent_mutation_throws_time_out", fn = runtime_checkpoint_permanent_mutation_throws_time_out }
-    ,{ name = "runtime_checkpoint_verifies_rename_and_delete_postconditions", fn = runtime_checkpoint_verifies_rename_and_delete_postconditions }
-    ,{ name = "runtime_checkpoint_recovers_mixed_crash_states", fn = runtime_checkpoint_recovers_mixed_crash_states }
-    ,{ name = "runtime_checkpoint_persists_intent_before_load", fn = runtime_checkpoint_persists_intent_before_load }
-    ,{ name = "runtime_checkpoint_consumes_intent_only_after_rehide", fn = runtime_checkpoint_consumes_intent_only_after_rehide }
-    ,{ name = "runtime_checkpoint_rejects_mismatched_resume", fn = runtime_checkpoint_rejects_mismatched_resume }
-    ,{ name = "runtime_checkpoint_fresh_process_recovers_all_exact_layouts", fn = runtime_checkpoint_fresh_process_recovers_all_exact_layouts }
-    ,{ name = "runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch", fn = runtime_checkpoint_fresh_recovery_rejects_missing_inconsistent_and_mismatch }
-    ,{ name = "runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift", fn = runtime_checkpoint_fresh_recovery_rejects_persisted_intent_drift }
-    ,{ name = "runtime_checkpoint_cleanup_is_idempotent_in_every_state", fn = runtime_checkpoint_cleanup_is_idempotent_in_every_state }
-    ,{ name = "runtime_checkpoint_two_sessions_leave_no_stale_paths", fn = runtime_checkpoint_two_sessions_leave_no_stale_paths }
-    ,{ name = "runtime_checkpoint_six_paths_are_fixed_and_safe", fn = runtime_checkpoint_six_paths_are_fixed_and_safe }
-    ,{ name = "runtime_checkpoint_rejects_unsafe_resolved_paths", fn = runtime_checkpoint_rejects_unsafe_resolved_paths }
-    ,{ name = "runtime_engine_checkpoint_port_canonicalizes_xray_alias", fn = runtime_engine_checkpoint_port_canonicalizes_xray_alias }
-    ,{ name = "runtime_checkpoint_command_throw_fails_safely", fn = runtime_checkpoint_command_throw_fails_safely }
-    ,{ name = "runtime_checkpoint_failed_intent_never_unhides", fn = runtime_checkpoint_failed_intent_never_unhides }
-    ,{ name = "runtime_checkpoint_ready_gates_generation", fn = runtime_checkpoint_ready_gates_generation }
-    ,{ name = "runtime_checkpoint_resume_applies_index_after_ready", fn = runtime_checkpoint_resume_applies_index_after_ready }
+    ,{ name = "runtime_dedicated_start_reaches_preparing_without_checkpoint", fn = runtime_dedicated_start_reaches_preparing_without_checkpoint }
     ,{ name = "runtime_entity_does_not_spawn_before_begin_apply", fn = runtime_entity_does_not_spawn_before_begin_apply }
     ,{ name = "runtime_entity_actor_loadout_precedes_spawn", fn = runtime_entity_actor_loadout_precedes_spawn }
     ,{ name = "runtime_entity_npcs_are_offline_until_atomic_activation", fn = runtime_entity_npcs_are_offline_until_atomic_activation }
     ,{ name = "runtime_entity_online_wait_is_bounded_and_wrap_safe", fn = runtime_entity_online_wait_is_bounded_and_wrap_safe }
     ,{ name = "runtime_entity_active_defers_input_release_to_task8", fn = runtime_entity_active_defers_input_release_to_task8 }
     ,{ name = "runtime_bootstrap_actor_loadout_port_is_bound_and_exact", fn = runtime_bootstrap_actor_loadout_port_is_bound_and_exact }
+    ,{ name = "runtime_actor_loadout_translates_ltx_slots_to_lua_slots", fn = runtime_actor_loadout_translates_ltx_slots_to_lua_slots }
+    ,{ name = "runtime_actor_loadout_waits_across_frames_for_engine_equipment", fn = runtime_actor_loadout_waits_across_frames_for_engine_equipment }
+    ,{ name = "runtime_actor_loadout_derives_unreadable_server_ammo_quantity", fn = runtime_actor_loadout_derives_unreadable_server_ammo_quantity }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
     ,{ name = "runtime_bootstrap_actor_existence_lookup_fails_closed", fn = runtime_bootstrap_actor_existence_lookup_fails_closed }
@@ -4685,6 +5149,7 @@ local cases = {
     ,{ name = "runtime_entity_purges_only_snapshot_children_still_parented", fn = runtime_entity_purges_only_snapshot_children_still_parented }
     ,{ name = "runtime_entity_supports_real_get_children_iterator", fn = runtime_entity_supports_real_get_children_iterator }
     ,{ name = "runtime_entity_multi_return_ammo_is_exact", fn = runtime_entity_multi_return_ammo_is_exact }
+    ,{ name = "runtime_entity_derives_unreadable_server_ammo_quantity", fn = runtime_entity_derives_unreadable_server_ammo_quantity }
     ,{ name = "runtime_entity_death_dropped_is_persisted_and_round_tripped", fn = runtime_entity_death_dropped_is_persisted_and_round_tripped }
     ,{ name = "runtime_entity_multi_return_late_failure_is_fully_registered", fn = runtime_entity_multi_return_late_failure_is_fully_registered }
     ,{ name = "runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation", fn = runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation }
@@ -4705,7 +5170,12 @@ local cases = {
     ,{ name = "runtime_entity_release_timeout_is_wrap_safe", fn = runtime_entity_release_timeout_is_wrap_safe }
     ,{ name = "runtime_entity_max_cardinality_cleanup_fits_default_budget", fn = runtime_entity_max_cardinality_cleanup_fits_default_budget }
     ,{ name = "runtime_entity_relations_friend_first_then_actor_hostile", fn = runtime_entity_relations_friend_first_then_actor_hostile }
-    ,{ name = "runtime_entity_equipment_delays_active_and_times_out", fn = runtime_entity_equipment_delays_active_and_times_out }
+    ,{ name = "runtime_entity_tactical_begin_precedes_hostility", fn = runtime_entity_tactical_begin_precedes_hostility }
+    ,{ name = "runtime_entity_tactical_bind_failure_rolls_back", fn = runtime_entity_tactical_bind_failure_rolls_back }
+    ,{ name = "runtime_entity_tactical_active_failure_is_fail_soft_once", fn = runtime_entity_tactical_active_failure_is_fail_soft_once }
+    ,{ name = "runtime_entity_tactical_death_and_stop_are_ordered", fn = runtime_entity_tactical_death_and_stop_are_ordered }
+    ,{ name = "runtime_entity_tactical_stop_failure_is_retried_before_release", fn = runtime_entity_tactical_stop_failure_is_retried_before_release }
+    ,{ name = "runtime_entity_activation_does_not_wait_for_precombat_active_item", fn = runtime_entity_activation_does_not_wait_for_precombat_active_item }
     ,{ name = "runtime_entity_callbacks_fail_closed", fn = runtime_entity_callbacks_fail_closed }
     ,{ name = "runtime_validator_rejects_effective_nonhuman_profile", fn = runtime_validator_rejects_effective_nonhuman_profile }
     ,{ name = "runtime_entity_runtime_profile_check_precedes_actor_mutation", fn = runtime_entity_runtime_profile_check_precedes_actor_mutation }
@@ -4715,6 +5185,7 @@ local cases = {
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
+    ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }
     ,{ name = "runtime_task8_main_menu_disconnect_retries_after_failure", fn = runtime_task8_main_menu_disconnect_retries_after_failure }
@@ -4733,18 +5204,14 @@ local cases = {
     ,{ name = "runtime_task9_death_outside_active_is_not_a_defeat", fn = runtime_task9_death_outside_active_is_not_a_defeat }
     ,{ name = "runtime_task9_single_result_contract_maps_both_kinds", fn = runtime_task9_single_result_contract_maps_both_kinds }
     ,{ name = "runtime_task9_countdown_escape_model_routes_main_menu_cleanup", fn = runtime_task9_countdown_escape_model_routes_main_menu_cleanup }
-    ,{ name = "runtime_task9_resume_failures_normalize_to_restore_failed", fn = runtime_task9_resume_failures_normalize_to_restore_failed }
-    ,{ name = "runtime_task9_resume_pending_invalid_loaded_session_normalizes", fn = runtime_task9_resume_pending_invalid_loaded_session_normalizes }
-    ,{ name = "runtime_task9_restoring_state_read_failure_normalizes", fn = runtime_task9_restoring_state_read_failure_normalizes }
-    ,{ name = "runtime_task9_resume_completion_transition_failure_normalizes", fn = runtime_task9_resume_completion_transition_failure_normalizes }
-    ,{ name = "runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec", fn = runtime_task9_defeat_next_persists_before_cleanup_and_never_replays_lost_spec }
-    ,{ name = "runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active", fn = runtime_task9_defeat_reloads_consumes_intent_and_reaches_new_active }
+    ,{ name = "runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint", fn = runtime_task9_defeat_retry_reuses_same_spec_without_checkpoint }
     ,{ name = "runtime_task9_defeat_and_victory_share_main_menu_cleanup", fn = runtime_task9_defeat_and_victory_share_main_menu_cleanup }
-    ,{ name = "runtime_task9_restore_failure_enters_error_with_safe_menu_only", fn = runtime_task9_restore_failure_enters_error_with_safe_menu_only }
 }
 
 function run(run_case_fn)
     local all_passed = true
+    if not run_case_fn('runtime_bootstrap_default_store_exposes_complete_launch_contract', bootstrap_default_store_exposes_complete_launch_contract) then all_passed = false end
+    if not run_case_fn('runtime_missing_dependency_method_routes_fatal_once', missing_dependency_method_routes_fatal_once) then all_passed = false end
     for index = 1, #cases do
         local case = cases[index]
         if not run_case_fn(case.name, case.fn) then all_passed = false end

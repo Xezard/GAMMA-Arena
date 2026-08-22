@@ -1,0 +1,451 @@
+local Director = {}
+Director.__index = Director
+
+local UINT32_MOD = 4294967296
+local STRENGTH = {
+    visual = 6,
+    enemy_contact = 5,
+    hit = 4,
+    casualty = 4,
+    grenade = 4,
+    attack_sound = 3,
+    enemy_sound = 2,
+    sound = 2,
+    ricochet = 1
+}
+local ROLE_ORDER = { "pressure", "flank", "support", "anchor" }
+local CONFIG_KEYS = {
+    "observation_interval_ms",
+    "report_delay_min_ms",
+    "report_delay_max_ms",
+    "assignment_dwell_ms",
+    "visual_aging_ms",
+    "evidence_expiry_ms",
+    "hint_delay_ms",
+    "hint_cooldown_ms"
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= 0 and value < UINT32_MOD
+end
+
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function copy_position(value)
+    if type(value) ~= "table" or not finite_number(value.x) or not finite_number(value.y) or not finite_number(value.z) then return nil end
+    return { x = value.x, y = value.y, z = value.z }
+end
+
+local function copy_config(config)
+    if type(config) ~= "table" then return nil end
+    local value = {}
+    for _, key in ipairs(CONFIG_KEYS) do
+        if not finite_integer(config[key]) then return nil end
+        value[key] = config[key]
+    end
+    if value.observation_interval_ms < 1 or value.report_delay_min_ms < 1
+        or value.report_delay_max_ms < value.report_delay_min_ms
+        or value.visual_aging_ms > value.evidence_expiry_ms
+        or value.hint_delay_ms < value.evidence_expiry_ms
+        or value.hint_cooldown_ms < 1 then return nil end
+    return value
+end
+
+local function copy_routes(routes)
+    if type(routes) ~= "table" or #routes < 1 then return nil end
+    local values, seen = {}, {}
+    for index, route in ipairs(routes) do
+        if type(route) ~= "table" or type(route.id) ~= "string" or route.id == "" or seen[route.id] then return nil end
+        local anchor = copy_position(route.anchor)
+        if anchor == nil then return nil end
+        seen[route.id] = true
+        values[index] = { id = route.id, anchor = anchor }
+    end
+    table.sort(values, function(a, b) return a.id < b.id end)
+    return values, seen
+end
+
+local function copy_participants(participants, route_ids)
+    if type(participants) ~= "table" or #participants < 1 then return nil end
+    local values, seen_slots, seen_ids = {}, {}, {}
+    for index, participant in ipairs(participants) do
+        if type(participant) ~= "table" or not finite_integer(participant.slot) or participant.slot < 1
+            or participant.slot ~= index or not finite_integer(participant.id) or seen_slots[participant.slot] or seen_ids[participant.id]
+            or type(participant.spawn_route) ~= "string" or route_ids[participant.spawn_route] ~= true then return nil end
+        seen_slots[participant.slot] = true
+        seen_ids[participant.id] = true
+        values[index] = { slot = participant.slot, id = participant.id, spawn_route = participant.spawn_route }
+    end
+    return values
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function is_modular_newer(candidate, current)
+    if candidate == current then return false end
+    local delta = elapsed_ms(current, candidate)
+    return delta > 0 and delta < (UINT32_MOD / 2)
+end
+
+local function deadline_reached(now_ms, deadline_ms)
+    return now_ms == deadline_ms or is_modular_newer(now_ms, deadline_ms)
+end
+
+local function distance_sqr(left, right)
+    local x, y, z = left.x - right.x, left.y - right.y, left.z - right.z
+    return x * x + y * y + z * z
+end
+
+local function evidence_key(evidence)
+    local position = evidence.position
+    return evidence.kind .. "|" .. tostring(evidence.observer_slot) .. "|" .. tostring(evidence.at_ms)
+        .. "|" .. tostring(math.floor(position.x * 10)) .. "|" .. tostring(math.floor(position.y * 10))
+        .. "|" .. tostring(math.floor(position.z * 10))
+end
+
+local function role_for(index, count)
+    if index <= 4 then return ROLE_ORDER[index] end
+    if count > 4 and index % 2 == 1 then return "pressure" end
+    return "flank"
+end
+
+local function sorted_living_slots(participants, statuses)
+    local slots = {}
+    for _, participant in ipairs(participants) do
+        local status = statuses and statuses[participant.slot]
+        if status == nil or status.alive ~= false then slots[#slots + 1] = participant.slot end
+    end
+    return slots
+end
+
+local function rank_routes(routes, position)
+    local ranked = {}
+    for index, route in ipairs(routes) do
+        ranked[index] = { id = route.id, distance = distance_sqr(route.anchor, position) }
+    end
+    table.sort(ranked, function(a, b)
+        if a.distance == b.distance then return a.id < b.id end
+        return a.distance < b.distance
+    end)
+    local result = {}
+    for index, route in ipairs(ranked) do result[index] = route.id end
+    return result
+end
+
+local function route_preferences(ranked_ids, roles)
+    local result, used = {}, {}
+    local count = #ranked_ids
+    for index, role in ipairs(roles) do
+        local preferred = index
+        if role == "pressure" then preferred = 1
+        elseif role == "flank" then preferred = count
+        elseif role == "support" then preferred = math.min(2, count)
+        elseif role == "anchor" then preferred = math.max(count - 1, 1) end
+        local route_id = ranked_ids[preferred]
+        if used[route_id] then
+            route_id = nil
+            for _, candidate in ipairs(ranked_ids) do
+                if not used[candidate] then route_id = candidate; break end
+            end
+        end
+        route_id = route_id or ranked_ids[((index - 1) % count) + 1]
+        used[route_id] = true
+        result[index] = route_id
+    end
+    return result
+end
+
+local function plain_statuses(participants, statuses)
+    local result = {}
+    for _, participant in ipairs(participants) do
+        local source = type(statuses) == "table" and statuses[participant.slot] or nil
+        result[participant.slot] = {
+            alive = source == nil or source.alive ~= false,
+            combat_owned = source ~= nil and source.combat_owned == true
+        }
+    end
+    return result
+end
+
+function Director:begin(fight_key, routes, participants, now_ms)
+    if self.state ~= "IDLE" and self.state ~= "STOPPED" then return failure("GA_DIRECTOR_BUSY", "Tactical director is already active") end
+    if type(fight_key) ~= "string" or fight_key == "" or not finite_integer(now_ms) then
+        return failure("GA_DIRECTOR_BEGIN_INVALID", "Tactical director identity/time is invalid")
+    end
+    local copied_routes, route_ids = copy_routes(routes)
+    local copied_participants = copied_routes and copy_participants(participants, route_ids) or nil
+    if copied_routes == nil or copied_participants == nil then return failure("GA_DIRECTOR_BEGIN_INVALID", "Tactical routes or participants are invalid") end
+
+    self.state = "ACTIVE"
+    self.fight_key = fight_key
+    self.routes = copied_routes
+    self.route_ids = route_ids
+    self.participants = copied_participants
+    self.assignments = {}
+    self.pending_reports = {}
+    self.shared_evidence = {}
+    self.local_evidence = {}
+    self.evidence_keys = {}
+    self.evidence_sequence = 0
+    self.hint_sequence = 0
+    self.hint_request_outstanding = false
+    self.last_credible_at = now_ms
+    self.last_update_at = now_ms
+    self.last_hint_at = nil
+    self.last_statuses = plain_statuses(copied_participants, nil)
+
+    local commands = {}
+    for index, participant in ipairs(copied_participants) do
+        local role = role_for(index, #copied_participants)
+        local command = { slot = participant.slot, route_id = participant.spawn_route, role = role, reason = "initial_assault" }
+        commands[#commands + 1] = command
+        self.assignments[participant.slot] = {
+            route_id = command.route_id,
+            role = role,
+            assigned_at = now_ms,
+            evidence_strength = 0,
+            evidence_sequence = 0
+        }
+    end
+    return gamma_arena_result.ok({ commands = commands, hint_requested = false })
+end
+
+function Director:observe(evidence)
+    if self.state ~= "ACTIVE" then return failure("GA_DIRECTOR_NOT_ACTIVE", "Tactical evidence requires an active director") end
+    if type(evidence) ~= "table" or STRENGTH[evidence.kind] == nil or not finite_integer(evidence.observer_slot)
+        or self.participants[evidence.observer_slot] == nil or not finite_integer(evidence.at_ms) then
+        return failure("GA_DIRECTOR_EVIDENCE_INVALID", "Tactical evidence metadata is invalid")
+    end
+    local position = copy_position(evidence.position)
+    if position == nil then return failure("GA_DIRECTOR_EVIDENCE_INVALID", "Tactical evidence position is invalid") end
+    local normalized = {
+        kind = evidence.kind,
+        observer_slot = evidence.observer_slot,
+        at_ms = evidence.at_ms,
+        position = position,
+        strength = STRENGTH[evidence.kind]
+    }
+    local key = evidence_key(normalized)
+    local duplicate = self.evidence_keys[key]
+    if duplicate ~= nil then return gamma_arena_result.ok({ queued = false, deliver_at = duplicate }) end
+
+    self.evidence_sequence = self.evidence_sequence + 1
+    local rng = gamma_arena_rng.new(gamma_arena_rng.derive_seed({
+        self.fight_key, "report_delay", self.evidence_sequence, normalized.observer_slot
+    }))
+    local delay = rng:next_int(self.config.report_delay_min_ms, self.config.report_delay_max_ms)
+    if type(delay) ~= "number" then return delay end
+    normalized.sequence = self.evidence_sequence
+    normalized.deliver_at = (normalized.at_ms + delay) % UINT32_MOD
+    self.pending_reports[#self.pending_reports + 1] = normalized
+    local prior_local = self.local_evidence[normalized.observer_slot]
+    if prior_local == nil or normalized.strength > prior_local.strength
+        or (normalized.strength == prior_local.strength and is_modular_newer(normalized.at_ms, prior_local.at_ms)) then
+        self.local_evidence[normalized.observer_slot] = normalized
+    end
+    self.evidence_keys[key] = normalized.deliver_at
+    if is_modular_newer(normalized.at_ms, self.last_credible_at) then self.last_credible_at = normalized.at_ms end
+    return gamma_arena_result.ok({ queued = true, deliver_at = normalized.deliver_at })
+end
+
+function Director:best_evidence(now_ms)
+    local best = nil
+    for _, evidence in ipairs(self.shared_evidence) do
+        local age = elapsed_ms(evidence.at_ms, now_ms)
+        evidence.aged = evidence.kind == "visual" and age >= self.config.visual_aging_ms
+        evidence.effective_strength = evidence.aged and STRENGTH.enemy_sound or evidence.strength
+        evidence.uncertainty = math.min(1, age / self.config.evidence_expiry_ms)
+        evidence.confidence = 1 - evidence.uncertainty
+        if best == nil or evidence.effective_strength > best.effective_strength
+            or (evidence.effective_strength == best.effective_strength and is_modular_newer(evidence.at_ms, best.at_ms))
+            or (evidence.effective_strength == best.effective_strength and evidence.at_ms == best.at_ms and evidence.sequence > best.sequence) then
+            best = evidence
+        end
+    end
+    return best
+end
+
+function Director:deliver_and_expire(now_ms)
+    local pending = {}
+    for _, evidence in ipairs(self.pending_reports) do
+        if deadline_reached(now_ms, evidence.deliver_at) then self.shared_evidence[#self.shared_evidence + 1] = evidence
+        else pending[#pending + 1] = evidence end
+    end
+    self.pending_reports = pending
+    local shared = {}
+    for _, evidence in ipairs(self.shared_evidence) do
+        if elapsed_ms(evidence.at_ms, now_ms) < self.config.evidence_expiry_ms then shared[#shared + 1] = evidence end
+    end
+    self.shared_evidence = shared
+    for slot, evidence in pairs(self.local_evidence) do
+        if elapsed_ms(evidence.at_ms, now_ms) >= self.config.evidence_expiry_ms then self.local_evidence[slot] = nil end
+    end
+end
+
+function Director:commands_for_evidence(now_ms, statuses, evidence, observer_slot)
+    if evidence == nil then return {} end
+    local living_slots = sorted_living_slots(self.participants, statuses)
+    local slots = living_slots
+    if observer_slot ~= nil then
+        slots = {}
+        for _, slot in ipairs(living_slots) do if slot == observer_slot then slots[1] = slot; break end end
+    end
+    local roles = {}
+    for index = 1, #slots do roles[index] = role_for(index, #slots) end
+    local desired_routes = route_preferences(rank_routes(self.routes, evidence.position), roles)
+    local commands = {}
+    for index, slot in ipairs(slots) do
+        local status = statuses[slot]
+        local assignment = self.assignments[slot]
+        local dwell_elapsed = assignment == nil or elapsed_ms(assignment.assigned_at, now_ms) >= self.config.assignment_dwell_ms
+        local strong_preemption = assignment == nil or (
+            evidence.effective_strength >= STRENGTH.enemy_contact
+            and evidence.effective_strength > (assignment.evidence_strength or 0)
+            and evidence.sequence > (assignment.evidence_sequence or 0)
+        )
+        local desired = desired_routes[index]
+        if status.combat_owned ~= true and desired ~= nil and (dwell_elapsed or strong_preemption) then
+            if assignment == nil or assignment.route_id ~= desired or assignment.role ~= roles[index] then
+                commands[#commands + 1] = { slot = slot, route_id = desired, role = roles[index], reason = evidence.kind }
+                self.assignments[slot] = {
+                    route_id = desired,
+                    role = roles[index],
+                    assigned_at = now_ms,
+                    evidence_strength = evidence.effective_strength,
+                    evidence_sequence = evidence.sequence
+                }
+            elseif evidence.effective_strength > assignment.evidence_strength
+                or evidence.sequence > (assignment.evidence_sequence or 0) then
+                assignment.evidence_strength = evidence.effective_strength
+                assignment.evidence_sequence = evidence.sequence
+            end
+        end
+    end
+    return commands
+end
+
+function Director:update(now_ms, status_by_slot)
+    if self.state ~= "ACTIVE" or not finite_integer(now_ms) or type(status_by_slot) ~= "table" then
+        return failure("GA_DIRECTOR_UPDATE_INVALID", "Tactical director update is invalid")
+    end
+    self.last_statuses = plain_statuses(self.participants, status_by_slot)
+    self.last_update_at = now_ms
+    self:deliver_and_expire(now_ms)
+    local best = self:best_evidence(now_ms)
+    local commands = {}
+    for _, participant in ipairs(self.participants) do
+        local local_value = self.local_evidence[participant.slot]
+        if local_value ~= nil then
+            local age = elapsed_ms(local_value.at_ms, now_ms)
+            local_value.aged = local_value.kind == "visual" and age >= self.config.visual_aging_ms
+            local_value.effective_strength = local_value.aged and STRENGTH.enemy_sound or local_value.strength
+            local_value.uncertainty = math.min(1, age / self.config.evidence_expiry_ms)
+            local private_commands = self:commands_for_evidence(now_ms, self.last_statuses, local_value, participant.slot)
+            for _, command in ipairs(private_commands) do commands[#commands + 1] = command end
+        end
+    end
+    local shared_commands = self:commands_for_evidence(now_ms, self.last_statuses, best)
+    for _, command in ipairs(shared_commands) do commands[#commands + 1] = command end
+    local any_combat = false
+    for _, status in pairs(self.last_statuses) do
+        if status.alive and status.combat_owned then any_combat = true; break end
+    end
+    local since_evidence = elapsed_ms(self.last_credible_at, now_ms)
+    local since_hint = self.last_hint_at == nil and self.config.hint_cooldown_ms or elapsed_ms(self.last_hint_at, now_ms)
+    if not any_combat and not self.hint_request_outstanding and since_evidence >= self.config.hint_delay_ms
+        and since_hint >= self.config.hint_cooldown_ms then self.hint_request_outstanding = true end
+    return gamma_arena_result.ok({
+        commands = commands,
+        hint_requested = self.hint_request_outstanding,
+        next_observation_at = (now_ms + self.config.observation_interval_ms) % UINT32_MOD
+    })
+end
+
+function Director:accept_hint(now_ms, ranked_route_ids)
+    if self.state ~= "ACTIVE" or not self.hint_request_outstanding or not finite_integer(now_ms)
+        or type(ranked_route_ids) ~= "table" or #ranked_route_ids < 1 then
+        return failure("GA_DIRECTOR_HINT_INVALID", "Tactical hint is not authorized or malformed")
+    end
+    local seen = {}
+    for _, route_id in ipairs(ranked_route_ids) do
+        if type(route_id) ~= "string" or self.route_ids[route_id] ~= true or seen[route_id] then
+            return failure("GA_DIRECTOR_HINT_INVALID", "Tactical hint contains an unknown or duplicate route")
+        end
+        seen[route_id] = true
+    end
+    self.hint_sequence = self.hint_sequence + 1
+    local upper = math.min(3, #ranked_route_ids)
+    local selected_index = 1
+    if upper >= 2 then
+        local rng = gamma_arena_rng.new(gamma_arena_rng.derive_seed({ self.fight_key, "hint_route", self.hint_sequence }))
+        selected_index = rng:next_int(2, upper)
+        if type(selected_index) ~= "number" then return selected_index end
+    end
+    local ordered = { ranked_route_ids[selected_index] }
+    for _, route_id in ipairs(ranked_route_ids) do if route_id ~= ordered[1] then ordered[#ordered + 1] = route_id end end
+    local slots = sorted_living_slots(self.participants, self.last_statuses)
+    local roles = {}
+    for index = 1, #slots do roles[index] = role_for(index, #slots) end
+    local commands = {}
+    for index, slot in ipairs(slots) do
+        local status = self.last_statuses[slot]
+        if status ~= nil and status.combat_owned ~= true then
+            local route_id = ordered[((index - 1) % #ordered) + 1]
+            commands[#commands + 1] = { slot = slot, route_id = route_id, role = roles[index], reason = "anti_stall_hint" }
+            self.assignments[slot] = { route_id = route_id, role = roles[index], assigned_at = now_ms, evidence_strength = 0, evidence_sequence = 0 }
+        end
+    end
+    self.last_hint_at = now_ms
+    self.hint_request_outstanding = false
+    return gamma_arena_result.ok({ commands = commands, selected_rank = selected_index })
+end
+
+function Director:stop()
+    self.state = "STOPPED"
+    self.fight_key = nil
+    self.routes = {}
+    self.route_ids = {}
+    self.participants = {}
+    self.assignments = {}
+    self.pending_reports = {}
+    self.shared_evidence = {}
+    self.local_evidence = {}
+    self.evidence_keys = {}
+    self.last_statuses = {}
+    self.last_update_at = nil
+    self.hint_request_outstanding = false
+    return gamma_arena_result.ok(true)
+end
+
+function Director:snapshot()
+    local best = nil
+    if self.state == "ACTIVE" then best = self:best_evidence(self.last_update_at or self.last_credible_at) end
+    return {
+        state = self.state,
+        participant_count = #(self.participants or {}),
+        pending_report_count = #(self.pending_reports or {}),
+        shared_evidence_count = #(self.shared_evidence or {}),
+        best_evidence_kind = best and best.kind or nil,
+        best_evidence_aged = best and best.aged == true or false,
+        best_evidence_uncertainty = best and best.uncertainty or nil,
+        hint_request_outstanding = self.hint_request_outstanding == true,
+        last_credible_at = self.last_credible_at,
+        last_hint_at = self.last_hint_at
+    }
+end
+
+function new(config)
+    local validated = copy_config(config)
+    if validated == nil then return nil, failure("GA_DIRECTOR_CONFIG_INVALID", "Tactical director configuration is invalid") end
+    return setmetatable({ config = validated, state = "IDLE", participants = {}, routes = {} }, Director), nil
+end

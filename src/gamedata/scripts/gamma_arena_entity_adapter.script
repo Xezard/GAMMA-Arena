@@ -134,12 +134,14 @@ local function copy_loadout(loadout)
     if type(loadout.weapon) ~= "string" or loadout.weapon == ""
         or type(loadout.ammo) ~= "string" or loadout.ammo == ""
         or type(loadout.outfit) ~= "string" or loadout.outfit == ""
+        or type(loadout.knife) ~= "string" or loadout.knife == ""
         or not finite_integer(loadout.ammo_boxes) or loadout.ammo_boxes < 1 then return nil end
     return {
         weapon = loadout.weapon,
         ammo = loadout.ammo,
         ammo_boxes = loadout.ammo_boxes,
         outfit = loadout.outfit,
+        knife = loadout.knife,
         consumables = consumables,
         cost = loadout.cost
     }
@@ -180,19 +182,30 @@ local function resolve_ammo_rounds(loadout, slot, ammo_box_size)
         })
     end
     loadout.ammo_rounds = rounds
+    loadout.ammo_box_size = box_size
     return gamma_arena_result.ok(rounds)
 end
 
 local function build_descriptors(loadout)
     local result = {
         { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
-        { section = loadout.ammo, count = loadout.ammo_rounds, ammo = true, role = "ammo" },
-        { section = loadout.outfit, count = 1, ammo = false, role = "outfit" }
+        { section = loadout.ammo, count = loadout.ammo_rounds, ammo = true, role = "ammo", box_size = loadout.ammo_box_size },
+        { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
+        { section = loadout.knife, count = 1, ammo = false, role = "knife" }
     }
     for index, section in ipairs(loadout.consumables) do
         result[#result + 1] = { section = section, count = 1, ammo = false, role = "consumable", ordinal = index }
     end
     return result
+end
+
+local function expected_created_quantity(descriptor, index, entity_count)
+    if descriptor.ammo ~= true or not finite_integer(descriptor.box_size) or descriptor.box_size < 1 then return nil end
+    local expected_entities = math.floor((descriptor.count + descriptor.box_size - 1) / descriptor.box_size)
+    if entity_count ~= expected_entities then return nil end
+    local remaining = descriptor.count - ((index - 1) * descriptor.box_size)
+    if remaining < 1 then return nil end
+    return math.min(descriptor.box_size, remaining)
 end
 
 function EntityAdapter:__init(deps)
@@ -201,10 +214,11 @@ function EntityAdapter:__init(deps)
     self.session_id = nil
     self.actor_spec = nil
     self.opponents = nil
+    self.tactical_routes = nil
     self.opponent_index = 1
     self.current = nil
     self.creation_stack = {}
-    self.registry = { state = "IDLE", session_id = nil, npcs = {}, items = {}, error = nil }
+    self.registry = { state = "IDLE", session_id = nil, actor_loadout = nil, npcs = {}, items = {}, error = nil }
     self.npc_by_id = {}
     self.record_by_id = {}
     self.pending_release = nil
@@ -215,11 +229,33 @@ function EntityAdapter:__init(deps)
     self.online_started = nil
     self.pairs_staged = false
     self.terminal_error = nil
+    self.fight_key = nil
+    self.tactical_started = false
+    self.tactical_disabled = false
+    self.tactical_warning_logged = false
 end
 
 function EntityAdapter:set_state(value)
     self.state_value = value
     self.registry.state = value
+end
+
+function EntityAdapter:disable_tactical(result)
+    self.tactical_disabled = true
+    if self.tactical_warning_logged then return end
+    self.tactical_warning_logged = true
+    if type(self.deps.log_warn) == "function" then
+        pcall(self.deps.log_warn, "GA_DIRECTOR_RUNTIME_DISABLED", "Tactical director failed softly; native combat remains active", {
+            cause = type(result) == "table" and result.error or nil
+        })
+    end
+end
+
+function EntityAdapter:stop_tactical()
+    if self.tactical_started ~= true then return gamma_arena_result.ok(true) end
+    local stopped = method_result("GA_ENTITY_TACTICAL_STOP_FAILED", self.deps.tactical, "stop")
+    if stopped.ok then self.tactical_started = false else self:disable_tactical(stopped) end
+    return stopped
 end
 
 function EntityAdapter:clock()
@@ -317,17 +353,34 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     end
     local actor_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.actor)
     local opponents_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.opponents)
+    local tactical_routes_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.tactical_routes)
+    local fight_key_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.stable_encode)
     if not actor_result.ok then return actor_result end
     if not opponents_result.ok then return opponents_result end
+    if not tactical_routes_result.ok then return tactical_routes_result end
+    if not fight_key_result.ok or type(fight_key_result.value) ~= "string" or fight_key_result.value == "" then
+        return fight_key_result.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec stable encoding is invalid") or fight_key_result
+    end
     local actor_spec = copy_participant(actor_result.value, 0)
     if actor_spec == nil or type(opponents_result.value) ~= "table" or #opponents_result.value < 1 then
         return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec accessors returned invalid participants")
     end
-    local opponents = {}
+    local opponents, tactical_routes, tactical_route_set = {}, {}, {}
+    if type(tactical_routes_result.value) ~= "table" or #tactical_routes_result.value < 1 then
+        return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec exposes no tactical routes")
+    end
+    for index, route in ipairs(tactical_routes_result.value) do
+        if type(route) ~= "string" or route == "" or tactical_route_set[route] then
+            return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec tactical route is invalid", { route = route, index = index })
+        end
+        tactical_routes[index] = route
+        tactical_route_set[route] = true
+    end
     for index, participant in ipairs(opponents_result.value) do
         opponents[index] = copy_participant(participant, index)
         if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
-        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime)
+        if tactical_route_set[opponents[index].spawn_path] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent spawn route is unavailable to the tactical director", { slot = index, route = opponents[index].spawn_path }) end
+        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, opponents[index].community)
         if not effective.ok then return effective end
     end
     local actor_ammo = resolve_ammo_rounds(actor_spec.loadout, 0, self.deps.ammo_box_size)
@@ -339,8 +392,10 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
 
     self:__init(self.deps)
     self.session_id = session_id
+    self.fight_key = fight_key_result.value
     self.actor_spec = actor_spec
     self.opponents = opponents
+    self.tactical_routes = tactical_routes
     self.registry.session_id = session_id
     local loadout = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "apply_loadout", actor_spec.loadout)
     if not loadout.ok then
@@ -349,10 +404,8 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
         self:set_state("ERROR")
         return loadout
     end
-    -- begin_apply intentionally stages in COUNTDOWN. Ordinary update ticks do
-    -- not create NPCs until the injected opponent_gate is explicitly opened.
-    self:set_state("COUNTDOWN")
-    return gamma_arena_result.ok({ state = "COUNTDOWN" })
+    self:set_state("WAIT_ACTOR_LOADOUT")
+    return gamma_arena_result.ok({ state = "WAIT_ACTOR_LOADOUT" })
 end
 
 function EntityAdapter:opponent_gate_open()
@@ -588,11 +641,15 @@ function EntityAdapter:create_descriptor(descriptor)
             return fail("GA_ENTITY_ITEM_PARENT_MISMATCH", "Created item is not owned by its Arena opponent", { id = record.id, expected_parent_id = self.current.npc_id })
         end
         local quantity = result_call("GA_ENTITY_ITEM_QUANTITY_FAILED", self.deps.item_quantity, entity, descriptor.ammo == true)
-        if not quantity.ok or not finite_integer(quantity.value) or quantity.value < 1 then
+        local quantity_value = quantity.value
+        if quantity.ok and quantity_value == nil then
+            quantity_value = expected_created_quantity(descriptor, index, #records)
+        end
+        if not quantity.ok or not finite_integer(quantity_value) or quantity_value < 1 then
             return quantity.ok and fail("GA_ENTITY_ITEM_QUANTITY_FAILED", "Created item quantity is invalid", { section = descriptor.section }) or quantity
         end
-        record.quantity = quantity.value
-        total = total + quantity.value
+        record.quantity = quantity_value
+        total = total + quantity_value
     end
     if total ~= descriptor.count then
         return fail("GA_ENTITY_ITEM_QUANTITY_MISMATCH", "Created item quantity differs from validated FightSpec", { section = descriptor.section, expected = descriptor.count, actual = total })
@@ -705,7 +762,7 @@ function EntityAdapter:drive_online()
     end
     local equipped = self:verify_item_ownership()
     if not equipped.ok then return equipped end
-    for index, npc_record in ipairs(self.registry.npcs) do
+    for _, npc_record in ipairs(self.registry.npcs) do
         local weapon_record = nil
         for _, item_record in ipairs(self.registry.items) do
             if item_record.parent_id == npc_record.id and item_record.source == "assigned" and item_record.role == "weapon" and not item_record.released then
@@ -714,17 +771,29 @@ function EntityAdapter:drive_online()
             end
         end
         if weapon_record == nil then return fail("GA_ENTITY_WEAPON_MISSING", "Arena opponent has no registered validated weapon", { id = npc_record.id }) end
-        local activated = boolean_query("GA_ENTITY_EQUIP_FAILED", self.deps.ensure_weapon_equipped, objects[index], weapon_record.id)
-        if not activated.ok then return activated end
-        if activated.value ~= true then
-            local clock = self:clock()
-            if not clock.ok then return clock end
-            local timeout = self.deps.online_timeout_ms or DEFAULT_ONLINE_TIMEOUT_MS
-            if not finite_integer(timeout) or timeout < 0 or timeout >= UINT32_MOD then return fail("GA_ENTITY_ONLINE_TIMEOUT_INVALID", "Online timeout must be bounded") end
-            if elapsed_ms(self.online_started, clock.value) > timeout then return fail("GA_ENTITY_EQUIP_TIMEOUT", "Arena opponent did not equip its validated weapon before deadline", { id = npc_record.id, weapon_id = weapon_record.id }) end
-            return gamma_arena_result.ok(false)
-        end
         npc_record.equipped = true
+    end
+    if not self.tactical_started then
+        local actor_id = read_entity_id(actor.value)
+        if actor_id == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Arena actor id is unavailable for tactical bind") end
+        local tactical_opponents = {}
+        for _, record in ipairs(self.registry.npcs) do
+            local opponent = self.opponents[record.slot]
+            if opponent == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Tactical participant slot has no validated opponent", { slot = record.slot }) end
+            tactical_opponents[#tactical_opponents + 1] = {
+                slot = record.slot,
+                id = record.id,
+                spawn_path = opponent.spawn_path
+            }
+        end
+        local tactical = method_result("GA_ENTITY_TACTICAL_BEGIN_FAILED", self.deps.tactical, "begin", {
+            fight_key = self.fight_key,
+            actor_id = actor_id,
+            opponents = tactical_opponents,
+            routes = self.tactical_routes
+        })
+        if not tactical.ok then return tactical end
+        self.tactical_started = true
     end
     for _, object in ipairs(objects) do
         local hostile = result_call("GA_ENTITY_HOSTILE_RELATION_FAILED", self.deps.set_actor_hostile, object, actor.value, ACTOR_GOODWILL)
@@ -832,6 +901,11 @@ function EntityAdapter:fail_and_rollback(result)
     self.cleanup_mode = "rollback"
     self.release_index = #self.creation_stack
     self.pending_release = nil
+    local stopped = self:stop_tactical()
+    if not stopped.ok then
+        self:set_state("STOPPING")
+        return gamma_arena_result.ok({ state = "STOPPING", pending = true })
+    end
     self:set_state("ROLLING_BACK")
     -- Submit the first authorized safe release in the same callback. Further
     -- absence polling remains frame-driven.
@@ -843,7 +917,23 @@ end
 function EntityAdapter:update()
     if self.state_value == "IDLE" or self.state_value == "CLEAN" then return gamma_arena_result.ok({ state = self.state_value }) end
     if self.state_value == "ERROR" then return self.terminal_error or fail("GA_ENTITY_TRANSACTION_FAILED", "Arena entity transaction is in ERROR") end
+    if self.state_value == "STOPPING" then
+        local stopped = self:stop_tactical()
+        if not stopped.ok then return gamma_arena_result.ok({ state = "STOPPING", pending = true }) end
+        self:set_state(self.cleanup_mode == "rollback" and "ROLLING_BACK" or "CLEANING")
+        return self:drive_cleanup()
+    end
     if self.state_value == "CLEANING" or self.state_value == "ROLLING_BACK" then return self:drive_cleanup() end
+    if self.state_value == "WAIT_ACTOR_LOADOUT" then
+        local equipped = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "update_loadout")
+        if not equipped.ok then return self:fail_and_rollback(equipped) end
+        if type(equipped.value) ~= "table" or equipped.value.ready ~= true then
+            return gamma_arena_result.ok({ state = "WAIT_ACTOR_LOADOUT" })
+        end
+        self.registry.actor_loadout = copy_plain(equipped.value)
+        self:set_state("COUNTDOWN")
+        return gamma_arena_result.ok({ state = "COUNTDOWN", actor_loadout = copy_plain(equipped.value) })
+    end
     if self.state_value == "COUNTDOWN" then
         local gate = self:opponent_gate_open()
         if not gate.ok then return self:fail_and_rollback(gate) end
@@ -853,7 +943,15 @@ function EntityAdapter:update()
     local result
     if self.state_value == "SPAWNING" then result = self:drive_spawning()
     elseif self.state_value == "WAIT_ONLINE" then result = self:drive_online()
-    elseif self.state_value == "ACTIVE" then return gamma_arena_result.ok({ state = "ACTIVE" })
+    elseif self.state_value == "ACTIVE" then
+        if not self.tactical_disabled then
+            local tactical = method_result("GA_ENTITY_TACTICAL_UPDATE_FAILED", self.deps.tactical, "update")
+            if not tactical.ok then
+                self:disable_tactical(tactical)
+                return gamma_arena_result.ok({ state = "ACTIVE", tactical_disabled = true })
+            end
+        end
+        return gamma_arena_result.ok({ state = "ACTIVE", tactical_disabled = self.tactical_disabled == true })
     else result = fail("GA_ENTITY_TRANSACTION_INVALID", "Unknown Arena entity adapter state", { state = self.state_value }) end
     if not result.ok then
         if self.state_value == "WAIT_ONLINE" then
@@ -883,6 +981,10 @@ function EntityAdapter:on_npc_death(victim_or_id)
     if not owner.ok then return owner end
     if owner.value ~= self.session_id then return gamma_arena_result.ok(false) end
     record.dead = true
+    if self.tactical_started and not self.tactical_disabled then
+        local notified = method_result("GA_ENTITY_TACTICAL_DEATH_FAILED", self.deps.tactical, "record_death", record.slot)
+        if not notified.ok then self:disable_tactical(notified) end
+    end
     return gamma_arena_result.ok(true)
 end
 
@@ -895,6 +997,13 @@ end
 function EntityAdapter:cleanup()
     if self.state_value == "CLEAN" then return gamma_arena_result.ok(false) end
     if self.state_value == "CLEANING" then return gamma_arena_result.ok(false) end
+    if self.state_value == "STOPPING" then
+        self.cleanup_mode = "cleanup"
+        self.original_error = nil
+        self.terminal_error = nil
+        self.registry.error = nil
+        return gamma_arena_result.ok(false)
+    end
     if self.state_value == "ROLLING_BACK" then
         -- A level transition/fatal teardown owns every remaining release. Keep
         -- the in-flight poll, but finish toward CLEAN instead of resurfacing
@@ -912,6 +1021,11 @@ function EntityAdapter:cleanup()
     self.terminal_error = nil
     self.release_index = #self.creation_stack
     self.pending_release = nil
+    local stopped = self:stop_tactical()
+    if not stopped.ok then
+        self:set_state("STOPPING")
+        return gamma_arena_result.ok(true)
+    end
     self:set_state("CLEANING")
     return gamma_arena_result.ok(true)
 end

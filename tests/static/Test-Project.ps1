@@ -125,10 +125,12 @@ $Task2ScriptContracts = @(
 $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_number.script'; Namespace = 'gamma_arena_number'; Required = @('(?m)^function\s+is_finite\s*\(', '(?m)^function\s+is_integer\s*\(', '(?m)^function\s+is_positive_integer\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog.script'; Namespace = 'gamma_arena_catalog'; Required = @('(?m)^function\s+load\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'; Namespace = 'gamma_arena_catalog_discovery'; Required = @('(?m)^function\s+discover\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') }
 )
 
 $Task4ScriptContracts = @(
@@ -892,13 +894,19 @@ if (Test-Path -LiteralPath $LayoutPath) {
 }
 if (Test-Path -LiteralPath $NpcPath) {
     $NpcContent = Get-Content -LiteralPath $NpcPath -Raw
-    Assert-True ($NpcContent -match '(?m)^\[gamma_arena_bandit_novice\]:sim_default_bandit_0\r?$') 'NPC novice profile must inherit sim_default_bandit_0'
-    Assert-True ($NpcContent -match '(?m)^\[gamma_arena_bandit_veteran\]:sim_default_bandit_3\r?$') 'NPC veteran profile must inherit sim_default_bandit_3'
+    $ProfileBases = @{ army='military'; bandit='bandit'; csky='csky'; dolg='duty'; ecolog='ecolog'; freedom='freedom'; killer='killer'; monolith='monolith'; stalker='stalker' }
+    foreach ($Faction in @('army','bandit','csky','dolg','ecolog','freedom','killer','monolith','stalker')) {
+        $RankNames = @('novice','trainee','experienced','veteran')
+        for ($RankIndex = 0; $RankIndex -lt $RankNames.Count; $RankIndex++) {
+            $Alias = "gamma_arena_${Faction}_$($RankNames[$RankIndex])"
+            Assert-True ($NpcContent -match ("(?m)^\[" + [regex]::Escape($Alias) + "\]:sim_default_" + [regex]::Escape($ProfileBases[$Faction]) + "_" + $RankIndex + "\r?$")) "NPC profile must inherit its effective faction/rank section: $Alias"
+        }
+    }
 }
 if (Test-Path -LiteralPath $SkipPath) {
     $SkipContent = Get-Content -LiteralPath $SkipPath -Raw
     Assert-True ($SkipContent -match '(?m)^!\[skip_npcs\]\s*$') 'Loadout patch must use ![skip_npcs]'
-    Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_bandit_[a-z]+\s*=\s*bandit\s*$')).Count -eq 4) 'Loadout patch must add exactly four Arena humans to skip_npcs'
+    Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)_(novice|trainee|experienced|veteran)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)\s*$')).Count -eq 36) 'Loadout patch must add all 36 Arena human aliases to skip_npcs'
 }
 $GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v2.txt'
 if (Test-Path -LiteralPath $GoldenPath) {
