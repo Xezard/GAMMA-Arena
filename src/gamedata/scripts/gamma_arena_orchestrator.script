@@ -69,6 +69,19 @@ local function error_results(result)
     return values
 end
 
+local function append_unique_error(errors, result)
+    local candidate = type(result) == "table" and result.error or nil
+    if type(candidate) ~= "table" then return false end
+    for _, existing_result in ipairs(errors) do
+        local existing = type(existing_result) == "table" and existing_result.error or nil
+        if type(existing) == "table" and existing.code == candidate.code and existing.message == candidate.message then
+            return false
+        end
+    end
+    errors[#errors + 1] = result
+    return true
+end
+
 local function find_flags(...)
     local args = { ... }
     for index = 1, #args do
@@ -240,14 +253,10 @@ function Orchestrator:teardown_once(reason, preserve_session)
     return result
 end
 
-function Orchestrator:main_menu_action()
+function Orchestrator:submit_disconnect()
     if self.main_menu_executed then return gamma_arena_result.ok(false) end
-    local cleanup = self:cleanup_ready_for_disconnect()
-    if not cleanup.ok then return cleanup end
     if type(self.deps.disconnect) ~= "function" then
-        local unavailable = fail("GA_DISCONNECT_FAILED", "Main-menu disconnect dependency is unavailable")
-        pcall(gamma_arena_log.error, unavailable.error.code, unavailable.error.message, unavailable.error.context)
-        return unavailable
+        return fail("GA_DISCONNECT_FAILED", "Main-menu disconnect dependency is unavailable")
     end
     local called, value = pcall(self.deps.disconnect)
     local failure = nil
@@ -265,6 +274,13 @@ function Orchestrator:main_menu_action()
     end
     self.main_menu_executed = true
     return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:main_menu_action()
+    if self.main_menu_executed then return gamma_arena_result.ok(false) end
+    local cleanup = self:cleanup_ready_for_disconnect()
+    if not cleanup.ok then return cleanup end
+    return self:submit_disconnect()
 end
 
 function Orchestrator:cleanup_ready_for_disconnect()
@@ -289,6 +305,36 @@ function Orchestrator:cleanup_ready_for_disconnect()
     end
     self.cleanup_required = false
     return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:log_result_error(result)
+    local detail = type(result) == "table" and result.error or nil
+    if type(detail) == "table" then
+        pcall(gamma_arena_log.error, detail.code or "GA_RUNTIME_INTERNAL", detail.message or "Arena action failed", detail.context)
+    end
+end
+
+function Orchestrator:fatal_main_menu_action()
+    if self.machine_state ~= gamma_arena_state_machine.states.ERROR or not self.fatal_shown then
+        return fail("GA_FATAL_ACTION_INVALID", "Fatal main-menu action requires terminal Arena state")
+    end
+    if self.main_menu_executed then return gamma_arena_result.ok(false) end
+
+    local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
+    if not cleared.ok then self:log_result_error(cleared) end
+    local teardown = self:teardown_once("fatal_exit", false)
+    if not teardown.ok then self:log_result_error(teardown) end
+
+    local disconnected = self:submit_disconnect()
+    if disconnected.ok and self.main_menu_executed then
+        local ui = self.deps.ui
+        local method_ok, clear = pcall(function() return ui and ui.clear_fatal end)
+        if method_ok and type(clear) == "function" then
+            local dismissed = safe_result_call("GA_FATAL_UI_CLEAR_FAILED", clear)
+            if not dismissed.ok then self:log_result_error(dismissed) end
+        end
+    end
+    return disconnected
 end
 
 function Orchestrator:enter_fatal(result, intent_finalized)
@@ -318,7 +364,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.pending_continuation_kind = nil
     self.pending_disconnect = false
     local teardown = self:teardown_once("fatal", false)
-    if not teardown.ok then errors[#errors + 1] = teardown end
+    if not teardown.ok then append_unique_error(errors, teardown) end
     self.session = nil
     for index = 1, #errors do
         local item = errors[index]
@@ -328,12 +374,12 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         self.fatal_shown = true
         local ui = self.deps.ui
         local show = type(ui) == "table" and ui.show_fatal or nil
-        local ok, dialog = pcall(show, errors, function() return self:main_menu_action() end)
+        local ok, dialog = pcall(show, errors, function() return self:fatal_main_menu_action() end)
         if ok then
             self.fatal_dialog = dialog
         else
             pcall(gamma_arena_log.error, "GA_FATAL_UI_FAILED", "Fatal Arena UI could not be shown", { reason = tostring(dialog) })
-            self:main_menu_action()
+            self:fatal_main_menu_action()
         end
     end
     return result

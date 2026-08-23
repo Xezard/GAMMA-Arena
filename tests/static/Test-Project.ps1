@@ -1583,6 +1583,25 @@ foreach ($Task7TextPath in @($Task7EnglishTextPath, $Task7RussianTextPath)) {
     }
 }
 
+$FatalExitOrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+$FatalExitBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:submit_disconnect\s*\(') 'Fatal exit must isolate idempotent disconnect submission.'
+Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:fatal_main_menu_action\s*\(') 'Fatal exit must expose a terminal-only main-menu action.'
+Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:fatal_main_menu_action\s*\([\s\S]{0,1400}clear_transient') 'Fatal exit must best-effort clear transient intents.'
+Assert-True ($FatalExitBootstrapContent -match 'function\s+default_fatal_ui\s*\([\s\S]{0,500}clear_fatal') 'Fatal UI port must expose clear_fatal.'
+
+$FatalExitStart = $FatalExitOrchestratorContent.IndexOf('function Orchestrator:enter_fatal')
+$FatalExitEnd = if ($FatalExitStart -ge 0) { $FatalExitOrchestratorContent.IndexOf('function Orchestrator:on_callback_error', $FatalExitStart) } else { -1 }
+Assert-True ($FatalExitStart -ge 0 -and $FatalExitEnd -gt $FatalExitStart) 'Fatal routing boundary must remain structurally testable.'
+if ($FatalExitStart -ge 0 -and $FatalExitEnd -gt $FatalExitStart) {
+    $FatalExitBlock = $FatalExitOrchestratorContent.Substring($FatalExitStart, $FatalExitEnd - $FatalExitStart)
+    Assert-True (([regex]::Matches($FatalExitBlock, 'fatal_main_menu_action\s*\(')).Count -ge 2) 'Both fatal UI callback routes must use the fatal-only disconnect action.'
+    Assert-True (([regex]::Matches($FatalExitBlock, 'self:main_menu_action\s*\(')).Count -eq 0) 'Fatal UI callback routes must not use ordinary cleanup-gated exit.'
+}
+Assert-True ($FatalExitOrchestratorContent -match 'show_countdown[\s\S]{0,800}on_main_menu\s*=\s*function\s*\([\s\S]{0,250}request_main_menu_exit') 'Countdown result UI must retain the normal main-menu cleanup route.'
+Assert-True ($FatalExitOrchestratorContent -match 'show_result[\s\S]{0,800}on_main_menu\s*=\s*function\s*\([\s\S]{0,250}request_main_menu_exit') 'Result UI must retain the normal main-menu cleanup route.'
+Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:drive_runtime\s*\([\s\S]{0,900}pending_disconnect[\s\S]{0,300}main_menu_action') 'Normal result cleanup must still submit through main_menu_action.'
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"

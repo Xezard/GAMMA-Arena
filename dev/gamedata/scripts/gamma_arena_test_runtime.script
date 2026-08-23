@@ -1047,19 +1047,70 @@ end
 
 local function fatal_main_menu_retries_explicit_false()
     local attempts = 0
-    local deps = fake_orchestrator_deps(fake_store())
+    local action
+    local deps = fake_orchestrator_deps(fake_store({ launch_pending = true, resume_pending = false }))
+    deps.preflight = function() return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "failed") end
+    deps.ui.show_fatal = function(_, callback) action = callback; return {} end
     deps.disconnect = function()
         attempts = attempts + 1
         if attempts == 1 then return false end
         return true
     end
     local orchestrator = gamma_arena_orchestrator.new(deps)
-    local first = orchestrator:main_menu_action()
-    local second = orchestrator:main_menu_action()
-    local third = orchestrator:main_menu_action()
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI must receive one main-menu action")
+    local first = action()
+    local second = action()
+    local third = action()
     gamma_arena_test_assert.is_false(first.ok, "explicit false disconnect must be an observable failure")
     gamma_arena_test_assert.is_true(second.ok and third.ok, "explicit false disconnect must remain retryable then idempotent")
     gamma_arena_test_assert.equals(attempts, 2, "explicit false must not latch main-menu completion")
+end
+
+local function fatal_main_menu_bypasses_terminal_cleanup_error()
+    local action, disconnects = nil, 0
+    local deps = fake_orchestrator_deps(fake_store({ launch_pending = true }))
+    deps.preflight = function()
+        return gamma_arena_result.err("GA_ENTITY_CLEANUP_FAILED", "injected terminal cleanup")
+    end
+    deps.teardown = function()
+        return gamma_arena_result.err("GA_ENTITY_CLEANUP_FAILED", "injected terminal cleanup")
+    end
+    deps.entities = {
+        registry_snapshot = function()
+            return { state = "ERROR", npcs = { { id = 100 } }, items = {}, error = { code = "GA_ENTITY_CLEANUP_FAILED" } }
+        end
+    }
+    deps.ui.show_fatal = function(errors, callback)
+        gamma_arena_test_assert.equals(#errors, 1, "duplicate fatal aggregates are displayed once")
+        action = callback
+        return {}
+    end
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_false(orchestrator:actor_on_first_update().ok, "fixture enters fatal state")
+    gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI receives emergency action")
+    gamma_arena_test_assert.is_true(action().ok, "terminal cleanup cannot block fatal disconnect")
+    gamma_arena_test_assert.is_true(action().ok, "accepted fatal disconnect is idempotent")
+    gamma_arena_test_assert.equals(disconnects, 1, "fatal disconnect is submitted exactly once")
+end
+
+local function ordinary_main_menu_still_rejects_terminal_cleanup_error()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.entities = {
+        registry_snapshot = function() return { state = "ERROR", npcs = { { id = 100 } }, items = {} } end
+    }
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.cleanup_required = true
+    orchestrator.teardown_done = true
+    local result = orchestrator:main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "ordinary exit keeps exact cleanup gate")
+    gamma_arena_test_assert.equals(disconnects, 0, "ordinary exit never bypasses terminal cleanup")
 end
 
 local callback_names = {
@@ -6119,6 +6170,8 @@ local cases = {
     { name = "runtime_manual_save_and_load_flags_are_blocked", fn = manual_save_and_load_flags_are_blocked },
     { name = "runtime_fatal_main_menu_retries_throw_then_becomes_idempotent", fn = fatal_main_menu_retries_throw_then_becomes_idempotent },
     { name = "runtime_fatal_main_menu_retries_explicit_false", fn = fatal_main_menu_retries_explicit_false },
+    { name = "runtime_fatal_main_menu_bypasses_terminal_cleanup_error", fn = fatal_main_menu_bypasses_terminal_cleanup_error },
+    { name = "runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error", fn = ordinary_main_menu_still_rejects_terminal_cleanup_error },
     { name = "runtime_callback_boundary_routes_exceptions_once", fn = callback_boundary_routes_exceptions_once },
     { name = "runtime_callback_boundary_routes_false_results_once", fn = callback_boundary_routes_false_results_once },
     { name = "runtime_inactive_callback_results_remain_benign", fn = inactive_callback_results_remain_benign },
