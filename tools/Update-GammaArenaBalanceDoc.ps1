@@ -445,7 +445,7 @@ $OpponentRoleFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+role\s
 $WeaponRoleFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+weapon_role\s*=\s*role\s*==\s*"secondary"\s+and\s+"secondary"\s+or\s+"primary"' 'opponent weapon-role formula'
 
 $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"powered_exo"' 'powered_exo classification'
-$DynamicAmmoCostMatch = Get-RequiredLuaMatch $DiscoveryScriptPath 'local\s+record\s*=\s*\{\s*id\s*=\s*ammo_section\s*,\s*section\s*=\s*ammo_section\s*,\s*cost\s*=\s*(\d+)\s*\}' 'dynamic ammo cost'
+$DynamicAmmoCostMatch = Get-RequiredLuaMatch $DiscoveryScriptPath 'local\s+record\s*=\s*\{\s*id\s*=\s*(?<ammo_ref>ammo_section|variant\.section)\s*,\s*section\s*=\s*\k<ammo_ref>\s*,\s*cost\s*=\s*(\d+)\s*\}' 'dynamic ammo cost'
 $DynamicAmmoCost = [int]::Parse($DynamicAmmoCostMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 $SniperState = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+sniper_used\s*=\s*false' 'sniper_used initialization'
 $SniperFilter = Get-RequiredLuaMatch $GeneratorScriptPath 'sniper_used\s+and\s+weapon\.kind\s*==\s*"w_sniper"' 'sniper_used filter'

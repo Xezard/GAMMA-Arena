@@ -326,7 +326,7 @@ try {
     }
     & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
-        '| Catalog | schema 4 / revision 5 / generator 5 |',
+        '| Catalog | schema 5 / revision 6 / generator 6 |',
         '| Difficulties | schema 3 / revision 4 |',
         '| Layout | schema 2 / revision 2 |',
         '| Tactics | schema 1 / revision 1 |',
@@ -376,7 +376,7 @@ try {
 
     & $ToolPath -RepoRoot $Fixture -Verify
 
-    $Stale = $Second.Replace('Catalog | schema 4 /', 'Catalog | schema 999 /')
+    $Stale = $Second.Replace('Catalog | schema 5 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
     $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
     if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
@@ -489,6 +489,21 @@ try {
     Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'WEAPON_COST'
     if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
         throw 'Malformed Lua balance table partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Discovery, $DiscoveryOriginal, (New-Object Text.UTF8Encoding($false)))
+    $DynamicAmmoIdentityChanged = $DiscoveryOriginal.Replace(
+        'local record = { id = variant.section, section = variant.section, cost = 1 }',
+        'local record = { id = variant.section, section = ammo_section, cost = 1 }'
+    )
+    if ($DynamicAmmoIdentityChanged -ceq $DiscoveryOriginal) {
+        throw 'Dynamic ammo identity fixture did not match production source'
+    }
+    [IO.File]::WriteAllText($Discovery, $DynamicAmmoIdentityChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'dynamic ammo cost'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Mismatched dynamic ammo identity partially rewrote the document'
     }
 
     [IO.File]::WriteAllText($Discovery, $DiscoveryOriginal, (New-Object Text.UTF8Encoding($false)))
