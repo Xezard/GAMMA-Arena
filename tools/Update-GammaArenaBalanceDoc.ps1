@@ -278,12 +278,15 @@ $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"
 $PrimaryBandPercent = Get-RequiredLuaInt $GeneratorScriptPath 'PRIMARY_BAND_PERCENT'
 
 $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"powered_exo"' 'powered_exo classification'
+$DynamicAmmoCostMatch = Get-RequiredLuaMatch $DiscoveryScriptPath 'local\s+record\s*=\s*\{\s*id\s*=\s*ammo_section\s*,\s*section\s*=\s*ammo_section\s*,\s*cost\s*=\s*(\d+)\s*\}' 'dynamic ammo cost'
+$DynamicAmmoCost = [int]::Parse($DynamicAmmoCostMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 $SniperState = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+sniper_used\s*=\s*false' 'sniper_used initialization'
 $SniperFilter = Get-RequiredLuaMatch $GeneratorScriptPath 'sniper_used\s+and\s+weapon\.kind\s*==\s*"w_sniper"' 'sniper_used filter'
 $SniperUpdate = Get-RequiredLuaMatch $GeneratorScriptPath 'selected_weapon\.kind\s*==\s*"w_sniper"\s+then\s+sniper_used\s*=\s*true' 'sniper_used update'
 $TacticalRoleOrder = Get-RequiredLuaQuotedArray $TacticalDirectorScriptPath 'ROLE_ORDER'
 $TacticalStrength = Get-RequiredLuaTable $TacticalDirectorScriptPath 'STRENGTH' '(\d+)'
 $RepeatedRoleRule = Get-RequiredLuaMatch $TacticalDirectorScriptPath 'count\s*>\s*4\s+and\s+index\s*%\s*2\s*==\s*1\s+then\s+return\s+"pressure".*?return\s+"flank"' 'repeated tactical role rule'
+$ProfileFactions = Get-RequiredLuaQuotedArray $CatalogScriptPath 'PROFILE_FACTIONS'
 
 function Test-FallbackPairAffordable($Difficulty, [string]$WeaponClass, [string]$ArmorClass) {
     foreach ($Weapon in $FallbackWeapons) {
@@ -367,6 +370,20 @@ foreach ($Difficulty in $DifficultyModel) {
     $ActorLines.Add("| $($Difficulty.id) | $Eligible / 25 |") | Out-Null
 }
 $ActorLines.Add('') | Out-Null
+$ActorLines.Add('| difficulty | unavailable fallback class pairs / 25 | pairs |') | Out-Null
+$ActorLines.Add('|---|---:|---|') | Out-Null
+foreach ($Difficulty in $DifficultyModel) {
+    $Unavailable = New-Object System.Collections.Generic.List[string]
+    foreach ($WeaponClass in $WeaponWeightKeys.Keys) {
+        foreach ($ArmorClass in $ArmorWeightKeys.Keys) {
+            if (-not (Test-FallbackPairAffordable $Difficulty $WeaponClass $ArmorClass)) {
+                $Unavailable.Add("$WeaponClass/$ArmorClass") | Out-Null
+            }
+        }
+    }
+    $ActorLines.Add("| $($Difficulty.id) | $($Unavailable.Count) / 25 | $(@($Unavailable) -join ', ') |") | Out-Null
+}
+$ActorLines.Add('') | Out-Null
 $ActorLines.Add('| fallback weapon | kind | cost | ammo | boxes |') | Out-Null
 $ActorLines.Add('|---|---|---:|---|---:|') | Out-Null
 foreach ($Weapon in $FallbackWeapons) {
@@ -378,6 +395,14 @@ $ActorLines.Add('|---|---|---:|') | Out-Null
 foreach ($Outfit in $FallbackOutfits) {
     $ActorLines.Add("| $($Outfit.section) | $($Outfit.armor_class) | $($Outfit.cost) |") | Out-Null
 }
+$ActorLines.Add('') | Out-Null
+$ActorLines.Add('| ammunition | Arena cost | source mode |') | Out-Null
+$ActorLines.Add('|---|---:|---|') | Out-Null
+foreach ($AmmoSection in $FallbackAmmo.Keys) {
+    $ActorLines.Add("| $AmmoSection | $($FallbackAmmo[$AmmoSection].cost) | fallback |") | Out-Null
+}
+$ActorLines.Add("| dynamic discovered ammo | $DynamicAmmoCost | runtime discovery |") | Out-Null
+$ActorLines.Add("| bandage | $BandageCost | mandatory consumable |") | Out-Null
 $Blocks['actor-equipment'] = Join-MarkdownLines $ActorLines
 
 $OpponentLines = New-Object System.Collections.Generic.List[string]
@@ -416,6 +441,7 @@ $OpponentLines.Add('|---|---:|') | Out-Null
 $OpponentLines.Add("| PRIMARY_BAND_PERCENT | $PrimaryBandPercent% |") | Out-Null
 $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
+$OpponentLines.Add("| supported_factions | $(@($ProfileFactions) -join ', ') |") | Out-Null
 $OpponentLines.Add('| opponent_total_cost | profile + weapon + ammo boxes + outfit + bandage |') | Out-Null
 $Blocks['opponent-budgets'] = Join-MarkdownLines $OpponentLines
 
@@ -492,8 +518,35 @@ for ($Index = 1; $Index -lt $DifficultyModel.Count; $Index++) {
     $Previous = $DifficultyModel[$Index - 1]
     $CurrentDifficulty = $DifficultyModel[$Index]
     $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) envelope delta | enemy_budget +$($CurrentDifficulty.enemy_total_budget - $Previous.enemy_total_budget); actor_budget +$($CurrentDifficulty.player_loadout_budget - $Previous.player_loadout_budget); enemy_max +$($CurrentDifficulty.enemy_max - $Previous.enemy_max); primary_share +$($CurrentDifficulty.primary_share_percent - $Previous.primary_share_percent) pp |") | Out-Null
+
+    $LargestWeaponClass = $null
+    $LargestWeaponDelta = 0
+    foreach ($Class in $WeaponWeightKeys.Keys) {
+        $Delta = $CurrentDifficulty.weapon_weights[$Class] - $Previous.weapon_weights[$Class]
+        if ($null -eq $LargestWeaponClass -or [Math]::Abs($Delta) -gt [Math]::Abs($LargestWeaponDelta)) {
+            $LargestWeaponClass = $Class
+            $LargestWeaponDelta = $Delta
+        }
+    }
+    $WeaponSign = if ($LargestWeaponDelta -gt 0) { '+' } else { '' }
+    $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) largest weapon-class delta | $LargestWeaponClass $WeaponSign$LargestWeaponDelta pp |") | Out-Null
+
+    $LargestArmorClass = $null
+    $LargestArmorDelta = 0
+    foreach ($Class in $ArmorWeightKeys.Keys) {
+        $Delta = $CurrentDifficulty.armor_weights[$Class] - $Previous.armor_weights[$Class]
+        if ($null -eq $LargestArmorClass -or [Math]::Abs($Delta) -gt [Math]::Abs($LargestArmorDelta)) {
+            $LargestArmorClass = $Class
+            $LargestArmorDelta = $Delta
+        }
+    }
+    $ArmorSign = if ($LargestArmorDelta -gt 0) { '+' } else { '' }
+    $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) largest armor-class delta | $LargestArmorClass $ArmorSign$LargestArmorDelta pp |") | Out-Null
 }
 $DiagnosticLines.Add("| fact | layout capacity versus configured maxima | $LayoutCapacity slots; highest configured maximum $((($DifficultyModel | Measure-Object -Property enemy_max -Maximum).Maximum)) |") | Out-Null
+$ClippedDifficulties = @($DifficultyModel | Where-Object { $_.enemy_max -gt $LayoutCapacity } | ForEach-Object { $_.id })
+$ClippedText = if ($ClippedDifficulties.Count -eq 0) { 'none' } else { $ClippedDifficulties -join ', ' }
+$DiagnosticLines.Add("| derived | capacity-clipped difficulties | $ClippedText |") | Out-Null
 $DiagnosticLines.Add('| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |') | Out-Null
 $Blocks['balance-diagnostics'] = Join-MarkdownLines $DiagnosticLines
 
