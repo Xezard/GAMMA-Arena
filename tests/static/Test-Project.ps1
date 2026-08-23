@@ -1492,6 +1492,13 @@ foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'r
     Assert-True ($Task13RuntimeTests.Contains($IntegrityTest)) "Runtime integrity suite is missing case: $IntegrityTest"
 }
 
+foreach ($CleanupTest in @('runtime_entity_wounded_cleanup_holds_offline_before_release', 'runtime_entity_living_defeat_cleanup_holds_offline', 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release')) {
+    Assert-True ($Task13RuntimeTests.Contains($CleanupTest)) "Runtime cleanup suite is missing case: $CleanupTest"
+}
+foreach ($CleanupMarker in @('quiesce_live_owned_npcs', 'GA_ENTITY_CLEANUP_QUIESCE_FAILED', 'cleanup_phase', 'release_index', 'session_id')) {
+    Assert-True ($Task12EntityContent.Contains($CleanupMarker)) "Entity cleanup quiescence contract is missing marker: $CleanupMarker"
+}
+
 $Task7CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $Task7DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $Task7StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'

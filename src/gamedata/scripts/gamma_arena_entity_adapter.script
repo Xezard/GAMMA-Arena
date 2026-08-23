@@ -31,6 +31,12 @@ local VICTORY_DEFEATED_STATES = {
     DEFEATED_DEAD = true,
     DEFEATED_WOUNDED = true
 }
+local OFFLINE_BEFORE_RELEASE = {
+    [OPPONENT_STATES.ALIVE] = true,
+    [OPPONENT_STATES.WOUNDED_PENDING] = true,
+    [OPPONENT_STATES.DEFEATED_WOUNDED] = true,
+    [OPPONENT_STATES.MISSING_PENDING] = true
+}
 
 -- Production composition binds safe_release_manager.release and the exact
 -- game_object.friend/game_object.enemy set_relation calls. The runtime
@@ -270,6 +276,8 @@ function EntityAdapter:__init(deps)
     self.release_index = nil
     self.cleanup_errors = nil
     self.cleanup_mode = nil
+    self.cleanup_quiesced = false
+    self.cleanup_quiesce_record = nil
     self.original_error = nil
     self.online_started = nil
     self.pairs_staged = false
@@ -929,9 +937,62 @@ function EntityAdapter:drive_online()
     return gamma_arena_result.ok({ state = "ACTIVE" })
 end
 
-function EntityAdapter:add_cleanup_error(result)
-    local error_value = type(result) == "table" and result.error or nil
-    self.cleanup_errors[#self.cleanup_errors + 1] = error_value or { code = "GA_ENTITY_CLEANUP_FAILED", message = "Unknown entity cleanup error", context = {} }
+function EntityAdapter:add_cleanup_error(result, record, phase)
+    local source = type(result) == "table" and result.error or nil
+    local detail = source and copy_plain(source) or {
+        code = "GA_ENTITY_CLEANUP_FAILED",
+        message = "Unknown entity cleanup error",
+        context = {}
+    }
+    detail.context = type(detail.context) == "table" and detail.context or {}
+    detail.context.session_id = self.session_id
+    detail.context.cleanup_phase = phase
+    detail.context.release_index = self.release_index
+    if record ~= nil then
+        detail.context.entity_id = record.id
+        detail.context.entity_kind = record.kind
+        detail.context.section = record.section
+        detail.context.role = record.role
+        detail.context.parent_id = record.parent_id
+        detail.context.slot = record.slot
+    end
+    self.cleanup_errors[#self.cleanup_errors + 1] = detail
+    if type(self.deps.log_warn) == "function" then
+        pcall(self.deps.log_warn, detail.code, detail.message, detail.context)
+    end
+end
+
+function EntityAdapter:quiesce_live_owned_npcs()
+    self.cleanup_quiesce_record = nil
+    for _, record in ipairs(self.registry.npcs) do
+        if not record.released and not record.held_offline and OFFLINE_BEFORE_RELEASE[record.terminal_state] then
+            self.cleanup_quiesce_record = record
+            local server = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
+            if not server.ok then return server end
+            if server.value == nil then
+                local exists = self:entity_exists(record.id)
+                if not exists.ok then return exists end
+                if exists.value then
+                    return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC server object is unavailable", { id = record.id, slot = record.slot })
+                end
+                record.released = true
+                self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil)
+            else
+                local held = result_call("GA_ENTITY_CLEANUP_QUIESCE_FAILED", self.deps.hold_offline, server.value)
+                if not held.ok then
+                    return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC could not be held offline before release", {
+                        id = record.id,
+                        slot = record.slot,
+                        terminal_state = record.terminal_state,
+                        cause = held.error
+                    })
+                end
+                record.held_offline = true
+            end
+        end
+    end
+    self.cleanup_quiesce_record = nil
+    return gamma_arena_result.ok(true)
 end
 
 function EntityAdapter:quarantine_live_records()
@@ -985,10 +1046,19 @@ function EntityAdapter:finish_cleanup()
 end
 
 function EntityAdapter:drive_cleanup()
+    if self.cleanup_quiesced ~= true then
+        local quiesced = self:quiesce_live_owned_npcs()
+        self.cleanup_quiesced = true
+        if not quiesced.ok then
+            self:add_cleanup_error(quiesced, self.cleanup_quiesce_record, "quiesce")
+            return self:finish_cleanup()
+        end
+    end
     if self.pending_release ~= nil then
+        local record = self.pending_release.record
         local polled = self:poll_release()
         if not polled.ok then
-            self:add_cleanup_error(polled)
+            self:add_cleanup_error(polled, record, "poll_release")
             if self.pending_release then self.pending_release.record.protected = true end
             self.pending_release = nil
             self.release_index = self.release_index - 1
@@ -1005,7 +1075,7 @@ function EntityAdapter:drive_cleanup()
         else
             local exists = self:entity_exists(record.id)
             if not exists.ok then
-                self:add_cleanup_error(exists); record.protected = true; self.release_index = self.release_index - 1
+                self:add_cleanup_error(exists, record, "existence"); record.protected = true; self.release_index = self.release_index - 1
             elseif not exists.value then
                 record.released = true
                 if record.kind == "npc" then self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil) end
@@ -1013,7 +1083,7 @@ function EntityAdapter:drive_cleanup()
             else
                 local release = self:begin_release(record)
                 if not release.ok then
-                    self:add_cleanup_error(release); record.protected = true; self.release_index = self.release_index - 1
+                    self:add_cleanup_error(release, record, "begin_release"); record.protected = true; self.release_index = self.release_index - 1
                 else
                     return gamma_arena_result.ok(false)
                 end
@@ -1027,6 +1097,8 @@ function EntityAdapter:fail_and_rollback(result)
     self.original_error = result
     self.cleanup_errors = {}
     self.cleanup_mode = "rollback"
+    self.cleanup_quiesced = false
+    self.cleanup_quiesce_record = nil
     self.release_index = #self.creation_stack
     self.pending_release = nil
     local stopped = self:stop_tactical()
@@ -1355,6 +1427,8 @@ function EntityAdapter:cleanup()
     if self.state_value == "CLEANING" then return gamma_arena_result.ok(false) end
     if self.state_value == "STOPPING" then
         self.cleanup_mode = "cleanup"
+        self.cleanup_quiesced = false
+        self.cleanup_quiesce_record = nil
         self.original_error = nil
         self.terminal_error = nil
         self.registry.error = nil
@@ -1365,6 +1439,8 @@ function EntityAdapter:cleanup()
         -- the in-flight poll, but finish toward CLEAN instead of resurfacing
         -- the superseded transaction error after resources are absent.
         self.cleanup_mode = "cleanup"
+        self.cleanup_quiesced = false
+        self.cleanup_quiesce_record = nil
         self.original_error = nil
         self.terminal_error = nil
         self.registry.error = nil
@@ -1373,6 +1449,8 @@ function EntityAdapter:cleanup()
     if self.state_value == "IDLE" then self:set_state("CLEAN"); return gamma_arena_result.ok(true) end
     self.cleanup_errors = {}
     self.cleanup_mode = "cleanup"
+    self.cleanup_quiesced = false
+    self.cleanup_quiesce_record = nil
     self.original_error = nil
     self.terminal_error = nil
     self.release_index = #self.creation_stack

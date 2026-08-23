@@ -2802,7 +2802,8 @@ local function fake_entity_environment(options)
         end
         for id, remaining in pairs(self.pending_release) do
             remaining = remaining - 1
-            if remaining <= 0 and not options.release_never_finishes then
+            local online_blocked = options.online_release_requires_offline and self.online[id] ~= nil
+            if remaining <= 0 and not options.release_never_finishes and not online_blocked then
                 self.pending_release[id] = nil
                 self:remove_entity(id)
             else
@@ -4298,6 +4299,61 @@ local function runtime_entity_cleanup_is_idempotent()
     gamma_arena_test_assert.is_true(adapter:cleanup().ok, "repeated cleanup is benign")
     pump_entity(adapter, env)
     gamma_arena_test_assert.equals(#env.release_requests, release_count, "repeated cleanup never releases twice")
+end
+
+local function runtime_entity_wounded_cleanup_holds_offline_before_release()
+    local env, deps = fake_entity_environment({ online_release_requires_offline = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-wounded-cleanup")
+    pump_entity(adapter, env)
+    local npc = adapter:registry_snapshot().npcs[1]
+    env.online[npc.id].critical_value = true
+    env:advance(250); adapter:update()
+    env:advance(1500); adapter:update()
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_WOUNDED", "fixture proves stable wound")
+
+    env.events = {}
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "wounded cleanup starts")
+    local cleaned, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(cleaned.ok and snapshot.state == "CLEAN", "offline wound cleanup reaches exact CLEAN")
+    local held_index, release_index = nil, nil
+    for index, event in ipairs(env.events) do
+        if event == "hold_offline:" .. tostring(npc.id) then held_index = index end
+        if release_index == nil and string.find(event, "release:", 1, true) == 1 then release_index = index end
+    end
+    gamma_arena_test_assert.is_true(held_index ~= nil and held_index < release_index, "wounded NPC is offline before first release")
+end
+
+local function runtime_entity_living_defeat_cleanup_holds_offline()
+    local env, deps = fake_entity_environment({ online_release_requires_offline = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(2), "session-living-cleanup")
+    pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(adapter:neutralize_owned_opponents().ok, "living opponents are neutralized after actor death")
+    adapter:cleanup()
+    local cleaned, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(cleaned.ok and snapshot.state == "CLEAN", "neutralized living opponents clean after offline hold")
+end
+
+local function runtime_entity_cleanup_quiesce_failure_is_terminal_without_release()
+    local env, deps = fake_entity_environment({ online_release_requires_offline = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-quiesce-failure")
+    pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
+    deps.hold_offline = function()
+        return gamma_arena_result.err("GA_TEST_OFFLINE_HOLD", "injected cleanup offline-hold failure")
+    end
+    env.release_requests = {}
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "quiesce-failure cleanup starts")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_false(result.ok, "offline-hold failure is terminal")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "offline-hold failure reaches ERROR")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "quiesce failure submits no cleanup release")
+    local leaf = snapshot.error.context.errors[1]
+    gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_CLEANUP_QUIESCE_FAILED", "quiesce failure is normalized")
+    gamma_arena_test_assert.equals(leaf.context.entity_id, npc_id, "quiesce leaf keeps the NPC id")
+    gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "quiesce", "quiesce leaf keeps cleanup phase")
 end
 
 local function runtime_entity_lifecycle_cleanup_takes_over_mid_rollback()
@@ -6295,6 +6351,9 @@ local cases = {
     ,{ name = "runtime_entity_cleanup_retires_vanished_owned_child", fn = runtime_entity_cleanup_retires_vanished_owned_child }
     ,{ name = "runtime_entity_parent_release_blocks_unreadable_child_parent", fn = runtime_entity_parent_release_blocks_unreadable_child_parent }
     ,{ name = "runtime_entity_cleanup_is_idempotent", fn = runtime_entity_cleanup_is_idempotent }
+    ,{ name = "runtime_entity_wounded_cleanup_holds_offline_before_release", fn = runtime_entity_wounded_cleanup_holds_offline_before_release }
+    ,{ name = "runtime_entity_living_defeat_cleanup_holds_offline", fn = runtime_entity_living_defeat_cleanup_holds_offline }
+    ,{ name = "runtime_entity_cleanup_quiesce_failure_is_terminal_without_release", fn = runtime_entity_cleanup_quiesce_failure_is_terminal_without_release }
     ,{ name = "runtime_entity_lifecycle_cleanup_takes_over_mid_rollback", fn = runtime_entity_lifecycle_cleanup_takes_over_mid_rollback }
     ,{ name = "runtime_entity_existence_result_must_be_boolean", fn = runtime_entity_existence_result_must_be_boolean }
     ,{ name = "runtime_entity_duplicate_death_is_idempotent", fn = runtime_entity_duplicate_death_is_idempotent }
