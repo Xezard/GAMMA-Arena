@@ -1113,6 +1113,58 @@ local function ordinary_main_menu_still_rejects_terminal_cleanup_error()
     gamma_arena_test_assert.equals(disconnects, 0, "ordinary exit never bypasses terminal cleanup")
 end
 
+local function fatal_display_deduplicates_ui_cleanup_error()
+    local displayed
+    local duplicate = gamma_arena_result.err("GA_RUNTIME_UI_CLEAR_FAILED", "Arena runtime UI could not be removed safely")
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.result_ui = {
+        clear_countdown = function() return gamma_arena_result.err("GA_TEST_UI_CLEAR", "injected UI clear failure") end,
+        clear_result = function() return gamma_arena_result.err("GA_TEST_UI_CLEAR", "injected UI clear failure") end
+    }
+    deps.ui.show_fatal = function(errors) displayed = errors; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:enter_fatal(duplicate)
+    gamma_arena_test_assert.equals(#displayed, 1, "fatal display deduplicates the matching UI cleanup aggregate")
+    gamma_arena_test_assert.equals(displayed[1].error.code, duplicate.error.code, "fatal display retains the UI cleanup error code")
+    gamma_arena_test_assert.equals(displayed[1].error.message, duplicate.error.message, "fatal display retains the UI cleanup error message")
+end
+
+local function fatal_display_deduplicates_transient_clear_error()
+    local displayed
+    local duplicate = gamma_arena_result.err("GA_TRANSIENT_CLEAR_FAILED", "injected transient clear failure")
+    local store = fake_store()
+    store.clear_result = duplicate
+    local deps = fake_orchestrator_deps(store)
+    deps.ui.show_fatal = function(errors) displayed = errors; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:enter_fatal(duplicate)
+    gamma_arena_test_assert.equals(#displayed, 1, "fatal display deduplicates the matching transient clear aggregate")
+    gamma_arena_test_assert.equals(displayed[1].error.code, duplicate.error.code, "fatal display retains the transient clear error code")
+    gamma_arena_test_assert.equals(displayed[1].error.message, duplicate.error.message, "fatal display retains the transient clear error message")
+end
+
+local function fatal_main_menu_rejects_idle_state()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local result = gamma_arena_orchestrator.new(deps):fatal_main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "IDLE cannot use the fatal main-menu action")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FATAL_ACTION_INVALID", "IDLE rejection has the fatal action code")
+    gamma_arena_test_assert.equals(disconnects, 0, "IDLE rejection never attempts disconnect")
+end
+
+local function fatal_main_menu_rejects_unshown_fatal_state()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.machine_state = gamma_arena_state_machine.states.ERROR
+    local result = orchestrator:fatal_main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "unshown ERROR cannot use the fatal main-menu action")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FATAL_ACTION_INVALID", "unshown ERROR rejection has the fatal action code")
+    gamma_arena_test_assert.equals(disconnects, 0, "unshown ERROR rejection never attempts disconnect")
+end
+
 local callback_names = {
     "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death", "actor_on_death",
     "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
@@ -6172,6 +6224,10 @@ local cases = {
     { name = "runtime_fatal_main_menu_retries_explicit_false", fn = fatal_main_menu_retries_explicit_false },
     { name = "runtime_fatal_main_menu_bypasses_terminal_cleanup_error", fn = fatal_main_menu_bypasses_terminal_cleanup_error },
     { name = "runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error", fn = ordinary_main_menu_still_rejects_terminal_cleanup_error },
+    { name = "runtime_fatal_display_deduplicates_ui_cleanup_error", fn = fatal_display_deduplicates_ui_cleanup_error },
+    { name = "runtime_fatal_display_deduplicates_transient_clear_error", fn = fatal_display_deduplicates_transient_clear_error },
+    { name = "runtime_fatal_main_menu_rejects_idle_state", fn = fatal_main_menu_rejects_idle_state },
+    { name = "runtime_fatal_main_menu_rejects_unshown_fatal_state", fn = fatal_main_menu_rejects_unshown_fatal_state },
     { name = "runtime_callback_boundary_routes_exceptions_once", fn = callback_boundary_routes_exceptions_once },
     { name = "runtime_callback_boundary_routes_false_results_once", fn = callback_boundary_routes_false_results_once },
     { name = "runtime_inactive_callback_results_remain_benign", fn = inactive_callback_results_remain_benign },

@@ -1597,6 +1597,8 @@ if ($FatalExitStart -ge 0 -and $FatalExitEnd -gt $FatalExitStart) {
     $FatalExitBlock = $FatalExitOrchestratorContent.Substring($FatalExitStart, $FatalExitEnd - $FatalExitStart)
     Assert-True (([regex]::Matches($FatalExitBlock, 'fatal_main_menu_action\s*\(')).Count -ge 2) 'Both fatal UI callback routes must use the fatal-only disconnect action.'
     Assert-True (([regex]::Matches($FatalExitBlock, 'self:main_menu_action\s*\(')).Count -eq 0) 'Fatal UI callback routes must not use ordinary cleanup-gated exit.'
+    Assert-True ($FatalExitBlock -notmatch 'errors\s*\[\s*#errors\s*\+\s*1\s*\]\s*=\s*ui_cleanup') 'Fatal UI cleanup errors must use display-level deduplication.'
+    Assert-True ($FatalExitBlock -notmatch 'errors\s*\[\s*#errors\s*\+\s*1\s*\]\s*=\s*cleared') 'Fatal transient-clear errors must use display-level deduplication.'
 }
 Assert-True ($FatalExitOrchestratorContent -match 'show_countdown[\s\S]{0,800}on_main_menu\s*=\s*function\s*\([\s\S]{0,250}request_main_menu_exit') 'Countdown result UI must retain the normal main-menu cleanup route.'
 Assert-True ($FatalExitOrchestratorContent -match 'show_result[\s\S]{0,800}on_main_menu\s*=\s*function\s*\([\s\S]{0,250}request_main_menu_exit') 'Result UI must retain the normal main-menu cleanup route.'
