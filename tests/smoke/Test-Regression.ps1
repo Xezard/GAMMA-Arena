@@ -960,8 +960,11 @@ end
         $RegistrationPath = Join-Path $RegistrationFixture $RegistrationCase.Path
         $RegistrationContent = Get-Content -LiteralPath $RegistrationPath -Raw
         $RegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RegistrationCase.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RegistrationCase.Function) + '\s*\}'
-        $RegistrationMutated = [regex]::Replace($RegistrationContent, $RegistrationPattern, '', 1)
+        $RegistrationRegex = [regex]::new($RegistrationPattern)
+        Assert-True ($RegistrationRegex.Matches($RegistrationContent).Count -eq 1) "Registration negative fixture must find exactly one case: $($RegistrationCase.Name)."
+        $RegistrationMutated = $RegistrationRegex.Replace($RegistrationContent, '', 1)
         Assert-True ($RegistrationMutated -ne $RegistrationContent) "Registration negative fixture must remove exactly one case: $($RegistrationCase.Name)."
+        Assert-True ($RegistrationRegex.Matches($RegistrationMutated).Count -eq 0) "Registration negative fixture must remove the matched case exactly once: $($RegistrationCase.Name)."
         Write-FixtureFile $RegistrationFixture $RegistrationCase.Path $RegistrationMutated
         $RegistrationResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $RegistrationFixture) -CaptureOutput
         $RegistrationDiagnostic = "Regression case must be registered exactly: $($RegistrationCase.Name) -> $($RegistrationCase.Function)."
