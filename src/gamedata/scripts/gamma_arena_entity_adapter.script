@@ -169,10 +169,25 @@ local function copy_loadout(loadout)
         or type(loadout.outfit) ~= "string" or loadout.outfit == ""
         or type(loadout.knife) ~= "string" or loadout.knife == ""
         or not finite_integer(loadout.ammo_boxes) or loadout.ammo_boxes < 1 then return nil end
+    local bonus_ammo = nil
+    if loadout.bonus_ammo ~= nil then
+        if type(loadout.bonus_ammo) ~= "table"
+            or type(loadout.bonus_ammo.section) ~= "string" or loadout.bonus_ammo.section == ""
+            or type(loadout.bonus_ammo.requested_category) ~= "string" or loadout.bonus_ammo.requested_category == ""
+            or type(loadout.bonus_ammo.resolved_category) ~= "string" or loadout.bonus_ammo.resolved_category == ""
+            or not finite_integer(loadout.bonus_ammo.boxes) or loadout.bonus_ammo.boxes < 1 then return nil end
+        bonus_ammo = {
+            section = loadout.bonus_ammo.section,
+            requested_category = loadout.bonus_ammo.requested_category,
+            resolved_category = loadout.bonus_ammo.resolved_category,
+            boxes = loadout.bonus_ammo.boxes
+        }
+    end
     return {
         weapon = loadout.weapon,
         ammo = loadout.ammo,
         ammo_boxes = loadout.ammo_boxes,
+        bonus_ammo = bonus_ammo,
         outfit = loadout.outfit,
         knife = loadout.knife,
         consumables = consumables,
@@ -212,28 +227,45 @@ local function copy_participant(participant, expected_slot)
     return copy
 end
 
-local function resolve_ammo_rounds(loadout, slot, ammo_box_size)
-    local resolved = result_call("GA_ENTITY_AMMO_BOX_SIZE_INVALID", ammo_box_size, loadout.ammo)
-    if not resolved.ok then return resolved end
+local function preflight_ammo_rounds(target, section, boxes, slot, ammo_box_size, role)
+    local resolved = result_call("GA_ENTITY_AMMO_BOX_SIZE_INVALID", ammo_box_size, section)
+    if not resolved.ok then
+        return fail("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size dependency failed safely", {
+            slot = slot,
+            section = section,
+            role = role,
+            reason = resolved.error and resolved.error.context and resolved.error.context.reason or nil
+        })
+    end
     local box_size = resolved.value
     if not finite_integer(box_size) or box_size < 1 or box_size >= UINT32_MOD then
         return fail("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size must be a positive bounded integer", {
             slot = slot,
-            section = loadout.ammo,
-            box_size = box_size
+            section = section,
+            box_size = box_size,
+            role = role
         })
     end
-    local rounds = loadout.ammo_boxes * box_size
+    if not finite_integer(boxes) or boxes < 1 or boxes >= UINT32_MOD then
+        return fail("GA_ENTITY_AMMO_ROUNDS_INVALID", "Ammo boxes must be positive bounded integers", {
+            slot = slot,
+            section = section,
+            ammo_boxes = boxes,
+            role = role
+        })
+    end
+    local rounds = boxes * box_size
     if not finite_integer(rounds) or rounds < 1 or rounds >= UINT32_MOD then
         return fail("GA_ENTITY_AMMO_ROUNDS_INVALID", "Ammo boxes cannot be translated to a bounded exact round count", {
             slot = slot,
-            section = loadout.ammo,
-            ammo_boxes = loadout.ammo_boxes,
-            box_size = box_size
+            section = section,
+            ammo_boxes = boxes,
+            box_size = box_size,
+            role = role
         })
     end
-    loadout.ammo_rounds = rounds
-    loadout.ammo_box_size = box_size
+    target.ammo_rounds = rounds
+    target.ammo_box_size = box_size
     return gamma_arena_result.ok(rounds)
 end
 
@@ -492,10 +524,16 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
         local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, opponents[index].community)
         if not effective.ok then return effective end
     end
-    local actor_ammo = resolve_ammo_rounds(actor_spec.loadout, 0, self.deps.ammo_box_size)
+    if actor_spec.loadout.bonus_ammo == nil then
+        return fail("GA_ENTITY_SPEC_INVALID", "Validated actor loadout is missing bonus ammo")
+    end
+    local actor_ammo = preflight_ammo_rounds(actor_spec.loadout, actor_spec.loadout.ammo, actor_spec.loadout.ammo_boxes, 0, self.deps.ammo_box_size, "ammo")
     if not actor_ammo.ok then return actor_ammo end
+    local actor_bonus_ammo = preflight_ammo_rounds(actor_spec.loadout.bonus_ammo, actor_spec.loadout.bonus_ammo.section, actor_spec.loadout.bonus_ammo.boxes, 0, self.deps.ammo_box_size, "bonus_ammo")
+    if not actor_bonus_ammo.ok then return actor_bonus_ammo end
     for index, opponent in ipairs(opponents) do
-        local opponent_ammo = resolve_ammo_rounds(opponent.loadout, index, self.deps.ammo_box_size)
+        if opponent.loadout.bonus_ammo ~= nil then return fail("GA_ENTITY_SPEC_INVALID", "Opponent loadout must not contain bonus ammo", { slot = index }) end
+        local opponent_ammo = preflight_ammo_rounds(opponent.loadout, opponent.loadout.ammo, opponent.loadout.ammo_boxes, index, self.deps.ammo_box_size, "ammo")
         if not opponent_ammo.ok then return opponent_ammo end
     end
 

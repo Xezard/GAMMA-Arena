@@ -2679,7 +2679,11 @@ local function entity_spec(opponent_count)
         slot = 0,
         spawn_path = "actor_spawn",
         look_path = "actor_look",
-        loadout = { weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2, outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6 }
+        loadout = {
+            weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2,
+            bonus_ammo = { section = "ammo_9x18_ap", requested_category = "armor_piercing", resolved_category = "armor_piercing", boxes = 1 },
+            outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6
+        }
     }
     local opponents = {}
     for index = 1, (opponent_count or 2) do
@@ -3183,7 +3187,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         ownership_token = function() return "session-exact" end,
         reserve_magazines = 3,
         ammo_box_size = function(section)
-            gamma_arena_test_assert.equals(section, "ammo_9x18_fmj", "actor adapter resolves the exact effective ammo section")
+            gamma_arena_test_assert.is_true(section == "ammo_9x18_fmj" or section == "ammo_9x18_ap", "actor adapter resolves only validated effective ammo sections")
             return 20
         end,
         magazine_capacity = function() return 30 end,
@@ -3204,10 +3208,13 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local actor = { id = function() return 77 end }
     local result = port.apply(actor, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "production-shaped actor loadout port applies exact descriptors")
-    gamma_arena_test_assert.equals(#calls, 5, "actor receives weapon, ammo, outfit and two consumables exactly once")
+    gamma_arena_test_assert.equals(#calls, 6, "actor receives weapon, base ammo, bonus ammo, outfit, knife and consumables exactly once")
     gamma_arena_test_assert.equals(calls[2].section, "ammo_9x18_fmj", "actor ammo section is exact")
     gamma_arena_test_assert.equals(calls[2].count, 90, "actor reserve is raised to three full magazines when catalog boxes are insufficient")
     gamma_arena_test_assert.is_true(calls[2].is_ammo, "actor ammo uses the ammo property path")
+    gamma_arena_test_assert.equals(calls[3].section, "ammo_9x18_ap", "actor bonus ammo section is exact")
+    gamma_arena_test_assert.equals(calls[3].count, 20, "actor bonus ammo remains one exact box without reserve inflation")
+    gamma_arena_test_assert.is_true(calls[3].is_ammo, "actor bonus ammo uses the ammo property path")
     gamma_arena_test_assert.equals(#released, 0, "successful actor loadout has no rollback")
 
     local function partial_failure_port(release_failure_id)
@@ -3226,7 +3233,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count, is_ammo)
                 create_calls = create_calls + 1
-                if create_calls == 3 then return nil end
+                if create_calls == 4 then return nil end
                 if is_ammo then return { partial_entity(section, target:id(), 1), partial_entity(section, target:id(), count - 1) } end
                 return partial_entity(section, target:id(), 1)
             end,
@@ -3255,7 +3262,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local failed = gamma_arena_entity_adapter.new(failure_deps):begin_apply(entity_spec(1), "session-actor-port-failure")
     gamma_arena_test_assert.is_false(failed.ok, "partial production actor loadout failure is observable")
     gamma_arena_test_assert.equals(failure_env.create_npc_count, 0, "partial actor loadout rollback finishes before NPC creation")
-    local expected_rollback = { 602, 601, 600 }
+    local expected_rollback = { 604, 603, 602, 601, 600 }
     gamma_arena_test_assert.equals(#rollback_ids, #expected_rollback, "every partially created actor item is released")
     for index, id in ipairs(expected_rollback) do gamma_arena_test_assert.equals(rollback_ids[index], id, "actor loadout rollback is exact reverse creation order") end
     local pending = failing_port.cleanup()
@@ -3419,6 +3426,7 @@ local function new_actor_loadout_test_fixture(options)
         weapon = loadout.weapon,
         ammo = loadout.ammo,
         ammo_boxes = loadout.ammo_boxes,
+        bonus_ammo = loadout.bonus_ammo,
         outfit = options.outfit or loadout.outfit,
         knife = loadout.knife,
         consumables = loadout.consumables
@@ -3780,7 +3788,15 @@ local function actor_loadout_ownership_fixture(options)
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "ga-session:nonce" end,
         ammo_box_size = function() return 20 end,
-        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        create_item = function(section, target, count)
+            if options.fail_bonus_create and section == "ammo_9x18_ap" then return nil end
+            if options.bonus_multi_return and section == "ammo_9x18_ap" then
+                local valid = entity(section, target:id(), count)
+                if options.bonus_multi_return == "duplicate" then return { valid, valid } end
+                return { valid, { id = function() return nil end } }
+            end
+            return entity(section, target:id(), count)
+        end,
         entity_id = function(item) return item:id() end,
         entity_parent_id = function(item) return item.parent_id end,
         entity_section = function(item) return item.section_name end,
@@ -3913,6 +3929,48 @@ local function runtime_actor_loadout_exact_owned_match_releases_once()
     gamma_arena_test_assert.is_true(env.port.cleanup().ok, "later authoritative absence completes cleanup")
 end
 
+local function runtime_actor_loadout_bonus_ammo_rollback_is_owned()
+    local success = actor_loadout_ownership_fixture()
+    local bonus_id = nil
+    for id, item in pairs(success.current) do if item.section_name == "ammo_9x18_ap" then bonus_id = id end end
+    gamma_arena_test_assert.is_true(bonus_id ~= nil, "bonus descriptor remains in the shared owned-record snapshot")
+    gamma_arena_test_assert.is_true(success.port.cleanup().ok, "bonus record routes through shared ownership cleanup")
+    local bonus_releases = 0
+    for _, id in ipairs(success.releases) do if id == bonus_id then bonus_releases = bonus_releases + 1 end end
+    gamma_arena_test_assert.equals(bonus_releases, 1, "ownership proof releases the bonus record exactly once")
+
+    local env = actor_loadout_ownership_fixture({ fail_bonus_create = true })
+    gamma_arena_test_assert.is_false(env.applied.ok, "bonus ammo creation failure remains transactional")
+    gamma_arena_test_assert.equals(#env.releases, 2, "weapon and base ammo are retained for ownership-proven rollback")
+    local blocked = env.port.apply(env.actor, entity_spec(1).actor().loadout)
+    gamma_arena_test_assert.is_false(blocked.ok, "bonus creation rollback keeps valid tagged ids owned until absence")
+    gamma_arena_test_assert.equals(blocked.error.code, "GA_ACTOR_LOADOUT_BUSY", "rollback ownership blocks a second actor apply")
+    for id in pairs(env.current) do env.current[id] = nil end
+    gamma_arena_test_assert.is_true(env.port.cleanup().ok, "authoritative absence retires bonus rollback ownership")
+end
+
+local function runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids()
+    for _, shape in ipairs({ "invalid", "duplicate" }) do
+        local env = actor_loadout_ownership_fixture({ bonus_multi_return = shape })
+        gamma_arena_test_assert.is_false(env.applied.ok, shape .. " bonus multi-return fails closed")
+        gamma_arena_test_assert.equals(#env.releases, 3, shape .. " bonus multi-return rolls back weapon, base ammo, and valid bonus id")
+        local blocked = env.port.apply(env.actor, entity_spec(1).actor().loadout)
+        gamma_arena_test_assert.is_false(blocked.ok, shape .. " valid bonus id remains owned until authoritative absence")
+        gamma_arena_test_assert.equals(blocked.error.code, "GA_ACTOR_LOADOUT_BUSY", shape .. " rollback cannot lose retained ownership")
+    end
+end
+
+local function runtime_entity_preflights_base_and_bonus_ammo_independently()
+    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = 7 } })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-independent-ammo").ok, "independent actor ammo preflight accepts valid base and bonus metadata")
+    gamma_arena_test_assert.equals(env.actor_loadout_calls, 1, "actor mutation follows both successful preflight resolutions")
+    local actor_loadout = adapter.actor_spec.loadout
+    gamma_arena_test_assert.equals(actor_loadout.ammo_rounds, 40, "base ammo uses its own effective box size")
+    gamma_arena_test_assert.equals(actor_loadout.bonus_ammo.ammo_rounds, 7, "bonus ammo uses its own effective box size")
+    gamma_arena_test_assert.equals(adapter.opponents[1].loadout.bonus_ammo, nil, "opponents retain base ammo only")
+end
+
 local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids()
     for _, case in ipairs({
         { label = "parent mismatch", options = { apply_parent_mismatch = true }, cleanable = false },
@@ -3967,6 +4025,27 @@ local function runtime_entity_ammo_box_size_failure_precedes_actor_mutation()
         gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "effective ammo conversion is verified before actor mutation")
         gamma_arena_test_assert.equals(env.create_npc_count, 0, "effective ammo conversion is verified before opponent creation")
     end
+end
+
+local function runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation()
+    for _, case in ipairs({ { value = nil }, { value = 0 }, { value = 1.5 }, { value = 4294967296 } }) do
+        local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = case.value } })
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        local result = adapter:begin_apply(entity_spec(1), "session-invalid-bonus-box-size")
+        gamma_arena_test_assert.is_false(result.ok, "invalid bonus effective box_size fails closed")
+        gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "bonus effective ammo conversion is verified before actor mutation")
+        gamma_arena_test_assert.equals(env.create_npc_count, 0, "bonus effective ammo conversion is verified before opponent creation")
+    end
+    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = function() error("injected bonus box-size failure") end } })
+    deps.ammo_box_size = function(section)
+        if section == "ammo_9x18_ap" then error("injected bonus box-size failure") end
+        return 20
+    end
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    local result = adapter:begin_apply(entity_spec(1), "session-throwing-bonus-box-size")
+    gamma_arena_test_assert.is_false(result.ok, "throwing bonus effective box_size fails closed")
+    gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "throwing bonus conversion precedes actor mutation")
+    gamma_arena_test_assert.equals(env.create_npc_count, 0, "throwing bonus conversion precedes opponent creation")
 end
 
 local function runtime_bootstrap_hostility_port_is_feature_probed()
@@ -4102,9 +4181,13 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
         clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-unreadable-ammo" end,
-        ammo_box_size = function() return 20 end,
+        ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
         create_item = function(section, actor, count, is_ammo)
             if is_ammo then
+                if section == "ammo_9x18_ap" then
+                    ammo_entities = ammo_entities + 1
+                    return entity(section, actor:id())
+                end
                 ammo_entities = ammo_entities + 2
                 return { entity(section, actor:id()), entity(section, actor:id()) }
             end
@@ -4120,7 +4203,51 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
     local actor = { id = function() return 77 end }
     local result = port.apply(actor, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "actor loadout derives exact ammo allocation when server quantity is unavailable")
-    gamma_arena_test_assert.equals(ammo_entities, 2, "forty actor rounds are represented by two effective twenty-round boxes")
+    gamma_arena_test_assert.equals(ammo_entities, 3, "unreadable base and bonus ammo use their own effective box sizes")
+end
+
+local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
+    local next_id, created, tags = 2400, {}, {}
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return 100 end,
+        actor_id = function(actor) return actor:id() end,
+        ownership_token = function() return "session-bonus-ammo" end,
+        ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
+        create_item = function(section, actor, count, is_ammo)
+            created[#created + 1] = { section = section, count = count, ammo = is_ammo == true }
+            return entity(section, actor:id(), count)
+        end,
+        entity_id = function(value) return value:id() end,
+        entity_parent_id = function(value) return value.parent_id end,
+        entity_section = function(value) return value.section_name end,
+        item_quantity = function(value) return value.quantity end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        reserve_magazines = 3,
+        magazine_capacity = function() return 30 end
+    })
+    local result = port.apply({ id = function() return 77 end }, entity_spec(1).actor().loadout)
+    gamma_arena_test_assert.is_true(result.ok, "actor loadout creates the validated bonus ammo box")
+    local expected = {
+        { section = "wpn_pm", count = 1, ammo = false },
+        { section = "ammo_9x18_fmj", count = 90, ammo = true },
+        { section = "ammo_9x18_ap", count = 7, ammo = true },
+        { section = "novice_outfit", count = 1, ammo = false },
+        { section = "wpn_knife", count = 1, ammo = false },
+        { section = "bandage", count = 1, ammo = false }
+    }
+    gamma_arena_test_assert.equals(#created, #expected, "actor descriptor count includes exactly one bonus ammo descriptor")
+    for index, expected_descriptor in ipairs(expected) do
+        gamma_arena_test_assert.equals(created[index].section, expected_descriptor.section, "actor descriptor section order is exact")
+        gamma_arena_test_assert.equals(created[index].count, expected_descriptor.count, "base reserve floor never inflates bonus ammo")
+        gamma_arena_test_assert.equals(created[index].ammo, expected_descriptor.ammo, "bonus descriptor uses the ammo creation path")
+    end
 end
 
 local function runtime_entity_derives_unreadable_server_ammo_quantity()
@@ -5001,7 +5128,7 @@ local function task8_validated_spec(index)
     local private = {
         fight_index = index,
         fight_id = "ga-task8-" .. tostring(index),
-        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, cost = 4 } },
+        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, bonus_ammo = { section = "ammo_bonus_test", requested_category = "standard", resolved_category = "standard", boxes = 1 }, outfit = "outfit_test", knife = "knife_test", consumables = { "medkit_test" }, cost = 4 } },
         opponents = { { slot = 1, profile = "gamma_arena_bandit_novice", spawn_path = "spawn_test", loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, cost = 4 } } }
     }
     return {
@@ -6542,6 +6669,7 @@ local cases = {
     ,{ name = "runtime_bootstrap_missing_outfit_repair_type_is_ordinary", fn = runtime_bootstrap_missing_outfit_repair_type_is_ordinary }
     ,{ name = "runtime_actor_loadout_exo_charge_failures_rollback", fn = runtime_actor_loadout_exo_charge_failures_rollback }
     ,{ name = "runtime_actor_loadout_derives_unreadable_server_ammo_quantity", fn = runtime_actor_loadout_derives_unreadable_server_ammo_quantity }
+    ,{ name = "runtime_actor_loadout_creates_exact_bonus_ammo_box", fn = runtime_actor_loadout_creates_exact_bonus_ammo_box }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
     ,{ name = "runtime_bootstrap_actor_existence_lookup_fails_closed", fn = runtime_bootstrap_actor_existence_lookup_fails_closed }
@@ -6550,10 +6678,14 @@ local cases = {
     ,{ name = "runtime_actor_loadout_post_submit_reuse_is_never_released_twice", fn = runtime_actor_loadout_post_submit_reuse_is_never_released_twice }
     ,{ name = "runtime_actor_loadout_malformed_ownership_proof_fails_closed", fn = runtime_actor_loadout_malformed_ownership_proof_fails_closed }
     ,{ name = "runtime_actor_loadout_exact_owned_match_releases_once", fn = runtime_actor_loadout_exact_owned_match_releases_once }
+    ,{ name = "runtime_actor_loadout_bonus_ammo_rollback_is_owned", fn = runtime_actor_loadout_bonus_ammo_rollback_is_owned }
+    ,{ name = "runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids", fn = runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids }
     ,{ name = "runtime_actor_loadout_apply_failures_never_drop_valid_created_ids", fn = runtime_actor_loadout_apply_failures_never_drop_valid_created_ids }
     ,{ name = "runtime_actor_loadout_failed_tag_write_never_manufactures_ownership", fn = runtime_actor_loadout_failed_tag_write_never_manufactures_ownership }
     ,{ name = "runtime_bootstrap_hostility_port_is_feature_probed", fn = runtime_bootstrap_hostility_port_is_feature_probed }
     ,{ name = "runtime_entity_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_ammo_box_size_failure_precedes_actor_mutation }
+    ,{ name = "runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation }
+    ,{ name = "runtime_entity_preflights_base_and_bonus_ammo_independently", fn = runtime_entity_preflights_base_and_bonus_ammo_independently }
     ,{ name = "runtime_entity_partial_failures_rollback_in_reverse", fn = runtime_entity_partial_failures_rollback_in_reverse }
     ,{ name = "runtime_entity_purges_only_snapshot_children_still_parented", fn = runtime_entity_purges_only_snapshot_children_still_parented }
     ,{ name = "runtime_entity_supports_real_get_children_iterator", fn = runtime_entity_supports_real_get_children_iterator }

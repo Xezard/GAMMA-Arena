@@ -1686,6 +1686,25 @@ Assert-True ($FatalExitOrchestratorContent -match 'show_countdown[\s\S]{0,800}on
 Assert-True ($FatalExitOrchestratorContent -match 'show_result[\s\S]{0,800}on_main_menu\s*=\s*function\s*\([\s\S]{0,250}request_main_menu_exit') 'Result UI must retain the normal main-menu cleanup route.'
 Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:drive_runtime\s*\([\s\S]{0,900}pending_disconnect[\s\S]{0,300}main_menu_action') 'Normal result cleanup must still submit through main_menu_action.'
 
+$BonusAmmoEntityContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script') -Raw
+$BonusAmmoBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+$BonusAmmoRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+Assert-True ($BonusAmmoEntityContent -match 'bonus_ammo\s*=\s*\{[\s\S]{0,400}resolved_category') 'Entity adapter must deep-copy validated bonus ammo metadata.'
+Assert-True ($BonusAmmoEntityContent -match 'preflight_ammo_rounds\(actor_spec\.loadout\.bonus_ammo') 'Entity adapter must preflight bonus ammo before actor mutation.'
+$BonusPreflightStart = $BonusAmmoEntityContent.IndexOf('function EntityAdapter:begin_apply')
+$BonusPreflightMutation = if ($BonusPreflightStart -ge 0) { $BonusAmmoEntityContent.IndexOf('self:__init(self.deps)', $BonusPreflightStart) } else { -1 }
+Assert-True ($BonusPreflightStart -ge 0 -and $BonusPreflightMutation -gt $BonusPreflightStart) 'Bonus ammo static contract must find the entity preflight-before-mutation boundary.'
+if ($BonusPreflightStart -ge 0 -and $BonusPreflightMutation -gt $BonusPreflightStart) {
+    $BonusPreflightSlice = $BonusAmmoEntityContent.Substring($BonusPreflightStart, $BonusPreflightMutation - $BonusPreflightStart)
+    Assert-True (([regex]::Matches($BonusPreflightSlice, 'preflight_ammo_rounds\(')).Count -ge 3) 'Actor base, actor bonus, and opponent base ammo must resolve through guarded preflight before mutation.'
+}
+Assert-True ($BonusAmmoBootstrapContent -match 'bonus_ammo_rounds') 'Actor loadout must retain bonus_ammo_rounds in its readiness state.'
+Assert-True ($BonusAmmoBootstrapContent -match 'role\s*=\s*"bonus_ammo"') 'Actor loadout must ownership-tag the bonus ammo descriptor role.'
+Assert-True ($BonusAmmoBootstrapContent -match 'expected_created_quantity\(descriptor, index, #entities, descriptor\.box_size\)') 'Unreadable actor ammo quantities must use each descriptor box_size.'
+foreach ($Name in @('runtime_actor_loadout_creates_exact_bonus_ammo_box','runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation','runtime_actor_loadout_bonus_ammo_rollback_is_owned')) {
+    Assert-True ($BonusAmmoRuntimeContent -match [regex]::Escape($Name)) "Bonus ammo runtime regression must cover $Name"
+}
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"

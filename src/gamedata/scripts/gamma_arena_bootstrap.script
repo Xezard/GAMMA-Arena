@@ -517,6 +517,21 @@ function new_actor_loadout_port(ports)
         if ammo_rounds ~= math.floor(ammo_rounds) or ammo_rounds < 1 or ammo_rounds >= UINT32_MOD then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor ammo boxes cannot be translated to a bounded exact round count", { section = loadout.ammo, ammo_boxes = loadout.ammo_boxes, box_size = box_size.value })
         end
+        if type(loadout.bonus_ammo) ~= "table" or type(loadout.bonus_ammo.section) ~= "string" or loadout.bonus_ammo.section == ""
+            or type(loadout.bonus_ammo.boxes) ~= "number" or loadout.bonus_ammo.boxes ~= math.floor(loadout.bonus_ammo.boxes)
+            or loadout.bonus_ammo.boxes < 1 then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", "Validated bonus ammo boxes must be positive bounded integers")
+        end
+        local bonus_box_size = actor_loadout_call("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", ports.ammo_box_size, loadout.bonus_ammo.section)
+        if not bonus_box_size.ok then return bonus_box_size end
+        if type(bonus_box_size.value) ~= "number" or bonus_box_size.value ~= math.floor(bonus_box_size.value)
+            or bonus_box_size.value < 1 or bonus_box_size.value >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_BOX_SIZE_INVALID", "Validated bonus ammo and effective box_size must be positive bounded integers", { section = loadout.bonus_ammo.section, role = "bonus_ammo" })
+        end
+        local bonus_ammo_rounds = loadout.bonus_ammo.boxes * bonus_box_size.value
+        if bonus_ammo_rounds ~= math.floor(bonus_ammo_rounds) or bonus_ammo_rounds < 1 or bonus_ammo_rounds >= UINT32_MOD then
+            return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor bonus ammo boxes cannot be translated to a bounded exact round count", { section = loadout.bonus_ammo.section, ammo_boxes = loadout.bonus_ammo.boxes, box_size = bonus_box_size.value, role = "bonus_ammo" })
+        end
         if ports.reserve_magazines ~= nil then
             if type(ports.reserve_magazines) ~= "number" or ports.reserve_magazines ~= math.floor(ports.reserve_magazines)
                 or ports.reserve_magazines < 1 or ports.reserve_magazines >= UINT32_MOD then
@@ -535,7 +550,8 @@ function new_actor_loadout_port(ports)
         end
         local descriptors = {
             { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
-            { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo" },
+            { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo", box_size = box_size.value },
+            { section = loadout.bonus_ammo.section, count = bonus_ammo_rounds, ammo = true, role = "bonus_ammo", box_size = bonus_box_size.value },
             { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
             { section = loadout.knife, count = 1, ammo = false, role = "knife" }
         }
@@ -567,7 +583,7 @@ function new_actor_loadout_port(ports)
                     local proof_failure = not parent.ok and parent or (not section.ok and section or (not quantity.ok and quantity or nil))
                     local quantity_value = quantity.value
                     if proof_failure == nil and quantity_value == nil then
-                        quantity_value = expected_created_quantity(descriptor, index, #entities, box_size.value)
+                        quantity_value = expected_created_quantity(descriptor, index, #entities, descriptor.box_size)
                     end
                     if proof_failure == nil and parent.value ~= actor_id.value then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_OWNER_INVALID", "Created actor item has a foreign parent", { id = id.value }) end
                     if proof_failure == nil and section.value ~= descriptor.section then proof_failure = actor_loadout_failure("GA_ACTOR_LOADOUT_SECTION_INVALID", "Created actor item section differs from FightSpec", { id = id.value }) end
@@ -596,6 +612,7 @@ function new_actor_loadout_port(ports)
             last_progress_at = started.value,
             timeout_ms = timeout_ms,
             reserve_rounds = ammo_rounds,
+            bonus_ammo_rounds = bonus_ammo_rounds,
             summary = nil
         }
         return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
@@ -830,6 +847,7 @@ function new_actor_loadout_port(ports)
             outfit_slot = equipment.slots.outfit,
             magazine_rounds = equipment.magazine_rounds,
             reserve_rounds = equipment.reserve_rounds,
+            bonus_ammo_rounds = equipment.bonus_ammo_rounds,
             outfit_power = equipment.outfit_power
         }
         equipment.state = "READY"
