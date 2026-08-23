@@ -124,6 +124,17 @@ function Get-RequiredLuaTable([string]$Path, [string]$Symbol, [string]$ValuePatt
     return $Values
 }
 
+function Get-RequiredLuaQuotedArray([string]$Path, [string]$Symbol) {
+    $Pattern = 'local\s+' + [regex]::Escape($Symbol) + '\s*=\s*\{(?<body>.*?)\}'
+    $Match = Get-RequiredLuaMatch $Path $Pattern $Symbol
+    $Values = New-Object System.Collections.Generic.List[string]
+    foreach ($Entry in [regex]::Matches($Match.Groups['body'].Value, '"([^"]+)"')) {
+        $Values.Add($Entry.Groups[1].Value) | Out-Null
+    }
+    if ($Values.Count -eq 0) { throw "Lua balance array '$Symbol' is empty: $Path" }
+    return @($Values)
+}
+
 function Get-PercentBar([int]$Percent) {
     $Filled = [Math]::Min(10, [Math]::Max(0, [Math]::Floor(($Percent + 5) / 10)))
     return ('#' * $Filled) + ('.' * (10 - $Filled))
@@ -174,6 +185,7 @@ $TacticalPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_aren
 $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
+$TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
 
 $Catalog = Read-GammaArenaLtx $CatalogPath
 $Difficulties = Read-GammaArenaLtx $DifficultyPath
@@ -269,6 +281,9 @@ $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"
 $SniperState = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+sniper_used\s*=\s*false' 'sniper_used initialization'
 $SniperFilter = Get-RequiredLuaMatch $GeneratorScriptPath 'sniper_used\s+and\s+weapon\.kind\s*==\s*"w_sniper"' 'sniper_used filter'
 $SniperUpdate = Get-RequiredLuaMatch $GeneratorScriptPath 'selected_weapon\.kind\s*==\s*"w_sniper"\s+then\s+sniper_used\s*=\s*true' 'sniper_used update'
+$TacticalRoleOrder = Get-RequiredLuaQuotedArray $TacticalDirectorScriptPath 'ROLE_ORDER'
+$TacticalStrength = Get-RequiredLuaTable $TacticalDirectorScriptPath 'STRENGTH' '(\d+)'
+$RepeatedRoleRule = Get-RequiredLuaMatch $TacticalDirectorScriptPath 'count\s*>\s*4\s+and\s+index\s*%\s*2\s*==\s*1\s+then\s+return\s+"pressure".*?return\s+"flank"' 'repeated tactical role rule'
 
 function Test-FallbackPairAffordable($Difficulty, [string]$WeaponClass, [string]$ArmorClass) {
     foreach ($Weapon in $FallbackWeapons) {
@@ -403,6 +418,97 @@ $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| opponent_total_cost | profile + weapon + ammo boxes + outfit + bandage |') | Out-Null
 $Blocks['opponent-budgets'] = Join-MarkdownLines $OpponentLines
+
+$ArenaLines = New-Object System.Collections.Generic.List[string]
+$ArenaLines.Add('| layout parameter | value |') | Out-Null
+$ArenaLines.Add('|---|---:|') | Out-Null
+$OpponentPaths = @(Get-LtxCsv $Layout 'ga_layout_rostok_arena_v1' 'opponent_spawn_paths' $LayoutPath)
+$ArenaLines.Add("| native_opponent_paths | $($OpponentPaths.Count) |") | Out-Null
+$ArenaLines.Add("| virtual_capacity | $LayoutCapacity |") | Out-Null
+$ArenaLines.Add("| virtual_radii | $(Get-RequiredLtxValue $Layout 'ga_layout_rostok_arena_v1' 'virtual_radii' $LayoutPath) m |") | Out-Null
+foreach ($Key in @('max_height_delta', 'min_opponent_separation', 'min_actor_separation', 'max_base_distance')) {
+    $ArenaLines.Add("| $Key | $(Get-RequiredLtxNumber $Layout 'ga_layout_rostok_arena_v1' $Key $LayoutPath) m |") | Out-Null
+}
+$ArenaLines.Add('') | Out-Null
+$ArenaLines.Add('| tactical parameter | value |') | Out-Null
+$ArenaLines.Add('|---|---|') | Out-Null
+$ArenaLines.Add("| observation_interval_ms | $(Get-RequiredLtxInt $Tactical 'director' 'observation_interval_ms' $TacticalPath) ms |") | Out-Null
+$ReportMinimum = Get-RequiredLtxInt $Tactical 'director' 'report_delay_min_ms' $TacticalPath
+$ReportMaximum = Get-RequiredLtxInt $Tactical 'director' 'report_delay_max_ms' $TacticalPath
+$ArenaLines.Add("| report_delay_ms | $ReportMinimum-$ReportMaximum ms |") | Out-Null
+foreach ($Key in @('assignment_dwell_ms', 'visual_aging_ms', 'evidence_expiry_ms', 'hint_delay_ms', 'hint_cooldown_ms')) {
+    $ArenaLines.Add("| $Key | $(Get-RequiredLtxInt $Tactical 'director' $Key $TacticalPath) ms |") | Out-Null
+}
+$ArenaLines.Add("| initial_role_order | $(@($TacticalRoleOrder) -join ' -> ') |") | Out-Null
+$ArenaLines.Add('| repeated_role_rule | odd slot: pressure / even slot: flank |') | Out-Null
+$ArenaLines.Add('') | Out-Null
+$ArenaLines.Add('| tactical evidence | strength |') | Out-Null
+$ArenaLines.Add('|---|---:|') | Out-Null
+foreach ($Kind in $TacticalStrength.Keys) {
+    $ArenaLines.Add("| $Kind | $($TacticalStrength[$Kind]) |") | Out-Null
+}
+$Blocks['arena-tactics'] = Join-MarkdownLines $ArenaLines
+
+$MinimumFallbackLoadout = $null
+foreach ($Weapon in $FallbackWeapons) {
+    if (-not $FallbackAmmo.Contains($Weapon.ammo)) { continue }
+    $Ammo = $FallbackAmmo[$Weapon.ammo]
+    foreach ($Outfit in $FallbackOutfits) {
+        $Cost = $Weapon.cost + ($Ammo.cost * $Weapon.ammo_box_min) + $Outfit.cost + $BandageCost
+        if ($null -eq $MinimumFallbackLoadout -or $Cost -lt $MinimumFallbackLoadout) {
+            $MinimumFallbackLoadout = $Cost
+        }
+    }
+}
+if ($null -eq $MinimumFallbackLoadout) { throw 'Fallback catalog has no complete loadout' }
+
+$MinimumProfileCost = $null
+foreach ($Id in Get-LtxCsv $Catalog 'profiles' 'ids' $CatalogPath) {
+    $Cost = Get-RequiredLtxInt $Catalog ('profile_' + $Id) 'cost' $CatalogPath
+    if ($null -eq $MinimumProfileCost -or $Cost -lt $MinimumProfileCost) { $MinimumProfileCost = $Cost }
+}
+
+$DiagnosticLines = New-Object System.Collections.Generic.List[string]
+$DiagnosticLines.Add('| category | diagnostic | value |') | Out-Null
+$DiagnosticLines.Add('|---|---|---|') | Out-Null
+$DiagnosticLines.Add("| fact | minimum_fallback_loadout | $MinimumFallbackLoadout budget points |") | Out-Null
+foreach ($Difficulty in $DifficultyModel) {
+    $Maximum = [Math]::Min($Difficulty.enemy_max, $LayoutCapacity)
+    $Required = $Maximum * ($MinimumProfileCost + $MinimumFallbackLoadout)
+    $Margin = $Difficulty.enemy_total_budget - $Required
+    $DiagnosticLines.Add("| derived | $($Difficulty.id) max-team feasibility margin | $Margin |") | Out-Null
+}
+foreach ($Difficulty in $DifficultyModel) {
+    $ZeroWeapon = @($WeaponWeightKeys.Keys | Where-Object { $Difficulty.weapon_weights[$_] -eq 0 })
+    $ZeroArmor = @($ArmorWeightKeys.Keys | Where-Object { $Difficulty.armor_weights[$_] -eq 0 })
+    if ($ZeroWeapon.Count -gt 0) {
+        $DiagnosticLines.Add("| fact | $($Difficulty.id) zero-weight weapon classes | $($ZeroWeapon -join ', ') |") | Out-Null
+    }
+    if ($ZeroArmor.Count -gt 0) {
+        $DiagnosticLines.Add("| fact | $($Difficulty.id) zero-weight armor classes | $($ZeroArmor -join ', ') |") | Out-Null
+    }
+}
+for ($Index = 1; $Index -lt $DifficultyModel.Count; $Index++) {
+    $Previous = $DifficultyModel[$Index - 1]
+    $CurrentDifficulty = $DifficultyModel[$Index]
+    $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) envelope delta | enemy_budget +$($CurrentDifficulty.enemy_total_budget - $Previous.enemy_total_budget); actor_budget +$($CurrentDifficulty.player_loadout_budget - $Previous.player_loadout_budget); enemy_max +$($CurrentDifficulty.enemy_max - $Previous.enemy_max); primary_share +$($CurrentDifficulty.primary_share_percent - $Previous.primary_share_percent) pp |") | Out-Null
+}
+$DiagnosticLines.Add("| fact | layout capacity versus configured maxima | $LayoutCapacity slots; highest configured maximum $((($DifficultyModel | Measure-Object -Property enemy_max -Maximum).Maximum)) |") | Out-Null
+$DiagnosticLines.Add('| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |') | Out-Null
+$Blocks['balance-diagnostics'] = Join-MarkdownLines $DiagnosticLines
+
+$SourceLines = New-Object System.Collections.Generic.List[string]
+$SourceLines.Add('| concern | authoritative source |') | Out-Null
+$SourceLines.Add('|---|---|') | Out-Null
+$SourceLines.Add('| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |') | Out-Null
+$SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | Out-Null
+$SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
+$SourceLines.Add('| actor/opponent selection and budget allocation | `gamma_arena_generator.script` |') | Out-Null
+$SourceLines.Add('| faction profiles and effective weapon pools | `gamma_arena_catalog.script` |') | Out-Null
+$SourceLines.Add('| spawn capacity and separation | `gamma_arena_layouts.ltx` |') | Out-Null
+$SourceLines.Add('| tactical timings | `gamma_arena_tactical.ltx` |') | Out-Null
+$SourceLines.Add('| tactical roles and evidence strength | `gamma_arena_tactical_director.script` |') | Out-Null
+$Blocks['source-map'] = Join-MarkdownLines $SourceLines
 
 if (-not (Test-Path -LiteralPath $DocumentPath)) {
     throw "Arena balance document is missing: $DocumentPath"

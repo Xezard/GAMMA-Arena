@@ -13,6 +13,15 @@ if (-not (Test-Path -LiteralPath $ToolPath)) {
     throw 'Arena balance document generator is missing'
 }
 
+& $ToolPath -RepoRoot $RepoRoot -Verify
+$RepositoryDocument = [IO.File]::ReadAllText((Join-Path $RepoRoot 'docs\arena-balance.md'))
+if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
+    throw 'Arena balance document has unbalanced Markdown fences'
+}
+if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
+    throw 'Arena balance document must contain exactly one Mermaid diagram'
+}
+
 function New-BalanceFixture([string]$SourceRoot) {
     $FixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamma-arena-balance-' + [guid]::NewGuid().ToString('N'))
     foreach ($RelativePath in @(
@@ -45,6 +54,15 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: opponent-budgets -->
 <!-- END GENERATED: opponent-budgets -->
+
+<!-- BEGIN GENERATED: arena-tactics -->
+<!-- END GENERATED: arena-tactics -->
+
+<!-- BEGIN GENERATED: balance-diagnostics -->
+<!-- END GENERATED: balance-diagnostics -->
+
+<!-- BEGIN GENERATED: source-map -->
+<!-- END GENERATED: source-map -->
 '@, (New-Object Text.UTF8Encoding($false)))
     return $FixtureRoot
 }
@@ -82,7 +100,16 @@ try {
         '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
         '| master | 10 | 10 x 10 | 8 | 2 |',
         '| PRIMARY_BAND_PERCENT | 70% |',
-        '| max_snipers_per_fight | 1 |'
+        '| max_snipers_per_fight | 1 |',
+        '| native_opponent_paths | 6 |',
+        '| virtual_capacity | 10 |',
+        '| observation_interval_ms | 500 ms |',
+        '| report_delay_ms | 1000-3000 ms |',
+        '| initial_role_order | pressure -> flank -> support -> anchor |',
+        '| minimum_fallback_loadout | 5 budget points |',
+        '| derived | master max-team feasibility margin | 40 |',
+        '| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |',
+        '| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |'
     )) {
         if (-not $First.Contains($Expected)) {
             throw "Generated state passport is missing: $Expected"
@@ -125,6 +152,29 @@ try {
     Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
 
     [IO.File]::WriteAllText($Difficulty, $DifficultyOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
+
+    $Layout = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
+    $LayoutOriginal = [IO.File]::ReadAllText($Layout)
+    [IO.File]::WriteAllText(
+        $Layout,
+        $LayoutOriginal.Replace('virtual_capacity = 10', 'virtual_capacity = 9'),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+
+    [IO.File]::WriteAllText($Layout, $LayoutOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
+    $Tactical = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'
+    $TacticalOriginal = [IO.File]::ReadAllText($Tactical)
+    [IO.File]::WriteAllText(
+        $Tactical,
+        $TacticalOriginal.Replace('observation_interval_ms = 500', 'observation_interval_ms = 501'),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+
+    [IO.File]::WriteAllText($Tactical, $TacticalOriginal, (New-Object Text.UTF8Encoding($false)))
     & $ToolPath -RepoRoot $Fixture
     $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
