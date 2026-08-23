@@ -1010,7 +1010,9 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($GeneratorTests -match 'weighted_player_class_pair_selection') 'Generator tests must cover weighted player class-pair selection'
     Assert-True ($GeneratorTests -match 'player_class_pair_ignores_concrete_cardinality') 'Generator tests must prove concrete duplicate cardinality cannot change class selection'
     Assert-True ($GeneratorTests -match 'master_player_class_diversity') 'Generator tests must cover Master player class diversity'
-    Assert-True ($GeneratorTests -match 'master_powered_exo_rate_is_rare') 'Generator tests must lock the rare Master powered-exoskeleton rate'
+    $MasterExoRegistration = [PSCustomObject]@{ Name = 'master_powered_exo_rate_is_rare'; Function = 'master_powered_exo_rate_is_rare' }
+    $MasterExoRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($MasterExoRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($MasterExoRegistration.Function) + '\s*\}'
+    Assert-True ($GeneratorTests -match $MasterExoRegistrationPattern) "Regression case must be registered exactly: $($MasterExoRegistration.Name) -> $($MasterExoRegistration.Function)."
     Assert-True ($Task3GeneratorContent -match 'value\.knife') 'Stable encoding must include the generated knife'
 }
 if (Test-Path -LiteralPath $DifficultyPath) {
@@ -1492,16 +1494,20 @@ foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reco
 Assert-True ($Task12OrchestratorContent -match 'reconcile_active_integrity\s*\([\s\S]{0,500}reconcile_active_victory\s*\(') 'Integrity recovery must be reconciled before victory'
 Assert-True ($Task12BootstrapContent.Contains('object_position')) 'Bootstrap must bind guarded opponent position evidence'
 $Task13RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
-foreach ($RuntimeRegression in @('runtime_fatal_main_menu_bypasses_terminal_cleanup_error', 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error', 'runtime_entity_wounded_cleanup_holds_offline_before_release', 'runtime_entity_living_defeat_cleanup_holds_offline', 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release')) {
-    Assert-True ($Task13RuntimeTests.Contains($RuntimeRegression)) "Runtime regression suite is missing case: $RuntimeRegression"
+foreach ($RuntimeRegression in @(
+    [PSCustomObject]@{ Name = 'runtime_fatal_main_menu_bypasses_terminal_cleanup_error'; Function = 'fatal_main_menu_bypasses_terminal_cleanup_error' },
+    [PSCustomObject]@{ Name = 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error'; Function = 'ordinary_main_menu_still_rejects_terminal_cleanup_error' },
+    [PSCustomObject]@{ Name = 'runtime_entity_wounded_cleanup_holds_offline_before_release'; Function = 'runtime_entity_wounded_cleanup_holds_offline_before_release' },
+    [PSCustomObject]@{ Name = 'runtime_entity_living_defeat_cleanup_holds_offline'; Function = 'runtime_entity_living_defeat_cleanup_holds_offline' },
+    [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Function = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release' }
+)) {
+    $RuntimeRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeRegression.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeRegression.Function) + '\s*\}'
+    Assert-True ($Task13RuntimeTests -match $RuntimeRegistrationPattern) "Regression case must be registered exactly: $($RuntimeRegression.Name) -> $($RuntimeRegression.Function)."
 }
 foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
     Assert-True ($Task13RuntimeTests.Contains($IntegrityTest)) "Runtime integrity suite is missing case: $IntegrityTest"
 }
 
-foreach ($CleanupTest in @('runtime_entity_wounded_cleanup_holds_offline_before_release', 'runtime_entity_living_defeat_cleanup_holds_offline', 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release')) {
-    Assert-True ($Task13RuntimeTests.Contains($CleanupTest)) "Runtime cleanup suite is missing case: $CleanupTest"
-}
 Assert-True ($Task13RuntimeTests.Contains('runtime_entity_post_request_online_failure_requiesces_before_release')) 'Runtime cleanup suite must cover post-side-effect online-request failure'
 Assert-True ($Task13RuntimeTests.Contains('runtime_entity_cleanup_error_accumulator_rejects_malformed_and_cyclic_errors')) 'Runtime cleanup suite must cover malformed and cyclic cleanup errors'
 Assert-True ($Task13RuntimeTests.Contains('runtime_entity_lifecycle_cleanup_takes_over_stopping')) 'Runtime cleanup suite must cover STOPPING lifecycle takeover'
@@ -1518,7 +1524,7 @@ $Task4FatalEnterStart = $Task12OrchestratorContent.IndexOf('function Orchestrato
 $Task4FatalEnterEnd = if ($Task4FatalEnterStart -ge 0) { $Task12OrchestratorContent.IndexOf('function Orchestrator:on_callback_error', $Task4FatalEnterStart) } else { -1 }
 if ($Task4FatalEnterStart -ge 0 -and $Task4FatalEnterEnd -gt $Task4FatalEnterStart) {
     $Task4FatalEnterBlock = $Task12OrchestratorContent.Substring($Task4FatalEnterStart, $Task4FatalEnterEnd - $Task4FatalEnterStart)
-    Assert-True ($Task4FatalEnterBlock -match 'show_fatal[\s\S]{0,700}self:fatal_main_menu_action\(\)') 'Fatal UI must bind its Main menu action to the fatal-only cleanup-bypass exit.'
+    Assert-True ($Task4FatalEnterBlock -match 'pcall\s*\(\s*show\s*,\s*errors\s*,\s*function\s*\(\s*\)\s*return\s+self:fatal_main_menu_action\s*\(\s*\)') 'Fatal UI must bind its Main menu action to the fatal-only cleanup-bypass exit.'
 } else {
     Assert-True $false 'Fatal entry path must remain structurally testable.'
 }

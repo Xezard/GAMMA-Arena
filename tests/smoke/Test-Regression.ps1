@@ -948,6 +948,26 @@ end
     $PostClassificationOverwriteResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $PostClassificationOverwriteFixture) -CaptureOutput
     Assert-True ($PostClassificationOverwriteResult.ExitCode -ne 0 -and $PostClassificationOverwriteResult.Output -match 'Dynamic catalog discovery must preserve installed Powered Exos repair_type/proto semantics') 'Static policy must reject post-classification overwrites before emitting the outfit record.'
 
+    foreach ($RegistrationCase in @(
+        [PSCustomObject]@{ Name = 'runtime_fatal_main_menu_bypasses_terminal_cleanup_error'; Function = 'fatal_main_menu_bypasses_terminal_cleanup_error'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error'; Function = 'ordinary_main_menu_still_rejects_terminal_cleanup_error'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_entity_wounded_cleanup_holds_offline_before_release'; Function = 'runtime_entity_wounded_cleanup_holds_offline_before_release'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_entity_living_defeat_cleanup_holds_offline'; Function = 'runtime_entity_living_defeat_cleanup_holds_offline'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Function = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'master_powered_exo_rate_is_rare'; Function = 'master_powered_exo_rate_is_rare'; Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script' }
+    )) {
+        $RegistrationFixture = New-Task7Fixture ("registration-removed-" + $RegistrationCase.Name)
+        $RegistrationPath = Join-Path $RegistrationFixture $RegistrationCase.Path
+        $RegistrationContent = Get-Content -LiteralPath $RegistrationPath -Raw
+        $RegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RegistrationCase.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RegistrationCase.Function) + '\s*\}'
+        $RegistrationMutated = [regex]::Replace($RegistrationContent, $RegistrationPattern, '', 1)
+        Assert-True ($RegistrationMutated -ne $RegistrationContent) "Registration negative fixture must remove exactly one case: $($RegistrationCase.Name)."
+        Write-FixtureFile $RegistrationFixture $RegistrationCase.Path $RegistrationMutated
+        $RegistrationResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $RegistrationFixture) -CaptureOutput
+        $RegistrationDiagnostic = "Regression case must be registered exactly: $($RegistrationCase.Name) -> $($RegistrationCase.Function)."
+        Assert-True ($RegistrationResult.ExitCode -ne 0 -and $RegistrationResult.Output -match [regex]::Escape($RegistrationDiagnostic)) "Static policy must reject a removed registration while its function definition remains: $($RegistrationCase.Name)."
+    }
+
     $FatalBypassFixture = New-Task7Fixture 'fatal-main-menu-bypass-replaced'
     $FatalBypassPath = Join-Path $FatalBypassFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script'
     $FatalBypassContent = Get-Content -LiteralPath $FatalBypassPath -Raw
@@ -956,14 +976,23 @@ end
     Assert-True ($FatalEnterStart -ge 0 -and $FatalEnterEnd -gt $FatalEnterStart) 'Fatal bypass negative fixture must find the enter_fatal slice.'
     if ($FatalEnterStart -ge 0 -and $FatalEnterEnd -gt $FatalEnterStart) {
         $FatalEnter = $FatalBypassContent.Substring($FatalEnterStart, $FatalEnterEnd - $FatalEnterStart)
-        $FatalActionIndex = $FatalEnter.IndexOf('self:fatal_main_menu_action()')
+        $FatalAction = 'self:fatal_main_menu_action()'
+        $NormalAction = 'self:main_menu_action()'
+        $OriginalFatalActionCount = ([regex]::Matches($FatalEnter, [regex]::Escape($FatalAction))).Count
+        $OriginalNormalActionCount = ([regex]::Matches($FatalEnter, [regex]::Escape($NormalAction))).Count
+        Assert-True ($OriginalFatalActionCount -eq 2 -and $OriginalNormalActionCount -eq 0) 'Fatal bypass negative fixture must start with exactly two fatal-only actions and no ordinary action.'
+        $FatalActionIndex = $FatalEnter.IndexOf($FatalAction)
         Assert-True ($FatalActionIndex -ge 0) 'Fatal bypass negative fixture must find the fatal-only menu action.'
         if ($FatalActionIndex -ge 0) {
-            $MutatedFatalEnter = $FatalEnter.Substring(0, $FatalActionIndex) + 'self:main_menu_action()' + $FatalEnter.Substring($FatalActionIndex + 'self:fatal_main_menu_action()'.Length)
+            $MutatedFatalEnter = $FatalEnter.Substring(0, $FatalActionIndex) + $NormalAction + $FatalEnter.Substring($FatalActionIndex + $FatalAction.Length)
+            $MutatedFatalActionCount = ([regex]::Matches($MutatedFatalEnter, [regex]::Escape($FatalAction))).Count
+            $MutatedNormalActionCount = ([regex]::Matches($MutatedFatalEnter, [regex]::Escape($NormalAction))).Count
+            Assert-True ($MutatedFatalActionCount -eq ($OriginalFatalActionCount - 1) -and $MutatedNormalActionCount -eq ($OriginalNormalActionCount + 1)) 'Fatal bypass negative fixture must replace exactly one fatal-only action with one ordinary action.'
             $MutatedFatalBypass = $FatalBypassContent.Substring(0, $FatalEnterStart) + $MutatedFatalEnter + $FatalBypassContent.Substring($FatalEnterEnd)
             Write-FixtureFile $FatalBypassFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script' $MutatedFatalBypass
             $FatalBypassResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $FatalBypassFixture) -CaptureOutput
-            Assert-True ($FatalBypassResult.ExitCode -ne 0) 'Static policy must reject replacing the fatal-only Main menu action inside enter_fatal.'
+            $FatalBypassDiagnostic = 'Fatal UI must bind its Main menu action to the fatal-only cleanup-bypass exit.'
+            Assert-True ($FatalBypassResult.ExitCode -ne 0 -and $FatalBypassResult.Output -match [regex]::Escape($FatalBypassDiagnostic)) 'Static policy must reject replacing the fatal-only Main menu action inside enter_fatal through its intended diagnostic.'
         }
     }
 
@@ -975,14 +1004,20 @@ end
     Assert-True ($DriveCleanupStart -ge 0 -and $DriveCleanupEnd -gt $DriveCleanupStart) 'Quiesce negative fixture must find the drive_cleanup slice.'
     if ($DriveCleanupStart -ge 0 -and $DriveCleanupEnd -gt $DriveCleanupStart) {
         $DriveCleanup = $QuiesceContent.Substring($DriveCleanupStart, $DriveCleanupEnd - $DriveCleanupStart)
-        $QuiesceCallIndex = $DriveCleanup.IndexOf('self:quiesce_live_owned_npcs()')
+        $QuiesceCall = 'self:quiesce_live_owned_npcs()'
+        $OriginalQuiesceCount = ([regex]::Matches($DriveCleanup, [regex]::Escape($QuiesceCall))).Count
+        Assert-True ($OriginalQuiesceCount -eq 1) 'Quiesce negative fixture must start with exactly one cleanup quiesce call.'
+        $QuiesceCallIndex = $DriveCleanup.IndexOf($QuiesceCall)
         Assert-True ($QuiesceCallIndex -ge 0) 'Quiesce negative fixture must find the cleanup quiesce call.'
         if ($QuiesceCallIndex -ge 0) {
-            $MutatedDriveCleanup = $DriveCleanup.Remove($QuiesceCallIndex, 'self:quiesce_live_owned_npcs()'.Length)
+            $MutatedDriveCleanup = $DriveCleanup.Remove($QuiesceCallIndex, $QuiesceCall.Length)
+            $MutatedQuiesceCount = ([regex]::Matches($MutatedDriveCleanup, [regex]::Escape($QuiesceCall))).Count
+            Assert-True ($MutatedQuiesceCount -eq 0) 'Quiesce negative fixture must remove the only cleanup quiesce call.'
             $MutatedQuiesce = $QuiesceContent.Substring(0, $DriveCleanupStart) + $MutatedDriveCleanup + $QuiesceContent.Substring($DriveCleanupEnd)
             Write-FixtureFile $QuiesceFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $MutatedQuiesce
             $QuiesceResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $QuiesceFixture) -CaptureOutput
-            Assert-True ($QuiesceResult.ExitCode -ne 0) 'Static policy must reject removing cleanup quiescence before release submission.'
+            $QuiesceDiagnostic = 'Entity cleanup must quiesce living owned NPCs before it can submit releases.'
+            Assert-True ($QuiesceResult.ExitCode -ne 0 -and $QuiesceResult.Output -match [regex]::Escape($QuiesceDiagnostic)) 'Static policy must reject removing cleanup quiescence before release submission through its intended diagnostic.'
         }
     }
     }
