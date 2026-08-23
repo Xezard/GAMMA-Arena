@@ -21,6 +21,14 @@ if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
 if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
     throw 'Arena balance document must contain exactly one Mermaid diagram'
 }
+$Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
+if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
+    throw 'README does not link the Arena balance dashboard'
+}
+$StandardSuite = [IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'))
+if ($StandardSuite -notmatch 'Test-BalanceDocumentation\.ps1') {
+    throw 'Standard suite does not verify Arena balance documentation'
+}
 
 function New-BalanceFixture([string]$SourceRoot) {
     $FixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamma-arena-balance-' + [guid]::NewGuid().ToString('N'))
