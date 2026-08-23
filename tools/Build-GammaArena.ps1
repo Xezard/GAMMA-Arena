@@ -78,10 +78,10 @@ $Manifest = [ordered]@{
     addon_version = $Version
     state_schema_version = 1
     session_schema_version = 1
-    fight_spec_schema_version = 2
-    generator_version = 2
-    catalog_revision = 2
-    layout_revision = 1
+    fight_spec_schema_version = 3
+    generator_version = 5
+    catalog_revision = 5
+    layout_revision = 2
     compatibility_manifest_version = 1
     files = $ManifestFiles
 }

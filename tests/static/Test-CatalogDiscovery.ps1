@@ -103,10 +103,10 @@ if (-not $GeneratorTests.Contains('catalog_augments_effective_system_without_car
 if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
     throw 'Dynamic catalog integration must cover extended GAMMA loadout inheritance readers'
 }
-if ($Catalog -notmatch 'difficulty_manifest_v3' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
+if ($Catalog -notmatch 'difficulty_manifest_v4' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*4' -or $Catalog -notmatch 'generator_version\s*=\s*5') {
+if ($Catalog -notmatch 'schema_version\s*=\s*4' -or $Catalog -notmatch 'revision\s*=\s*5' -or $Catalog -notmatch 'generator_version\s*=\s*5') {
     throw 'Catalog snapshot version markers are stale'
 }
 Write-Host 'PASS: dynamic catalog integration static contract passed'
@@ -159,10 +159,11 @@ foreach ($Expected in @(
     '(?ms)\[ga_difficulty_rookie\].*?enemy_min\s*=\s*2\s*.*?enemy_max\s*=\s*3\s*.*?enemy_total_budget\s*=\s*25\s*.*?player_loadout_budget\s*=\s*8\s*.*?weapon_weight_pistol\s*=\s*50\s*.*?weapon_weight_smg\s*=\s*30\s*.*?weapon_weight_shotgun\s*=\s*15\s*.*?weapon_weight_rifle\s*=\s*5\s*.*?weapon_weight_sniper\s*=\s*0\s*.*?armor_weight_light\s*=\s*55\s*.*?armor_weight_medium\s*=\s*30\s*.*?armor_weight_scientific\s*=\s*10\s*.*?armor_weight_heavy\s*=\s*5\s*.*?armor_weight_powered_exo\s*=\s*0',
     '(?ms)\[ga_difficulty_stalker\].*?enemy_min\s*=\s*3\s*.*?enemy_max\s*=\s*5\s*.*?enemy_total_budget\s*=\s*50\s*.*?player_loadout_budget\s*=\s*11\s*.*?weapon_weight_pistol\s*=\s*25\s*.*?weapon_weight_smg\s*=\s*35\s*.*?weapon_weight_shotgun\s*=\s*20\s*.*?weapon_weight_rifle\s*=\s*18\s*.*?weapon_weight_sniper\s*=\s*2\s*.*?armor_weight_light\s*=\s*30\s*.*?armor_weight_medium\s*=\s*40\s*.*?armor_weight_scientific\s*=\s*20\s*.*?armor_weight_heavy\s*=\s*9\s*.*?armor_weight_powered_exo\s*=\s*1',
     '(?ms)\[ga_difficulty_veteran\].*?enemy_min\s*=\s*5\s*.*?enemy_max\s*=\s*7\s*.*?enemy_total_budget\s*=\s*75\s*.*?player_loadout_budget\s*=\s*14\s*.*?weapon_weight_pistol\s*=\s*10\s*.*?weapon_weight_smg\s*=\s*25\s*.*?weapon_weight_shotgun\s*=\s*20\s*.*?weapon_weight_rifle\s*=\s*38\s*.*?weapon_weight_sniper\s*=\s*7\s*.*?armor_weight_light\s*=\s*15\s*.*?armor_weight_medium\s*=\s*30\s*.*?armor_weight_scientific\s*=\s*25\s*.*?armor_weight_heavy\s*=\s*25\s*.*?armor_weight_powered_exo\s*=\s*5',
-    '(?ms)\[ga_difficulty_master\].*?enemy_min\s*=\s*7\s*.*?enemy_max\s*=\s*10\s*.*?enemy_total_budget\s*=\s*100\s*.*?player_loadout_budget\s*=\s*16\s*.*?weapon_weight_pistol\s*=\s*5\s*.*?weapon_weight_smg\s*=\s*15\s*.*?weapon_weight_shotgun\s*=\s*15\s*.*?weapon_weight_rifle\s*=\s*50\s*.*?weapon_weight_sniper\s*=\s*15\s*.*?armor_weight_light\s*=\s*5\s*.*?armor_weight_medium\s*=\s*20\s*.*?armor_weight_scientific\s*=\s*20\s*.*?armor_weight_heavy\s*=\s*35\s*.*?armor_weight_powered_exo\s*=\s*20'
+    '(?ms)\[ga_difficulty_master\].*?enemy_min\s*=\s*7\s*.*?enemy_max\s*=\s*10\s*.*?enemy_total_budget\s*=\s*100\s*.*?player_loadout_budget\s*=\s*16\s*.*?weapon_weight_pistol\s*=\s*5\s*.*?weapon_weight_smg\s*=\s*15\s*.*?weapon_weight_shotgun\s*=\s*15\s*.*?weapon_weight_rifle\s*=\s*50\s*.*?weapon_weight_sniper\s*=\s*15\s*.*?armor_weight_light\s*=\s*10\s*.*?armor_weight_medium\s*=\s*25\s*.*?armor_weight_scientific\s*=\s*25\s*.*?armor_weight_heavy\s*=\s*35\s*.*?armor_weight_powered_exo\s*=\s*5'
 )) {
     if ($Difficulty -notmatch $Expected) { throw 'Difficulty budget/count/primary-share matrix is stale' }
 }
+if ($Difficulty -notmatch '(?m)^revision\s*=\s*4\s*$') { throw 'Difficulty revision marker is stale' }
 Write-Host 'PASS: expanded difficulty balance contract passed'
 
 $OutfitClassificationStart = $Production.IndexOf('elseif OUTFIT_COST[kind] ~= nil then')

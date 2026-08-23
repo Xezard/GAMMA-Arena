@@ -33,25 +33,25 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 4 -or [int]$catalog.meta.revision -ne 4 -or [int]$catalog.meta.generator_version -ne 5 -or
-    [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 3 -or
+if ([int]$catalog.meta.schema_version -ne 4 -or [int]$catalog.meta.revision -ne 5 -or [int]$catalog.meta.generator_version -ne 5 -or
+    [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 4 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
     $generatorText -notmatch 'schema_version\s*=\s*3' -or $generatorText -notmatch 'FightSpecV3') {
-    throw 'Reference oracle requires catalog v4, generator v5, difficulty v3, layout v2, and FightSpec v3.'
+    throw 'Reference oracle requires catalog v5, generator v5, difficulty v4, layout v2, and FightSpec v3.'
 }
 
 $difficultyManifest = @{
     rookie = @(2,3,25,8,50,50,30,15,5,0,55,30,10,5,0)
     stalker = @(3,5,50,11,60,25,35,20,18,2,30,40,20,9,1)
     veteran = @(5,7,75,14,75,10,25,20,38,7,15,30,25,25,5)
-    master = @(7,10,100,16,80,5,15,15,50,15,5,20,20,35,20)
+    master = @(7,10,100,16,80,5,15,15,50,15,10,25,25,35,5)
 }
 $difficultyCatalog = @{}
 foreach ($id in @('rookie','stalker','veteran','master')) {
     $entry = $difficulties["ga_difficulty_$id"]
-    if ($null -eq $entry -or $entry.Count -ne 15) { throw "Difficulty $id must expose exactly fifteen v3 fields." }
+    if ($null -eq $entry -or $entry.Count -ne 15) { throw "Difficulty $id must expose exactly fifteen v4 fields." }
     $actual = @([int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_loadout_budget,[int]$entry.primary_share_percent,[int]$entry.weapon_weight_pistol,[int]$entry.weapon_weight_smg,[int]$entry.weapon_weight_shotgun,[int]$entry.weapon_weight_rifle,[int]$entry.weapon_weight_sniper,[int]$entry.armor_weight_light,[int]$entry.armor_weight_medium,[int]$entry.armor_weight_scientific,[int]$entry.armor_weight_heavy,[int]$entry.armor_weight_powered_exo)
-    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v3 semantic manifest." }
+    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v4 semantic manifest." }
     $difficultyCatalog[$id] = [pscustomobject]@{Id=$id;EnemyMin=$actual[0];EnemyMax=$actual[1];EnemyBudget=$actual[2];PlayerBudget=$actual[3];PrimaryShare=$actual[4];WeaponWeights=@{w_pistol=$actual[5];w_smg=$actual[6];w_shotgun=$actual[7];w_rifle=$actual[8];w_sniper=$actual[9]};ArmorWeights=@{light=$actual[10];medium=$actual[11];scientific=$actual[12];heavy=$actual[13];powered_exo=$actual[14]}}
 }
 
@@ -252,7 +252,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
         $opponents += "${index}:$index,$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($assigned[$zero]),$role,$($profile.Section),$($profile.Cost),$($gear.Encoded),$($profile.Cost+$gear.Cost)"
     }
-    $fields=@('schema_version=3','generator_version=5','catalog_revision=4','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g5-c4-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV3 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=3','generator_version=5','catalog_revision=5','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g5-c5-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV3 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 

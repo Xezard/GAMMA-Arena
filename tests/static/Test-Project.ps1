@@ -933,7 +933,7 @@ if (Test-Path -LiteralPath $FightSpecV3Path) {
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
     Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*4\s*$') 'Catalog must declare schema_version = 4'
-    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*4\s*$') 'Catalog must declare revision = 4'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*5\s*$') 'Catalog must declare revision = 5'
     Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*5\s*$') 'Catalog must declare generator_version = 5'
     Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s+armor_class\s*=\s*light\s*$') 'Novice outfit must declare the light armor class'
@@ -952,10 +952,10 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'r_line') 'Runtime catalog enumeration must use r_line'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_SECTION_CHECK_FAILED') 'Catalog section checks must return structured errors'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
-    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v4 semantic manifest'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v5 semantic manifest'
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
-    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v4') 'Catalog loader must bind exact v4 catalog semantics'
-    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v3') 'Catalog loader must bind exact v3 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v5') 'Catalog loader must bind exact v5 catalog semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v4') 'Catalog loader must bind exact v4 difficulty semantics'
     foreach ($Marker in @('armor_class','player_weapon_weights','player_armor_weights','w_pistol','w_smg','w_shotgun','w_rifle','w_sniper','light','medium','scientific','heavy','powered_exo')) {
         Assert-True ($Task3CatalogScriptContent -match [regex]::Escape($Marker)) "Catalog loader must cover $Marker"
     }
@@ -1525,8 +1525,8 @@ $Task7RussianTextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_ga
 if ((Test-Path -LiteralPath $Task7CatalogPath) -and (Test-Path -LiteralPath $Task7DifficultyPath)) {
     $Task7CatalogContent = Get-Content -LiteralPath $Task7CatalogPath -Raw
     $Task7DifficultyContent = Get-Content -LiteralPath $Task7DifficultyPath -Raw
-    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*4\s*.*?revision\s*=\s*4\s*.*?generator_version\s*=\s*5') 'Natural-death/loadout catalog metadata must retain schema 4, revision 4, and generator 5.'
-    Assert-True ($Task7DifficultyContent -match '(?ms)\[meta\].*?schema_version\s*=\s*3\s*.*?revision\s*=\s*3') 'Weighted player loadouts must retain difficulty schema and revision 3.'
+    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*4\s*.*?revision\s*=\s*5\s*.*?generator_version\s*=\s*5') 'Natural-death/loadout catalog metadata must retain schema 4, revision 5, and generator 5.'
+    Assert-True ($Task7DifficultyContent -match '(?ms)\[meta\].*?schema_version\s*=\s*3\s*.*?revision\s*=\s*4') 'Weighted player loadouts must retain difficulty schema and revision 4.'
 }
 if (Test-Path -LiteralPath $Task7BootstrapPath) {
     $Task7BootstrapContent = Get-Content -LiteralPath $Task7BootstrapPath -Raw
