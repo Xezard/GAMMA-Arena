@@ -108,6 +108,8 @@ try {
         '| o_heavy | 5 | heavy; powered_exo when exo/proto |',
         '| ammo_5.45x39_fmj | 2 | fallback |',
         '| dynamic discovered ammo | 1 | runtime discovery |',
+        '| medkit | 2 | catalogued, not selected |',
+        '| knives | 9 | no budget cost; uniform section pick |',
         '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
         '| master | 10 | 10 x 10 | 8 | 2 |',
         '| PRIMARY_BAND_PERCENT | 70% |',

@@ -280,7 +280,19 @@ foreach ($Id in Get-LtxCsv $Catalog 'outfits' 'ids' $CatalogPath) {
     }) | Out-Null
 }
 
-$BandageCost = Get-RequiredLtxInt $Catalog 'consumable_bandage' 'cost' $CatalogPath
+$FallbackConsumables = New-Object System.Collections.Generic.List[object]
+foreach ($Id in Get-LtxCsv $Catalog 'consumables' 'ids' $CatalogPath) {
+    $Section = 'consumable_' + $Id
+    $FallbackConsumables.Add([pscustomobject]@{
+        id = $Id
+        section = Get-RequiredLtxValue $Catalog $Section 'section' $CatalogPath
+        cost = Get-RequiredLtxInt $Catalog $Section 'cost' $CatalogPath
+    }) | Out-Null
+}
+$Bandage = @($FallbackConsumables | Where-Object { $_.id -eq 'bandage' })
+if ($Bandage.Count -ne 1) { throw 'Fallback catalog must contain exactly one bandage' }
+$BandageCost = $Bandage[0].cost
+$FallbackKnives = @(Get-LtxCsv $Catalog 'knives' 'ids' $CatalogPath)
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'
 $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"([^"]+)"'
@@ -411,7 +423,14 @@ foreach ($AmmoSection in $FallbackAmmo.Keys) {
     $ActorLines.Add("| $AmmoSection | $($FallbackAmmo[$AmmoSection].cost) | fallback |") | Out-Null
 }
 $ActorLines.Add("| dynamic discovered ammo | $DynamicAmmoCost | runtime discovery |") | Out-Null
-$ActorLines.Add("| bandage | $BandageCost | mandatory consumable |") | Out-Null
+$ActorLines.Add('') | Out-Null
+$ActorLines.Add('| extra item | Arena cost | selection |') | Out-Null
+$ActorLines.Add('|---|---:|---|') | Out-Null
+foreach ($Consumable in $FallbackConsumables) {
+    $Selection = if ($Consumable.id -eq 'bandage') { 'mandatory: one per loadout' } else { 'catalogued, not selected' }
+    $ActorLines.Add("| $($Consumable.section) | $($Consumable.cost) | $Selection |") | Out-Null
+}
+$ActorLines.Add("| knives | $($FallbackKnives.Count) | no budget cost; uniform section pick |") | Out-Null
 $Blocks['actor-equipment'] = Join-MarkdownLines $ActorLines
 
 $OpponentLines = New-Object System.Collections.Generic.List[string]
