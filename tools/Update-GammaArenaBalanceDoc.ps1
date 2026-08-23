@@ -114,8 +114,13 @@ function Get-RequiredLuaTable([string]$Path, [string]$Symbol, [string]$ValuePatt
     $TablePattern = 'local\s+' + [regex]::Escape($Symbol) + '\s*=\s*\{(?<body>.*?)\r?\n\}'
     $Table = Get-RequiredLuaMatch $Path $TablePattern $Symbol
     $Values = [ordered]@{}
-    $EntryPattern = '(?m)^\s*([A-Za-z0-9_]+)\s*=\s*' + $ValuePattern + '\s*,?\s*$'
-    foreach ($Entry in [regex]::Matches($Table.Groups['body'].Value, $EntryPattern)) {
+    $EntryPattern = '^\s*([A-Za-z0-9_]+)\s*=\s*' + $ValuePattern + '\s*,?\s*$'
+    foreach ($Line in ($Table.Groups['body'].Value -split '\r?\n')) {
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+        $Entry = [regex]::Match($Line, $EntryPattern)
+        if (-not $Entry.Success) {
+            throw "Lua balance table '$Symbol' has an unsupported entry: $Path"
+        }
         $Key = $Entry.Groups[1].Value
         if ($Values.Contains($Key)) { throw "Duplicate Lua table key '$Key' in $Symbol`: $Path" }
         $Values[$Key] = $Entry.Groups[2].Value
@@ -130,6 +135,10 @@ function Get-RequiredLuaQuotedArray([string]$Path, [string]$Symbol) {
     $Values = New-Object System.Collections.Generic.List[string]
     foreach ($Entry in [regex]::Matches($Match.Groups['body'].Value, '"([^"]+)"')) {
         $Values.Add($Entry.Groups[1].Value) | Out-Null
+    }
+    $Remainder = [regex]::Replace($Match.Groups['body'].Value, '\s*"[^"]+"\s*,?', '')
+    if (-not [string]::IsNullOrWhiteSpace($Remainder)) {
+        throw "Lua balance array '$Symbol' has an unsupported entry: $Path"
     }
     if ($Values.Count -eq 0) { throw "Lua balance array '$Symbol' is empty: $Path" }
     return @($Values)

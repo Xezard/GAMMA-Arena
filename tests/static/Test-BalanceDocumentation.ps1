@@ -190,6 +190,19 @@ try {
 
     [IO.File]::WriteAllText($Tactical, $TacticalOriginal, (New-Object Text.UTF8Encoding($false)))
     & $ToolPath -RepoRoot $Fixture
+
+    $Discovery = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
+    $DiscoveryOriginal = [IO.File]::ReadAllText($Discovery)
+    $DiscoveryChanged = $DiscoveryOriginal.Replace('w_sniper = 6', 'w_sniper = 3 + 3')
+    [IO.File]::WriteAllText($Discovery, $DiscoveryChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'WEAPON_COST'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Malformed Lua balance table partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Discovery, $DiscoveryOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
     $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
     $Renamed = $GeneratorText.Replace('local PRIMARY_BAND_PERCENT = 70', 'local PRIMARY_BAND_RENAMED = 70')
