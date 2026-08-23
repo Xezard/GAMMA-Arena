@@ -1499,7 +1499,11 @@ foreach ($RuntimeRegression in @(
     [PSCustomObject]@{ Name = 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error'; Function = 'ordinary_main_menu_still_rejects_terminal_cleanup_error' },
     [PSCustomObject]@{ Name = 'runtime_entity_wounded_cleanup_holds_offline_before_release'; Function = 'runtime_entity_wounded_cleanup_holds_offline_before_release' },
     [PSCustomObject]@{ Name = 'runtime_entity_living_defeat_cleanup_holds_offline'; Function = 'runtime_entity_living_defeat_cleanup_holds_offline' },
-    [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Function = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release' }
+    [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Function = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release' },
+    [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_rejects_lost_npc_tag_before_hold'; Function = 'runtime_entity_cleanup_quiesce_rejects_lost_npc_tag_before_hold' },
+    [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_rejects_reused_npc_id_before_hold'; Function = 'runtime_entity_cleanup_quiesce_rejects_reused_npc_id_before_hold' },
+    [PSCustomObject]@{ Name = 'runtime_entity_dead_cleanup_bypasses_offline_hold'; Function = 'runtime_entity_dead_cleanup_bypasses_offline_hold' },
+    [PSCustomObject]@{ Name = 'runtime_entity_authoritative_absence_cleanup_bypasses_offline_hold'; Function = 'runtime_entity_authoritative_absence_cleanup_bypasses_offline_hold' }
 )) {
     $RuntimeRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeRegression.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeRegression.Function) + '\s*\}'
     Assert-True ($Task13RuntimeTests -match $RuntimeRegistrationPattern) "Regression case must be registered exactly: $($RuntimeRegression.Name) -> $($RuntimeRegression.Function)."
@@ -1520,6 +1524,19 @@ if ($Task2DriveOnlineStart -ge 0 -and $Task2DriveOnlineEnd -gt $Task2DriveOnline
 foreach ($CleanupMarker in @('quiesce_live_owned_npcs', 'GA_ENTITY_CLEANUP_QUIESCE_FAILED', 'cleanup_phase', 'release_index', 'session_id')) {
     Assert-True ($Task12EntityContent.Contains($CleanupMarker)) "Entity cleanup quiescence contract is missing marker: $CleanupMarker"
 }
+$Task2QuiesceStart = $Task12EntityContent.IndexOf('function EntityAdapter:quiesce_live_owned_npcs')
+$Task2QuiesceEnd = if ($Task2QuiesceStart -ge 0) { $Task12EntityContent.IndexOf('function EntityAdapter:quarantine_live_records', $Task2QuiesceStart) } else { -1 }
+if ($Task2QuiesceStart -ge 0 -and $Task2QuiesceEnd -gt $Task2QuiesceStart) {
+    $Task2QuiesceBlock = $Task12EntityContent.Substring($Task2QuiesceStart, $Task2QuiesceEnd - $Task2QuiesceStart)
+    $Task2IdentityProof = $Task2QuiesceBlock.IndexOf('self.record_by_id[record.id] ~= record')
+    $Task2TaggedProof = $Task2QuiesceBlock.IndexOf('record.tagged ~= true')
+    $Task2OwnerProof = $Task2QuiesceBlock.IndexOf('self:load_owner_tag(record.id)')
+    $Task2ServerLookup = $Task2QuiesceBlock.IndexOf('self.deps.server_entity')
+    Assert-True ($Task2IdentityProof -ge 0 -and $Task2TaggedProof -gt $Task2IdentityProof -and $Task2OwnerProof -gt $Task2TaggedProof -and $Task2ServerLookup -gt $Task2OwnerProof) 'Quiescence must re-prove registry identity, recorded tag, and current owner tag before server lookup or offline hold.'
+} else {
+    Assert-True $false 'Quiescence ownership proof must remain structurally testable.'
+}
+Assert-True ($Task13RuntimeTests.Contains('accepted fatal disconnect clears fatal UI exactly once across repeated clicks')) 'Accepted repeated fatal clicks must clear fatal UI exactly once.'
 $Task4FatalEnterStart = $Task12OrchestratorContent.IndexOf('function Orchestrator:enter_fatal')
 $Task4FatalEnterEnd = if ($Task4FatalEnterStart -ge 0) { $Task12OrchestratorContent.IndexOf('function Orchestrator:on_callback_error', $Task4FatalEnterStart) } else { -1 }
 if ($Task4FatalEnterStart -ge 0 -and $Task4FatalEnterEnd -gt $Task4FatalEnterStart) {

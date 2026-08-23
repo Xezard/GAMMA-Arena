@@ -970,6 +970,51 @@ function EntityAdapter:quiesce_live_owned_npcs()
     for _, record in ipairs(self.registry.npcs) do
         if not record.released and not record.held_offline and OFFLINE_BEFORE_RELEASE[record.terminal_state] then
             self.cleanup_quiesce_record = record
+            if self.record_by_id[record.id] ~= record then
+                return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC registry identity could not be proved before offline hold", {
+                    id = record.id,
+                    slot = record.slot,
+                    terminal_state = record.terminal_state,
+                    cause = {
+                        code = "GA_ENTITY_RELEASE_UNREGISTERED",
+                        message = "Registry is not the authoritative owner of the Arena NPC id",
+                        context = { id = record.id }
+                    }
+                })
+            end
+            if record.tagged ~= true then
+                return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC recorded ownership could not be proved before offline hold", {
+                    id = record.id,
+                    slot = record.slot,
+                    terminal_state = record.terminal_state,
+                    cause = {
+                        code = "GA_ENTITY_RELEASE_TAG_MISMATCH",
+                        message = "Arena NPC record has no verified ownership tag",
+                        context = { id = record.id }
+                    }
+                })
+            end
+            local owner = self:load_owner_tag(record.id)
+            if not owner.ok then
+                return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC current ownership tag is unavailable before offline hold", {
+                    id = record.id,
+                    slot = record.slot,
+                    terminal_state = record.terminal_state,
+                    cause = owner.error
+                })
+            end
+            if owner.value ~= self.session_id then
+                return fail("GA_ENTITY_CLEANUP_QUIESCE_FAILED", "Living Arena NPC current ownership tag is missing or mismatched before offline hold", {
+                    id = record.id,
+                    slot = record.slot,
+                    terminal_state = record.terminal_state,
+                    cause = {
+                        code = "GA_ENTITY_RELEASE_TAG_MISMATCH",
+                        message = "Arena NPC current ownership tag does not match the active session",
+                        context = { id = record.id }
+                    }
+                })
+            end
             local server = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
             if not server.ok then return server end
             if server.value == nil then
