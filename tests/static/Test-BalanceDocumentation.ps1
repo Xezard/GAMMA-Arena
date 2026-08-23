@@ -207,6 +207,20 @@ try {
     & $ToolPath -RepoRoot $Fixture
     $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
+
+    $FormulaChanged = $GeneratorText.Replace(
+        'local primary_count = math.ceil(enemy_count * difficulty.primary_share_percent / 100)',
+        'local primary_count = math.floor(enemy_count * difficulty.primary_share_percent / 100)'
+    )
+    [IO.File]::WriteAllText($Generator, $FormulaChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'primary count formula'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Changed generator formula partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Generator, $GeneratorText, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
     $Renamed = $GeneratorText.Replace('local PRIMARY_BAND_PERCENT = 70', 'local PRIMARY_BAND_RENAMED = 70')
     [IO.File]::WriteAllText($Generator, $Renamed, (New-Object Text.UTF8Encoding($false)))
     $BeforeFailure = [IO.File]::ReadAllText($Document)
