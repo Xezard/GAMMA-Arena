@@ -36,6 +36,15 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: state-passport -->
 <!-- END GENERATED: state-passport -->
+
+<!-- BEGIN GENERATED: difficulty-dashboard -->
+<!-- END GENERATED: difficulty-dashboard -->
+
+<!-- BEGIN GENERATED: actor-equipment -->
+<!-- END GENERATED: actor-equipment -->
+
+<!-- BEGIN GENERATED: opponent-budgets -->
+<!-- END GENERATED: opponent-budgets -->
 '@, (New-Object Text.UTF8Encoding($false)))
     return $FixtureRoot
 }
@@ -61,7 +70,19 @@ try {
         '| Catalog | schema 4 / revision 5 / generator 5 |',
         '| Difficulties | schema 3 / revision 4 |',
         '| Layout | schema 2 / revision 2 |',
-        '| Tactics | schema 1 / revision 1 |'
+        '| Tactics | schema 1 / revision 1 |',
+        '| rookie | 2-3 | 25 | 8 | 50% |',
+        '| master | 7-10 | 100 | 16 | 80% |',
+        '| master | 5% | 15% | 15% | 50% | 15% |',
+        '| master | 10% | 25% | 25% | 35% | 5% |',
+        '| rookie | 4 / 25 |',
+        '| master | 12 / 25 |',
+        '| w_pistol | 2 |',
+        '| o_heavy | 5 | heavy; powered_exo when exo/proto |',
+        '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
+        '| master | 10 | 10 x 10 | 8 | 2 |',
+        '| PRIMARY_BAND_PERCENT | 70% |',
+        '| max_snipers_per_fight | 1 |'
     )) {
         if (-not $First.Contains($Expected)) {
             throw "Generated state passport is missing: $Expected"
@@ -89,11 +110,30 @@ try {
 
     [IO.File]::WriteAllText($Document, $Valid, (New-Object Text.UTF8Encoding($false)))
     $Difficulty = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
+    $DifficultyOriginal = [IO.File]::ReadAllText($Difficulty)
     [IO.File]::AppendAllText($Difficulty, "`n[meta]`nrevision = 4`n")
     $BeforeFailure = [IO.File]::ReadAllText($Document)
     Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'duplicate section'
     if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
         throw 'Malformed balance source partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Difficulty, $DifficultyOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
+    $DifficultyChanged = $DifficultyOriginal.Replace('enemy_total_budget = 100', 'enemy_total_budget = 101')
+    [IO.File]::WriteAllText($Difficulty, $DifficultyChanged, (New-Object Text.UTF8Encoding($false)))
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+
+    [IO.File]::WriteAllText($Difficulty, $DifficultyOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
+    $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
+    $GeneratorText = [IO.File]::ReadAllText($Generator)
+    $Renamed = $GeneratorText.Replace('local PRIMARY_BAND_PERCENT = 70', 'local PRIMARY_BAND_RENAMED = 70')
+    [IO.File]::WriteAllText($Generator, $Renamed, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'PRIMARY_BAND_PERCENT'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Missing Lua balance symbol partially rewrote the document'
     }
 }
 finally {
