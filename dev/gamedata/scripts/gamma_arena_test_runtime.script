@@ -3297,7 +3297,7 @@ end
 
 local function new_actor_loadout_test_fixture(options)
     options = options or {}
-    local fixture = { calls = { is_exo = 0, get = 0, set = 0, release = 0 }, stored = options.stored }
+    local fixture = { calls = { is_exo = 0, get = 0, init = 0, set = 0, release = 0 }, stored = options.stored }
     local next_id, present, tags, slots, magazine = 1600, {}, {}, {}, {}
     local active = nil
     local actor = { id = function() return 77 end }
@@ -3345,6 +3345,7 @@ local function new_actor_loadout_test_fixture(options)
         outfit_requires_power = options.outfit_requires_power,
         exo_is_object = options.exo_is_object,
         exo_get_data = options.exo_get_data,
+        exo_init_data = options.exo_init_data,
         exo_set_data = options.exo_set_data,
         resolve_entity = function(id) return present[id] end,
         release_item = function(id) fixture.calls.release = fixture.calls.release + 1; present[id] = nil; return true end
@@ -3389,6 +3390,50 @@ local function runtime_actor_loadout_charges_powered_exo_before_ready()
     gamma_arena_test_assert.equals(fixture.stored.preserved, "yes", "unrelated exo state is preserved")
     gamma_arena_test_assert.equals(fixture.stored.power, 100, "powered exo is set to exactly full charge")
     gamma_arena_test_assert.equals(ready.value.outfit_power, 100, "ready summary proves full charge")
+end
+
+local function runtime_actor_loadout_charges_proto_outfit_without_repair_type()
+    local original_system_ini = system_ini
+    system_ini = function()
+        return {
+            line_exist = function() return false end,
+            r_string_ex = function() return nil end
+        }
+    end
+    local fixture
+    local ran, ready = pcall(function()
+        fixture = new_actor_loadout_test_fixture({
+            outfit = "stalker_proto_exo_outfit",
+            outfit_requires_power = effective_outfit_requires_power,
+            exo_is_object = function()
+                fixture.calls.is_exo = fixture.calls.is_exo + 1
+                return true
+            end,
+            exo_get_data = function()
+                fixture.calls.get = fixture.calls.get + 1
+                return fixture.stored
+            end,
+            exo_init_data = function()
+                fixture.calls.init = fixture.calls.init + 1
+                fixture.stored = { power = 0 }
+                return fixture.stored
+            end,
+            exo_set_data = function(_, data)
+                fixture.calls.set = fixture.calls.set + 1
+                fixture.stored = data
+                return true
+            end
+        })
+        return fixture.drive_to_ready()
+    end)
+    system_ini = original_system_ini
+    if not ran then error(ready) end
+    gamma_arena_test_assert.is_true(ready.ok, "proto exo without repair_type reaches READY")
+    gamma_arena_test_assert.equals(fixture.calls.is_exo, 1, "proto exo is confirmed through installed Powered Exos")
+    gamma_arena_test_assert.equals(fixture.calls.get, 2, "proto exo charge is read back")
+    gamma_arena_test_assert.equals(fixture.calls.init, 1, "fresh proto exo state is initialized synchronously")
+    gamma_arena_test_assert.equals(fixture.stored.power, 100, "proto exo is fully charged")
+    gamma_arena_test_assert.equals(ready.value.outfit_power, 100, "proto exo readiness proves full charge")
 end
 
 local function runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge()
@@ -3444,6 +3489,8 @@ local function runtime_actor_loadout_exo_charge_failures_rollback()
         { label = "throwing exo object classifier", options = { outfit_requires_power = function() return true end, exo_is_object = function() error("injected exo object classifier failure") end } },
         { label = "missing exo read", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end } },
         { label = "throwing exo read", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() error("injected read failure") end } },
+        { label = "missing exo init", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return nil end } },
+        { label = "throwing exo init", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return nil end, exo_init_data = function() error("injected init failure") end } },
         { label = "missing exo write", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return { power = 0 } end } },
         { label = "failed exo write", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return { power = 0 } end, exo_set_data = function() return false end } },
         { label = "throwing exo write", options = { outfit_requires_power = function() return true end, exo_is_object = function() return true end, exo_get_data = function() return { power = 0 } end, exo_set_data = function() error("injected write failure") end } },
@@ -6106,6 +6153,7 @@ local cases = {
     ,{ name = "runtime_actor_loadout_progress_survives_clock_stalls", fn = runtime_actor_loadout_progress_survives_clock_stalls }
     ,{ name = "runtime_actor_loadout_no_progress_timeout_has_context", fn = runtime_actor_loadout_no_progress_timeout_has_context }
     ,{ name = "runtime_actor_loadout_charges_powered_exo_before_ready", fn = runtime_actor_loadout_charges_powered_exo_before_ready }
+    ,{ name = "runtime_actor_loadout_charges_proto_outfit_without_repair_type", fn = runtime_actor_loadout_charges_proto_outfit_without_repair_type }
     ,{ name = "runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge", fn = runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge }
     ,{ name = "runtime_bootstrap_missing_outfit_repair_type_is_ordinary", fn = runtime_bootstrap_missing_outfit_repair_type_is_ordinary }
     ,{ name = "runtime_actor_loadout_exo_charge_failures_rollback", fn = runtime_actor_loadout_exo_charge_failures_rollback }

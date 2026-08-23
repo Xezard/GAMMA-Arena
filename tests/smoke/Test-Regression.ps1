@@ -918,7 +918,7 @@ end
     $UnverifiedExo = [regex]::Replace($UnverifiedExo, '(?s)\s*local verified = actor_loadout_call\("GA_ACTOR_EXO_VERIFY_FAILED".*?\s*end\r?\n\s*equipment\.outfit_power = 100', "`r`n                equipment.outfit_power = 100", 1)
     Write-FixtureFile $UnverifiedExoFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $UnverifiedExo
     $UnverifiedExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $UnverifiedExoFixture) -CaptureOutput
-    Assert-True ($UnverifiedExoResult.ExitCode -ne 0 -and $UnverifiedExoResult.Output -match 'Powered-exo CHARGE_OUTFIT must read back and verify 100-percent charge after writing it\.') 'Static policy must reject a powered exo write without CHARGE_OUTFIT readback verification.'
+    Assert-True ($UnverifiedExoResult.ExitCode -ne 0 -and $UnverifiedExoResult.Output -match 'Powered-exo CHARGE_OUTFIT must initialize fresh state, then read back and verify 100-percent charge after writing it\.') 'Static policy must reject a powered exo write without CHARGE_OUTFIT readback verification.'
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
     $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
@@ -932,14 +932,21 @@ end
     $GenericHeavyExo = (Get-Content -LiteralPath $GenericHeavyExoPath -Raw).Replace('armor_class = "powered_exo"', 'local powered_exo_marker = "powered_exo"' + [Environment]::NewLine + '                    armor_class = "heavy"')
     Write-FixtureFile $GenericHeavyExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script' $GenericHeavyExo
     $GenericHeavyExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $GenericHeavyExoFixture) -CaptureOutput
-    Assert-True ($GenericHeavyExoResult.ExitCode -ne 0 -and $GenericHeavyExoResult.Output -match 'Dynamic catalog discovery must preserve repair_type outfit_exo as the emitted powered_exo armor class') 'Static policy must reject generic-heavy powered-exo classification through its semantic precedence failure.'
+    Assert-True ($GenericHeavyExoResult.ExitCode -ne 0 -and $GenericHeavyExoResult.Output -match 'Dynamic catalog discovery must preserve installed Powered Exos repair_type/proto semantics') 'Static policy must reject generic-heavy powered-exo classification through its semantic precedence failure.'
+
+    $MissingProtoExoFixture = New-Task7Fixture 'missing-proto-powered-exo'
+    $MissingProtoExoPath = Join-Path $MissingProtoExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
+    $MissingProtoExo = (Get-Content -LiteralPath $MissingProtoExoPath -Raw).Replace('or string.find(section, "proto", 1, true) ~= nil', 'or false')
+    Write-FixtureFile $MissingProtoExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script' $MissingProtoExo
+    $MissingProtoExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MissingProtoExoFixture) -CaptureOutput
+    Assert-True ($MissingProtoExoResult.ExitCode -ne 0 -and $MissingProtoExoResult.Output -match 'Dynamic catalog discovery must preserve installed Powered Exos repair_type/proto semantics') 'Static policy must reject removal of the installed proto-exo classification rule.'
 
     $PostClassificationOverwriteFixture = New-Task7Fixture 'powered-exo-post-classification-overwrite'
     $PostClassificationOverwritePath = Join-Path $PostClassificationOverwriteFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
     $PostClassificationOverwrite = (Get-Content -LiteralPath $PostClassificationOverwritePath -Raw).Replace('                outfits[#outfits + 1] = {', '                armor_class = "heavy"' + [Environment]::NewLine + '                outfits[#outfits + 1] = {')
     Write-FixtureFile $PostClassificationOverwriteFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script' $PostClassificationOverwrite
     $PostClassificationOverwriteResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $PostClassificationOverwriteFixture) -CaptureOutput
-    Assert-True ($PostClassificationOverwriteResult.ExitCode -ne 0 -and $PostClassificationOverwriteResult.Output -match 'Dynamic catalog discovery must preserve repair_type outfit_exo as the emitted powered_exo armor class') 'Static policy must reject post-classification overwrites before emitting the outfit record.'
+    Assert-True ($PostClassificationOverwriteResult.ExitCode -ne 0 -and $PostClassificationOverwriteResult.Output -match 'Dynamic catalog discovery must preserve installed Powered Exos repair_type/proto semantics') 'Static policy must reject post-classification overwrites before emitting the outfit record.'
     }
 
     if ($StaticFixturesOnly) {

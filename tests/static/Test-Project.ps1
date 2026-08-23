@@ -860,17 +860,18 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($Task11HostilityBlock -notmatch 'make_object_visible_somewhen|set_enemy') 'Hostile activation must not seed omniscient memory or force a current target'
     Assert-True ($Task5BootstrapContent -match 'reserve_magazines\s*=\s*3') 'Production actor loadout must provide at least three full reserve magazines'
     Assert-True ($Task5BootstrapContent -match 'function\s+engine_inventory_slot\(ltx_slot\)[\s\S]{0,700}ltx_slot\s*\+\s*1') 'Actor loadout must translate zero-based LTX slots to one-based Lua inventory API slots'
-    foreach ($Marker in @('WAIT_SLOT_VERIFY','CHARGE_OUTFIT','WAIT_MAGAZINE_VERIFY','WAIT_ACTIVE_VERIFY','outfit_requires_power','exo_is_object','exo_get_data','exo_set_data')) {
+    foreach ($Marker in @('WAIT_SLOT_VERIFY','CHARGE_OUTFIT','WAIT_MAGAZINE_VERIFY','WAIT_ACTIVE_VERIFY','outfit_requires_power','exo_is_object','exo_get_data','exo_init_data','exo_set_data')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment must retain cross-frame phase $Marker"
     }
     foreach ($Marker in @('WAIT_ACTOR_LOADOUT','move_to_slot','item_in_slot','set_ammo_elapsed','get_ammo_in_magazine','ammo_mag_size','update_loadout','GA_ACTOR_LOADOUT_EQUIP_TIMEOUT')) {
         Assert-True (($Task5BootstrapContent + $Task7EntityContent + $Task6ActorContent) -match [regex]::Escape($Marker)) "Equipped actor loadout must cover $Marker"
     }
-    foreach ($Marker in @('runtime_actor_loadout_derives_unreadable_server_ammo_quantity','runtime_entity_derives_unreadable_server_ammo_quantity','runtime_actor_loadout_translates_ltx_slots_to_lua_slots','runtime_actor_loadout_progress_survives_clock_stalls','runtime_actor_loadout_no_progress_timeout_has_context','new_actor_loadout_test_fixture','runtime_actor_loadout_charges_powered_exo_before_ready','runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge','runtime_actor_loadout_exo_charge_failures_rollback')) {
+    foreach ($Marker in @('runtime_actor_loadout_derives_unreadable_server_ammo_quantity','runtime_entity_derives_unreadable_server_ammo_quantity','runtime_actor_loadout_translates_ltx_slots_to_lua_slots','runtime_actor_loadout_progress_survives_clock_stalls','runtime_actor_loadout_no_progress_timeout_has_context','new_actor_loadout_test_fixture','runtime_actor_loadout_charges_powered_exo_before_ready','runtime_actor_loadout_charges_proto_outfit_without_repair_type','runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge','runtime_actor_loadout_exo_charge_failures_rollback')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime ammo allocation regression must cover $Marker"
     }
     Assert-True ($Task5DevTestContent -match [regex]::Escape('runtime_bootstrap_missing_outfit_repair_type_is_ordinary')) 'Runtime actor loadout must cover missing ordinary outfit repair_type'
     Assert-True ($Task5BootstrapContent -match 'if\s+present_ok\s+and\s+present\s+==\s+false\s+then\s+return\s+gamma_arena_result\.ok\(false\)\s+end') 'Missing effective outfit repair_type must classify as ordinary rather than fail the loadout transaction'
+    Assert-True ($Task5BootstrapContent -match 'function\s+effective_outfit_requires_power[\s\S]{0,500}string\.find\(section,\s*"proto",\s*1,\s*true\)[\s\S]{0,200}return\s+gamma_arena_result\.ok\(true\)') 'Runtime exo classification must preserve the installed Powered Exos proto rule'
     foreach ($Marker in @('last_progress_at','elapsed_since_progress_ms','total_elapsed_ms')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment inactivity timeout must expose $Marker"
     }
@@ -1505,7 +1506,7 @@ if (Test-Path -LiteralPath $Task7BootstrapPath) {
     Assert-True ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) 'Powered-exo CHARGE_OUTFIT phase must remain structurally testable.'
     if ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) {
         $Task7ChargeBlock = $Task7BootstrapContent.Substring($Task7ChargeStart, $Task7ChargeEnd - $Task7ChargeStart)
-        Assert-True ($Task7ChargeBlock -match 'exo_set_data[\s\S]{0,500}GA_ACTOR_EXO_VERIFY_FAILED[\s\S]{0,500}exo_get_data[\s\S]{0,500}verified\.value\.power\s*~=\s*100') 'Powered-exo CHARGE_OUTFIT must read back and verify 100-percent charge after writing it.'
+        Assert-True ($Task7ChargeBlock -match 'exo_get_data[\s\S]{0,700}exo_init_data[\s\S]{0,700}exo_set_data[\s\S]{0,500}GA_ACTOR_EXO_VERIFY_FAILED[\s\S]{0,500}exo_get_data[\s\S]{0,500}verified\.value\.power\s*~=\s*100') 'Powered-exo CHARGE_OUTFIT must initialize fresh state, then read back and verify 100-percent charge after writing it.'
     }
 }
 if (Test-Path -LiteralPath $Task7OrchestratorPath) {

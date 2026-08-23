@@ -748,7 +748,12 @@ function new_actor_loadout_port(ports)
                     return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_CLASSIFY_FAILED", "Powered outfit object was not recognized by Powered Exos"))
                 end
                 local first = actor_loadout_call("GA_ACTOR_EXO_READ_FAILED", ports.exo_get_data, outfit.value.record.id)
-                if not first.ok or type(first.value) ~= "table" then
+                if first.ok and first.value == nil then
+                    first = actor_loadout_call("GA_ACTOR_EXO_INIT_FAILED", ports.exo_init_data, outfit.value.record.id)
+                    if not first.ok or type(first.value) ~= "table" then
+                        return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_INIT_FAILED", "Fresh Powered Exos data could not be initialized"))
+                    end
+                elseif not first.ok or type(first.value) ~= "table" then
                     return rollback(owned_records, actor_loadout_failure("GA_ACTOR_EXO_READ_FAILED", "Powered Exos data is unavailable"))
                 end
                 first.value.power = 100
@@ -990,6 +995,13 @@ local function default_actor_adapter(active_instance)
             if not called then return gamma_arena_result.err("GA_ACTOR_EXO_READ_FAILED", "Powered Exos data read failed safely", { id = id, reason = tostring(value) }) end
             return gamma_arena_result.ok(value)
         end,
+        exo_init_data = function(id)
+            local api = powered_exos_api("init_data", "GA_ACTOR_EXO_INIT_FAILED")
+            if not api.ok then return api end
+            local called, value = pcall(api.value, id)
+            if not called then return gamma_arena_result.err("GA_ACTOR_EXO_INIT_FAILED", "Powered Exos data initialization failed safely", { id = id, reason = tostring(value) }) end
+            return gamma_arena_result.ok(value)
+        end,
         exo_set_data = function(id, data)
             local api = powered_exos_api("set_data", "GA_ACTOR_EXO_WRITE_FAILED")
             if not api.ok then return api end
@@ -1216,8 +1228,12 @@ function effective_magazine_size(section)
 end
 
 function effective_outfit_requires_power(section)
-    if type(section) ~= "string" or section == "" or type(system_ini) ~= "function" then
-        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit section/system_ini is unavailable", { section = section })
+    if type(section) ~= "string" or section == "" then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective outfit section is unavailable", { section = section })
+    end
+    if string.find(section, "proto", 1, true) ~= nil then return gamma_arena_result.ok(true) end
+    if type(system_ini) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective system_ini is unavailable", { section = section })
     end
     local opened, system = pcall(system_ini)
     if not opened or system == nil then return gamma_arena_result.err("GA_ACTOR_EXO_CLASSIFY_FAILED", "Effective system.ini is unavailable", { section = section }) end
