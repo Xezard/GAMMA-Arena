@@ -92,7 +92,7 @@ function Get-GaNextRaw([hashtable]$Rng) {
 }
 function Get-GaNextInt([hashtable]$Rng, [int]$Minimum, [int]$Maximum) { return $Minimum + (Get-GaNextRaw $Rng) % ($Maximum - $Minimum + 1) }
 function New-GaStream([pscustomobject]$Request, [int]$FightIndex, [string]$Tag) {
-    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,5,4,2,$Tag)
+    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,5,5,2,$Tag)
 }
 function Select-GaPick([hashtable]$Rng, [array]$Values) { return $Values[(Get-GaNextInt $Rng 1 $Values.Count) - 1] }
 function Select-GaWeightedPair {
