@@ -84,14 +84,33 @@ local function normalized_sections(source)
     return normalized
 end
 
-local function first_valid_ammo(source, raw_ammo)
+local function rejected_ammo(section)
+    return string.match(section, "_bad$") ~= nil or string.match(section, "_verybad$") ~= nil or string.match(section, "_self$") ~= nil
+end
+
+local function ammo_category(section, is_base)
+    if is_base then return "standard" end
+    if string.match(section, "_ap$") or string.match(section, "_dart$") then return "armor_piercing" end
+    if string.match(section, "_hp$") or string.match(section, "_hydro$") or string.match(section, "_pbp$")
+        or string.match(section, "_ep$") or string.match(section, "_ss190$") or string.match(section, "_pmm$")
+        or string.match(section, "_zhekan$") or string.find(section, "_hp_", 1, true) ~= nil then return "special" end
+    return nil
+end
+
+local function compatible_ammo_variants(source, raw_ammo)
+    local variants, seen = {}, {}
     for _, ammo_section in ipairs(split_csv(raw_ammo)) do
-        if read_string(source, ammo_section, "kind") == "w_ammo"
-            and read_u32(source, ammo_section, "box_size", 1) ~= nil then
-            return ammo_section
+        if not seen[ammo_section] then
+            seen[ammo_section] = true
+            if not rejected_ammo(ammo_section) and read_string(source, ammo_section, "kind") == "w_ammo" then
+                local box_size = read_u32(source, ammo_section, "box_size", 1)
+                if box_size ~= nil then
+                    variants[#variants + 1] = { section = ammo_section, category = ammo_category(ammo_section, #variants == 0), box_size = box_size }
+                end
+            end
         end
     end
-    return nil
+    return variants
 end
 
 local function sort_records(records)
@@ -129,22 +148,27 @@ function discover(source)
         if weapon_cost ~= nil then
             local slot = read_u32(source, section, "slot", 0)
             local magazine = read_u32(source, section, "ammo_mag_size", 1)
-            local ammo_section = first_valid_ammo(source, read_string(source, section, "ammo_class"))
+            local ammo_variants, ammo_error = compatible_ammo_variants(source, read_string(source, section, "ammo_class"))
+            if ammo_error ~= nil then return ammo_error end
+            local ammo_section = ammo_variants[1] and ammo_variants[1].section or nil
             if (slot == 1 or slot == 2) and magazine ~= nil and ammo_section ~= nil then
                 weapons[#weapons + 1] = {
                     id = section,
                     section = section,
                     ammo = ammo_section,
+                    ammo_variants = ammo_variants,
                     cost = weapon_cost,
                     ammo_box_min = 1,
                     ammo_box_max = 2,
                     kind = kind,
                     slot = slot
                 }
-                if not ammo_by_section[ammo_section] then
-                    local record = { id = ammo_section, section = ammo_section, cost = 1 }
-                    ammo_by_section[ammo_section] = record
-                    ammo[#ammo + 1] = record
+                for _, variant in ipairs(ammo_variants) do
+                    if not ammo_by_section[variant.section] then
+                        local record = { id = variant.section, section = variant.section, cost = 1 }
+                        ammo_by_section[variant.section] = record
+                        ammo[#ammo + 1] = record
+                    end
                 end
             else
                 skipped = skipped + 1
@@ -183,9 +207,12 @@ function discover(source)
     sort_records(outfits)
     sort_records(knives)
 
-    local fingerprint_parts = { "dynamic" }
+    local fingerprint_parts = { "dynamic_catalog_v6" }
     for _, item in ipairs(weapons) do
         fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "weapon", item.section, item.ammo, item.kind, item.slot, item.cost }, ":")
+        for _, variant in ipairs(item.ammo_variants) do
+            fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "ammo_variant", item.section, variant.section, variant.category or "unclassified", variant.box_size }, ":")
+        end
     end
     for _, item in ipairs(ammo) do
         fingerprint_parts[#fingerprint_parts + 1] = table.concat({ "ammo", item.section, item.cost }, ":")
@@ -196,8 +223,6 @@ function discover(source)
     for _, item in ipairs(knives) do
         fingerprint_parts[#fingerprint_parts + 1] = "knife:" .. item.section
     end
-    table.sort(fingerprint_parts)
-
     return gamma_arena_result.ok({
         mode = "dynamic",
         weapons = weapons,

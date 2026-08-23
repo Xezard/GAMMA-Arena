@@ -43,7 +43,35 @@ local function valid_armor_class(value)
     return value == "light" or value == "medium" or value == "scientific" or value == "heavy" or value == "powered_exo"
 end
 
-local function validate_loadout(loadout, catalogs, budget)
+local function rejected_ammo(section)
+    return string.match(section, "_bad$") ~= nil or string.match(section, "_verybad$") ~= nil or string.match(section, "_self$") ~= nil
+end
+
+local function validate_bonus_ammo(loadout, weapon, actor)
+    if not actor then
+        if loadout.bonus_ammo ~= nil then return failure("GA_LOADOUT_BONUS_SCOPE_INVALID", "Opponent loadouts cannot contain bonus ammo", {}) end
+        return gamma_arena_result.ok(true)
+    end
+    local bonus = loadout.bonus_ammo
+    if type(bonus) ~= "table" or bonus.boxes ~= 1 or type(bonus.section) ~= "string"
+        or (bonus.requested_category ~= "standard" and bonus.requested_category ~= "special" and bonus.requested_category ~= "armor_piercing")
+        or (bonus.resolved_category ~= "standard" and bonus.resolved_category ~= "special" and bonus.resolved_category ~= "armor_piercing")
+        or rejected_ammo(type(bonus) == "table" and bonus.section or "") then
+        return failure("GA_LOADOUT_BONUS_AMMO_INVALID", "Actor bonus ammo is invalid", {})
+    end
+    local declared, requested_exists
+    for _, variant in ipairs(weapon.ammo_variants or {}) do
+        if variant.category == bonus.requested_category then requested_exists = true end
+        if variant.section == bonus.section then declared = variant end
+    end
+    if type(declared) ~= "table" or declared.category ~= bonus.resolved_category
+        or not gamma_arena_number.is_positive_integer(declared.box_size) or declared.box_size >= 4294967296 then return failure("GA_LOADOUT_BONUS_AMMO_INVALID", "Actor bonus ammo is incompatible with the selected weapon", {}) end
+    if requested_exists and bonus.resolved_category ~= bonus.requested_category then return failure("GA_LOADOUT_BONUS_AMMO_INVALID", "Available requested bonus category must resolve exactly", {}) end
+    if not requested_exists and (bonus.resolved_category ~= "standard" or bonus.section ~= weapon.ammo) then return failure("GA_LOADOUT_BONUS_AMMO_INVALID", "Unavailable bonus category must fall back to base ammo", {}) end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_loadout(loadout, catalogs, budget, actor)
     if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or type(loadout.knife) ~= "string" or loadout.knife == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.cost) then
         return failure("GA_LOADOUT_TYPE_INVALID", "Loadout fields have invalid types", {})
     end
@@ -56,6 +84,8 @@ local function validate_loadout(loadout, catalogs, budget)
     local knife = item_exists(catalogs.knives, loadout.knife)
     if not knife then return failure("GA_LOADOUT_KNIFE_INVALID", "Loadout knife is not cataloged", { section = loadout.knife }) end
     if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
+    local bonus_result = validate_bonus_ammo(loadout, weapon, actor)
+    if not bonus_result.ok then return bonus_result end
     if not valid_armor_class(outfit.armor_class) then return failure("GA_LOADOUT_OUTFIT_INVALID", "Loadout outfit has no valid armor class", { section = outfit.section }) end
     if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
     local bandage = catalogs.consumables and catalogs.consumables.bandage
@@ -79,7 +109,9 @@ end
 
 local function copy_loadout(loadout)
     local consumables = {}; for index, section in ipairs(loadout.consumables) do consumables[index] = section end
-    return { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, knife = loadout.knife, consumables = consumables, cost = loadout.cost }
+    local copy = { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, knife = loadout.knife, consumables = consumables, cost = loadout.cost }
+    if type(loadout.bonus_ammo) == "table" then copy.bonus_ammo = { section = loadout.bonus_ammo.section, requested_category = loadout.bonus_ammo.requested_category, resolved_category = loadout.bonus_ammo.resolved_category, boxes = loadout.bonus_ammo.boxes } end
+    return copy
 end
 
 local function copy_participant(participant)
@@ -140,7 +172,7 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
     if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
     local resolved, resolved_error = resolved_layout_index(resolved_layout, layout); if not resolved then return resolved_error end
-    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 3 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 4 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
     if not gamma_arena_number.is_integer(spec.layout_version) or spec.layout_version ~= resolved_layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
     if spec.level ~= resolved_layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
@@ -149,7 +181,7 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
     if spec.fight_id ~= expected_fight_id then return failure("GA_FIGHT_ID_INVALID", "Fight id does not match FightSpec generation inputs", { expected = expected_fight_id, actual = spec.fight_id }) end
     if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
     if spec.actor.spawn_path ~= resolved_layout.actor_spawn_path or spec.actor.look_path ~= resolved_layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
-    local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget); if not actor_result.ok then return actor_result end
+    local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty.player_loadout_budget, true); if not actor_result.ok then return actor_result end
     local opponent_count = array_length(spec.opponents)
     if opponent_count == nil then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec opponents must be a dense array", {}) end
     if opponent_count < difficulty.enemy_min or opponent_count > math.min(difficulty.enemy_max, resolved.capacity) then return failure("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
@@ -174,7 +206,7 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
         if catalogs.selection_mode == "staged" and normalized_community(opponent.community) ~= expected_community then return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "FightSpec opponent community does not match catalog profile", { slot = index, section = opponent.profile, community = opponent.community, expected_community = expected_community }) end
         if runtime ~= nil then local effective = validate_effective_profile(opponent.profile, index, runtime, expected_community); if not effective.ok then return effective end end
         local slot_budget = slot_base + (index <= slot_remainder and 1 or 0)
-        local gear_result = validate_loadout(opponent.loadout, catalogs, slot_budget - profile.cost); if not gear_result.ok then return gear_result end
+        local gear_result = validate_loadout(opponent.loadout, catalogs, slot_budget - profile.cost, false); if not gear_result.ok then return gear_result end
         local weapon = gear_result.value
         local is_primary = weapon.kind ~= "w_pistol"
         if opponent.role == "secondary" and is_primary then return failure("GA_ENEMY_ROLE_INVALID", "Secondary role received a primary firearm", { slot = index }) end

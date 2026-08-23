@@ -45,10 +45,17 @@ local function installed_sections()
             kind = "w_rifle",
             slot = "2",
             ammo_mag_size = "30",
-            ammo_class = "ammo_addon_fmj, ammo_addon_ap"
+            ammo_class = "ammo_addon_fmj, ammo_addon_hp, ammo_addon_ap, ammo_addon_hp_mag, ammo_addon_bad, ammo_addon_verybad, ammo_addon_self, ammo_addon_missing, ammo_addon_non_ammo, ammo_addon_zero, ammo_addon_hp"
         },
         ammo_addon_fmj = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_hp = { kind = "w_ammo", box_size = "30" },
         ammo_addon_ap = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_hp_mag = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_bad = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_verybad = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_self = { kind = "w_ammo", box_size = "30" },
+        ammo_addon_non_ammo = { kind = "w_rifle", box_size = "30" },
+        ammo_addon_zero = { kind = "w_ammo", box_size = "0" },
         addon_medium_outfit = { kind = "o_medium", slot = "6" },
         heavy_fixture_outfit = { kind = "o_heavy", slot = "6", repair_type = "outfit_heavy" },
         exo_fixture_outfit = { kind = "o_heavy", slot = "6", repair_type = "outfit_exo" },
@@ -93,13 +100,62 @@ local function discovers_semantic_installed_gear()
     gamma_arena_test_assert.equals(result.value.weapons[1].cost, 5, "rifle cost is derived from semantic kind")
     gamma_arena_test_assert.equals(result.value.weapons[1].kind, "w_rifle", "weapon semantic kind is retained")
     gamma_arena_test_assert.equals(result.value.weapons[1].slot, 2, "weapon inventory slot is retained")
-    gamma_arena_test_assert.equals(#result.value.ammo, 1, "only selected compatible ammo is materialized")
+    gamma_arena_test_assert.equals(#result.value.ammo, 4, "every clean compatible ammo variant is materialized")
     gamma_arena_test_assert.equals(result.value.ammo[1].section, "ammo_addon_fmj", "selected ammo record is exact")
     gamma_arena_test_assert.equals(#result.value.outfits, 3, "all wearable outfit classes are discovered")
     gamma_arena_test_assert.equals(result.value.outfits[1].section, "addon_medium_outfit", "new outfit needs no Arena allowlist entry")
     gamma_arena_test_assert.equals(#result.value.knives, 1, "usable knife family is discovered")
     gamma_arena_test_assert.equals(result.value.knives[1].section, "wpn_knife_addon", "knife section is exact")
     gamma_arena_test_assert.is_true(result.value.skipped >= 3, "unsafe firearm-shaped sections are skipped individually")
+end
+
+local function catalog_discovery_retains_clean_compatible_ammo_variants()
+    local result = gamma_arena_catalog_discovery.discover(source(installed_sections()))
+    local variants = result.value.weapons[1].ammo_variants
+    gamma_arena_test_assert.equals(#variants, 4, "clean compatible variants survive while low-condition variants are rejected")
+    gamma_arena_test_assert.equals(variants[1].section, "ammo_addon_fmj", "base variant preserves declared order")
+    gamma_arena_test_assert.equals(variants[4].section, "ammo_addon_hp_mag", "clean hp_mag variant survives")
+end
+
+local function catalog_discovery_classifies_bonus_ammo_categories()
+    local result = gamma_arena_catalog_discovery.discover(source(installed_sections()))
+    local variants = result.value.weapons[1].ammo_variants
+    gamma_arena_test_assert.equals(variants[1].category, "standard", "first clean base is standard")
+    gamma_arena_test_assert.equals(variants[2].category, "special", "hp is special")
+    gamma_arena_test_assert.equals(variants[3].category, "armor_piercing", "ap is armor piercing")
+    gamma_arena_test_assert.equals(variants[4].category, "special", "hp_mag is special")
+end
+
+local function catalog_discovery_classifies_all_bonus_suffixes()
+    local sections = installed_sections()
+    sections.wpn_suffix_fixture = {
+        kind = "w_shotgun", slot = "2", ammo_mag_size = "8",
+        ammo_class = "ammo_suffix_base,ammo_suffix_pbp,ammo_suffix_pmm,ammo_suffix_zhekan,ammo_suffix_hydro,ammo_suffix_ep,ammo_suffix_ss190,ammo_suffix_dart,ammo_suffix_unknown"
+    }
+    for _, name in ipairs({ "base", "pbp", "pmm", "zhekan", "hydro", "ep", "ss190", "dart", "unknown" }) do
+        sections["ammo_suffix_" .. name] = { kind = "w_ammo", box_size = "16" }
+    end
+    local result = gamma_arena_catalog_discovery.discover(source(sections))
+    gamma_arena_test_assert.is_true(result.ok, "suffix fixture discovers safely")
+    local variants = result.value.weapons[2].ammo_variants
+    gamma_arena_test_assert.equals(variants[1].category, "standard", "first clean base record is standard")
+    for _, index in ipairs({ 2, 3, 4, 5, 6, 7 }) do gamma_arena_test_assert.equals(variants[index].category, "special", "documented special suffix is classified") end
+    gamma_arena_test_assert.equals(variants[8].category, "armor_piercing", "dart suffix is armor-piercing")
+    gamma_arena_test_assert.equals(variants[9].category, nil, "unknown clean suffix stays unclassified")
+end
+
+local function catalog_discovery_skips_invalid_variants_and_fingerprints_metadata()
+    local sections = installed_sections()
+    local first = gamma_arena_catalog_discovery.discover(source(sections))
+    sections.wpn_addon_rifle.ammo_class = "ammo_addon_fmj,ammo_addon_ap,ammo_addon_hp,ammo_addon_hp_mag"
+    local reordered = gamma_arena_catalog_discovery.discover(source(sections))
+    sections.ammo_addon_ap.box_size = "31"
+    local resized = gamma_arena_catalog_discovery.discover(source(sections))
+    gamma_arena_test_assert.is_true(first.ok and reordered.ok and resized.ok, "invalid variants are rejected without rejecting their weapon")
+    gamma_arena_test_assert.equals(#first.value.weapons[1].ammo_variants, 4, "missing, non-ammo, zero-box, duplicate, and low-condition entries never survive")
+    gamma_arena_test_assert.is_true(table.concat(first.value.fingerprint_parts, "|") ~= table.concat(reordered.value.fingerprint_parts, "|"), "variant order changes the fingerprint")
+    gamma_arena_test_assert.is_true(table.concat(reordered.value.fingerprint_parts, "|") ~= table.concat(resized.value.fingerprint_parts, "|"), "variant box size changes the fingerprint")
+    gamma_arena_test_assert.is_true(string.find(table.concat(first.value.fingerprint_parts, "|"), "ammo_variant:wpn_addon_rifle:ammo_addon_hp:special:30", 1, true) ~= nil, "variant category metadata is part of the fingerprint")
 end
 
 local function discovery_order_is_stable()
@@ -138,7 +194,11 @@ local cases = {
     { name = "catalog_discovery_powered_exo_is_separate_from_heavy", fn = discovers_powered_exo_separately_from_heavy },
     { name = "catalog_discovery_prefilters_irrelevant_system_sections", fn = discovery_prefilters_irrelevant_system_sections },
     { name = "catalog_discovery_is_order_stable", fn = discovery_order_is_stable },
-    { name = "catalog_discovery_enumeration_failure_falls_back", fn = enumeration_failure_falls_back }
+    { name = "catalog_discovery_enumeration_failure_falls_back", fn = enumeration_failure_falls_back },
+    { name = "catalog_discovery_retains_clean_compatible_ammo_variants", fn = catalog_discovery_retains_clean_compatible_ammo_variants },
+    { name = "catalog_discovery_classifies_bonus_ammo_categories", fn = catalog_discovery_classifies_bonus_ammo_categories },
+    { name = "catalog_discovery_classifies_all_bonus_suffixes", fn = catalog_discovery_classifies_all_bonus_suffixes },
+    { name = "catalog_discovery_skips_invalid_variants_and_fingerprints_metadata", fn = catalog_discovery_skips_invalid_variants_and_fingerprints_metadata }
 }
 
 function run(run_case_fn)

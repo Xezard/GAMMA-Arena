@@ -1489,6 +1489,18 @@ local function fake_actor_adapter_env()
         owned = true,
         iterating = false,
         released = {},
+        release_requests = {},
+        release_queue = {},
+        release_delay_ms = 0,
+        never_finishes = false,
+        never_finishes_ids = {},
+        release_fail_ids = {},
+        release_submission_count = 0,
+        inventory_callback_sequence = nil,
+        inventory_callback_count = 0,
+        actor_id_sequence = nil,
+        actor_id_reads = 0,
+        now = 0,
         input_acquires = 0,
         input_releases = 0,
         effect_calls = 0,
@@ -1506,14 +1518,22 @@ local function fake_actor_adapter_env()
         }
     }
     local actor = { items = {}, actor_id = 700, money_value = 2500 }
-    function actor:id() return self.actor_id end
+    function actor:id()
+        env.actor_id_reads = env.actor_id_reads + 1
+        if env.actor_id_sequence ~= nil then return env.actor_id_sequence[env.actor_id_reads] end
+        return self.actor_id
+    end
     function actor:money() return self.money_value end
     function actor:give_money(value) self.money_delta = value; self.money_value = self.money_value + value end
     function actor:iterate_inventory(callback, context)
         env.iterating = true
-        local snapshot = {}
-        for index = 1, #self.items do snapshot[index] = self.items[index] end
-        for index = 1, #snapshot do callback(context, snapshot[index]) end
+        if env.inventory_callback_sequence ~= nil then
+            for index = 1, env.inventory_callback_count do callback(context, env.inventory_callback_sequence[index]) end
+        else
+            local snapshot = {}
+            for index = 1, #self.items do snapshot[index] = self.items[index] end
+            for index = 1, #snapshot do callback(context, snapshot[index]) end
+        end
         env.iterating = false
     end
     function actor:set_health_ex(value) self.health_value = value end
@@ -1540,15 +1560,37 @@ local function fake_actor_adapter_env()
             if self.options.parent_missing then return nil end
             return self.options.parent or actor
         end
+        function item:section()
+            if self.options.section_throw then error("injected item section failure") end
+            return self.options.section or ("section_" .. tostring(self.item_id))
+        end
         actor.items[#actor.items + 1] = item
         return item
     end
-    local function release(id)
-        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
-        env.released[#env.released + 1] = id
+    function env:remove_item(id)
         for index = #actor.items, 1, -1 do
             if actor.items[index].item_id == id then table.remove(actor.items, index) end
         end
+    end
+    function env:advance(delta)
+        self.now = (self.now + delta) % 4294967296
+        for index = #self.release_queue, 1, -1 do
+            local queued = self.release_queue[index]
+            local elapsed = (self.now - queued.submitted_at) % 4294967296
+            if not self.never_finishes and not self.never_finishes_ids[queued.id] and elapsed >= queued.delay_ms then
+                self:remove_item(queued.id)
+                table.remove(self.release_queue, index)
+            end
+        end
+    end
+    local function release(id)
+        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
+        env.release_submission_count = env.release_submission_count + 1
+        if env.release_fail_ids[id] then return gamma_arena_result.err("GA_ACTOR_INVENTORY_RELEASE_FAILED", "injected release failure") end
+        env.released[#env.released + 1] = id
+        env.release_requests[id] = (env.release_requests[id] or 0) + 1
+        local delay = type(env.release_delay_ms) == "function" and env.release_delay_ms(id) or env.release_delay_ms
+        env.release_queue[#env.release_queue + 1] = { id = id, submitted_at = env.now, delay_ms = delay }
         return gamma_arena_result.ok(true)
     end
     local deps = {
@@ -1556,6 +1598,9 @@ local function fake_actor_adapter_env()
         is_session_active = function() return env.active end,
         is_actor_owned = function(candidate) return env.owned and candidate == actor end,
         release_item_id = release,
+        clock = function() return env.now end,
+        inventory_drain_timeout_ms = 10000,
+        item_section = function(item) return item:section() end,
         patrol = function(path)
             local object = {}
             function object:point() return env.positions[path] end
@@ -1597,10 +1642,207 @@ local function runtime_actor_inventory_release_is_deferred_and_verified()
     gamma_arena_test_assert.equals(first.parent_calls, 1, "real client item parent object is inspected")
     gamma_arena_test_assert.equals(second.parent_calls, 1, "every inventory item uses game_object:parent()")
     gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "inventory cannot be verified on the purge update")
+    env:advance(0)
     adapter:begin_update()
     gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "a later update confirms the inventory is empty")
     adapter:begin_update()
     gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "inventory verification is idempotent")
+end
+
+local function runtime_actor_inventory_drain_waits_for_looted_items()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 4000
+    env:add_item(12, { section = "wpn_ak74" })
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    local cleanup_calls = 0
+    adapter.deps.loadout = { cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end }
+
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending, "initial inventory drain stays pending")
+    for poll = 1, 3 do
+        env:advance(1000)
+        adapter:begin_update()
+        local pending = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending and pending.value.stage == "inventory_absence", "looted inventory remains a successful pending result for poll " .. poll)
+    end
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "initial weapon release is submitted once")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "initial ammo release is submitted once")
+    gamma_arena_test_assert.equals(cleanup_calls, 1, "victory cleanup runs once while drain is pending")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "victory drain retains one input lease")
+    env:advance(1000)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).value, "authoritative asynchronous removal completes the drain")
+end
+
+local function runtime_actor_inventory_drain_releases_newly_surfaced_item_once()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "initial purge succeeds")
+    env:add_item(13)
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "newly surfaced item keeps inventory drain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "newly surfaced item is submitted once")
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "unchanged submitted items remain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "later polls never duplicate new-item submission")
+
+    env:add_item(99)
+    env.release_fail_ids[99] = true
+    env:advance(1)
+    adapter:begin_update()
+    local failed = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(failed.ok, "new-item release submission failure is immediate")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_INVENTORY_RELEASE_FAILED", "new-item release failure code")
+end
+
+local function runtime_actor_inventory_drain_times_out_with_sorted_evidence()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    env:add_item(12, { section_throw = true })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "never-finishing purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "drain remains pending before exact inactivity deadline")
+    env:remove_item(13)
+    env:add_item(14, { section = "wpn_lr300" })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "same-count id replacement is progress")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "progress immediately before deadline resets inactivity")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "drain times out at the exact inactivity boundary")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_INVENTORY_NOT_EMPTY", "drain timeout code")
+    local context = timed_out.error.context
+    gamma_arena_test_assert.equals(context.remaining_count, 2, "timeout reports remaining count")
+    gamma_arena_test_assert.equals(context.remaining_ids[1], 12, "timeout sorts remaining ids")
+    gamma_arena_test_assert.equals(context.remaining_ids[2], 14, "timeout replaces stale ids in evidence")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].id, 12, "timeout section evidence retains first sorted id")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].section, "<unavailable>", "section failures are diagnostic only")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].id, 14, "timeout section evidence retains second sorted id")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].section, "wpn_lr300", "timeout retains readable sections")
+    gamma_arena_test_assert.equals(context.poll_count, 4, "timeout counts every verification poll")
+    gamma_arena_test_assert.equals(context.elapsed_since_progress_ms, 10000, "timeout uses exact inactivity boundary")
+    gamma_arena_test_assert.equals(context.total_elapsed_ms, 19999, "progress does not reset total elapsed")
+    gamma_arena_test_assert.equals(context.timeout_ms, 10000, "timeout evidence retains configured timeout")
+end
+
+local function runtime_actor_inventory_drain_timeout_is_wrap_safe()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env.now = 4294967290
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "wrap-safe purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "wrapped clock remains pending below timeout")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "wrapped clock reaches timeout")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 10000, "wrapped elapsed time is exact")
+    gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 10000, "wrapped total elapsed is exact")
+end
+
+local function runtime_actor_inventory_drain_rejects_unowned_public_actor()
+    local env, adapter = fake_actor_adapter_env()
+    local foreign = {
+        id = function() return env.actor.actor_id end,
+        iterate_inventory = function() error("foreign actor must not be inspected") end
+    }
+    adapter:begin_update()
+    local result = adapter:purge_inventory(foreign)
+    gamma_arena_test_assert.is_false(result.ok, "public purge argument must be the currently owned Arena actor")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_NOT_OWNED", "public foreign actor uses ownership guard")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "public foreign actor submits no releases")
+end
+
+local function runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values()
+    local actor_id_cases = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(actor_id_cases) do
+        local env, adapter = fake_actor_adapter_env()
+        env.actor.actor_id = case.value
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid public actor id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_ID_INVALID", "invalid actor id error code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid actor id submits no releases")
+    end
+
+    local nil_env, nil_adapter = fake_actor_adapter_env()
+    nil_env.inventory_callback_sequence = { [1] = nil }
+    nil_env.inventory_callback_count = 1
+    nil_adapter:begin_update()
+    local nil_result = nil_adapter:purge_inventory(nil_env.actor)
+    gamma_arena_test_assert.is_false(nil_result.ok, "explicit nil inventory callback item fails closed")
+    gamma_arena_test_assert.equals(nil_result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "nil callback item code")
+    gamma_arena_test_assert.equals(nil_env.release_submission_count, 0, "nil callback item submits no releases")
+
+    local invalid_item_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_item_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env:add_item(case.value)
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid item id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "invalid item id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid item id submits no releases")
+    end
+
+    local invalid_parent_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_parent_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env.actor_id_sequence = { 700, case.value }
+        env:add_item(46)
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid parent id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "invalid parent id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid parent id submits no releases")
+    end
+end
+
+local function runtime_actor_inventory_drain_submits_sorted_deduplicated_ids()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(30)
+    env:add_item(10)
+    env:add_item(30)
+    env:add_item(2)
+    adapter:begin_update()
+    local result = adapter:purge_inventory(env.actor)
+    gamma_arena_test_assert.is_true(result.ok, "unsorted duplicate inventory snapshot purges")
+    gamma_arena_test_assert.equals(result.value, 3, "deduplicated snapshot count")
+    gamma_arena_test_assert.equals(env.release_submission_count, 3, "each observed id submits exactly once")
+    gamma_arena_test_assert.equals(env.released[1], 2, "first submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[2], 10, "second submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[3], 30, "third submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.release_requests[30], 1, "duplicate id submits once")
+    gamma_arena_test_assert.equals(adapter.inventory_drain.last_count, 0, "transaction starts with approved zero last count")
+end
+
+local function runtime_actor_inventory_drain_cleanup_clears_transaction()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:purge_inventory(env.actor).ok, "active drain starts before cleanup")
+    gamma_arena_test_assert.is_true(adapter.inventory_drain ~= nil, "active drain is retained while release is pending")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup clears active drain")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "first cleanup clears transaction state")
+    gamma_arena_test_assert.equals(adapter.purge_tick, nil, "first cleanup clears same-update gate")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup remains idempotent")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "repeated cleanup keeps transaction cleared")
 end
 
 local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
@@ -2679,7 +2921,11 @@ local function entity_spec(opponent_count)
         slot = 0,
         spawn_path = "actor_spawn",
         look_path = "actor_look",
-        loadout = { weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2, outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6 }
+        loadout = {
+            weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2,
+            bonus_ammo = { section = "ammo_9x18_ap", requested_category = "armor_piercing", resolved_category = "armor_piercing", boxes = 1 },
+            outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6
+        }
     }
     local opponents = {}
     for index = 1, (opponent_count or 2) do
@@ -2754,6 +3000,8 @@ local function fake_entity_environment(options)
         tactical_death_slots = {},
         tactical_stop_calls = 0,
         tactical_warnings = {},
+        warning_records = {},
+        warnings_by_code = {},
         terminal_transitions = {}
     }
 
@@ -2876,8 +3124,11 @@ local function fake_entity_environment(options)
     local deps = {
         actor = actor_port,
         tactical = tactical,
-        log_warn = function(code)
+        log_warn = function(code, message, context)
             env.tactical_warnings[#env.tactical_warnings + 1] = code
+            local warning = { code = code, message = message, context = clone(context) }
+            env.warning_records[#env.warning_records + 1] = warning
+            env.warnings_by_code[code] = warning
             env.events[#env.events + 1] = "tactical_warn:" .. tostring(code)
         end,
         log_info = function(code, message, context)
@@ -3183,7 +3434,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         ownership_token = function() return "session-exact" end,
         reserve_magazines = 3,
         ammo_box_size = function(section)
-            gamma_arena_test_assert.equals(section, "ammo_9x18_fmj", "actor adapter resolves the exact effective ammo section")
+            gamma_arena_test_assert.is_true(section == "ammo_9x18_fmj" or section == "ammo_9x18_ap", "actor adapter resolves only validated effective ammo sections")
             return 20
         end,
         magazine_capacity = function() return 30 end,
@@ -3204,10 +3455,13 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local actor = { id = function() return 77 end }
     local result = port.apply(actor, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "production-shaped actor loadout port applies exact descriptors")
-    gamma_arena_test_assert.equals(#calls, 5, "actor receives weapon, ammo, outfit and two consumables exactly once")
+    gamma_arena_test_assert.equals(#calls, 6, "actor receives weapon, base ammo, bonus ammo, outfit, knife and consumables exactly once")
     gamma_arena_test_assert.equals(calls[2].section, "ammo_9x18_fmj", "actor ammo section is exact")
     gamma_arena_test_assert.equals(calls[2].count, 90, "actor reserve is raised to three full magazines when catalog boxes are insufficient")
     gamma_arena_test_assert.is_true(calls[2].is_ammo, "actor ammo uses the ammo property path")
+    gamma_arena_test_assert.equals(calls[3].section, "ammo_9x18_ap", "actor bonus ammo section is exact")
+    gamma_arena_test_assert.equals(calls[3].count, 20, "actor bonus ammo remains one exact box without reserve inflation")
+    gamma_arena_test_assert.is_true(calls[3].is_ammo, "actor bonus ammo uses the ammo property path")
     gamma_arena_test_assert.equals(#released, 0, "successful actor loadout has no rollback")
 
     local function partial_failure_port(release_failure_id)
@@ -3226,7 +3480,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count, is_ammo)
                 create_calls = create_calls + 1
-                if create_calls == 3 then return nil end
+                if create_calls == 4 then return nil end
                 if is_ammo then return { partial_entity(section, target:id(), 1), partial_entity(section, target:id(), count - 1) } end
                 return partial_entity(section, target:id(), 1)
             end,
@@ -3255,7 +3509,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local failed = gamma_arena_entity_adapter.new(failure_deps):begin_apply(entity_spec(1), "session-actor-port-failure")
     gamma_arena_test_assert.is_false(failed.ok, "partial production actor loadout failure is observable")
     gamma_arena_test_assert.equals(failure_env.create_npc_count, 0, "partial actor loadout rollback finishes before NPC creation")
-    local expected_rollback = { 602, 601, 600 }
+    local expected_rollback = { 604, 603, 602, 601, 600 }
     gamma_arena_test_assert.equals(#rollback_ids, #expected_rollback, "every partially created actor item is released")
     for index, id in ipairs(expected_rollback) do gamma_arena_test_assert.equals(rollback_ids[index], id, "actor loadout rollback is exact reverse creation order") end
     local pending = failing_port.cleanup()
@@ -3419,6 +3673,7 @@ local function new_actor_loadout_test_fixture(options)
         weapon = loadout.weapon,
         ammo = loadout.ammo,
         ammo_boxes = loadout.ammo_boxes,
+        bonus_ammo = loadout.bonus_ammo,
         outfit = options.outfit or loadout.outfit,
         knife = loadout.knife,
         consumables = loadout.consumables
@@ -3780,7 +4035,15 @@ local function actor_loadout_ownership_fixture(options)
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "ga-session:nonce" end,
         ammo_box_size = function() return 20 end,
-        create_item = function(section, target, count) return entity(section, target:id(), count) end,
+        create_item = function(section, target, count)
+            if options.fail_bonus_create and section == "ammo_9x18_ap" then return nil end
+            if options.bonus_multi_return and section == "ammo_9x18_ap" then
+                local valid = entity(section, target:id(), count)
+                if options.bonus_multi_return == "duplicate" then return { valid, valid } end
+                return { valid, { id = function() return nil end } }
+            end
+            return entity(section, target:id(), count)
+        end,
         entity_id = function(item) return item:id() end,
         entity_parent_id = function(item) return item.parent_id end,
         entity_section = function(item) return item.section_name end,
@@ -3913,6 +4176,51 @@ local function runtime_actor_loadout_exact_owned_match_releases_once()
     gamma_arena_test_assert.is_true(env.port.cleanup().ok, "later authoritative absence completes cleanup")
 end
 
+local function runtime_actor_loadout_bonus_ammo_rollback_is_owned()
+    local success = actor_loadout_ownership_fixture()
+    local bonus_id = nil
+    for id, item in pairs(success.current) do if item.section_name == "ammo_9x18_ap" then bonus_id = id end end
+    gamma_arena_test_assert.is_true(bonus_id ~= nil, "bonus descriptor remains in the shared owned-record snapshot")
+    local owned_bonus = nil
+    for _, record in ipairs(success.port.records_snapshot()) do if record.id == bonus_id then owned_bonus = record end end
+    gamma_arena_test_assert.equals(owned_bonus.role, "bonus_ammo", "copied owned record retains the bonus ammo role")
+    gamma_arena_test_assert.is_true(success.port.cleanup().ok, "bonus record routes through shared ownership cleanup")
+    local bonus_releases = 0
+    for _, id in ipairs(success.releases) do if id == bonus_id then bonus_releases = bonus_releases + 1 end end
+    gamma_arena_test_assert.equals(bonus_releases, 1, "ownership proof releases the bonus record exactly once")
+
+    local env = actor_loadout_ownership_fixture({ fail_bonus_create = true })
+    gamma_arena_test_assert.is_false(env.applied.ok, "bonus ammo creation failure remains transactional")
+    gamma_arena_test_assert.equals(#env.releases, 2, "weapon and base ammo are retained for ownership-proven rollback")
+    local blocked = env.port.apply(env.actor, entity_spec(1).actor().loadout)
+    gamma_arena_test_assert.is_false(blocked.ok, "bonus creation rollback keeps valid tagged ids owned until absence")
+    gamma_arena_test_assert.equals(blocked.error.code, "GA_ACTOR_LOADOUT_BUSY", "rollback ownership blocks a second actor apply")
+    for id in pairs(env.current) do env.current[id] = nil end
+    gamma_arena_test_assert.is_true(env.port.cleanup().ok, "authoritative absence retires bonus rollback ownership")
+end
+
+local function runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids()
+    for _, shape in ipairs({ "invalid", "duplicate" }) do
+        local env = actor_loadout_ownership_fixture({ bonus_multi_return = shape })
+        gamma_arena_test_assert.is_false(env.applied.ok, shape .. " bonus multi-return fails closed")
+        gamma_arena_test_assert.equals(#env.releases, 3, shape .. " bonus multi-return rolls back weapon, base ammo, and valid bonus id")
+        local blocked = env.port.apply(env.actor, entity_spec(1).actor().loadout)
+        gamma_arena_test_assert.is_false(blocked.ok, shape .. " valid bonus id remains owned until authoritative absence")
+        gamma_arena_test_assert.equals(blocked.error.code, "GA_ACTOR_LOADOUT_BUSY", shape .. " rollback cannot lose retained ownership")
+    end
+end
+
+local function runtime_entity_preflights_base_and_bonus_ammo_independently()
+    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = 7 } })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-independent-ammo").ok, "independent actor ammo preflight accepts valid base and bonus metadata")
+    gamma_arena_test_assert.equals(env.actor_loadout_calls, 1, "actor mutation follows both successful preflight resolutions")
+    local actor_loadout = adapter.actor_spec.loadout
+    gamma_arena_test_assert.equals(actor_loadout.ammo_rounds, 40, "base ammo uses its own effective box size")
+    gamma_arena_test_assert.equals(actor_loadout.bonus_ammo.ammo_rounds, 7, "bonus ammo uses its own effective box size")
+    gamma_arena_test_assert.equals(adapter.opponents[1].loadout.bonus_ammo, nil, "opponents retain base ammo only")
+end
+
 local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids()
     for _, case in ipairs({
         { label = "parent mismatch", options = { apply_parent_mismatch = true }, cleanable = false },
@@ -3967,6 +4275,27 @@ local function runtime_entity_ammo_box_size_failure_precedes_actor_mutation()
         gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "effective ammo conversion is verified before actor mutation")
         gamma_arena_test_assert.equals(env.create_npc_count, 0, "effective ammo conversion is verified before opponent creation")
     end
+end
+
+local function runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation()
+    for _, case in ipairs({ { value = nil }, { value = 0 }, { value = 1.5 }, { value = 4294967296 } }) do
+        local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = case.value } })
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        local result = adapter:begin_apply(entity_spec(1), "session-invalid-bonus-box-size")
+        gamma_arena_test_assert.is_false(result.ok, "invalid bonus effective box_size fails closed")
+        gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "bonus effective ammo conversion is verified before actor mutation")
+        gamma_arena_test_assert.equals(env.create_npc_count, 0, "bonus effective ammo conversion is verified before opponent creation")
+    end
+    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = function() error("injected bonus box-size failure") end } })
+    deps.ammo_box_size = function(section)
+        if section == "ammo_9x18_ap" then error("injected bonus box-size failure") end
+        return 20
+    end
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    local result = adapter:begin_apply(entity_spec(1), "session-throwing-bonus-box-size")
+    gamma_arena_test_assert.is_false(result.ok, "throwing bonus effective box_size fails closed")
+    gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "throwing bonus conversion precedes actor mutation")
+    gamma_arena_test_assert.equals(env.create_npc_count, 0, "throwing bonus conversion precedes opponent creation")
 end
 
 local function runtime_bootstrap_hostility_port_is_feature_probed()
@@ -4102,9 +4431,13 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
         clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-unreadable-ammo" end,
-        ammo_box_size = function() return 20 end,
+        ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
         create_item = function(section, actor, count, is_ammo)
             if is_ammo then
+                if section == "ammo_9x18_ap" then
+                    ammo_entities = ammo_entities + 1
+                    return entity(section, actor:id())
+                end
                 ammo_entities = ammo_entities + 2
                 return { entity(section, actor:id()), entity(section, actor:id()) }
             end
@@ -4120,7 +4453,74 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
     local actor = { id = function() return 77 end }
     local result = port.apply(actor, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "actor loadout derives exact ammo allocation when server quantity is unavailable")
-    gamma_arena_test_assert.equals(ammo_entities, 2, "forty actor rounds are represented by two effective twenty-round boxes")
+    gamma_arena_test_assert.equals(ammo_entities, 3, "unreadable base and bonus ammo use their own effective box sizes")
+end
+
+local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
+    local next_id, created, tags, present, slots, magazine = 2400, {}, {}, {}, {}, {}
+    local active = nil
+    local function entity(section, parent_id, quantity)
+        local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity }
+        next_id = next_id + 1
+        function value:id() return self.runtime_id end
+        present[value.runtime_id] = value
+        return value
+    end
+    local port = gamma_arena_bootstrap.new_actor_loadout_port({
+        clock = function() return 100 end,
+        actor_id = function(actor) return actor:id() end,
+        ownership_token = function() return "session-bonus-ammo" end,
+        ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
+        create_item = function(section, actor, count, is_ammo)
+            created[#created + 1] = { section = section, count = count, ammo = is_ammo == true }
+            return entity(section, actor:id(), count)
+        end,
+        entity_id = function(value) return value:id() end,
+        entity_parent_id = function(value) return value.parent_id end,
+        entity_section = function(value) return value.section_name end,
+        item_quantity = function(value) return value.quantity end,
+        save_owner_tag = function(id, token) tags[id] = token; return true end,
+        load_owner_tag = function(id) return tags[id] end,
+        reserve_magazines = 3,
+        magazine_capacity = function() return 30 end,
+        online_item = function(_, id) return present[id] end,
+        item_slot = function(section)
+            if section == "novice_outfit" then return 7 end
+            if section == "wpn_knife" then return 1 end
+            if section == "wpn_pm" then return 3 end
+        end,
+        move_to_slot = function(_, item, slot) slots[slot] = item; return true end,
+        item_in_slot = function(_, slot) return slots[slot] end,
+        set_ammo_elapsed = function(item, count) magazine[item:id()] = count; return true end,
+        get_ammo_in_magazine = function(item) return magazine[item:id()] or 0 end,
+        make_item_active = function(_, item) active = item; return true end,
+        active_item = function() return active end,
+        outfit_requires_power = function() return false end
+    })
+    local result = port.apply({ id = function() return 77 end }, entity_spec(1).actor().loadout)
+    gamma_arena_test_assert.is_true(result.ok, "actor loadout creates the validated bonus ammo box")
+    local expected = {
+        { section = "wpn_pm", count = 1, ammo = false },
+        { section = "ammo_9x18_fmj", count = 90, ammo = true },
+        { section = "ammo_9x18_ap", count = 7, ammo = true },
+        { section = "novice_outfit", count = 1, ammo = false },
+        { section = "wpn_knife", count = 1, ammo = false },
+        { section = "bandage", count = 1, ammo = false }
+    }
+    gamma_arena_test_assert.equals(#created, #expected, "actor descriptor count includes exactly one bonus ammo descriptor")
+    for index, expected_descriptor in ipairs(expected) do
+        gamma_arena_test_assert.equals(created[index].section, expected_descriptor.section, "actor descriptor section order is exact")
+        gamma_arena_test_assert.equals(created[index].count, expected_descriptor.count, "base reserve floor never inflates bonus ammo")
+        gamma_arena_test_assert.equals(created[index].ammo, expected_descriptor.ammo, "bonus descriptor uses the ammo creation path")
+    end
+    local ready = nil
+    for _ = 1, 20 do
+        ready = port.update({ id = function() return 77 end })
+        if ready.ok and ready.value.ready == true then break end
+    end
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "exact bonus actor loadout reaches READY")
+    gamma_arena_test_assert.equals(ready.value.reserve_rounds, 90, "READY summary retains the base reserve magazine floor")
+    gamma_arena_test_assert.equals(ready.value.bonus_ammo_rounds, 7, "READY summary reports the exact resolved bonus ammo rounds")
 end
 
 local function runtime_entity_derives_unreadable_server_ammo_quantity()
@@ -4742,17 +5142,246 @@ local function runtime_entity_missing_is_integrity_not_victory()
     gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "missing opponent can never satisfy the victory count")
 end
 
+local function equal_plain_values(first, second)
+    if type(first) ~= type(second) then return false end
+    if type(first) ~= "table" then return first == second end
+    for key, value in pairs(first) do
+        if not equal_plain_values(value, second[key]) then return false end
+    end
+    for key in pairs(second) do
+        if first[key] == nil then return false end
+    end
+    return true
+end
+
 local function runtime_entity_early_self_death_is_integrity()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
     begin_entity_apply(adapter, env, entity_spec(1), "session-self-death-integrity"); pump_entity(adapter, env)
     local victim_id = adapter:registry_snapshot().npcs[1].id
+    env.online[victim_id].position_value = { x = 5, y = 6, z = 15 }
     local victim = { id = function() return victim_id end }
     local accepted = adapter:on_npc_death(victim, victim)
     gamma_arena_test_assert.is_true(accepted.ok and accepted.value, "registered self-death remains authoritative death evidence")
     local fault = adapter:integrity_status()
     gamma_arena_test_assert.is_true(fault.ok and type(fault.value) == "table", "early self-death also marks the round corrupted")
     gamma_arena_test_assert.equals(fault.value.cause, "early_self_death", "self-death cause is stable")
+    gamma_arena_test_assert.equals(env.warning_records[#env.warning_records - 1].code, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "self-death diagnostic is emitted before integrity evidence")
+    gamma_arena_test_assert.equals(env.warning_records[#env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "integrity warning follows its self-death diagnostic")
+    local diagnostic = env.warnings_by_code.GA_EARLY_SELF_DEATH_DIAGNOSTIC.context
+    gamma_arena_test_assert.equals(diagnostic.session_id, "session-self-death-integrity", "diagnostic preserves session identity")
+    gamma_arena_test_assert.equals(diagnostic.fight_key, "stable:ga-entity-test", "diagnostic preserves exact FightSpec key")
+    gamma_arena_test_assert.equals(diagnostic.opponent_id, victim_id, "diagnostic preserves opponent identity")
+    gamma_arena_test_assert.equals(diagnostic.killer_id, victim_id, "diagnostic preserves killer identity")
+    gamma_arena_test_assert.equals(diagnostic.slot, 1, "diagnostic preserves participant slot")
+    gamma_arena_test_assert.equals(diagnostic.elapsed_ms, 0, "diagnostic preserves elapsed self-death time")
+    gamma_arena_test_assert.equals(diagnostic.window_ms, 20000, "diagnostic preserves the early self-death window")
+    gamma_arena_test_assert.equals(diagnostic.profile.section, "gamma_arena_bandit_novice", "diagnostic preserves profile section")
+    gamma_arena_test_assert.equals(diagnostic.profile.community, "bandit", "diagnostic preserves community")
+    gamma_arena_test_assert.equals(diagnostic.profile.tactical_route, "opponent_1", "diagnostic preserves tactical route")
+    gamma_arena_test_assert.equals(diagnostic.profile.role, "leader", "diagnostic preserves role")
+    gamma_arena_test_assert.equals(diagnostic.loadout.weapon, "wpn_pm", "diagnostic preserves weapon")
+    gamma_arena_test_assert.equals(diagnostic.loadout.ammo, "ammo_9x18_fmj", "diagnostic preserves base ammo")
+    gamma_arena_test_assert.equals(diagnostic.loadout.ammo_boxes, 3, "diagnostic preserves base ammo boxes")
+    gamma_arena_test_assert.equals(diagnostic.loadout.outfit, "novice_outfit", "diagnostic preserves outfit")
+    gamma_arena_test_assert.equals(diagnostic.loadout.knife, "wpn_knife", "diagnostic preserves knife")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.x, 2, "diagnostic preserves spawn x")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.y, 2, "diagnostic preserves spawn y")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.z, 3, "diagnostic preserves spawn z")
+    gamma_arena_test_assert.equals(diagnostic.queries.server_object.status, "ok", "diagnostic records server query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.status, "ok", "diagnostic records online query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.status, "ok", "diagnostic records owner-tag query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.status, "ok", "diagnostic records position query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.alive.status, "ok", "diagnostic records alive query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.critically_wounded.status, "ok", "diagnostic records wound query status")
+    gamma_arena_test_assert.is_true(diagnostic.server_available, "diagnostic records available server entity")
+    gamma_arena_test_assert.is_true(diagnostic.online_available, "diagnostic records available online object")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.x, 5, "diagnostic preserves observed x")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.y, 6, "diagnostic preserves observed y")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.z, 15, "diagnostic preserves observed z")
+    gamma_arena_test_assert.equals(diagnostic.delta_x, 3, "diagnostic calculates signed x displacement")
+    gamma_arena_test_assert.equals(diagnostic.delta_y, 4, "diagnostic calculates signed y displacement")
+    gamma_arena_test_assert.equals(diagnostic.delta_z, 12, "diagnostic calculates signed z displacement")
+    gamma_arena_test_assert.equals(diagnostic.displacement, 13, "diagnostic calculates stable Euclidean displacement")
+    gamma_arena_test_assert.is_true(equal_plain_values(fault.value.context.diagnostic, diagnostic), "integrity context receives the emitted diagnostic by value")
+    gamma_arena_test_assert.is_false(adapter:on_npc_death(victim, victim).value, "duplicate callback remains ignored")
+    gamma_arena_test_assert.equals(#env.warning_records, 2, "duplicate callback emits no second diagnostic")
+end
+
+local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-self-death-diagnostic-failures"); pump_entity(adapter, env)
+    local victim_id = adapter:registry_snapshot().npcs[1].id
+    local owner_reads = 0
+    deps.server_entity = function() error("injected diagnostic server failure") end
+    deps.online_object = function() return gamma_arena_result.err("GA_TEST_DIAGNOSTIC_ONLINE", "injected diagnostic online failure", { source = "online" }) end
+    deps.load_tag = function()
+        owner_reads = owner_reads + 1
+        if owner_reads == 1 then return "session-self-death-diagnostic-failures" end
+        error("injected diagnostic owner failure")
+    end
+    deps.object_position = function() error("injected diagnostic position failure") end
+    deps.is_alive = function() error("injected diagnostic alive failure") end
+    deps.is_critically_wounded = function() error("injected diagnostic wound failure") end
+    local logger_calls = 0
+    deps.log_warn = function(code)
+        logger_calls = logger_calls + 1
+        if code == "GA_EARLY_SELF_DEATH_DIAGNOSTIC" then error("injected diagnostic logger failure") end
+        env.warning_records[#env.warning_records + 1] = { code = code }
+    end
+    local victim = { id = function() return victim_id end }
+    local accepted = adapter:on_npc_death(victim, victim)
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value, "diagnostic dependency failures do not suppress accepted death")
+    local fault = adapter:integrity_status()
+    gamma_arena_test_assert.equals(fault.value.cause, "early_self_death", "diagnostic dependency failures preserve integrity cause")
+    local diagnostic = fault.value.context.diagnostic
+    gamma_arena_test_assert.equals(diagnostic.queries.server_object.status, "error", "throwing server diagnostic query is recorded")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.status, "error", "throwing online diagnostic query is recorded")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.status, "error", "throwing diagnostic owner reread is recorded")
+    gamma_arena_test_assert.is_true(string.find(diagnostic.queries.server_object.reason, "injected diagnostic server failure", 1, true) ~= nil, "throwing server diagnostic reason is copied")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.error.code, "GA_TEST_DIAGNOSTIC_ONLINE", "failed online diagnostic error code is copied")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.error.context.source, "online", "failed online diagnostic error context is copied")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.error.code, "GA_ENTITY_TAG_READ_FAILED", "throwing owner diagnostic wrapper code is copied")
+    gamma_arena_test_assert.is_true(string.find(diagnostic.queries.owner_tag.error.context.reason, "injected diagnostic owner failure", 1, true) ~= nil, "throwing owner diagnostic wrapper reason is copied")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.status, "unavailable", "position is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.alive.status, "unavailable", "alive is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.critically_wounded.status, "unavailable", "wound state is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.reason, "online_object_unavailable", "failed online lookup does not falsely claim absent online object")
+    gamma_arena_test_assert.equals(logger_calls, 2, "throwing diagnostic logger does not suppress integrity logger")
+
+    local nil_env, nil_deps = fake_entity_environment()
+    local nil_adapter = gamma_arena_entity_adapter.new(nil_deps)
+    begin_entity_apply(nil_adapter, nil_env, entity_spec(1), "session-self-death-diagnostic-nil"); pump_entity(nil_adapter, nil_env)
+    local nil_victim_id = nil_adapter:registry_snapshot().npcs[1].id
+    nil_deps.server_entity = function() return nil end
+    nil_deps.online_object = function() return nil end
+    local nil_victim = { id = function() return nil_victim_id end }
+    gamma_arena_test_assert.is_true(nil_adapter:on_npc_death(nil_victim, nil_victim).value, "nil availability still accepts authoritative death")
+    local nil_diagnostic = nil_adapter:integrity_status().value.context.diagnostic
+    gamma_arena_test_assert.is_false(nil_diagnostic.server_available, "nil server lookup records unavailable server")
+    gamma_arena_test_assert.is_false(nil_diagnostic.online_available, "nil online lookup records unavailable object")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.server_object.status, "ok", "nil server lookup remains a successful query")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.online_object.status, "ok", "nil online lookup remains a successful query")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.position.reason, "online_object_absent", "nil online lookup explains unavailable position")
+
+    for _, case in ipairs({
+        { name = "position", dependency = "object_position", query = "position", expect = "reason", inject = function() error("injected diagnostic position failure") end },
+        { name = "alive", dependency = "is_alive", query = "alive", expect = "error", code = "GA_TEST_DIAGNOSTIC_ALIVE", inject = function() return gamma_arena_result.err("GA_TEST_DIAGNOSTIC_ALIVE", "injected diagnostic alive failure", { source = "alive" }) end },
+        { name = "wound", dependency = "is_critically_wounded", query = "critically_wounded", expect = "error", code = "GA_ENTITY_WOUND_CHECK_FAILED", inject = function() error("injected diagnostic wound failure") end }
+    }) do
+        local query_env, query_deps = fake_entity_environment()
+        local query_adapter = gamma_arena_entity_adapter.new(query_deps)
+        begin_entity_apply(query_adapter, query_env, entity_spec(1), "session-self-death-diagnostic-" .. case.name); pump_entity(query_adapter, query_env)
+        local query_id = query_adapter:registry_snapshot().npcs[1].id
+        query_deps[case.dependency] = case.inject
+        local query_victim = { id = function() return query_id end }
+        gamma_arena_test_assert.is_true(query_adapter:on_npc_death(query_victim, query_victim).value, "throwing " .. case.name .. " diagnostic dependency still accepts death")
+        local query_diagnostic = query_adapter:integrity_status().value.context.diagnostic
+        gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].status, "error", "throwing " .. case.name .. " diagnostic dependency is recorded")
+        if case.expect == "reason" then
+            gamma_arena_test_assert.is_true(string.find(query_diagnostic.queries[case.query].reason, "injected diagnostic " .. case.name .. " failure", 1, true) ~= nil, "throwing " .. case.name .. " diagnostic reason is copied")
+        else
+            gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.code, case.code, "failed " .. case.name .. " diagnostic error code is copied")
+            if case.name == "alive" then
+                gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.context.source, "alive", "failed alive diagnostic error context is copied")
+            else
+                gamma_arena_test_assert.is_true(string.find(query_diagnostic.queries[case.query].error.context.reason, "injected diagnostic wound failure", 1, true) ~= nil, "throwing wound diagnostic wrapper reason is copied")
+            end
+        end
+        gamma_arena_test_assert.equals(query_adapter:integrity_status().value.cause, "early_self_death", "throwing " .. case.name .. " diagnostic dependency preserves integrity")
+    end
+
+    local builder_env, builder_deps = fake_entity_environment()
+    local builder_adapter = gamma_arena_entity_adapter.new(builder_deps)
+    begin_entity_apply(builder_adapter, builder_env, entity_spec(1), "session-self-death-diagnostic-builder"); pump_entity(builder_adapter, builder_env)
+    local builder_id = builder_adapter:registry_snapshot().npcs[1].id
+    builder_deps.early_self_death_diagnostic_builder = function() error("injected diagnostic builder failure") end
+    local builder_victim = { id = function() return builder_id end }
+    gamma_arena_test_assert.is_true(builder_adapter:on_npc_death(builder_victim, builder_victim).value, "throwing diagnostic builder still accepts death")
+    local builder_fault = builder_adapter:integrity_status().value
+    local builder_diagnostic = builder_env.warnings_by_code.GA_EARLY_SELF_DEATH_DIAGNOSTIC.context
+    gamma_arena_test_assert.equals(builder_diagnostic.status, "error", "throwing diagnostic builder emits a plain fallback snapshot")
+    gamma_arena_test_assert.is_true(string.find(builder_diagnostic.reason, "injected diagnostic builder failure", 1, true) ~= nil, "throwing diagnostic builder fallback preserves reason")
+    gamma_arena_test_assert.equals(builder_env.warning_records[#builder_env.warning_records - 1].code, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "builder failure diagnostic still precedes integrity evidence")
+    gamma_arena_test_assert.equals(builder_env.warning_records[#builder_env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "builder failure still emits following integrity evidence")
+    gamma_arena_test_assert.equals(#builder_env.warning_records, 2, "builder failure emits exactly one diagnostic and one integrity event")
+    gamma_arena_test_assert.is_true(equal_plain_values(builder_fault.context.diagnostic, builder_diagnostic), "builder failure attaches the emitted fallback snapshot by value")
+
+    for _, case in ipairs({
+        { name = "nil", build = function() return nil end, reason = "Diagnostic builder must return a plain table" },
+        { name = "cyclic", build = function() local value = {}; value.self = value; return value end, reason = "cyclic registry value" },
+        { name = "function_leaf", build = function() return { leaf = function() end } end, reason = "non-plain registry value: function" }
+    }) do
+        local invalid_env, invalid_deps = fake_entity_environment()
+        local invalid_adapter = gamma_arena_entity_adapter.new(invalid_deps)
+        begin_entity_apply(invalid_adapter, invalid_env, entity_spec(1), "session-self-death-diagnostic-invalid-" .. case.name); pump_entity(invalid_adapter, invalid_env)
+        local invalid_id = invalid_adapter:registry_snapshot().npcs[1].id
+        invalid_deps.early_self_death_diagnostic_builder = case.build
+        local invalid_victim = { id = function() return invalid_id end }
+        gamma_arena_test_assert.is_true(invalid_adapter:on_npc_death(invalid_victim, invalid_victim).value, "invalid successful diagnostic builder return still accepts death: " .. case.name)
+        local invalid_fault = invalid_adapter:integrity_status()
+        gamma_arena_test_assert.equals(invalid_fault.value.cause, "early_self_death", "invalid successful diagnostic builder return preserves integrity cause: " .. case.name)
+        local invalid_diagnostic = invalid_env.warnings_by_code.GA_EARLY_SELF_DEATH_DIAGNOSTIC.context
+        gamma_arena_test_assert.equals(invalid_diagnostic.status, "error", "invalid successful diagnostic builder return emits plain fallback: " .. case.name)
+        gamma_arena_test_assert.is_true(string.find(invalid_diagnostic.reason, case.reason, 1, true) ~= nil, "invalid successful diagnostic builder fallback preserves reason: " .. case.name)
+        gamma_arena_test_assert.equals(invalid_env.warning_records[#invalid_env.warning_records - 1].code, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "invalid successful builder fallback precedes integrity evidence: " .. case.name)
+        gamma_arena_test_assert.equals(invalid_env.warning_records[#invalid_env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "invalid successful builder fallback emits following integrity evidence: " .. case.name)
+        gamma_arena_test_assert.equals(#invalid_env.warning_records, 2, "invalid successful builder fallback emits exactly one diagnostic and integrity event: " .. case.name)
+        gamma_arena_test_assert.is_true(equal_plain_values(invalid_fault.value.context.diagnostic, invalid_diagnostic), "invalid successful builder fallback attaches emitted snapshot by value: " .. case.name)
+    end
+
+    local extreme_env, extreme_deps = fake_entity_environment()
+    local extreme_adapter = gamma_arena_entity_adapter.new(extreme_deps)
+    begin_entity_apply(extreme_adapter, extreme_env, entity_spec(1), "session-self-death-diagnostic-extreme"); pump_entity(extreme_adapter, extreme_env)
+    local extreme_id = extreme_adapter:registry_snapshot().npcs[1].id
+    extreme_adapter.npc_by_id[extreme_id].spawn_position = { x = -1e308, y = -1e308, z = -1e308 }
+    extreme_env.online[extreme_id].position_value = { x = 1e308, y = 1e308, z = 1e308 }
+    local extreme_victim = { id = function() return extreme_id end }
+    gamma_arena_test_assert.is_true(extreme_adapter:on_npc_death(extreme_victim, extreme_victim).value, "extreme finite coordinates still accept death")
+    local extreme_diagnostic = extreme_adapter:integrity_status().value.context.diagnostic
+    gamma_arena_test_assert.equals(extreme_diagnostic.delta_x, nil, "overflowing x delta is omitted")
+    gamma_arena_test_assert.equals(extreme_diagnostic.delta_y, nil, "overflowing y delta is omitted")
+    gamma_arena_test_assert.equals(extreme_diagnostic.delta_z, nil, "overflowing z delta is omitted")
+    gamma_arena_test_assert.equals(extreme_diagnostic.displacement, nil, "overflowing displacement is omitted")
+
+    local existing_env, existing_deps = fake_entity_environment()
+    local existing_adapter = gamma_arena_entity_adapter.new(existing_deps)
+    begin_entity_apply(existing_adapter, existing_env, entity_spec(1), "session-self-death-diagnostic-existing"); pump_entity(existing_adapter, existing_env)
+    local existing_id = existing_adapter:registry_snapshot().npcs[1].id
+    local existing_record = existing_adapter.npc_by_id[existing_id]
+    gamma_arena_test_assert.is_true(existing_adapter:declare_integrity_fault(existing_record, "vertical_escape", { evidence = "preexisting" }).value, "fixture latches a pre-existing integrity fault")
+    local existing_victim = { id = function() return existing_id end }
+    gamma_arena_test_assert.is_true(existing_adapter:on_npc_death(existing_victim, existing_victim).value, "pre-existing integrity state does not suppress authoritative death")
+    gamma_arena_test_assert.equals(#existing_env.warning_records, 1, "pre-existing integrity state suppresses an orphan self-death diagnostic")
+    gamma_arena_test_assert.equals(existing_env.warning_records[1].code, "GA_FIGHT_INTEGRITY_FAILED", "only the already-attached integrity event remains")
+    gamma_arena_test_assert.equals(existing_adapter:integrity_status().value.cause, "vertical_escape", "pre-existing integrity cause remains authoritative")
+
+    local function ignored_callback_fixture(session_id)
+        local ignored_env, ignored_deps = fake_entity_environment()
+        local ignored_adapter = gamma_arena_entity_adapter.new(ignored_deps)
+        begin_entity_apply(ignored_adapter, ignored_env, entity_spec(1), session_id); pump_entity(ignored_adapter, ignored_env)
+        local ignored_id = ignored_adapter:registry_snapshot().npcs[1].id
+        return ignored_env, ignored_adapter, ignored_id, { id = function() return ignored_id end }
+    end
+    local nonself_env, nonself_adapter, nonself_id, nonself = ignored_callback_fixture("session-self-death-diagnostic-nonself")
+    gamma_arena_test_assert.is_true(nonself_adapter:on_npc_death(nonself, { id = function() return nonself_id + 1 end }).value, "non-self death remains authoritative")
+    gamma_arena_test_assert.equals(#nonself_env.warning_records, 0, "non-self callback emits no diagnostic warning")
+    local late_env, late_adapter, _, late = ignored_callback_fixture("session-self-death-diagnostic-late")
+    late_env:advance(20001)
+    gamma_arena_test_assert.is_true(late_adapter:on_npc_death(late, late).value, "late self-death remains accepted")
+    gamma_arena_test_assert.equals(#late_env.warning_records, 0, "late self-death emits no diagnostic warning")
+    local unregistered_env, unregistered_adapter = ignored_callback_fixture("session-self-death-diagnostic-unregistered")
+    gamma_arena_test_assert.is_false(unregistered_adapter:on_npc_death(999999, 999999).value, "unregistered self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#unregistered_env.warning_records, 0, "unregistered callback emits no diagnostic warning")
+    local mismatch_env, mismatch_adapter, mismatch_id, mismatch = ignored_callback_fixture("session-self-death-diagnostic-mismatch")
+    mismatch_env.tags[mismatch_id] = "foreign-session"
+    gamma_arena_test_assert.is_false(mismatch_adapter:on_npc_death(mismatch, mismatch).value, "mismatched-owner self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#mismatch_env.warning_records, 0, "mismatched-owner callback emits no diagnostic warning")
+    local inactive_env, inactive_adapter, _, inactive = ignored_callback_fixture("session-self-death-diagnostic-inactive")
+    inactive_adapter:cleanup(); pump_entity(inactive_adapter, inactive_env)
+    gamma_arena_test_assert.is_false(inactive_adapter:on_npc_death(inactive, inactive).value, "inactive self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#inactive_env.warning_records, 0, "inactive callback emits no diagnostic warning")
 end
 
 local function runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only()
@@ -5001,7 +5630,7 @@ local function task8_validated_spec(index)
     local private = {
         fight_index = index,
         fight_id = "ga-task8-" .. tostring(index),
-        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, cost = 4 } },
+        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, bonus_ammo = { section = "ammo_bonus_test", requested_category = "standard", resolved_category = "standard", boxes = 1 }, outfit = "outfit_test", knife = "knife_test", consumables = { "medkit_test" }, cost = 4 } },
         opponents = { { slot = 1, profile = "gamma_arena_bandit_novice", spawn_path = "spawn_test", loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, cost = 4 } } }
     }
     return {
@@ -5041,12 +5670,17 @@ local function task8_environment(options)
         restore_calls = 0,
         actor_loadout_owned = false,
         actor_loadout_cleanup = 0,
+        inventory_pending = options.inventory_pending == true,
+        inventory_verify_calls = 0,
         integrity_fault = nil
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
         normalize_for_arena = function() return gamma_arena_result.ok(true) end,
-        verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        verify_inventory_empty = function()
+            env.inventory_verify_calls = env.inventory_verify_calls + 1
+            return gamma_arena_result.ok(not env.inventory_pending)
+        end,
         acquire_input = function() env.acquired_input = env.acquired_input + 1; return gamma_arena_result.ok(true) end,
         release_input = function() env.released_input = env.released_input + 1; return gamma_arena_result.ok(true) end,
         cleanup_loadout_for_restore = function()
@@ -5263,6 +5897,18 @@ local function runtime_task8_checkpoint_readiness_gates_generation()
     gamma_arena_test_assert.equals(env.generated, 0, "the callback proving READY does not also generate")
     env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(env.generated, 1, "READY opens exactly one generation")
+end
+
+local function runtime_wait_inventory_blocks_fight_generation_and_loadout()
+    local env = task8_environment({ inventory_pending = true })
+    env.orchestrator.runtime_stage = "WAIT_INVENTORY"
+    env.orchestrator.machine_state = gamma_arena_state_machine.states.PREPARING
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "first inventory wait poll succeeds")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "second inventory wait poll succeeds")
+    gamma_arena_test_assert.equals(env.inventory_verify_calls, 2, "inventory absence is polled on every waiting update")
+    gamma_arena_test_assert.equals(env.generated, 0, "pending inventory drain blocks new FightSpec generation")
+    gamma_arena_test_assert.equals(env.applied, 0, "pending inventory drain blocks actor loadout application")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "WAIT_INVENTORY", "pending drain retains inventory wait stage")
 end
 
 local function runtime_task8_generation_and_validation_fail_without_world_mutation()
@@ -6514,6 +7160,14 @@ local cases = {
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }
+    ,{ name = "runtime_actor_inventory_drain_waits_for_looted_items", fn = runtime_actor_inventory_drain_waits_for_looted_items }
+    ,{ name = "runtime_actor_inventory_drain_releases_newly_surfaced_item_once", fn = runtime_actor_inventory_drain_releases_newly_surfaced_item_once }
+    ,{ name = "runtime_actor_inventory_drain_times_out_with_sorted_evidence", fn = runtime_actor_inventory_drain_times_out_with_sorted_evidence }
+    ,{ name = "runtime_actor_inventory_drain_timeout_is_wrap_safe", fn = runtime_actor_inventory_drain_timeout_is_wrap_safe }
+    ,{ name = "runtime_actor_inventory_drain_rejects_unowned_public_actor", fn = runtime_actor_inventory_drain_rejects_unowned_public_actor }
+    ,{ name = "runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values", fn = runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values }
+    ,{ name = "runtime_actor_inventory_drain_submits_sorted_deduplicated_ids", fn = runtime_actor_inventory_drain_submits_sorted_deduplicated_ids }
+    ,{ name = "runtime_actor_inventory_drain_cleanup_clears_transaction", fn = runtime_actor_inventory_drain_cleanup_clears_transaction }
     ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
@@ -6542,6 +7196,7 @@ local cases = {
     ,{ name = "runtime_bootstrap_missing_outfit_repair_type_is_ordinary", fn = runtime_bootstrap_missing_outfit_repair_type_is_ordinary }
     ,{ name = "runtime_actor_loadout_exo_charge_failures_rollback", fn = runtime_actor_loadout_exo_charge_failures_rollback }
     ,{ name = "runtime_actor_loadout_derives_unreadable_server_ammo_quantity", fn = runtime_actor_loadout_derives_unreadable_server_ammo_quantity }
+    ,{ name = "runtime_actor_loadout_creates_exact_bonus_ammo_box", fn = runtime_actor_loadout_creates_exact_bonus_ammo_box }
     ,{ name = "runtime_actor_loadout_rollback_blocks_disconnect_until_absent", fn = runtime_actor_loadout_rollback_blocks_disconnect_until_absent }
     ,{ name = "runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect", fn = runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect }
     ,{ name = "runtime_bootstrap_actor_existence_lookup_fails_closed", fn = runtime_bootstrap_actor_existence_lookup_fails_closed }
@@ -6550,10 +7205,14 @@ local cases = {
     ,{ name = "runtime_actor_loadout_post_submit_reuse_is_never_released_twice", fn = runtime_actor_loadout_post_submit_reuse_is_never_released_twice }
     ,{ name = "runtime_actor_loadout_malformed_ownership_proof_fails_closed", fn = runtime_actor_loadout_malformed_ownership_proof_fails_closed }
     ,{ name = "runtime_actor_loadout_exact_owned_match_releases_once", fn = runtime_actor_loadout_exact_owned_match_releases_once }
+    ,{ name = "runtime_actor_loadout_bonus_ammo_rollback_is_owned", fn = runtime_actor_loadout_bonus_ammo_rollback_is_owned }
+    ,{ name = "runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids", fn = runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids }
     ,{ name = "runtime_actor_loadout_apply_failures_never_drop_valid_created_ids", fn = runtime_actor_loadout_apply_failures_never_drop_valid_created_ids }
     ,{ name = "runtime_actor_loadout_failed_tag_write_never_manufactures_ownership", fn = runtime_actor_loadout_failed_tag_write_never_manufactures_ownership }
     ,{ name = "runtime_bootstrap_hostility_port_is_feature_probed", fn = runtime_bootstrap_hostility_port_is_feature_probed }
     ,{ name = "runtime_entity_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_ammo_box_size_failure_precedes_actor_mutation }
+    ,{ name = "runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation }
+    ,{ name = "runtime_entity_preflights_base_and_bonus_ammo_independently", fn = runtime_entity_preflights_base_and_bonus_ammo_independently }
     ,{ name = "runtime_entity_partial_failures_rollback_in_reverse", fn = runtime_entity_partial_failures_rollback_in_reverse }
     ,{ name = "runtime_entity_purges_only_snapshot_children_still_parented", fn = runtime_entity_purges_only_snapshot_children_still_parented }
     ,{ name = "runtime_entity_supports_real_get_children_iterator", fn = runtime_entity_supports_real_get_children_iterator }
@@ -6592,6 +7251,7 @@ local cases = {
     ,{ name = "runtime_entity_vertical_escape_requires_grace", fn = runtime_entity_vertical_escape_requires_grace }
     ,{ name = "runtime_entity_missing_is_integrity_not_victory", fn = runtime_entity_missing_is_integrity_not_victory }
     ,{ name = "runtime_entity_early_self_death_is_integrity", fn = runtime_entity_early_self_death_is_integrity }
+    ,{ name = "runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity", fn = runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity }
     ,{ name = "runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only", fn = runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only }
     ,{ name = "runtime_entity_numeric_death_requires_test_injection", fn = runtime_entity_numeric_death_requires_test_injection }
     ,{ name = "runtime_entity_release_is_async_and_never_direct", fn = runtime_entity_release_is_async_and_never_direct }
@@ -6610,6 +7270,7 @@ local cases = {
     ,{ name = "runtime_entity_preserves_dynamic_opponent_community", fn = runtime_entity_preserves_dynamic_opponent_community }
     ,{ name = "runtime_orchestrator_living_count_fails_closed", fn = runtime_orchestrator_living_count_fails_closed }
     ,{ name = "runtime_task8_checkpoint_readiness_gates_generation", fn = runtime_task8_checkpoint_readiness_gates_generation }
+    ,{ name = "runtime_wait_inventory_blocks_fight_generation_and_loadout", fn = runtime_wait_inventory_blocks_fight_generation_and_loadout }
     ,{ name = "runtime_task8_generation_and_validation_fail_without_world_mutation", fn = runtime_task8_generation_and_validation_fail_without_world_mutation }
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }

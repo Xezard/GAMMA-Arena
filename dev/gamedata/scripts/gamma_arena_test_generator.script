@@ -13,7 +13,7 @@ function fixture_factory(options)
         end
     end
     local catalog = { sections = {
-        meta=section{schema_version="4",revision="5",generator_version="5"}, profiles=section{ids="novice,trainee,experienced,veteran"},
+        meta=section{schema_version="5",revision="6",generator_version="6"}, profiles=section{ids="novice,trainee,experienced,veteran"},
         profile_novice=section{section="gamma_arena_bandit_novice",cost="1"}, profile_trainee=section{section="gamma_arena_bandit_trainee",cost="2"}, profile_experienced=section{section="gamma_arena_bandit_experienced",cost="3"}, profile_veteran=section{section="gamma_arena_bandit_veteran",cost="4"},
         weapons=section{ids="pm,mp5,ak74u,ak74,wincheaster1300"}, weapon_pm=section{section="wpn_pm",ammo="ammo_9x18_fmj",cost="2",ammo_box_min="1",ammo_box_max="2",kind="w_pistol",slot="1"}, weapon_mp5=section{section="wpn_mp5",ammo="ammo_9x19_fmj",cost="4",ammo_box_min="1",ammo_box_max="2",kind="w_smg",slot="1"}, weapon_ak74u=section{section="wpn_ak74u",ammo="ammo_5.45x39_fmj",cost="5",ammo_box_min="1",ammo_box_max="2",kind="w_rifle",slot="2"}, weapon_ak74=section{section="wpn_ak74",ammo="ammo_5.45x39_fmj",cost="6",ammo_box_min="1",ammo_box_max="2",kind="w_rifle",slot="2"}, weapon_wincheaster1300=section{section="wpn_wincheaster1300",ammo="ammo_12x70_buck",cost="5",ammo_box_min="1",ammo_box_max="2",kind="w_shotgun",slot="2"},
         ammo=section{ids="ammo_9x18_fmj,ammo_9x19_fmj,ammo_5.45x39_fmj,ammo_12x70_buck"}, ammo_ammo_9x18_fmj=section{section="ammo_9x18_fmj",cost="1"}, ammo_ammo_9x19_fmj=section{section="ammo_9x19_fmj",cost="1"}, ["ammo_ammo_5.45x39_fmj"]=section{section="ammo_5.45x39_fmj",cost="2"}, ammo_ammo_12x70_buck=section{section="ammo_12x70_buck",cost="2"},
@@ -42,9 +42,14 @@ function fixture_factory(options)
             local values = system_sections[name]
             return values and values[key] or nil
         end
+    end
+    if options.disable_system_u32 ~= true then
         factory.read_system_u32 = function(name, key)
-            local values = system_sections[name]
-            return values and tonumber(values[key]) or nil
+            if options.throw_system_u32 then error("fixture system u32 failure") end
+            local values = type(system_sections) == "table" and system_sections[name] or nil
+            if values ~= nil then return tonumber(values[key]) end
+            local base_box_sizes = { ammo_9x18_fmj = 30, ammo_9x19_fmj = 30, ["ammo_5.45x39_fmj"] = 30, ammo_12x70_buck = 10 }
+            return key == "box_size" and base_box_sizes[name] or nil
         end
     end
     if type(loadout_sections) == "table" then
@@ -250,9 +255,21 @@ local function master_powered_exo_rate_is_rare()
 end
 
 local function catalog_augments_from_effective_system_without_cartesian_product()
+    local function has_unique_sections(values)
+        local seen = {}
+        for _, value in ipairs(values) do
+            if seen[value.section] then return false end
+            seen[value.section] = true
+        end
+        return true
+    end
     local system_sections = {
         wpn_dynamic_fixture = { kind="w_rifle", slot="2", ammo_mag_size="30", ammo_class="ammo_dynamic_fixture" },
         ammo_dynamic_fixture = { kind="w_ammo", box_size="30" },
+        wpn_pm = { kind="w_pistol", slot="1", ammo_mag_size="8", ammo_class="ammo_9x18_fmj,ammo_9x18_hp,ammo_9x18_ap" },
+        ammo_9x18_fmj = { kind="w_ammo", box_size="50" },
+        ammo_9x18_hp = { kind="w_ammo", box_size="50" },
+        ammo_9x18_ap = { kind="w_ammo", box_size="50" },
         dynamic_fixture_outfit = { kind="o_medium", slot="6" }
     }
     local loadout_sections = {
@@ -287,8 +304,16 @@ local function catalog_augments_from_effective_system_without_cartesian_product(
     gamma_arena_test_assert.is_true(first.value.combinations == nil, "dynamic catalog never builds a weapon/outfit Cartesian product")
     gamma_arena_test_assert.equals(first.value.weapons.wpn_dynamic_fixture.section, "wpn_dynamic_fixture", "installed weapon is keyed by exact section")
     gamma_arena_test_assert.equals(first.value.ammo.ammo_dynamic_fixture.section, "ammo_dynamic_fixture", "installed ammo is keyed by exact section")
+    gamma_arena_test_assert.equals(#first.value.weapons.pm.ammo_variants, 3, "installed fallback weapon record adopts clean discovered ammo variants")
+    gamma_arena_test_assert.equals(first.value.weapons.pm.ammo_variants[2].category, "special", "installed fallback weapon retains discovered special variant")
+    gamma_arena_test_assert.equals(first.value.weapons.pm.ammo_variants[3].category, "armor_piercing", "installed fallback weapon retains discovered AP variant")
+    gamma_arena_test_assert.equals(first.value.weapons.wpn_pm, nil, "fallback overlap does not add a second section-keyed weapon record")
+    gamma_arena_test_assert.is_true(has_unique_sections(first.value.weapon_list), "normalized weapon list has unique sections after fallback overlap")
+    gamma_arena_test_assert.is_true(has_unique_sections(first.value.outfit_list), "normalized outfit list has unique sections after dynamic augmentation")
+    gamma_arena_test_assert.is_true(has_unique_sections(first.value.knife_list), "normalized knife list has unique sections after dynamic augmentation")
+    gamma_arena_test_assert.is_true(type(first.value.ammo.ammo_9x18_hp) == "table" and type(first.value.ammo.ammo_9x18_ap) == "table", "fallback weapon variants are materialized in the ammo catalog")
     gamma_arena_test_assert.equals(first.value.outfits.dynamic_fixture_outfit.section, "dynamic_fixture_outfit", "installed outfit is keyed by exact section")
-    gamma_arena_test_assert.equals(first.value.generator_version, 5, "dynamic selection has an explicit generator version")
+    gamma_arena_test_assert.equals(first.value.generator_version, 6, "dynamic selection has an explicit generator version")
     gamma_arena_test_assert.is_true(gamma_arena_number.is_positive_integer(first.value.minimum_loadout_cost), "dynamic catalog exposes minimum viable loadout cost")
     gamma_arena_test_assert.equals(#first.value.weapon_pools_by_profile.gamma_arena_stalker_novice.primary, 1, "faction primary pool intersects effective eligible firearms")
     gamma_arena_test_assert.equals(first.value.weapon_pools_by_profile.gamma_arena_stalker_novice.primary[1].section, "wpn_dynamic_fixture", "faction primary pool stores normalized weapon records")
@@ -403,6 +428,18 @@ local function catalog_rejects_malformed_data()
     local invalid_open = gamma_arena_catalog.load({ open=function() return true end, section_exists=function() return true end })
     gamma_arena_test_assert.is_false(invalid_open.ok, "invalid opened objects must fail closed")
     gamma_arena_test_assert.is_true(string.sub(invalid_open.error.code,1,11) == "GA_CATALOG_", "invalid opened object code")
+    for _, options in ipairs({
+        { disable_system_u32 = true },
+        { throw_system_u32 = true },
+        { system_sections = { ammo_9x18_fmj = { box_size = "zero" } } },
+        { system_sections = { ammo_9x18_fmj = { box_size = "0" } } },
+        { system_sections = { ammo_9x18_fmj = { box_size = "-1" } } },
+        { system_sections = { ammo_9x18_fmj = { box_size = "4294967296" } } }
+    }) do
+        local invalid_variant = gamma_arena_catalog.load(fixture_factory(options))
+        gamma_arena_test_assert.is_false(invalid_variant.ok, "fallback ammo box size must fail closed")
+        gamma_arena_test_assert.equals(invalid_variant.error.code, "GA_CATALOG_AMMO_VARIANT_INVALID", "fallback ammo variant error code")
+    end
 end
 local function validator_never_throws_for_malformed_specs()
     local snapshot = catalogs()
@@ -498,6 +535,117 @@ local function stable_and_fight_index()
     gamma_arena_test_assert.is_true(first.value.fight_id ~= changed.value.fight_id and procedural_differs(first.value,changed.value),"fight index must alter a procedural field")
     gamma_arena_test_assert.is_true(first.value.fight_id ~= changed_seed.value.fight_id and procedural_differs(first.value,changed_seed.value),"session seed must alter a procedural field")
 end
+
+local function bonus_ammo_category_boundaries_and_fallback()
+    local weapon = {
+        ammo = "ammo_bonus_fmj",
+        ammo_variants = {
+            { section = "ammo_bonus_fmj", category = "standard", box_size = 30 },
+            { section = "ammo_bonus_hp", category = "special", box_size = 30 },
+            { section = "ammo_bonus_ap", category = "armor_piercing", box_size = 30 }
+        }
+    }
+    local function select(draw)
+        return gamma_arena_generator.select_bonus_ammo(
+            { next_int = function() return draw end },
+            { pick = function(_, values) return values[#values] end },
+            weapon
+        )
+    end
+    gamma_arena_test_assert.equals(select(1).requested_category, "standard", "bonus category lower standard boundary")
+    gamma_arena_test_assert.equals(select(60).requested_category, "standard", "bonus category upper standard boundary")
+    gamma_arena_test_assert.equals(select(61).requested_category, "special", "bonus category lower special boundary")
+    gamma_arena_test_assert.equals(select(75).requested_category, "special", "bonus category upper special boundary")
+    gamma_arena_test_assert.equals(select(76).requested_category, "armor_piercing", "bonus category lower AP boundary")
+    gamma_arena_test_assert.equals(select(100).requested_category, "armor_piercing", "bonus category upper AP boundary")
+    gamma_arena_test_assert.equals(select(61).section, "ammo_bonus_hp", "available category selects a compatible variant")
+    local fallback_weapon = { ammo = "ammo_bonus_fmj", ammo_variants = { weapon.ammo_variants[1] } }
+    local fallback = gamma_arena_generator.select_bonus_ammo({ next_int = function() return 76 end }, { pick = function(_, values) return values[1] end }, fallback_weapon)
+    gamma_arena_test_assert.equals(fallback.requested_category, "armor_piercing", "fallback preserves requested category")
+    gamma_arena_test_assert.equals(fallback.resolved_category, "standard", "missing category resolves to standard")
+    gamma_arena_test_assert.equals(fallback.section, "ammo_bonus_fmj", "missing category selects the base ammo")
+    gamma_arena_test_assert.equals(fallback.boxes, 1, "bonus always grants one actor-only box")
+end
+
+local function actor_bonus_ammo_is_deterministic_and_outside_budget()
+    local snapshot = catalogs()
+    local difficulty = snapshot.difficulties.veteran
+    local first = generate_fixture(request(3735928559, "veteran"), 7, snapshot)
+    local second = generate_fixture(request(3735928559, "veteran"), 7, snapshot)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "bonus fixture generates")
+    gamma_arena_test_assert.equals(first.value.actor.loadout.bonus_ammo.section, second.value.actor.loadout.bonus_ammo.section, "same seed and catalog select the same bonus section")
+    gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value), gamma_arena_generator.stable_encode(second.value), "bonus fields participate in stable encoding")
+    gamma_arena_test_assert.equals(first.value.actor.loadout.bonus_ammo.boxes, 1, "actor receives exactly one bonus box")
+    gamma_arena_test_assert.is_true(first.value.actor.loadout.cost <= difficulty.player_loadout_budget, "bonus does not alter actor loadout cost or affordability")
+    for _, opponent in ipairs(first.value.opponents) do gamma_arena_test_assert.equals(opponent.loadout.bonus_ammo, nil, "opponents never receive bonus ammo") end
+    gamma_arena_test_assert.is_true(string.find(gamma_arena_generator.stable_encode(first.value), ",bonus:", 1, true) ~= nil, "actor stable encoding includes bonus fields")
+end
+
+local function add_bonus_variants(snapshot)
+    for _, weapon in ipairs(snapshot.weapon_list) do
+        local base = weapon.ammo_variants[1]
+        weapon.ammo_variants = {
+            base,
+            { section = weapon.ammo .. "_hp", category = "special", box_size = base.box_size },
+            { section = weapon.ammo .. "_ap", category = "armor_piercing", box_size = base.box_size }
+        }
+    end
+end
+
+local function bonus_ammo_seed_sweep_and_stream_isolation()
+    local enriched = catalogs()
+    add_bonus_variants(enriched)
+    local seen = {}
+    for seed = 0, 1023 do
+        local generated = generate_fixture(request(seed, "rookie"), seed % 32, enriched)
+        gamma_arena_test_assert.is_true(generated.ok, "bonus category seed sweep generates")
+        local bonus = generated.value.actor.loadout.bonus_ammo
+        seen[bonus.requested_category] = true
+        gamma_arena_test_assert.equals(bonus.resolved_category, bonus.requested_category, "available category resolves without fallback")
+    end
+    for _, category in ipairs({ "standard", "special", "armor_piercing" }) do gamma_arena_test_assert.is_true(seen[category], "seed sweep reaches every available bonus category") end
+
+    local base = catalogs()
+    local with_variants = catalogs()
+    add_bonus_variants(with_variants)
+    for seed = 0, 127 do
+        local left = generate_fixture(request(seed, "veteran"), seed % 16, base)
+        local right = generate_fixture(request(seed, "veteran"), seed % 16, with_variants)
+        gamma_arena_test_assert.is_true(left.ok and right.ok, "stream isolation fixtures generate")
+        local left_gear, right_gear = left.value.actor.loadout, right.value.actor.loadout
+        gamma_arena_test_assert.equals(left_gear.weapon, right_gear.weapon, "bonus selection cannot consume actor weapon stream")
+        gamma_arena_test_assert.equals(left_gear.ammo_boxes, right_gear.ammo_boxes, "bonus selection cannot consume actor base-box stream")
+        gamma_arena_test_assert.equals(left_gear.outfit, right_gear.outfit, "bonus selection cannot consume actor outfit stream")
+        gamma_arena_test_assert.equals(left_gear.cost, right_gear.cost, "bonus selection cannot alter actor affordability")
+    end
+end
+
+local function validator_rejects_invalid_bonus_ammo()
+    local snapshot = catalogs()
+    local mutations = {
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo = nil end },
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo.boxes = 2 end },
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo.requested_category = "unknown" end },
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo.section = "ammo_missing" end },
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo.resolved_category = "special" end },
+        { code = "GA_LOADOUT_BONUS_AMMO_INVALID", fn = function(spec) spec.actor.loadout.bonus_ammo.section = "ammo_bad" end },
+        { code = "GA_LOADOUT_BONUS_SCOPE_INVALID", fn = function(spec) spec.opponents[1].loadout.bonus_ammo = spec.actor.loadout.bonus_ammo end }
+    }
+    for _, mutation in ipairs(mutations) do
+        local generated = generate_fixture(request(17, "rookie"), 0, snapshot)
+        mutation.fn(generated.value)
+        local result = validate_fixture(generated.value, snapshot)
+        gamma_arena_test_assert.is_false(result.ok, "invalid bonus ammo must fail validation")
+        gamma_arena_test_assert.equals(result.error.code, mutation.code, "invalid bonus ammo error code")
+    end
+    local generated = generate_fixture(request(17, "rookie"), 0, snapshot)
+    local selected = snapshot.weapons[generated.value.actor.loadout.weapon]
+    for _, variant in ipairs(selected.ammo_variants) do
+        if variant.section == generated.value.actor.loadout.bonus_ammo.section then variant.box_size = 0 end
+    end
+    local invalid_size = validate_fixture(generated.value, snapshot)
+    gamma_arena_test_assert.equals(invalid_size.error.code, "GA_LOADOUT_BONUS_AMMO_INVALID", "bonus validator independently requires a positive declared box size")
+end
 local function finite_integer_guards()
     for _, value in ipairs({math.huge,-math.huge,0/0}) do
         gamma_arena_test_assert.is_false(gamma_arena_number.is_finite(value),"non-finite value must fail the shared guard")
@@ -550,7 +698,7 @@ local function generator_primary_pool_affordability_falls_back()
     gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
 end
 
-local function golden_fights_v3()
+local function golden_fights_v4()
     local snapshot = catalogs()
     for _, expected in ipairs({
         { seed = 0, difficulty = "rookie", fight = 0 },
@@ -563,11 +711,11 @@ local function golden_fights_v3()
         gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
         local encoded = gamma_arena_generator.stable_encode(first.value)
         gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
-        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=3", 1, true) ~= nil, "FightSpec v3 is encoded")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=4", 1, true) ~= nil, "FightSpec v4 is encoded")
     end
 end
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v3",fn=stable_and_fight_index},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v3",fn=golden_fights_v3}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v4",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v4",fn=golden_fights_v4}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end
