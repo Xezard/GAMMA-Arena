@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 }
+$RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 $script:Failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -23,6 +24,57 @@ function Test-TextPattern([string]$Path, [string]$Pattern) {
     return [bool](Select-String -LiteralPath $Path -Pattern $Pattern -Quiet)
 }
 
+function Assert-NoReservedLuaFormalParameters([string]$Path) {
+    $reserved = @(
+        'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for',
+        'function', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat',
+        'return', 'then', 'true', 'until', 'while'
+    )
+    $declarationPattern = '(?ms)\bfunction(?:\s+[A-Za-z_][A-Za-z0-9_:.]*)?\s*\((?<parameters>[^)]*)\)'
+    $Content = Get-Content -LiteralPath $Path -Raw
+
+    foreach ($Declaration in [regex]::Matches($Content, $declarationPattern)) {
+        foreach ($Parameter in $Declaration.Groups['parameters'].Value.Split(',')) {
+            $Name = $Parameter.Trim()
+            if ($Name -ne '...' -and $reserved -contains $Name) {
+                Assert-True $false "Reserved Lua formal parameter ${Name}: $(Get-RelativeRepoPath $Path)"
+            }
+        }
+    }
+}
+
+$LuaFormalFixtureRoot = Join-Path $RepoRoot ('.reserved-lua-formal-fixtures-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $LuaFormalFixtureRoot -Force | Out-Null
+    $NamedFixture = Join-Path $LuaFormalFixtureRoot 'named.script'
+    $AnonymousFixture = Join-Path $LuaFormalFixtureRoot 'anonymous.script'
+    $ReservedFixture = Join-Path $LuaFormalFixtureRoot 'reserved.script'
+    [IO.File]::WriteAllText($NamedFixture, "function named(first, second, ...)`nend`n")
+    [IO.File]::WriteAllText($AnonymousFixture, "local callback = function(alpha, beta, ...)`nend`n")
+    [IO.File]::WriteAllText($ReservedFixture, "local function invalid(now, then)`nend`n")
+
+    $OriginalFailures = $script:Failures
+    $FixtureFailures = New-Object System.Collections.Generic.List[string]
+    $script:Failures = $FixtureFailures
+    Assert-NoReservedLuaFormalParameters $NamedFixture
+    Assert-NoReservedLuaFormalParameters $AnonymousFixture
+    Assert-NoReservedLuaFormalParameters $ReservedFixture
+    $script:Failures = $OriginalFailures
+
+    Assert-True ($FixtureFailures.Count -eq 1) 'Lua reserved-formal self-check must accept named and anonymous ordinary identifiers and reject exactly one reserved formal.'
+    if ($FixtureFailures.Count -eq 1) {
+        $ReservedDiagnostic = $FixtureFailures[0]
+        Assert-True ($ReservedDiagnostic -match [regex]::Escape((Get-RelativeRepoPath $ReservedFixture))) 'Lua reserved-formal self-check diagnostic must include the fixture path.'
+        Assert-True ($ReservedDiagnostic -match '\bthen\b') 'Lua reserved-formal self-check diagnostic must include the reserved keyword.'
+    }
+}
+finally {
+    $script:Failures = $OriginalFailures
+    if (Test-Path -LiteralPath $LuaFormalFixtureRoot) {
+        Remove-Item -LiteralPath $LuaFormalFixtureRoot -Recurse -Force
+    }
+}
+
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'VERSION')) 'VERSION is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata')) 'src/gamedata is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitattributes')) '.gitattributes is missing'
@@ -35,6 +87,15 @@ $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '
 })
 foreach ($Script in $AllLuaScripts) {
     Assert-True (-not (Test-TextPattern $Script.FullName '(?m)\b[A-Za-z_][A-Za-z0-9_]*\.[0-9][A-Za-z0-9_.]*\s*=')) "Invalid bare Lua table key containing a dot: $(Get-RelativeRepoPath $Script.FullName)"
+}
+
+foreach ($ScriptRoot in @('src\gamedata\scripts', 'dev\gamedata\scripts')) {
+    $ScriptDirectory = Join-Path $RepoRoot $ScriptRoot
+    if (Test-Path -LiteralPath $ScriptDirectory) {
+        foreach ($Script in @(Get-ChildItem -LiteralPath $ScriptDirectory -File -Recurse -Filter '*.script')) {
+            Assert-NoReservedLuaFormalParameters $Script.FullName
+        }
+    }
 }
 
 $ForbiddenOverrides = @(

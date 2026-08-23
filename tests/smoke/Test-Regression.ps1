@@ -815,6 +815,24 @@ try {
     $NestedGaRandomExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NestedGaRandomFixture)
     Assert-True ($NestedGaRandomExit -ne 0) 'Static policy must reject a nested ga_* math.randomseed call.'
 
+    $ReservedLuaFormalFixture = New-Task7Fixture 'reserved-lua-formal'
+    $ReservedLuaFormalPath = Join-Path $ReservedLuaFormalFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
+    $ReservedLuaFormalContent = Get-Content -LiteralPath $ReservedLuaFormalPath -Raw
+    $CorrectedElapsedHelper = '(?ms)local function elapsed_u32\(now,\s*started\)\s*return \(now - started\) % 4294967296\s*end'
+    $BrokenElapsedHelper = @'
+local function elapsed_u32(now, then)
+    return (now - then) % 4294967296
+end
+'@
+    $ReservedLuaFormalMutationCount = ([regex]::Matches($ReservedLuaFormalContent, $CorrectedElapsedHelper)).Count
+    Assert-True ($ReservedLuaFormalMutationCount -eq 1) 'Reserved Lua formal regression fixture must find the corrected elapsed_u32 helper exactly once.'
+    if ($ReservedLuaFormalMutationCount -eq 1) {
+        $ReservedLuaFormalMutated = [regex]::Replace($ReservedLuaFormalContent, $CorrectedElapsedHelper, $BrokenElapsedHelper, 1)
+        Write-FixtureFile $ReservedLuaFormalFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script' $ReservedLuaFormalMutated
+        $ReservedLuaFormalResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $ReservedLuaFormalFixture) -CaptureOutput
+        Assert-True ($ReservedLuaFormalResult.ExitCode -ne 0 -and $ReservedLuaFormalResult.Output -match 'gamma_arena_actor_adapter\.script' -and $ReservedLuaFormalResult.Output -match '\bthen\b') 'Static policy must reject a reserved Lua formal parameter with the actor adapter path and keyword diagnostic.'
+    }
+
     $PrefixedMutantCatalogFixture = New-Task7Fixture 'prefixed-mutant-catalog'
     Write-FixtureFile $PrefixedMutantCatalogFixture 'src\gamedata\configs\gamma_arena\arena_population.ltx' 'sim_default_bloodsucker = 1'
     $PrefixedMutantCatalogExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PrefixedMutantCatalogFixture)
