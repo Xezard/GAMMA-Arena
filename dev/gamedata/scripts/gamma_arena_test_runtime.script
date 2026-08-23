@@ -1348,6 +1348,61 @@ local function bootstrap_requires_unregister_before_composition()
     gamma_arena_test_assert.equals(compose_count, 0, "feature probe must run before orchestrator/router composition")
 end
 
+local function runtime_bootstrap_status_preserves_initialization_result()
+    local module_before_registration = gamma_arena_bootstrap.runtime_status()
+    gamma_arena_test_assert.is_false(module_before_registration.ok, "module readiness must report not ready before bootstrap creates a registrar")
+    gamma_arena_test_assert.equals(module_before_registration.error.code, "GA_BOOTSTRAP_NOT_READY", "module readiness code before bootstrap creation")
+
+    local unregistered = gamma_arena_bootstrap.new_registrar({
+        compose = function() return {} end,
+        register = function() end,
+        unregister = function() end
+    })
+    local before_registration = unregistered:runtime_status()
+    gamma_arena_test_assert.is_false(before_registration.ok, "new registrar must report not ready before registration")
+    gamma_arena_test_assert.equals(before_registration.error.code, "GA_BOOTSTRAP_NOT_READY", "unregistered readiness code")
+    gamma_arena_test_assert.equals(before_registration.error.context.registration_state, "idle", "unregistered readiness state")
+
+    local failed_registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function() error("injected composition failure") end,
+        register = function() end,
+        unregister = function() end
+    })
+    local failed = failed_registrar:register_all()
+    local failed_status = failed_registrar:runtime_status()
+    gamma_arena_test_assert.is_false(failed.ok, "injected composition failure must fail registration")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_BOOTSTRAP_COMPOSE_FAILED", "composition failure code")
+    gamma_arena_test_assert.is_true(failed.error.context ~= nil, "composition failure must retain context")
+    gamma_arena_test_assert.is_true(failed_status == failed, "readiness must return the original failed registration Result")
+    gamma_arena_test_assert.is_true(failed_status.error.context == failed.error.context, "readiness must preserve failed Result context identity")
+
+    local compose_count, register_count, unregister_count = 0, 0, 0
+    local registered = gamma_arena_bootstrap.new_registrar({
+        compose = function()
+            compose_count = compose_count + 1
+            return {}
+        end,
+        make_callbacks = function()
+            local callbacks = {}
+            for _, name in ipairs(callback_names) do callbacks[name] = function() return gamma_arena_result.ok(true) end end
+            return callbacks
+        end,
+        register = function() register_count = register_count + 1 end,
+        unregister = function() unregister_count = unregister_count + 1 end
+    })
+    local registration = registered:register_all()
+    gamma_arena_test_assert.is_true(registration.ok, "complete callback registration must succeed")
+    local registration_state, instance, callbacks, registered_entries, last_result = registered.registration_state, registered.instance, registered.callbacks, registered.registered, registered.last_result
+    local first_status = registered:runtime_status()
+    local second_status = registered:runtime_status()
+    gamma_arena_test_assert.is_true(first_status.ok and second_status.ok, "readiness succeeds only after registration state, instance, and callbacks are ready")
+    gamma_arena_test_assert.equals(compose_count, 1, "readiness must not recompose")
+    gamma_arena_test_assert.equals(register_count, #callback_names, "readiness must not register callbacks")
+    gamma_arena_test_assert.equals(unregister_count, 0, "readiness must not unregister callbacks")
+    gamma_arena_test_assert.equals(registered.registration_state, registration_state, "readiness must not change registration state")
+    gamma_arena_test_assert.is_true(registered.instance == instance and registered.callbacks == callbacks and registered.registered == registered_entries and registered.last_result == last_result, "readiness must not change registrar fields")
+end
+
 local function net_destroy_teardown_honors_checkpoint_latch()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local reasons = {}
@@ -7157,6 +7212,7 @@ local cases = {
     { name = "runtime_bootstrap_registration_rolls_back_every_position", fn = bootstrap_registration_rolls_back_every_position },
     { name = "runtime_bootstrap_registration_poison_blocks_retry", fn = bootstrap_registration_poison_blocks_retry },
     { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
+    { name = "runtime_bootstrap_status_preserves_initialization_result", fn = runtime_bootstrap_status_preserves_initialization_result },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }

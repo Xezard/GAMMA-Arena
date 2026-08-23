@@ -1687,7 +1687,7 @@ local function operation_failed(called, value)
     return not called or value == false or (type(value) == "table" and value.ok == false)
 end
 
-function Registrar:register_all()
+function Registrar:register_all_impl()
     if self.registration_state == "registered" then return gamma_arena_result.ok(false) end
     if self.registration_state == "poisoned" then
         return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_POISONED", "Arena callback registration is poisoned after rollback failure")
@@ -1755,9 +1755,40 @@ function Registrar:register_all()
     return gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_FAILED", "Arena callback registration failed and was rolled back", registration_failure)
 end
 
+function Registrar:register_all()
+    local result = self:register_all_impl()
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        result = gamma_arena_result.err("GA_BOOTSTRAP_REGISTRATION_FAILED", "Arena callback registration returned an invalid Result")
+    end
+    self.last_result = result
+    return result
+end
+
+function Registrar:runtime_status()
+    if self.last_result ~= nil and self.last_result.ok == false then
+        return self.last_result
+    end
+    if self.registration_state ~= "registered"
+        or self.instance == nil
+        or type(self.callbacks) ~= "table" then
+        return gamma_arena_result.err(
+            "GA_BOOTSTRAP_NOT_READY",
+            "Arena runtime is not registered",
+            { registration_state = self.registration_state })
+    end
+    return gamma_arena_result.ok(true)
+end
+
 function new_registrar(deps)
     if type(deps) ~= "table" then return nil end
-    return setmetatable({ deps = deps, registration_state = "idle", instance = nil, callbacks = nil, registered = {} }, Registrar)
+    return setmetatable({ deps = deps, registration_state = "idle", instance = nil, callbacks = nil, registered = {}, last_result = nil }, Registrar)
+end
+
+function runtime_status()
+    if runtime_registrar == nil then
+        return gamma_arena_result.err("GA_BOOTSTRAP_NOT_READY", "Arena runtime is not registered")
+    end
+    return runtime_registrar:runtime_status()
 end
 
 function on_game_start()
