@@ -339,7 +339,7 @@ if (Test-Path -LiteralPath $UiScriptPath) {
     Assert-True ($UiContent -match 'ShowFatal') 'Start UI must expose fatal-error mode'
     Assert-True ($UiContent -match 'fatal_main_menu') 'Fatal mode must expose exactly one main-menu action seam'
     Assert-True ($UiContent -match 'GA_LAUNCH_STALE_CLEARED') 'Start UI must retry once after an atomically cleared stale launch'
-    Assert-True (([regex]::Matches($UiContent, 'issue_launch\s*\(')).Count -ge 2) 'Start UI stale recovery must perform a fresh launch issuance attempt'
+    Assert-True ($UiContent -match 'local\s+function\s+retry_stale[\s\S]{0,500}return\s+issue\(\)') 'Start UI stale recovery must perform a fresh launch issuance attempt'
     Assert-True ($UiContent -match 'function\s+invoke_fatal_main_menu') 'Fatal UI must expose a total callback-result propagation seam'
     Assert-True ($UiContent -match 'return\s+invoke_fatal_main_menu') 'Fatal UI action must propagate the disconnect Result to its caller'
     Assert-True ($UiContent -match 'function\s+handoff_start_game') 'Start UI must expose a total engine-handoff seam for behavioral fault injection'
@@ -551,6 +551,8 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
     }
     Assert-True ($Task9UiContent -notmatch 'AddCustomStatic') 'Task 9 UI must never reference an undefined custom-static id'
     Assert-True ($Task9UiContent -match 'OnKeyboard[\s\S]{0,500}self:OnMainMenu\(\)[\s\S]{0,120}return\s+true') 'Task 9 Escape handler must route cleanup and return an engine boolean'
+    Assert-True ($Task9UiContent -match 'next_button:TextControl\(\):SetText') 'Result primary button captions must use the native CUI3tButton TextControl API'
+    Assert-True ($Task9UiContent -notmatch 'next_button:SetText') 'Result primary button captions must not call the unavailable CUI3tButton SetText method directly'
     Assert-True ($Task9UiContent -match 'resolve_result_keyboard_action[\s\S]{0,500}DIK_RETURN[\s\S]{0,240}DIK_SPACE[\s\S]{0,160}return\s+["'']next["''][\s\S]{0,600}OnKeyboard[\s\S]{0,400}action\s*==\s*["'']next["''][\s\S]{0,160}self:OnNext\(\)[\s\S]{0,120}return\s+true') 'Task 9 result keyboard fallback must route Enter/Space to the next-fight action'
     Assert-True ($Task9UiContent -match 'ShowCountdown[\s\S]{0,900}model\.on_main_menu[\s\S]{0,900}self\.on_main_menu') 'Task 9 countdown UI must retain the common Arena main-menu callback'
     Assert-True ($Task9UiContent -notmatch 'OnMainMenu[\s\S]{0,240}kind\s*==\s*["'']countdown["'']') 'Task 9 main-menu action must not reject countdown Escape'
@@ -576,6 +578,7 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
     }
     Assert-True ($Task6MainMenuContent -notmatch '\bdb\.actor\b') 'Task 6 menu-side defeat flow must never dereference the destroyed actor'
     Assert-True ($Task6MainMenuContent -notmatch 'Anomaly|load_game|load_save|checkpoint|resume|revive') 'Task 6 fresh-fight action must use only the engine new-game handoff'
+    Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\.ok\s+then[\s\S]{0,600}clear_result[\s\S]{0,600}clear_defeat[\s\S]{0,600}restore_main_menu') 'Failed defeat-result construction must dismiss partial UI and clear its confirmed intent before restoring the stock menu'
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\s+then[\s\S]{0,500}restore_main_menu\s*\(\s*menu') 'Task 6 fatal-UI construction failure must restore the owner menu as a fallback'
     Assert-True ($Task6MainMenuContent -match 'model\.on_main_menu\s*=\s*function\(\)[\s\S]{0,900}local\s+cleared[\s\S]{0,500}local\s+restored\s*=\s*restore_main_menu') 'Task 6 post-consume UI handling must attempt owner restoration even when result dismissal fails'
     Assert-True ($Task6MainMenuContent -match 'local\s+defeat_consumed\s*=\s*false') 'Task 6 main-menu action must latch successful defeat consumption across UI retries'
@@ -589,7 +592,7 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
 if (Test-Path -LiteralPath $Task9UiScriptPath) {
     Assert-True ($Task9UiContent -match 'next_title_key') 'Task 6 result UI must accept a primary-action title key'
     Assert-True ($Task9UiContent -match 'st_gamma_arena_result_new_fight') 'Task 6 result UI must validate the defeat-specific primary label'
-    Assert-True ($Task9UiContent -match 'next_button:SetText\s*\(') 'Task 6 result UI must apply the translated primary-action label'
+    Assert-True ($Task9UiContent -match 'next_button:TextControl\(\):SetText\s*\(') 'Task 6 result UI must apply the translated primary-action label through the native button text control'
     Assert-True ($Task9UiContent -match 'if\s+self\.action_locked[\s\S]{0,180}return\s+gamma_arena_result\.ok\(false\)') 'Task 6 result actions must retain the repeated-click lock'
     Assert-True ($Task9UiContent -match '(?m)^function\s+resolve_result_keyboard_action\s*\(') 'Task 6 result keyboard routing must expose a behavioral test seam'
     Assert-True ($Task9UiContent -match '(?m)^function\s+dismiss_result_window\s*\(') 'Task 6 result dismissal must expose its retry-safe behavioral seam'
@@ -604,6 +607,11 @@ if (Test-Path -LiteralPath $Task6UiStartPath) {
     $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
     Assert-True ($Task6UiStartContent -match '(?m)^function\s+handoff_start_game\s*\(') 'Task 6 must expose the shared StartGame handoff'
 }
+if (Test-Path -LiteralPath $Task6UiStartPath) {
+    $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
+    Assert-True ($Task6UiStartContent -match '(?m)^function\s+issue_launch_with_defeat_recovery\s*\(') 'Arena start UI must expose bounded confirmed-defeat conflict recovery'
+    Assert-True ($Task6UiStartContent -match 'GA_INTENT_CONFLICT[\s\S]{0,1000}peek_defeat[\s\S]{0,1000}clear_defeat[\s\S]{0,1000}retry_stale\s*\(\s*issue\(\)\s*\)') 'Arena start recovery must classify, clear, and retry only a confirmed defeat conflict'
+}
 if (Test-Path -LiteralPath $Task6TextPath) {
     [xml]$Task6Text = Get-Content -LiteralPath $Task6TextPath -Raw
     Assert-True ($null -ne $Task6Text.SelectSingleNode("//*[local-name()='string' and @id='st_gamma_arena_result_new_fight']")) 'Task 6 localization must define the New fight label'
@@ -614,7 +622,7 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
     }
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_recovery_dialog_waits_for_owner_restore','runtime_defeat_partial_clear_never_reconsumes_token','runtime_defeat_partial_owned_widget_clear_never_reconsumes_token','runtime_defeat_partial_hide_restores_or_retains_recovery','runtime_defeat_result_keyboard_and_lock_are_behavioral')) {
+    foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_result_construction_failure_clears_intent_and_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_recovery_dialog_waits_for_owner_restore','runtime_defeat_partial_clear_never_reconsumes_token','runtime_defeat_partial_owned_widget_clear_never_reconsumes_token','runtime_defeat_partial_hide_restores_or_retains_recovery','runtime_defeat_result_keyboard_and_lock_are_behavioral','runtime_result_primary_button_uses_native_text_control','runtime_start_launch_recovers_only_confirmed_defeat_conflict')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 runtime tests must cover $Marker"
     }
 }

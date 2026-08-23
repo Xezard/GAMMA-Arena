@@ -161,6 +161,34 @@ local function handoff_failure(config, failure)
     return failure
 end
 
+function issue_launch_with_defeat_recovery(config, request, ports)
+    ports = ports or {}
+    local issue_launch = ports.issue_launch or gamma_arena_session_store.issue_launch
+    local launch_options = ports.launch_options
+    local function issue()
+        return issue_launch(config, request, launch_options)
+    end
+    local function retry_stale(result)
+        if not result.ok and result.error and result.error.code == "GA_LAUNCH_STALE_CLEARED" then
+            return issue()
+        end
+        return result
+    end
+
+    local launch = retry_stale(issue())
+    if launch.ok or not launch.error or launch.error.code ~= "GA_INTENT_CONFLICT" then return launch end
+
+    local peek_defeat = ports.peek_defeat or gamma_arena_session_store.peek_defeat
+    local defeat = peek_defeat(config)
+    if not defeat.ok then return defeat end
+    if not defeat.value then return launch end
+
+    local clear_defeat = ports.clear_defeat or gamma_arena_session_store.clear_defeat
+    local cleared = clear_defeat(config)
+    if not cleared.ok then return cleared end
+    return retry_stale(issue())
+end
+
 function handoff_start_game(owner, config)
     local lookup_ok, method = pcall(function() return owner and owner.StartGame end)
     if not lookup_ok or type(method) ~= "function" then
@@ -206,11 +234,7 @@ function UIStart:OnStart()
         self:ShowFatal({ preferences })
         return
     end
-    local launch_options = self.ports and self.ports.launch_options or nil
-    local launch = gamma_arena_session_store.issue_launch(axr_main.config, request.value, launch_options)
-    if not launch.ok and launch.error.code == "GA_LAUNCH_STALE_CLEARED" then
-        launch = gamma_arena_session_store.issue_launch(axr_main.config, request.value, launch_options)
-    end
+    local launch = issue_launch_with_defeat_recovery(axr_main.config, request.value, self.ports)
     if not launch.ok then
         self:ShowFatal({ launch })
         return

@@ -5411,6 +5411,34 @@ local function runtime_defeat_menu_fatal_ui_failure_restores_owner()
     gamma_arena_test_assert.equals(menu.shown, 1, "fatal UI construction failure restores owner visibility")
 end
 
+local function runtime_defeat_result_construction_failure_clears_intent_and_restores_owner()
+    local menu = defeat_menu_test_owner()
+    local clears = 0
+    local result_clears = 0
+    local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function()
+            return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:broken_result" })
+        end,
+        show_result = function()
+            return gamma_arena_result.err("GA_TEST_RESULT_CONSTRUCTION", "injected result construction failure")
+        end,
+        clear_defeat = function()
+            clears = clears + 1
+            return gamma_arena_result.ok(true)
+        end,
+        clear_result = function()
+            result_clears = result_clears + 1
+            return gamma_arena_result.ok(true)
+        end
+    })
+    gamma_arena_test_assert.is_false(result.ok, "result construction failure remains observable")
+    gamma_arena_test_assert.equals(clears, 1, "failed result construction clears the confirmed defeat exactly once")
+    gamma_arena_test_assert.equals(result_clears, 1, "failed result construction dismisses any partially-created result window")
+    gamma_arena_test_assert.equals(menu.show_dialog, 1, "failed result construction restores owner dialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "failed result construction restores owner visibility")
+end
+
 local function runtime_defeat_menu_post_consume_ui_failure_restores_owner()
     local menu = defeat_menu_test_owner()
     local model
@@ -5697,6 +5725,88 @@ local function runtime_defeat_result_keyboard_and_lock_are_behavioral()
     gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnNext(window).ok, "first defeat primary action is accepted")
     gamma_arena_test_assert.is_true(gamma_arena_ui_result.UIResult.OnNext(window).ok, "duplicate defeat primary event is safely ignored")
     gamma_arena_test_assert.equals(calls, 1, "repeated defeat primary events dispatch exactly once")
+end
+
+local function runtime_result_primary_button_uses_native_text_control()
+    local title = { text = nil }
+    function title:SetText(value) self.text = value end
+    local caption = { text = nil }
+    function caption:SetText(value) self.text = value end
+    local next_button = {}
+    function next_button:TextControl() return caption end
+    local countdown = { visible = true }
+    function countdown:Show(value) self.visible = value end
+    local result_panel = { visible = false }
+    function result_panel:Show(value) self.visible = value end
+    local window = {
+        kind = nil,
+        on_next = nil,
+        on_main_menu = nil,
+        action_locked = true,
+        title = title,
+        next_button = next_button,
+        countdown = countdown,
+        result_panel = result_panel
+    }
+    local shown = gamma_arena_ui_result.UIResult.ShowResult(window, {
+        kind = "defeat",
+        title_key = "st_gamma_arena_result_defeat",
+        next_title_key = "st_gamma_arena_result_new_fight",
+        on_next = function() return gamma_arena_result.ok(true) end,
+        on_main_menu = function() return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(shown.ok, "real CUI3tButton caption API displays the defeat result")
+    gamma_arena_test_assert.equals(type(caption.text), "string", "primary caption is written through TextControl")
+    gamma_arena_test_assert.is_true(result_panel.visible, "result panel becomes visible after caption setup")
+end
+
+local function runtime_start_launch_recovers_only_confirmed_defeat_conflict()
+    local request = {
+        schema_version = 1,
+        mode_id = "skirmish",
+        difficulty_id = "master",
+        seed_mode = "random",
+        session_seed = 123
+    }
+    local issue_calls = 0
+    local peek_calls = 0
+    local clear_calls = 0
+    local recovered = gamma_arena_ui_start.issue_launch_with_defeat_recovery({}, request, {
+        issue_launch = function()
+            issue_calls = issue_calls + 1
+            if issue_calls == 1 then return gamma_arena_result.err("GA_INTENT_CONFLICT", "Launch and defeat intents cannot coexist") end
+            return gamma_arena_result.ok({ token = "ga1:1000:recovered" })
+        end,
+        peek_defeat = function()
+            peek_calls = peek_calls + 1
+            return gamma_arena_result.ok({ token = "gad1:1000:stale" })
+        end,
+        clear_defeat = function()
+            clear_calls = clear_calls + 1
+            return gamma_arena_result.ok(true)
+        end
+    })
+    gamma_arena_test_assert.is_true(recovered.ok, "explicit Arena start recovers a confirmed defeat conflict")
+    gamma_arena_test_assert.equals(issue_calls, 2, "confirmed defeat recovery retries launch exactly once")
+    gamma_arena_test_assert.equals(peek_calls, 1, "intent conflict is classified through the defeat store")
+    gamma_arena_test_assert.equals(clear_calls, 1, "only the confirmed defeat is cleared")
+
+    local resume_issue_calls = 0
+    local resume_clear_calls = 0
+    local resume_conflict = gamma_arena_ui_start.issue_launch_with_defeat_recovery({}, request, {
+        issue_launch = function()
+            resume_issue_calls = resume_issue_calls + 1
+            return gamma_arena_result.err("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist")
+        end,
+        peek_defeat = function() return gamma_arena_result.ok(false) end,
+        clear_defeat = function()
+            resume_clear_calls = resume_clear_calls + 1
+            return gamma_arena_result.ok(true)
+        end
+    })
+    gamma_arena_test_assert.is_false(resume_conflict.ok, "non-defeat intent conflicts remain fail-closed")
+    gamma_arena_test_assert.equals(resume_issue_calls, 1, "non-defeat conflict is never retried")
+    gamma_arena_test_assert.equals(resume_clear_calls, 0, "resume state is never erased by defeat recovery")
 end
 
 local function death_neutralization_fixture(actor)
@@ -6086,6 +6196,7 @@ local cases = {
     ,{ name = "runtime_defeat_menu_fresh_failures_are_bounded", fn = runtime_defeat_menu_fresh_failures_are_bounded }
     ,{ name = "runtime_defeat_menu_exit_retries_consumption_safely", fn = runtime_defeat_menu_exit_retries_consumption_safely }
     ,{ name = "runtime_defeat_menu_fatal_ui_failure_restores_owner", fn = runtime_defeat_menu_fatal_ui_failure_restores_owner }
+    ,{ name = "runtime_defeat_result_construction_failure_clears_intent_and_restores_owner", fn = runtime_defeat_result_construction_failure_clears_intent_and_restores_owner }
     ,{ name = "runtime_defeat_menu_post_consume_ui_failure_restores_owner", fn = runtime_defeat_menu_post_consume_ui_failure_restores_owner }
     ,{ name = "runtime_defeat_menu_post_consume_restore_failure_is_recoverable", fn = runtime_defeat_menu_post_consume_restore_failure_is_recoverable }
     ,{ name = "runtime_defeat_recovery_dialog_waits_for_owner_restore", fn = runtime_defeat_recovery_dialog_waits_for_owner_restore }
@@ -6093,6 +6204,8 @@ local cases = {
     ,{ name = "runtime_defeat_partial_owned_widget_clear_never_reconsumes_token", fn = runtime_defeat_partial_owned_widget_clear_never_reconsumes_token }
     ,{ name = "runtime_defeat_partial_hide_restores_or_retains_recovery", fn = runtime_defeat_partial_hide_restores_or_retains_recovery }
     ,{ name = "runtime_defeat_result_keyboard_and_lock_are_behavioral", fn = runtime_defeat_result_keyboard_and_lock_are_behavioral }
+    ,{ name = "runtime_result_primary_button_uses_native_text_control", fn = runtime_result_primary_button_uses_native_text_control }
+    ,{ name = "runtime_start_launch_recovers_only_confirmed_defeat_conflict", fn = runtime_start_launch_recovers_only_confirmed_defeat_conflict }
     ,{ name = "runtime_entity_death_neutralization_is_owned_living_and_idempotent", fn = runtime_entity_death_neutralization_is_owned_living_and_idempotent }
     ,{ name = "runtime_entity_death_neutralization_without_actor_still_clears_enemy", fn = runtime_entity_death_neutralization_without_actor_still_clears_enemy }
     ,{ name = "runtime_entity_death_neutralization_aggregates_every_failure", fn = runtime_entity_death_neutralization_aggregates_every_failure }
