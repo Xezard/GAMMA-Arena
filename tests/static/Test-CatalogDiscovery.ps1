@@ -116,6 +116,15 @@ if ($Catalog -notmatch 'difficulty_manifest_v4' -or $Catalog -notmatch 'PLAYER_W
 if ($Catalog -notmatch 'schema_version\s*=\s*5' -or $Catalog -notmatch 'revision\s*=\s*6' -or $Catalog -notmatch 'generator_version\s*=\s*6') {
     throw 'Catalog snapshot version markers are stale'
 }
+$AppendDiscoveredStart = $Catalog.IndexOf('local function append_discovered')
+$AppendDiscoveredEnd = $Catalog.IndexOf('local function sort_catalog_list', $AppendDiscoveredStart)
+if ($AppendDiscoveredStart -lt 0 -or $AppendDiscoveredEnd -le $AppendDiscoveredStart) {
+    throw 'Catalog overlap merger must remain structurally testable'
+}
+$AppendDiscovered = $Catalog.Substring($AppendDiscoveredStart, $AppendDiscoveredEnd - $AppendDiscoveredStart)
+if ($AppendDiscovered -match 'local\s+existing\s*=\s*target\s*\[' -or $AppendDiscovered -notmatch 'pairs\s*\(\s*target\s*\)') {
+    throw 'Catalog overlap merger must find fallback records by section rather than assuming map keys are section names'
+}
 Write-Host 'PASS: dynamic catalog integration static contract passed'
 
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
