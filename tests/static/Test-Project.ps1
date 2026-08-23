@@ -901,6 +901,19 @@ $DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_ar
 $LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
 $NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
+$FightSpecV3Path = Join-Path $RepoRoot 'schemas\fight-spec-v3.md'
+if (Test-Path -LiteralPath $FightSpecV3Path) {
+    $FightSpecV3Content = Get-Content -LiteralPath $FightSpecV3Path -Raw
+    Assert-True ($FightSpecV3Content -match '(?m)^\| schema_version \| exactly 3 \|\s*$') 'FightSpecV3 root schema must remain version 3.'
+    Assert-True ($FightSpecV3Content -match '(?m)^\| generator_version \| exactly 5 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| catalog_revision \| exactly 4 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| layout_version \| exactly 2 \|\s*$') 'FightSpecV3 contract must declare generator 5, catalog 4, and layout 2.'
+    Assert-True ($FightSpecV3Content.Contains('`ga-<seed>-<index>-g5-c4-l2`')) 'FightSpecV3 contract must document the canonical g5/c4/l2 fight ID.'
+    Assert-True ($FightSpecV3Content -match '(?is)actor.+weighted.+weapon.class.+armor.class.+exact player budget.+actor_class_pair' -and $FightSpecV3Content -match '(?is)deterministic.+sorted.+concrete.+actor_weapon.+actor_ammo_boxes.+actor_outfit') 'FightSpecV3 contract must document weighted actor class-pair selection and dedicated deterministic actor streams.'
+    Assert-True ($FightSpecV3Content -match '(?is)opponent.+70.{0,3}100%.+highest-affordable fallback') 'FightSpecV3 contract must scope the affordability band and fallback to opponent equipment.'
+    Assert-True ($FightSpecV3Content -match '(?is)enemy counts.+budgets.+roles.+factions.+loadout selection.+unchanged') 'FightSpecV3 contract must state that opponent generation behavior is unchanged.'
+    Assert-True ($FightSpecV3Content -notmatch '(?i)generator version 4|generator_version \| exactly 4|catalog_revision \| exactly 3|g4-c3-l2') 'FightSpecV3 contract must not regress to stale g4/c3 identifiers.'
+    $FightSpecV3ActorContract = [regex]::Match($FightSpecV3Content, '(?ims)^Actor[\s\S]*?(?=\r?\n\r?\n|\z)').Value
+    Assert-True (-not [string]::IsNullOrWhiteSpace($FightSpecV3ActorContract) -and $FightSpecV3ActorContract -notmatch '(?i)70.{0,3}100%|highest-affordable fallback') 'FightSpecV3 contract must not apply opponent max-cost affordability language to actor selection.'
+}
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
     Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*4\s*$') 'Catalog must declare schema_version = 4'
@@ -1526,6 +1539,8 @@ if (Test-Path -LiteralPath $Task7StorePath) {
     $Task7TokenEnd = if ($Task7TokenStart -ge 0) { $Task7StoreContent.IndexOf('local function validate_defeat_context', $Task7TokenStart) } else { -1 }
     $Task7ConfirmStart = $Task7StoreContent.IndexOf('function Store:confirm_defeat')
     $Task7ConfirmEnd = if ($Task7ConfirmStart -ge 0) { $Task7StoreContent.IndexOf('function Store:peek_defeat', $Task7ConfirmStart) } else { -1 }
+    $Task7PeekStart = $Task7StoreContent.IndexOf('function Store:peek_defeat')
+    $Task7PeekEnd = if ($Task7PeekStart -ge 0) { $Task7StoreContent.IndexOf('function Store:consume_defeat', $Task7PeekStart) } else { -1 }
     Assert-True ($Task7TokenStart -ge 0 -and $Task7TokenEnd -gt $Task7TokenStart -and $Task7ConfirmStart -ge 0 -and $Task7ConfirmEnd -gt $Task7ConfirmStart) 'Defeat token validation and confirmation boundaries must remain structurally testable.'
     if ($Task7TokenStart -ge 0 -and $Task7TokenEnd -gt $Task7TokenStart) {
         $Task7TokenBlock = $Task7StoreContent.Substring($Task7TokenStart, $Task7TokenEnd - $Task7TokenStart)
@@ -1534,6 +1549,11 @@ if (Test-Path -LiteralPath $Task7StorePath) {
     if ($Task7ConfirmStart -ge 0 -and $Task7ConfirmEnd -gt $Task7ConfirmStart) {
         $Task7ConfirmBlock = $Task7StoreContent.Substring($Task7ConfirmStart, $Task7ConfirmEnd - $Task7ConfirmStart)
         Assert-True ($Task7ConfirmBlock -match 'defeat\.value\.stage\s*==\s*"confirmed"' -and $Task7ConfirmBlock -match '\{\s*"defeat_stage"\s*,\s*"confirmed"\s*\}') 'Defeat confirmation must preserve the confirmed-stage transition and idempotence.'
+    }
+    Assert-True ($Task7PeekStart -ge 0 -and $Task7PeekEnd -gt $Task7PeekStart) 'Defeat peek boundary must remain structurally testable.'
+    if ($Task7PeekStart -ge 0 -and $Task7PeekEnd -gt $Task7PeekStart) {
+        $Task7PeekBlock = $Task7StoreContent.Substring($Task7PeekStart, $Task7PeekEnd - $Task7PeekStart)
+        Assert-True ($Task7PeekBlock -match 'defeat\.value\.stage\s*~=\s*"confirmed"[\s\S]{0,240}clear_defeat_and_return\s*\(\s*config\s*,\s*gamma_arena_result\.ok\s*\(\s*false\s*\)\s*\)') 'Readable non-confirmed defeat peeks must transactionally clear every defeat key before returning false.'
     }
 }
 foreach ($Task7TextPath in @($Task7EnglishTextPath, $Task7RussianTextPath)) {

@@ -231,16 +231,39 @@ local function valid_defeat_context()
 end
 
 local function defeat_intent_is_transactional_and_cross_vm_safe()
+    local context = valid_defeat_context()
+    local discarded_config = fake_config()
+    local discarded_store = gamma_arena_session_store.new_store()
+    local discarded = discarded_store:arm_defeat(discarded_config, context, {
+        clock = function() return 1000 end,
+        nonce = function() return "discarded" end
+    })
+    gamma_arena_test_assert.is_true(discarded.ok, "discard fixture arms")
+    gamma_arena_test_assert.equals(discarded_store:peek_defeat(discarded_config, { clock = function() return 1001 end }).value, false, "armed defeat is not menu-visible")
+    assert_keys_absent(discarded_config, defeat_keys, "armed defeat peek clears all keys")
+    assert_keys_absent({ data = discarded_config.persisted }, defeat_keys, "armed defeat peek persists all-key clear")
+
+    local failed_clear_config = fake_config()
+    local failed_clear_store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(failed_clear_store:arm_defeat(failed_clear_config, context, {
+        clock = function() return 1000 end,
+        nonce = function() return "failed_clear" end
+    }).ok, "failed-clear fixture arms")
+    failed_clear_config:arm_fault(1)
+    local failed_clear = failed_clear_store:peek_defeat(failed_clear_config, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_false(failed_clear.ok, "armed peek fails when transactional discard fails")
+    gamma_arena_test_assert.equals(failed_clear.error.code, "GA_DEFEAT_CLEAR_FAILED", "armed peek returns structured clear failure")
+    assert_keys_absent(failed_clear_config, defeat_keys, "failed armed peek is fail-closed")
+    assert_keys_absent({ data = failed_clear_config.persisted }, defeat_keys, "failed armed peek persisted state is fail-closed")
+
     local config = fake_config()
     local store = gamma_arena_session_store.new_store()
-    local context = valid_defeat_context()
     local armed = store:arm_defeat(config, context, {
         clock = function() return 1000 end,
         nonce = function() return "death_1" end
     })
-    gamma_arena_test_assert.is_true(armed.ok, "defeat arms")
+    gamma_arena_test_assert.is_true(armed.ok, "confirmation fixture arms")
     gamma_arena_test_assert.equals(armed.value.token, "gad1:1000:death_1", "defeat token grammar")
-    gamma_arena_test_assert.equals(store:peek_defeat(config, { clock = function() return 1001 end }).value, false, "armed defeat is not menu-visible")
     gamma_arena_test_assert.is_true(store:confirm_defeat(config, armed.value.token, { clock = function() return 1001 end }).ok, "death confirms")
     gamma_arena_test_assert.equals(store:peek_defeat(config, { clock = function() return 1002 end }).value.difficulty_id, "master", "confirmed context survives")
     gamma_arena_test_assert.is_true(store:confirm_defeat(config, armed.value.token, { clock = function() return 1002 end }).ok, "duplicate confirmation is idempotent")
