@@ -1502,6 +1502,7 @@ foreach ($DiagnosticMarker in @('GA_EARLY_SELF_DEATH_DIAGNOSTIC', 'spawn_positio
 foreach ($DiagnosticReviewMarker in @('finite_displacement', 'early_self_death_diagnostic_builder', 'self.integrity_fault == nil')) {
     Assert-True ($Task12EntityContent.Contains($DiagnosticReviewMarker)) "Early self-death diagnostic review fix is missing marker: $DiagnosticReviewMarker"
 }
+Assert-True ($Task12EntityContent.Contains('Diagnostic builder must return a plain table')) 'Early self-death diagnostic builder returns must be plain tables.'
 Assert-True ($Task12EntityContent.Contains('VICTORY_DEFEATED_STATES') -and $Task12EntityContent -match 'VICTORY_DEFEATED_STATES\[record\.terminal_state\]') 'Missing opponents must remain non-victory-qualified until integrity recovery starts'
 foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reconcile_active_integrity', 'GA_FIGHT_INTEGRITY_RETRY_EXHAUSTED')) {
     Assert-True ($Task12OrchestratorContent.Contains($IntegrityMarker)) "Arena integrity recovery is missing marker: $IntegrityMarker"

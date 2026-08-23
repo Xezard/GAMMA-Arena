@@ -5242,7 +5242,8 @@ local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppre
     gamma_arena_test_assert.is_true(string.find(diagnostic.queries.server_object.reason, "injected diagnostic server failure", 1, true) ~= nil, "throwing server diagnostic reason is copied")
     gamma_arena_test_assert.equals(diagnostic.queries.online_object.error.code, "GA_TEST_DIAGNOSTIC_ONLINE", "failed online diagnostic error code is copied")
     gamma_arena_test_assert.equals(diagnostic.queries.online_object.error.context.source, "online", "failed online diagnostic error context is copied")
-    gamma_arena_test_assert.is_true(string.find(diagnostic.queries.owner_tag.reason, "injected diagnostic owner failure", 1, true) ~= nil, "throwing owner diagnostic reason is copied")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.error.code, "GA_ENTITY_TAG_READ_FAILED", "throwing owner diagnostic wrapper code is copied")
+    gamma_arena_test_assert.is_true(string.find(diagnostic.queries.owner_tag.error.context.reason, "injected diagnostic owner failure", 1, true) ~= nil, "throwing owner diagnostic wrapper reason is copied")
     gamma_arena_test_assert.equals(diagnostic.queries.position.status, "unavailable", "position is explicitly unavailable without an online object")
     gamma_arena_test_assert.equals(diagnostic.queries.alive.status, "unavailable", "alive is explicitly unavailable without an online object")
     gamma_arena_test_assert.equals(diagnostic.queries.critically_wounded.status, "unavailable", "wound state is explicitly unavailable without an online object")
@@ -5266,8 +5267,8 @@ local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppre
 
     for _, case in ipairs({
         { name = "position", dependency = "object_position", query = "position", expect = "reason", inject = function() error("injected diagnostic position failure") end },
-        { name = "alive", dependency = "is_alive", query = "alive", expect = "error", inject = function() return gamma_arena_result.err("GA_TEST_DIAGNOSTIC_ALIVE", "injected diagnostic alive failure", { source = "alive" }) end },
-        { name = "wound", dependency = "is_critically_wounded", query = "critically_wounded", expect = "reason", inject = function() error("injected diagnostic wound failure") end }
+        { name = "alive", dependency = "is_alive", query = "alive", expect = "error", code = "GA_TEST_DIAGNOSTIC_ALIVE", inject = function() return gamma_arena_result.err("GA_TEST_DIAGNOSTIC_ALIVE", "injected diagnostic alive failure", { source = "alive" }) end },
+        { name = "wound", dependency = "is_critically_wounded", query = "critically_wounded", expect = "error", code = "GA_ENTITY_WOUND_CHECK_FAILED", inject = function() error("injected diagnostic wound failure") end }
     }) do
         local query_env, query_deps = fake_entity_environment()
         local query_adapter = gamma_arena_entity_adapter.new(query_deps)
@@ -5281,8 +5282,12 @@ local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppre
         if case.expect == "reason" then
             gamma_arena_test_assert.is_true(string.find(query_diagnostic.queries[case.query].reason, "injected diagnostic " .. case.name .. " failure", 1, true) ~= nil, "throwing " .. case.name .. " diagnostic reason is copied")
         else
-            gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.code, "GA_TEST_DIAGNOSTIC_ALIVE", "failed alive diagnostic error code is copied")
-            gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.context.source, "alive", "failed alive diagnostic error context is copied")
+            gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.code, case.code, "failed " .. case.name .. " diagnostic error code is copied")
+            if case.name == "alive" then
+                gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].error.context.source, "alive", "failed alive diagnostic error context is copied")
+            else
+                gamma_arena_test_assert.is_true(string.find(query_diagnostic.queries[case.query].error.context.reason, "injected diagnostic wound failure", 1, true) ~= nil, "throwing wound diagnostic wrapper reason is copied")
+            end
         end
         gamma_arena_test_assert.equals(query_adapter:integrity_status().value.cause, "early_self_death", "throwing " .. case.name .. " diagnostic dependency preserves integrity")
     end
@@ -5302,6 +5307,29 @@ local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppre
     gamma_arena_test_assert.equals(builder_env.warning_records[#builder_env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "builder failure still emits following integrity evidence")
     gamma_arena_test_assert.equals(#builder_env.warning_records, 2, "builder failure emits exactly one diagnostic and one integrity event")
     gamma_arena_test_assert.is_true(equal_plain_values(builder_fault.context.diagnostic, builder_diagnostic), "builder failure attaches the emitted fallback snapshot by value")
+
+    for _, case in ipairs({
+        { name = "nil", build = function() return nil end, reason = "Diagnostic builder must return a plain table" },
+        { name = "cyclic", build = function() local value = {}; value.self = value; return value end, reason = "cyclic registry value" },
+        { name = "function_leaf", build = function() return { leaf = function() end } end, reason = "non-plain registry value: function" }
+    }) do
+        local invalid_env, invalid_deps = fake_entity_environment()
+        local invalid_adapter = gamma_arena_entity_adapter.new(invalid_deps)
+        begin_entity_apply(invalid_adapter, invalid_env, entity_spec(1), "session-self-death-diagnostic-invalid-" .. case.name); pump_entity(invalid_adapter, invalid_env)
+        local invalid_id = invalid_adapter:registry_snapshot().npcs[1].id
+        invalid_deps.early_self_death_diagnostic_builder = case.build
+        local invalid_victim = { id = function() return invalid_id end }
+        gamma_arena_test_assert.is_true(invalid_adapter:on_npc_death(invalid_victim, invalid_victim).value, "invalid successful diagnostic builder return still accepts death: " .. case.name)
+        local invalid_fault = invalid_adapter:integrity_status()
+        gamma_arena_test_assert.equals(invalid_fault.value.cause, "early_self_death", "invalid successful diagnostic builder return preserves integrity cause: " .. case.name)
+        local invalid_diagnostic = invalid_env.warnings_by_code.GA_EARLY_SELF_DEATH_DIAGNOSTIC.context
+        gamma_arena_test_assert.equals(invalid_diagnostic.status, "error", "invalid successful diagnostic builder return emits plain fallback: " .. case.name)
+        gamma_arena_test_assert.is_true(string.find(invalid_diagnostic.reason, case.reason, 1, true) ~= nil, "invalid successful diagnostic builder fallback preserves reason: " .. case.name)
+        gamma_arena_test_assert.equals(invalid_env.warning_records[#invalid_env.warning_records - 1].code, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "invalid successful builder fallback precedes integrity evidence: " .. case.name)
+        gamma_arena_test_assert.equals(invalid_env.warning_records[#invalid_env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "invalid successful builder fallback emits following integrity evidence: " .. case.name)
+        gamma_arena_test_assert.equals(#invalid_env.warning_records, 2, "invalid successful builder fallback emits exactly one diagnostic and integrity event: " .. case.name)
+        gamma_arena_test_assert.is_true(equal_plain_values(invalid_fault.value.context.diagnostic, invalid_diagnostic), "invalid successful builder fallback attaches emitted snapshot by value: " .. case.name)
+    end
 
     local extreme_env, extreme_deps = fake_entity_environment()
     local extreme_adapter = gamma_arena_entity_adapter.new(extreme_deps)
