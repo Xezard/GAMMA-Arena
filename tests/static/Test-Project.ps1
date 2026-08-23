@@ -493,6 +493,7 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Marker in @('function Registrar:runtime_status', 'function runtime_status', 'last_result', 'GA_BOOTSTRAP_NOT_READY', 'GA_BOOTSTRAP_COMPOSE_FAILED')) {
         Assert-True ($Task5BootstrapContent.Contains($Marker)) "Bootstrap runtime readiness must cover $Marker"
     }
+    Assert-True ($Task5BootstrapContent -match 'type\(result\.error\)\s*~=\s*"table"\s+or\s+type\(result\.error\.code\)\s*~=\s*"string"\s+or\s+type\(result\.error\.message\)\s*~=\s*"string"') 'Bootstrap registration Result validation must reject malformed failed error shapes'
     foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','actor_on_death','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
         Assert-True ($Task5BootstrapContent -match ('"' + [regex]::Escape($Callback) + '"')) "Bootstrap registration table must contain $Callback"
     }

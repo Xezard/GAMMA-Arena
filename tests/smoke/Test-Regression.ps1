@@ -426,7 +426,7 @@ end
 function make_callbacks() end
 local Registrar = {}
 function Registrar:runtime_status() return "GA_BOOTSTRAP_NOT_READY GA_BOOTSTRAP_COMPOSE_FAILED" end
-function new_registrar() return setmetatable({ last_result = nil, register_all = function() UnregisterScriptCallback("x", guarded) end }, { __index = Registrar }) end
+function new_registrar() return setmetatable({ last_result = nil, register_all = function() local result = { ok = false, error = { code = "GA_BOOTSTRAP_REGISTRATION_FAILED", message = "fixture" } }; if type(result.error) ~= "table" or type(result.error.code) ~= "string" or type(result.error.message) ~= "string" then return nil end; UnregisterScriptCallback("x", guarded); return result end }, { __index = Registrar }) end
 function runtime_status() return "GA_BOOTSTRAP_NOT_READY" end
 function on_game_start() return new_registrar():register_all() end
 '@
