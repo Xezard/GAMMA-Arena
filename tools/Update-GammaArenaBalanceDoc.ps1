@@ -12,6 +12,8 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 if ([string]::IsNullOrWhiteSpace($DocumentPath)) {
     $DocumentPath = Join-Path $RepoRoot 'docs\arena-balance.md'
 }
+$RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
+$DocumentPath = [IO.Path]::GetFullPath($DocumentPath)
 
 function Read-GammaArenaLtx([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -52,7 +54,11 @@ function Get-RequiredLtxValue($Ltx, [string]$Section, [string]$Key, [string]$Pat
     if (-not $Ltx.Contains($Section) -or -not $Ltx[$Section].Contains($Key)) {
         throw "Required LTX value [$Section] $Key is missing: $Path"
     }
-    return [string]$Ltx[$Section][$Key]
+    $Value = [string]$Ltx[$Section][$Key]
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Required LTX value [$Section] $Key is empty: $Path"
+    }
+    return $Value
 }
 
 function Get-RequiredLtxInt($Ltx, [string]$Section, [string]$Key, [string]$Path) {
@@ -85,10 +91,40 @@ function Get-RequiredLtxNumber($Ltx, [string]$Section, [string]$Key, [string]$Pa
 
 function Get-LtxCsv($Ltx, [string]$Section, [string]$Key, [string]$Path) {
     $Values = New-Object System.Collections.Generic.List[string]
+    $Seen = @{}
     foreach ($Value in (Get-RequiredLtxValue $Ltx $Section $Key $Path).Split(',')) {
         $Trimmed = $Value.Trim()
         if ($Trimmed.Length -eq 0) { throw "Empty list value [$Section] $Key`: $Path" }
+        if ($Seen.ContainsKey($Trimmed)) { throw "Duplicate list value '$Trimmed' [$Section] $Key`: $Path" }
+        $Seen[$Trimmed] = $true
         $Values.Add($Trimmed) | Out-Null
+    }
+    return @($Values)
+}
+
+function Get-RequiredLtxNumberList($Ltx, [string]$Section, [string]$Key, [string]$Path, [int]$ExpectedCount) {
+    $Values = New-Object System.Collections.Generic.List[double]
+    $Seen = @{}
+    foreach ($RawValue in (Get-RequiredLtxValue $Ltx $Section $Key $Path).Split(',')) {
+        $Trimmed = $RawValue.Trim()
+        $Value = 0.0
+        if (-not [double]::TryParse(
+            $Trimmed,
+            [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$Value
+        ) -or $Value -le 0) {
+            throw "Required positive number list [$Section] $Key is malformed: $Path"
+        }
+        $Canonical = $Value.ToString('R', [Globalization.CultureInfo]::InvariantCulture)
+        if ($Seen.ContainsKey($Canonical)) {
+            throw "Duplicate number '$Canonical' [$Section] $Key`: $Path"
+        }
+        $Seen[$Canonical] = $true
+        $Values.Add($Value) | Out-Null
+    }
+    if ($ExpectedCount -gt 0 -and $Values.Count -ne $ExpectedCount) {
+        throw "Required number list [$Section] $Key must contain $ExpectedCount values: $Path"
     }
     return @($Values)
 }
@@ -144,6 +180,25 @@ function Get-RequiredLuaQuotedArray([string]$Path, [string]$Symbol) {
     return @($Values)
 }
 
+function Get-RequiredLuaRankTable([string]$Path, [string]$Symbol) {
+    $TablePattern = 'local\s+' + [regex]::Escape($Symbol) + '\s*=\s*\{(?<body>.*?)\r?\n\}'
+    $Table = Get-RequiredLuaMatch $Path $TablePattern $Symbol
+    $Values = [ordered]@{}
+    $EntryPattern = '^\s*\{\s*id\s*=\s*"([^"]+)"\s*,\s*cost\s*=\s*(\d+)\s*\}\s*,?\s*$'
+    foreach ($Line in ($Table.Groups['body'].Value -split '\r?\n')) {
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+        $Entry = [regex]::Match($Line, $EntryPattern)
+        if (-not $Entry.Success) {
+            throw "Lua balance table '$Symbol' has an unsupported entry: $Path"
+        }
+        $Id = $Entry.Groups[1].Value
+        if ($Values.Contains($Id)) { throw "Duplicate Lua rank '$Id' in $Symbol`: $Path" }
+        $Values[$Id] = [int]::Parse($Entry.Groups[2].Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Values.Count -eq 0) { throw "Lua balance table '$Symbol' is empty: $Path" }
+    return $Values
+}
+
 function Get-PercentBar([int]$Percent) {
     $Filled = [Math]::Min(10, [Math]::Max(0, [Math]::Floor(($Percent + 5) / 10)))
     return ('#' * $Filled) + ('.' * (10 - $Filled))
@@ -165,6 +220,7 @@ function Get-SubstringCount([string]$Text, [string]$Value) {
 
 function Set-GeneratedMarkdownBlocks([string]$Document, $Blocks) {
     $Result = $Document.Replace("`r`n", "`n").Replace("`r", "`n")
+    $Ranges = New-Object System.Collections.Generic.List[object]
     foreach ($Name in $Blocks.Keys) {
         $Begin = "<!-- BEGIN GENERATED: $Name -->"
         $End = "<!-- END GENERATED: $Name -->"
@@ -176,10 +232,53 @@ function Set-GeneratedMarkdownBlocks([string]$Document, $Blocks) {
         if ($EndIndex -le $BeginIndex) {
             throw "Generated block markers are reversed: $Name"
         }
-        $Before = $Result.Substring(0, $BeginIndex + $Begin.Length)
-        $After = $Result.Substring($EndIndex)
-        $Body = ([string]$Blocks[$Name]).Trim("`r", "`n")
+        $Ranges.Add([pscustomobject]@{
+            Name = $Name
+            Begin = $Begin
+            End = $End
+            BeginIndex = $BeginIndex
+            EndIndex = $EndIndex
+            EndExclusive = $EndIndex + $End.Length
+        }) | Out-Null
+    }
+
+    $OrderedRanges = @($Ranges | Sort-Object BeginIndex)
+    for ($Index = 1; $Index -lt $OrderedRanges.Count; $Index++) {
+        if ($OrderedRanges[$Index - 1].EndExclusive -gt $OrderedRanges[$Index].BeginIndex) {
+            throw "Generated block markers overlap or are nested: $($OrderedRanges[$Index - 1].Name), $($OrderedRanges[$Index].Name)"
+        }
+    }
+
+    foreach ($Range in @($Ranges | Sort-Object BeginIndex -Descending)) {
+        $Before = $Result.Substring(0, $Range.BeginIndex + $Range.Begin.Length)
+        $After = $Result.Substring($Range.EndIndex)
+        $Body = ([string]$Blocks[$Range.Name]).Trim("`r", "`n")
         $Result = $Before + "`n" + $Body + "`n" + $After
+    }
+
+    $ValidatedRanges = New-Object System.Collections.Generic.List[object]
+    foreach ($Name in $Blocks.Keys) {
+        $Begin = "<!-- BEGIN GENERATED: $Name -->"
+        $End = "<!-- END GENERATED: $Name -->"
+        if ((Get-SubstringCount $Result $Begin) -ne 1 -or (Get-SubstringCount $Result $End) -ne 1) {
+            throw "Generated block markers were corrupted during replacement: $Name"
+        }
+        $BeginIndex = $Result.IndexOf($Begin, [StringComparison]::Ordinal)
+        $EndIndex = $Result.IndexOf($End, [StringComparison]::Ordinal)
+        if ($EndIndex -le $BeginIndex) {
+            throw "Generated block markers were reversed during replacement: $Name"
+        }
+        $ValidatedRanges.Add([pscustomobject]@{
+            Name = $Name
+            BeginIndex = $BeginIndex
+            EndExclusive = $EndIndex + $End.Length
+        }) | Out-Null
+    }
+    $OrderedValidatedRanges = @($ValidatedRanges | Sort-Object BeginIndex)
+    for ($Index = 1; $Index -lt $OrderedValidatedRanges.Count; $Index++) {
+        if ($OrderedValidatedRanges[$Index - 1].EndExclusive -gt $OrderedValidatedRanges[$Index].BeginIndex) {
+            throw "Generated block markers overlap after replacement: $($OrderedValidatedRanges[$Index - 1].Name), $($OrderedValidatedRanges[$Index].Name)"
+        }
     }
     if (-not $Result.EndsWith("`n", [StringComparison]::Ordinal)) {
         $Result += "`n"
@@ -193,6 +292,7 @@ $LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_
 $TacticalPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'
 $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
+$BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 $TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
 
@@ -246,6 +346,29 @@ foreach ($DifficultyId in $DifficultyIds) {
     }) | Out-Null
 }
 
+$ProfileIds = @(Get-LtxCsv $Catalog 'profiles' 'ids' $CatalogPath)
+$ProfileRanks = Get-RequiredLuaRankTable $CatalogScriptPath 'PROFILE_RANKS'
+if ($ProfileIds.Count -ne $ProfileRanks.Count) {
+    throw 'PROFILE_RANKS and fallback profile ids must have the same cardinality'
+}
+$FallbackProfiles = New-Object System.Collections.Generic.List[object]
+for ($Index = 0; $Index -lt $ProfileIds.Count; $Index++) {
+    $Id = $ProfileIds[$Index]
+    if (@($ProfileRanks.Keys)[$Index] -cne $Id) {
+        throw "PROFILE_RANKS order differs from fallback profiles at index $Index"
+    }
+    $Section = 'profile_' + $Id
+    $Cost = Get-RequiredLtxInt $Catalog $Section 'cost' $CatalogPath
+    if ($ProfileRanks[$Id] -ne $Cost) {
+        throw "PROFILE_RANKS cost differs from fallback profile '$Id'"
+    }
+    $FallbackProfiles.Add([pscustomobject]@{
+        id = $Id
+        section = Get-RequiredLtxValue $Catalog $Section 'section' $CatalogPath
+        cost = $Cost
+    }) | Out-Null
+}
+
 $FallbackAmmo = [ordered]@{}
 foreach ($Id in Get-LtxCsv $Catalog 'ammo' 'ids' $CatalogPath) {
     $Section = 'ammo_' + $Id
@@ -292,7 +415,16 @@ foreach ($Id in Get-LtxCsv $Catalog 'consumables' 'ids' $CatalogPath) {
 $Bandage = @($FallbackConsumables | Where-Object { $_.id -eq 'bandage' })
 if ($Bandage.Count -ne 1) { throw 'Fallback catalog must contain exactly one bandage' }
 $BandageCost = $Bandage[0].cost
-$FallbackKnives = @(Get-LtxCsv $Catalog 'knives' 'ids' $CatalogPath)
+$KnifeIds = @(Get-LtxCsv $Catalog 'knives' 'ids' $CatalogPath)
+if ($KnifeIds.Count -ne 9) { throw 'Fallback knife catalog must contain exactly 9 ids' }
+$FallbackKnives = New-Object System.Collections.Generic.List[object]
+$KnifeSections = @{}
+foreach ($Id in $KnifeIds) {
+    $Section = Get-RequiredLtxValue $Catalog ('knife_' + $Id) 'section' $CatalogPath
+    if ($KnifeSections.ContainsKey($Section)) { throw "Duplicate fallback knife section '$Section'" }
+    $KnifeSections[$Section] = $true
+    $FallbackKnives.Add([pscustomobject]@{ id = $Id; section = $Section }) | Out-Null
+}
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'
 $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"([^"]+)"'
@@ -303,6 +435,7 @@ $ActorPairWeightFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+wei
 $ActorWeaponPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+weapon\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_weapon"\):pick\(weapons\)' 'actor weapon pick'
 $ActorAmmoPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+ammo_boxes\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_ammo_boxes"\):pick\(boxes\)' 'actor ammo-box pick'
 $ActorOutfitPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+outfit\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_outfit"\):pick\(outfits\)' 'actor outfit pick'
+$RandomKnifeSelection = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+function\s+random_knife\(rng,\s*knives\).*?local\s+choice\s*=\s*rng:pick\(knives\)' 'random knife selection'
 $EnemyCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_count\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_count"\):next_int\(difficulty\.enemy_min,\s*maximum\)' 'enemy count formula'
 $EnemyFactionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_faction\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_faction"\):pick\(catalogs\.faction_ids\)' 'enemy faction formula'
 $PrimaryCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+primary_count\s*=\s*math\.ceil\(enemy_count\s*\*\s*difficulty\.primary_share_percent\s*/\s*100\)' 'primary count formula'
@@ -321,6 +454,9 @@ $TacticalRoleOrder = Get-RequiredLuaQuotedArray $TacticalDirectorScriptPath 'ROL
 $TacticalStrength = Get-RequiredLuaTable $TacticalDirectorScriptPath 'STRENGTH' '(\d+)'
 $RepeatedRoleRule = Get-RequiredLuaMatch $TacticalDirectorScriptPath 'count\s*>\s*4\s+and\s+index\s*%\s*2\s*==\s*1\s+then\s+return\s+"pressure".*?return\s+"flank"' 'repeated tactical role rule'
 $ProfileFactions = Get-RequiredLuaQuotedArray $CatalogScriptPath 'PROFILE_FACTIONS'
+$PoweredExoChargeAssignment = Get-RequiredLuaMatch $BootstrapScriptPath 'first\.value\.power\s*=\s*100' 'powered exo charge assignment'
+$PoweredExoChargeWrite = Get-RequiredLuaMatch $BootstrapScriptPath 'GA_ACTOR_EXO_WRITE_FAILED"\s*,\s*ports\.exo_set_data\s*,\s*outfit\.value\.record\.id\s*,\s*first\.value' 'powered exo charge write'
+$PoweredExoChargeVerification = Get-RequiredLuaMatch $BootstrapScriptPath 'verified\.value\.power\s*~=\s*100' 'powered exo charge verification'
 
 function Test-FallbackPairAffordable($Difficulty, [string]$WeaponClass, [string]$ArmorClass) {
     foreach ($Weapon in $FallbackWeapons) {
@@ -354,24 +490,24 @@ foreach ($Difficulty in $DifficultyModel) {
     $DifficultyLines.Add("| $($Difficulty.id) | $($Difficulty.enemy_min)-$($Difficulty.enemy_max) | $($Difficulty.enemy_total_budget) | $($Difficulty.player_loadout_budget) | $($Difficulty.primary_share_percent)% |") | Out-Null
 }
 $DifficultyLines.Add('') | Out-Null
-$DifficultyLines.Add('| difficulty | w_pistol | w_smg | w_shotgun | w_rifle | w_sniper |') | Out-Null
-$DifficultyLines.Add('|---|---:|---:|---:|---:|---:|') | Out-Null
-foreach ($Difficulty in $DifficultyModel) {
-    $DifficultyLines.Add("| $($Difficulty.id) | $($Difficulty.weapon_weights.w_pistol)% | $($Difficulty.weapon_weights.w_smg)% | $($Difficulty.weapon_weights.w_shotgun)% | $($Difficulty.weapon_weights.w_rifle)% | $($Difficulty.weapon_weights.w_sniper)% |") | Out-Null
+$DifficultyLines.Add('| weapon_class | rookie | stalker | veteran | master |') | Out-Null
+$DifficultyLines.Add('|---|---|---|---|---|') | Out-Null
+foreach ($Class in $WeaponWeightKeys.Keys) {
+    $Cells = @($DifficultyModel | ForEach-Object {
+        $Value = $_.weapon_weights[$Class]
+        "$Value% $(Get-PercentBar $Value)"
+    }) -join ' | '
+    $DifficultyLines.Add("| $Class | $Cells |") | Out-Null
 }
 $DifficultyLines.Add('') | Out-Null
-$DifficultyLines.Add('| difficulty | light | medium | scientific | heavy | powered_exo |') | Out-Null
-$DifficultyLines.Add('|---|---:|---:|---:|---:|---:|') | Out-Null
-foreach ($Difficulty in $DifficultyModel) {
-    $DifficultyLines.Add("| $($Difficulty.id) | $($Difficulty.armor_weights.light)% | $($Difficulty.armor_weights.medium)% | $($Difficulty.armor_weights.scientific)% | $($Difficulty.armor_weights.heavy)% | $($Difficulty.armor_weights.powered_exo)% |") | Out-Null
-}
-$DifficultyLines.Add('') | Out-Null
-$DifficultyLines.Add('| difficulty | weapon weight bars (10 cells = 100%) | armor weight bars (10 cells = 100%) |') | Out-Null
-$DifficultyLines.Add('|---|---|---|') | Out-Null
-foreach ($Difficulty in $DifficultyModel) {
-    $WeaponBars = @($WeaponWeightKeys.Keys | ForEach-Object { "$_ $($Difficulty.weapon_weights[$_])% $(Get-PercentBar $Difficulty.weapon_weights[$_])" }) -join '; '
-    $ArmorBars = @($ArmorWeightKeys.Keys | ForEach-Object { "$_ $($Difficulty.armor_weights[$_])% $(Get-PercentBar $Difficulty.armor_weights[$_])" }) -join '; '
-    $DifficultyLines.Add("| $($Difficulty.id) | $WeaponBars | $ArmorBars |") | Out-Null
+$DifficultyLines.Add('| armor_class | rookie | stalker | veteran | master |') | Out-Null
+$DifficultyLines.Add('|---|---|---|---|---|') | Out-Null
+foreach ($Class in $ArmorWeightKeys.Keys) {
+    $Cells = @($DifficultyModel | ForEach-Object {
+        $Value = $_.armor_weights[$Class]
+        "$Value% $(Get-PercentBar $Value)"
+    }) -join ' | '
+    $DifficultyLines.Add("| $Class | $Cells |") | Out-Null
 }
 $Blocks['difficulty-dashboard'] = Join-MarkdownLines $DifficultyLines
 
@@ -392,8 +528,8 @@ foreach ($Kind in $OutfitKindCosts.Keys) {
     $ActorLines.Add("| $Kind | $($OutfitKindCosts[$Kind]) | $ArmorClass |") | Out-Null
 }
 $ActorLines.Add('') | Out-Null
-$ActorLines.Add('| difficulty | affordable fallback class pairs / 25 |') | Out-Null
-$ActorLines.Add('|---|---:|') | Out-Null
+$ActorLines.Add('| difficulty | affordable fallback pairs | unavailable fallback pairs |') | Out-Null
+$ActorLines.Add('|---|---:|---:|') | Out-Null
 foreach ($Difficulty in $DifficultyModel) {
     $Eligible = 0
     foreach ($WeaponClass in $WeaponWeightKeys.Keys) {
@@ -401,21 +537,27 @@ foreach ($Difficulty in $DifficultyModel) {
             if (Test-FallbackPairAffordable $Difficulty $WeaponClass $ArmorClass) { $Eligible++ }
         }
     }
-    $ActorLines.Add("| $($Difficulty.id) | $Eligible / 25 |") | Out-Null
+    $ActorLines.Add("| $($Difficulty.id) | $Eligible / 25 | $(25 - $Eligible) / 25 |") | Out-Null
 }
 $ActorLines.Add('') | Out-Null
-$ActorLines.Add('| difficulty | unavailable fallback class pairs / 25 | pairs |') | Out-Null
-$ActorLines.Add('|---|---:|---|') | Out-Null
+$ActorLines.Add('| difficulty | weapon_class | affordable armor classes | unavailable armor classes |') | Out-Null
+$ActorLines.Add('|---|---|---|---|') | Out-Null
 foreach ($Difficulty in $DifficultyModel) {
-    $Unavailable = New-Object System.Collections.Generic.List[string]
     foreach ($WeaponClass in $WeaponWeightKeys.Keys) {
+        $Affordable = New-Object System.Collections.Generic.List[string]
+        $Unavailable = New-Object System.Collections.Generic.List[string]
         foreach ($ArmorClass in $ArmorWeightKeys.Keys) {
-            if (-not (Test-FallbackPairAffordable $Difficulty $WeaponClass $ArmorClass)) {
-                $Unavailable.Add("$WeaponClass/$ArmorClass") | Out-Null
+            if (Test-FallbackPairAffordable $Difficulty $WeaponClass $ArmorClass) {
+                $Affordable.Add($ArmorClass) | Out-Null
+            }
+            else {
+                $Unavailable.Add($ArmorClass) | Out-Null
             }
         }
+        $AffordableText = if ($Affordable.Count -eq 0) { '-' } else { @($Affordable) -join ', ' }
+        $UnavailableText = if ($Unavailable.Count -eq 0) { '-' } else { @($Unavailable) -join ', ' }
+        $ActorLines.Add("| $($Difficulty.id) | $WeaponClass | $AffordableText | $UnavailableText |") | Out-Null
     }
-    $ActorLines.Add("| $($Difficulty.id) | $($Unavailable.Count) / 25 | $(@($Unavailable) -join ', ') |") | Out-Null
 }
 $ActorLines.Add('') | Out-Null
 $ActorLines.Add('| fallback weapon | kind | cost | ammo | boxes |') | Out-Null
@@ -444,12 +586,14 @@ foreach ($Consumable in $FallbackConsumables) {
     $ActorLines.Add("| $($Consumable.section) | $($Consumable.cost) | $Selection |") | Out-Null
 }
 $ActorLines.Add("| knives | $($FallbackKnives.Count) | no budget cost; uniform section pick |") | Out-Null
+$ActorLines.Add("| knife sections | - | $(@($FallbackKnives | ForEach-Object { $_.section }) -join ', ') |") | Out-Null
 $Blocks['actor-equipment'] = Join-MarkdownLines $ActorLines
 
 $OpponentLines = New-Object System.Collections.Generic.List[string]
 $OpponentLines.Add('| difficulty | opponents | slot budgets | primary incl. leader | secondary |') | Out-Null
 $OpponentLines.Add('|---|---:|---|---:|---:|') | Out-Null
 $LayoutCapacity = Get-RequiredLtxInt $Layout 'ga_layout_rostok_arena_v1' 'virtual_capacity' $LayoutPath
+if ($LayoutCapacity -le 0) { throw 'virtual_capacity must be positive' }
 foreach ($Difficulty in $DifficultyModel) {
     $Maximum = [Math]::Min($Difficulty.enemy_max, $LayoutCapacity)
     for ($EnemyCount = $Difficulty.enemy_min; $EnemyCount -le $Maximum; $EnemyCount++) {
@@ -472,14 +616,14 @@ foreach ($Difficulty in $DifficultyModel) {
 $OpponentLines.Add('') | Out-Null
 $OpponentLines.Add('| profile rank | profile cost |') | Out-Null
 $OpponentLines.Add('|---|---:|') | Out-Null
-foreach ($Id in Get-LtxCsv $Catalog 'profiles' 'ids' $CatalogPath) {
-    $Section = 'profile_' + $Id
-    $OpponentLines.Add("| $Id | $(Get-RequiredLtxInt $Catalog $Section 'cost' $CatalogPath) |") | Out-Null
+foreach ($Profile in $FallbackProfiles) {
+    $OpponentLines.Add("| $($Profile.id) | $($Profile.cost) |") | Out-Null
 }
 $OpponentLines.Add('') | Out-Null
 $OpponentLines.Add('| rule | value |') | Out-Null
 $OpponentLines.Add('|---|---:|') | Out-Null
 $OpponentLines.Add("| PRIMARY_BAND_PERCENT | $PrimaryBandPercent% |") | Out-Null
+$OpponentLines.Add("| selection_band_threshold | ceil(maximum * $PrimaryBandPercent / 100) |") | Out-Null
 $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
 $OpponentLines.Add("| supported_factions | $(@($ProfileFactions) -join ', ') |") | Out-Null
@@ -490,9 +634,19 @@ $ArenaLines = New-Object System.Collections.Generic.List[string]
 $ArenaLines.Add('| layout parameter | value |') | Out-Null
 $ArenaLines.Add('|---|---:|') | Out-Null
 $OpponentPaths = @(Get-LtxCsv $Layout 'ga_layout_rostok_arena_v1' 'opponent_spawn_paths' $LayoutPath)
+if ($OpponentPaths.Count -ne 6) { throw 'opponent_spawn_paths must contain exactly 6 unique paths' }
+$ActorSpawnPath = Get-RequiredLtxValue $Layout 'ga_layout_rostok_arena_v1' 'actor_spawn_path' $LayoutPath
+$ActorLookPath = Get-RequiredLtxValue $Layout 'ga_layout_rostok_arena_v1' 'actor_look_path' $LayoutPath
+if ($ActorSpawnPath -ceq $ActorLookPath -or $OpponentPaths -ccontains $ActorSpawnPath -or $OpponentPaths -ccontains $ActorLookPath) {
+    throw 'actor and opponent layout paths must be unique'
+}
+$VirtualRadii = @(Get-RequiredLtxNumberList $Layout 'ga_layout_rostok_arena_v1' 'virtual_radii' $LayoutPath 2)
+$ArenaLines.Add("| actor_spawn_path | $ActorSpawnPath |") | Out-Null
+$ArenaLines.Add("| actor_look_path | $ActorLookPath |") | Out-Null
 $ArenaLines.Add("| native_opponent_paths | $($OpponentPaths.Count) |") | Out-Null
 $ArenaLines.Add("| virtual_capacity | $LayoutCapacity |") | Out-Null
-$ArenaLines.Add("| virtual_radii | $(Get-RequiredLtxValue $Layout 'ga_layout_rostok_arena_v1' 'virtual_radii' $LayoutPath) m |") | Out-Null
+$VirtualRadiiText = @($VirtualRadii | ForEach-Object { $_.ToString('0.################', [Globalization.CultureInfo]::InvariantCulture) }) -join ', '
+$ArenaLines.Add("| virtual_radii | $VirtualRadiiText m |") | Out-Null
 foreach ($Key in @('max_height_delta', 'min_opponent_separation', 'min_actor_separation', 'max_base_distance')) {
     $ArenaLines.Add("| $Key | $(Get-RequiredLtxNumber $Layout 'ga_layout_rostok_arena_v1' $Key $LayoutPath) m |") | Out-Null
 }
@@ -530,9 +684,8 @@ foreach ($Weapon in $FallbackWeapons) {
 if ($null -eq $MinimumFallbackLoadout) { throw 'Fallback catalog has no complete loadout' }
 
 $MinimumProfileCost = $null
-foreach ($Id in Get-LtxCsv $Catalog 'profiles' 'ids' $CatalogPath) {
-    $Cost = Get-RequiredLtxInt $Catalog ('profile_' + $Id) 'cost' $CatalogPath
-    if ($null -eq $MinimumProfileCost -or $Cost -lt $MinimumProfileCost) { $MinimumProfileCost = $Cost }
+foreach ($Profile in $FallbackProfiles) {
+    if ($null -eq $MinimumProfileCost -or $Profile.cost -lt $MinimumProfileCost) { $MinimumProfileCost = $Profile.cost }
 }
 
 $DiagnosticLines = New-Object System.Collections.Generic.List[string]
@@ -540,8 +693,7 @@ $DiagnosticLines.Add('| category | diagnostic | value |') | Out-Null
 $DiagnosticLines.Add('|---|---|---|') | Out-Null
 $DiagnosticLines.Add("| fact | minimum_fallback_loadout | $MinimumFallbackLoadout budget points |") | Out-Null
 foreach ($Difficulty in $DifficultyModel) {
-    $Maximum = [Math]::Min($Difficulty.enemy_max, $LayoutCapacity)
-    $Required = $Maximum * ($MinimumProfileCost + $MinimumFallbackLoadout)
+    $Required = $Difficulty.enemy_max * ($MinimumProfileCost + $MinimumFallbackLoadout)
     $Margin = $Difficulty.enemy_total_budget - $Required
     $DiagnosticLines.Add("| derived | $($Difficulty.id) max-team feasibility margin | $Margin |") | Out-Null
 }
@@ -599,6 +751,7 @@ $SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | 
 $SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
 $SourceLines.Add('| actor/opponent selection and budget allocation | `gamma_arena_generator.script` |') | Out-Null
 $SourceLines.Add('| faction profiles and effective weapon pools | `gamma_arena_catalog.script` |') | Out-Null
+$SourceLines.Add('| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |') | Out-Null
 $SourceLines.Add('| spawn capacity and separation | `gamma_arena_layouts.ltx` |') | Out-Null
 $SourceLines.Add('| tactical timings | `gamma_arena_tactical.ltx` |') | Out-Null
 $SourceLines.Add('| tactical roles and evidence strength | `gamma_arena_tactical_director.script` |') | Out-Null
@@ -612,7 +765,8 @@ $Expected = Set-GeneratedMarkdownBlocks $Current $Blocks
 
 if ($Verify) {
     if ($Current.Replace("`r`n", "`n").Replace("`r", "`n") -cne $Expected) {
-        throw "Arena balance document is stale. Run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Update-GammaArenaBalanceDoc.ps1"
+        $ToolInvocation = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$([IO.Path]::GetFullPath($PSCommandPath))`" -RepoRoot `"$RepoRoot`" -DocumentPath `"$DocumentPath`""
+        throw "Arena balance document is stale: $DocumentPath. Run: $ToolInvocation"
     }
     Write-Host 'PASS: Arena balance document is current'
     return

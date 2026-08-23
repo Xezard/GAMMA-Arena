@@ -39,6 +39,7 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx',
         'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
         'src\gamedata\scripts\gamma_arena_catalog.script',
+        'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
         'src\gamedata\scripts\gamma_arena_tactical_director.script'
     )) {
@@ -75,16 +76,245 @@ function New-BalanceFixture([string]$SourceRoot) {
     return $FixtureRoot
 }
 
-function Invoke-ExpectedFailure([scriptblock]$Action, [string]$Pattern) {
-    $Failed = $false
+function Get-ExpectedFailureMessage([scriptblock]$Action, [string]$Pattern) {
     try {
         & $Action
     }
     catch {
         if ($_.Exception.Message -notmatch $Pattern) { throw }
-        $Failed = $true
+        return $_.Exception.Message
     }
-    if (-not $Failed) { throw "Expected failure matching: $Pattern" }
+    throw "Expected failure matching: $Pattern"
+}
+
+function Invoke-ExpectedFailure([scriptblock]$Action, [string]$Pattern) {
+    Get-ExpectedFailureMessage $Action $Pattern | Out-Null
+}
+
+function Get-TestLtxValue([string]$Text, [string]$Section, [string]$Key) {
+    $SectionPattern = '(?ms)^\[' + [regex]::Escape($Section) + '\]\s*\r?\n(?<body>.*?)(?=^\[|\z)'
+    $SectionMatch = [regex]::Match($Text, $SectionPattern)
+    if (-not $SectionMatch.Success) { throw "Test oracle cannot find LTX section: $Section" }
+    $KeyPattern = '(?m)^\s*' + [regex]::Escape($Key) + '\s*=\s*(.*?)\s*$'
+    $KeyMatch = [regex]::Match($SectionMatch.Groups['body'].Value, $KeyPattern)
+    if (-not $KeyMatch.Success) { throw "Test oracle cannot find LTX key: [$Section] $Key" }
+    return $KeyMatch.Groups[1].Value.Trim()
+}
+
+function Get-TestLtxCsv([string]$Text, [string]$Section, [string]$Key) {
+    return @((Get-TestLtxValue $Text $Section $Key).Split(',') | ForEach-Object { $_.Trim() })
+}
+
+function Get-TestGeneratedBlock([string]$DocumentText, [string]$Name) {
+    $Pattern = '(?s)<!-- BEGIN GENERATED: ' + [regex]::Escape($Name) + ' -->\s*(.*?)\s*<!-- END GENERATED: ' + [regex]::Escape($Name) + ' -->'
+    $Match = [regex]::Match($DocumentText, $Pattern)
+    if (-not $Match.Success) { throw "Test oracle cannot find generated block: $Name" }
+    return $Match.Groups[1].Value
+}
+
+function Get-TestPercentBar([int]$Percent) {
+    $Filled = [Math]::Min(10, [Math]::Max(0, [Math]::Floor(($Percent + 5) / 10)))
+    return ('#' * $Filled) + ('.' * (10 - $Filled))
+}
+
+function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$DocumentText) {
+    $DifficultyText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'))
+    $CatalogText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'))
+    $LayoutText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'))
+    $TacticalText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'))
+    $TacticalDirectorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'))
+    $DifficultyIds = @('rookie', 'stalker', 'veteran', 'master')
+    $WeaponClasses = @('w_pistol', 'w_smg', 'w_shotgun', 'w_rifle', 'w_sniper')
+    $ArmorClasses = @('light', 'medium', 'scientific', 'heavy', 'powered_exo')
+
+    $ExpectedTableRows = [ordered]@{
+        'state-passport' = 6
+        'difficulty-dashboard' = 20
+        'actor-equipment' = 66
+        'opponent-budgets' = 28
+        'arena-tactics' = 33
+        'balance-diagnostics' = 21
+        'source-map' = 11
+    }
+    foreach ($BlockName in $ExpectedTableRows.Keys) {
+        $Block = Get-TestGeneratedBlock $DocumentText $BlockName
+        $Rows = @($Block -split '\r?\n' | Where-Object { $_ -match '^\|' })
+        if ($Rows.Count -ne $ExpectedTableRows[$BlockName]) {
+            throw "Generated table-row cardinality differs for $BlockName"
+        }
+    }
+
+    $DifficultyBlock = Get-TestGeneratedBlock $DocumentText 'difficulty-dashboard'
+    $DifficultyRows = @([regex]::Matches($DifficultyBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+-\d+) \| (\d+) \| (\d+) \| (\d+)% \|$'))
+    if ($DifficultyRows.Count -ne $DifficultyIds.Count) { throw 'Difficulty summary must contain exactly four data rows' }
+    $WeightRows = @([regex]::Matches($DifficultyBlock, '(?m)^\| (w_pistol|w_smg|w_shotgun|w_rifle|w_sniper|light|medium|scientific|heavy|powered_exo) \| ([^|]+) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$'))
+    if ($WeightRows.Count -ne ($WeaponClasses.Count + $ArmorClasses.Count)) { throw 'Difficulty weight matrices have unexpected cardinality' }
+    if (@($WeightRows | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique).Count -ne $WeightRows.Count) {
+        throw 'Difficulty weight matrices contain duplicate class rows'
+    }
+    $WeaponWeightKeys = @('weapon_weight_pistol', 'weapon_weight_smg', 'weapon_weight_shotgun', 'weapon_weight_rifle', 'weapon_weight_sniper')
+    $ArmorWeightKeys = @('armor_weight_light', 'armor_weight_medium', 'armor_weight_scientific', 'armor_weight_heavy', 'armor_weight_powered_exo')
+    for ($DifficultyIndex = 0; $DifficultyIndex -lt $DifficultyIds.Count; $DifficultyIndex++) {
+        $DifficultyId = $DifficultyIds[$DifficultyIndex]
+        $Section = 'ga_difficulty_' + $DifficultyId
+        $ExpectedSummary = "| $DifficultyId | $(Get-TestLtxValue $DifficultyText $Section 'enemy_min')-$(Get-TestLtxValue $DifficultyText $Section 'enemy_max') | $(Get-TestLtxValue $DifficultyText $Section 'enemy_total_budget') | $(Get-TestLtxValue $DifficultyText $Section 'player_loadout_budget') | $(Get-TestLtxValue $DifficultyText $Section 'primary_share_percent')% |"
+        if (@($DifficultyRows | Where-Object { $_.Value -ceq $ExpectedSummary }).Count -ne 1) {
+            throw "Difficulty summary differs: $DifficultyId"
+        }
+        $WeaponTotal = 0
+        for ($ClassIndex = 0; $ClassIndex -lt $WeaponClasses.Count; $ClassIndex++) {
+            $Value = [int](Get-TestLtxValue $DifficultyText $Section $WeaponWeightKeys[$ClassIndex])
+            $WeaponTotal += $Value
+            $Cell = "$Value% $(Get-TestPercentBar $Value)"
+            $Row = @($WeightRows | Where-Object { $_.Groups[1].Value -eq $WeaponClasses[$ClassIndex] })
+            if ($Row.Count -ne 1 -or $Row[0].Groups[$DifficultyIndex + 2].Value.Trim() -cne $Cell) {
+                throw "Weapon weight cell differs: $DifficultyId/$($WeaponClasses[$ClassIndex])"
+            }
+        }
+        if ($WeaponTotal -ne 100) { throw "Source weapon weights do not total 100: $DifficultyId" }
+        $ArmorTotal = 0
+        for ($ClassIndex = 0; $ClassIndex -lt $ArmorClasses.Count; $ClassIndex++) {
+            $Value = [int](Get-TestLtxValue $DifficultyText $Section $ArmorWeightKeys[$ClassIndex])
+            $ArmorTotal += $Value
+            $Cell = "$Value% $(Get-TestPercentBar $Value)"
+            $Row = @($WeightRows | Where-Object { $_.Groups[1].Value -eq $ArmorClasses[$ClassIndex] })
+            if ($Row.Count -ne 1 -or $Row[0].Groups[$DifficultyIndex + 2].Value.Trim() -cne $Cell) {
+                throw "Armor weight cell differs: $DifficultyId/$($ArmorClasses[$ClassIndex])"
+            }
+        }
+        if ($ArmorTotal -ne 100) { throw "Source armor weights do not total 100: $DifficultyId" }
+    }
+
+    $OpponentBlock = Get-TestGeneratedBlock $DocumentText 'opponent-budgets'
+    $OpponentRows = @([regex]::Matches($OpponentBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+) \| ([^|]+?) \| (\d+) \| (\d+) \|$'))
+    $ExpectedOpponentRows = 0
+    $Capacity = [int](Get-TestLtxValue $LayoutText 'ga_layout_rostok_arena_v1' 'virtual_capacity')
+    foreach ($DifficultyId in $DifficultyIds) {
+        $Section = 'ga_difficulty_' + $DifficultyId
+        $Minimum = [int](Get-TestLtxValue $DifficultyText $Section 'enemy_min')
+        $Maximum = [Math]::Min([int](Get-TestLtxValue $DifficultyText $Section 'enemy_max'), $Capacity)
+        $TotalBudget = [int](Get-TestLtxValue $DifficultyText $Section 'enemy_total_budget')
+        $PrimaryShare = [int](Get-TestLtxValue $DifficultyText $Section 'primary_share_percent')
+        for ($EnemyCount = $Minimum; $EnemyCount -le $Maximum; $EnemyCount++) {
+            $ExpectedOpponentRows++
+            $Rows = @($OpponentRows | Where-Object { $_.Groups[1].Value -eq $DifficultyId -and [int]$_.Groups[2].Value -eq $EnemyCount })
+            if ($Rows.Count -ne 1) { throw "Expected one generated opponent row for $DifficultyId/$EnemyCount" }
+            $BudgetText = $Rows[0].Groups[3].Value.Trim()
+            if ($BudgetText -match '^(\d+) x (\d+)$') {
+                $Budgets = @(1..([int]$Matches[2]) | ForEach-Object { [int]$Matches[1] })
+            }
+            else {
+                $Budgets = @($BudgetText.Split(',') | ForEach-Object { [int]$_.Trim() })
+            }
+            if ($Budgets.Count -ne $EnemyCount) { throw "Slot-budget cardinality differs for $DifficultyId/$EnemyCount" }
+            if ((($Budgets | Measure-Object -Sum).Sum) -ne $TotalBudget) { throw "Slot budgets do not sum to the configured total for $DifficultyId/$EnemyCount" }
+            if ((($Budgets | Measure-Object -Maximum).Maximum - ($Budgets | Measure-Object -Minimum).Minimum) -gt 1) {
+                throw "Slot budgets differ by more than one for $DifficultyId/$EnemyCount"
+            }
+            $ExpectedPrimary = [int][Math]::Ceiling($EnemyCount * $PrimaryShare / 100.0)
+            if ([int]$Rows[0].Groups[4].Value -ne $ExpectedPrimary -or [int]$Rows[0].Groups[5].Value -ne ($EnemyCount - $ExpectedPrimary)) {
+                throw "Generated role counts differ for $DifficultyId/$EnemyCount"
+            }
+        }
+    }
+    if ($OpponentRows.Count -ne $ExpectedOpponentRows) { throw 'Generated opponent-budget table contains unexpected rows' }
+
+    $AmmoCosts = @{}
+    foreach ($Id in Get-TestLtxCsv $CatalogText 'ammo' 'ids') {
+        $Section = 'ammo_' + $Id
+        $AmmoCosts[(Get-TestLtxValue $CatalogText $Section 'section')] = [int](Get-TestLtxValue $CatalogText $Section 'cost')
+    }
+    $Weapons = @(foreach ($Id in Get-TestLtxCsv $CatalogText 'weapons' 'ids') {
+        $Section = 'weapon_' + $Id
+        [pscustomobject]@{
+            ammo = Get-TestLtxValue $CatalogText $Section 'ammo'
+            cost = [int](Get-TestLtxValue $CatalogText $Section 'cost')
+            ammo_box_min = [int](Get-TestLtxValue $CatalogText $Section 'ammo_box_min')
+            ammo_box_max = [int](Get-TestLtxValue $CatalogText $Section 'ammo_box_max')
+            kind = Get-TestLtxValue $CatalogText $Section 'kind'
+        }
+    })
+    $Outfits = @(foreach ($Id in Get-TestLtxCsv $CatalogText 'outfits' 'ids') {
+        $Section = 'outfit_' + $Id
+        [pscustomobject]@{
+            cost = [int](Get-TestLtxValue $CatalogText $Section 'cost')
+            armor_class = Get-TestLtxValue $CatalogText $Section 'armor_class'
+        }
+    })
+    $BandageCost = [int](Get-TestLtxValue $CatalogText 'consumable_bandage' 'cost')
+    $ActorBlock = Get-TestGeneratedBlock $DocumentText 'actor-equipment'
+    $ActorPairRows = @([regex]::Matches($ActorBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (w_pistol|w_smg|w_shotgun|w_rifle|w_sniper) \| ([^|]+) \| ([^|]+) \|$'))
+    if ($ActorPairRows.Count -ne ($DifficultyIds.Count * $WeaponClasses.Count)) { throw 'Fallback pair matrix has unexpected cardinality' }
+    $ActorCountRows = @([regex]::Matches($ActorBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+) / 25 \| (\d+) / 25 \|$'))
+    if ($ActorCountRows.Count -ne $DifficultyIds.Count) { throw 'Fallback pair totals have unexpected cardinality' }
+    foreach ($DifficultyId in $DifficultyIds) {
+        $ActorBudget = [int](Get-TestLtxValue $DifficultyText ('ga_difficulty_' + $DifficultyId) 'player_loadout_budget')
+        $TotalAffordable = 0
+        foreach ($WeaponClass in $WeaponClasses) {
+            $Affordable = New-Object System.Collections.Generic.List[string]
+            $Unavailable = New-Object System.Collections.Generic.List[string]
+            foreach ($ArmorClass in $ArmorClasses) {
+                $PairAffordable = $false
+                foreach ($Weapon in @($Weapons | Where-Object { $_.kind -eq $WeaponClass -and $AmmoCosts.ContainsKey($_.ammo) })) {
+                    foreach ($Outfit in @($Outfits | Where-Object { $_.armor_class -eq $ArmorClass })) {
+                        for ($Boxes = $Weapon.ammo_box_min; $Boxes -le $Weapon.ammo_box_max; $Boxes++) {
+                            if (($Weapon.cost + $AmmoCosts[$Weapon.ammo] * $Boxes + $Outfit.cost + $BandageCost) -le $ActorBudget) {
+                                $PairAffordable = $true
+                            }
+                        }
+                    }
+                }
+                if ($PairAffordable) { $Affordable.Add($ArmorClass) | Out-Null; $TotalAffordable++ }
+                else { $Unavailable.Add($ArmorClass) | Out-Null }
+            }
+            $AffordableText = if ($Affordable.Count -eq 0) { '-' } else { @($Affordable) -join ', ' }
+            $UnavailableText = if ($Unavailable.Count -eq 0) { '-' } else { @($Unavailable) -join ', ' }
+            $PairRows = @($ActorPairRows | Where-Object { $_.Groups[1].Value -eq $DifficultyId -and $_.Groups[2].Value -eq $WeaponClass })
+            if ($PairRows.Count -ne 1 -or $PairRows[0].Groups[3].Value.Trim() -cne $AffordableText -or $PairRows[0].Groups[4].Value.Trim() -cne $UnavailableText) {
+                throw "Fallback pair matrix differs: $DifficultyId/$WeaponClass"
+            }
+        }
+        $CountRows = @($ActorCountRows | Where-Object { $_.Groups[1].Value -eq $DifficultyId })
+        if ($CountRows.Count -ne 1 -or [int]$CountRows[0].Groups[2].Value -ne $TotalAffordable -or [int]$CountRows[0].Groups[3].Value -ne (25 - $TotalAffordable)) {
+            throw "Fallback pair totals differ: $DifficultyId"
+        }
+    }
+
+    $ArenaBlock = Get-TestGeneratedBlock $DocumentText 'arena-tactics'
+    $ExpectedArenaRows = New-Object System.Collections.Generic.List[string]
+    $LayoutSection = 'ga_layout_rostok_arena_v1'
+    $ExpectedArenaRows.Add("| actor_spawn_path | $(Get-TestLtxValue $LayoutText $LayoutSection 'actor_spawn_path') |") | Out-Null
+    $ExpectedArenaRows.Add("| actor_look_path | $(Get-TestLtxValue $LayoutText $LayoutSection 'actor_look_path') |") | Out-Null
+    $ExpectedArenaRows.Add("| native_opponent_paths | $(@(Get-TestLtxCsv $LayoutText $LayoutSection 'opponent_spawn_paths').Count) |") | Out-Null
+    $ExpectedArenaRows.Add("| virtual_capacity | $(Get-TestLtxValue $LayoutText $LayoutSection 'virtual_capacity') |") | Out-Null
+    $Radii = @(Get-TestLtxCsv $LayoutText $LayoutSection 'virtual_radii') -join ', '
+    $ExpectedArenaRows.Add("| virtual_radii | $Radii m |") | Out-Null
+    foreach ($Key in @('max_height_delta', 'min_opponent_separation', 'min_actor_separation', 'max_base_distance')) {
+        $Value = [double]::Parse((Get-TestLtxValue $LayoutText $LayoutSection $Key), [Globalization.CultureInfo]::InvariantCulture)
+        $ExpectedArenaRows.Add("| $Key | $($Value.ToString('0.################', [Globalization.CultureInfo]::InvariantCulture)) m |") | Out-Null
+    }
+    $ExpectedArenaRows.Add("| observation_interval_ms | $(Get-TestLtxValue $TacticalText 'director' 'observation_interval_ms') ms |") | Out-Null
+    $ExpectedArenaRows.Add("| report_delay_ms | $(Get-TestLtxValue $TacticalText 'director' 'report_delay_min_ms')-$(Get-TestLtxValue $TacticalText 'director' 'report_delay_max_ms') ms |") | Out-Null
+    foreach ($Key in @('assignment_dwell_ms', 'visual_aging_ms', 'evidence_expiry_ms', 'hint_delay_ms', 'hint_cooldown_ms')) {
+        $ExpectedArenaRows.Add("| $Key | $(Get-TestLtxValue $TacticalText 'director' $Key) ms |") | Out-Null
+    }
+    $RoleOrderMatch = [regex]::Match($TacticalDirectorText, '(?m)^local\s+ROLE_ORDER\s*=\s*\{(?<body>.*?)\}\s*$')
+    if (-not $RoleOrderMatch.Success) { throw 'Test oracle cannot find ROLE_ORDER' }
+    $RoleOrder = @([regex]::Matches($RoleOrderMatch.Groups['body'].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+    $ExpectedArenaRows.Add("| initial_role_order | $($RoleOrder -join ' -> ') |") | Out-Null
+    $ExpectedArenaRows.Add('| repeated_role_rule | odd slot: pressure / even slot: flank |') | Out-Null
+    $StrengthMatch = [regex]::Match($TacticalDirectorText, '(?s)local\s+STRENGTH\s*=\s*\{(?<body>.*?)\r?\n\}')
+    if (-not $StrengthMatch.Success) { throw 'Test oracle cannot find STRENGTH' }
+    $StrengthEntries = @([regex]::Matches($StrengthMatch.Groups['body'].Value, '(?m)^\s*([A-Za-z0-9_]+)\s*=\s*(\d+)\s*,?\s*$'))
+    foreach ($Entry in $StrengthEntries) {
+        $ExpectedArenaRows.Add("| $($Entry.Groups[1].Value) | $($Entry.Groups[2].Value) |") | Out-Null
+    }
+    if ($ExpectedArenaRows.Count -ne 27 -or $StrengthEntries.Count -ne 9) { throw 'Arena/tactical source oracle has unexpected cardinality' }
+    foreach ($ExpectedRow in $ExpectedArenaRows) {
+        if ([regex]::Matches($ArenaBlock, '(?m)^' + [regex]::Escape($ExpectedRow) + '$').Count -ne 1) {
+            throw "Arena/tactical row differs or is duplicated: $ExpectedRow"
+        }
+    }
 }
 
 $Fixture = New-BalanceFixture $RepoRoot
@@ -99,24 +329,27 @@ try {
         '| Tactics | schema 1 / revision 1 |',
         '| rookie | 2-3 | 25 | 8 | 50% |',
         '| master | 7-10 | 100 | 16 | 80% |',
-        '| master | 5% | 15% | 15% | 50% | 15% |',
-        '| master | 10% | 25% | 25% | 35% | 5% |',
-        '| rookie | 4 / 25 |',
-        '| master | 12 / 25 |',
-        '| rookie | 21 / 25 |',
+        '| w_pistol | 50% #####..... | 25% ###....... | 10% #......... | 5% #......... |',
+        '| powered_exo | 0% .......... | 1% .......... | 5% #......... | 5% #......... |',
+        '| rookie | 4 / 25 | 21 / 25 |',
+        '| master | 12 / 25 | 13 / 25 |',
+        '| rookie | w_pistol | light, medium, scientific | heavy, powered_exo |',
         '| w_pistol | 2 |',
         '| o_heavy | 5 | heavy; powered_exo when exo/proto |',
         '| ammo_5.45x39_fmj | 2 | fallback |',
         '| dynamic discovered ammo | 1 | runtime discovery |',
         '| medkit | 2 | catalogued, not selected |',
         '| knives | 9 | no budget cost; uniform section pick |',
+        '| knife sections | - | wpn_knife, wpn_knife2, wpn_knife3, wpn_knife4, wpn_knife5, wpn_knife6, wpn_knife7, wpn_knife8, wpn_knife9 |',
         '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
         '| master | 10 | 10 x 10 | 8 | 2 |',
         '| PRIMARY_BAND_PERCENT | 70% |',
+        '| selection_band_threshold | ceil(maximum * 70 / 100) |',
         '| max_snipers_per_fight | 1 |',
         '| supported_factions | army, bandit, csky, dolg, ecolog, freedom, killer, monolith, stalker |',
         '| native_opponent_paths | 6 |',
         '| virtual_capacity | 10 |',
+        '| virtual_radii | 1.5, 2.5 m |',
         '| observation_interval_ms | 500 ms |',
         '| report_delay_ms | 1000-3000 ms |',
         '| initial_role_order | pressure -> flank -> support -> anchor |',
@@ -125,12 +358,14 @@ try {
         '| derived | rookie -> stalker largest weapon-class delta | w_pistol -25 pp |',
         '| derived | capacity-clipped difficulties | none |',
         '| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |',
-        '| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |'
+        '| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |',
+        '| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |'
     )) {
         if (-not $First.Contains($Expected)) {
             throw "Generated state passport is missing: $Expected"
         }
     }
+    Assert-DerivedBalanceInvariants $Fixture $First
 
     & $ToolPath -RepoRoot $Fixture
     $Second = [IO.File]::ReadAllText($Document)
@@ -140,7 +375,12 @@ try {
 
     $Stale = $Second.Replace('Catalog | schema 4 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
-    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
+    $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
+    if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
+        -not $StaleMessage.Contains("-RepoRoot `"$([IO.Path]::GetFullPath($Fixture))`"") -or
+        -not $StaleMessage.Contains("-DocumentPath `"$([IO.Path]::GetFullPath($Document))`"")) {
+        throw 'Stale-document error does not include the target and exact regeneration arguments'
+    }
     & $ToolPath -RepoRoot $Fixture
 
     $Valid = [IO.File]::ReadAllText($Document)
@@ -150,6 +390,43 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
     Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'markers must exist exactly once'
+
+    $Nested = @'
+# Gamma Arena balance
+
+<!-- BEGIN GENERATED: difficulty-dashboard -->
+<!-- BEGIN GENERATED: state-passport -->
+<!-- END GENERATED: state-passport -->
+<!-- END GENERATED: difficulty-dashboard -->
+<!-- BEGIN GENERATED: actor-equipment -->
+<!-- END GENERATED: actor-equipment -->
+<!-- BEGIN GENERATED: opponent-budgets -->
+<!-- END GENERATED: opponent-budgets -->
+<!-- BEGIN GENERATED: arena-tactics -->
+<!-- END GENERATED: arena-tactics -->
+<!-- BEGIN GENERATED: balance-diagnostics -->
+<!-- END GENERATED: balance-diagnostics -->
+<!-- BEGIN GENERATED: source-map -->
+<!-- END GENERATED: source-map -->
+'@
+    [IO.File]::WriteAllText($Document, $Nested, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'overlap|nested'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Nested generated markers partially rewrote the document'
+    }
+
+    $Reversed = [regex]::Replace(
+        $Valid,
+        '(?s)<!-- BEGIN GENERATED: source-map -->.*?<!-- END GENERATED: source-map -->',
+        "<!-- END GENERATED: source-map -->`n<!-- BEGIN GENERATED: source-map -->"
+    )
+    [IO.File]::WriteAllText($Document, $Reversed, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'markers are reversed'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Reversed generated markers partially rewrote the document'
+    }
 
     [IO.File]::WriteAllText($Document, $Valid, (New-Object Text.UTF8Encoding($false)))
     $Difficulty = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
@@ -178,6 +455,14 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
     Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+    & $ToolPath -RepoRoot $Fixture
+    $CapacityLimited = [IO.File]::ReadAllText($Document)
+    if (-not $CapacityLimited.Contains('| derived | master max-team feasibility margin | 40 |')) {
+        throw 'Configured max-team feasibility margin was incorrectly clipped by runtime capacity'
+    }
+    if (-not $CapacityLimited.Contains('| derived | capacity-clipped difficulties | master |')) {
+        throw 'Runtime capacity clipping is not reported separately'
+    }
 
     [IO.File]::WriteAllText($Layout, $LayoutOriginal, (New-Object Text.UTF8Encoding($false)))
     & $ToolPath -RepoRoot $Fixture
@@ -205,8 +490,68 @@ try {
 
     [IO.File]::WriteAllText($Discovery, $DiscoveryOriginal, (New-Object Text.UTF8Encoding($false)))
     & $ToolPath -RepoRoot $Fixture
+
+    $CatalogScript = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_catalog.script'
+    $CatalogScriptOriginal = [IO.File]::ReadAllText($CatalogScript)
+    $ProfileRanksChanged = $CatalogScriptOriginal.Replace(
+        '{ id = "veteran", cost = 4 }',
+        '{ id = "veteran", cost = 5 }'
+    )
+    [IO.File]::WriteAllText($CatalogScript, $ProfileRanksChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'PROFILE_RANKS'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Changed profile rank costs partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($CatalogScript, $CatalogScriptOriginal, (New-Object Text.UTF8Encoding($false)))
+    $CatalogConfig = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+    $CatalogConfigOriginal = [IO.File]::ReadAllText($CatalogConfig)
+    $KnifeChanged = $CatalogConfigOriginal.Replace('section = wpn_knife9', '; section intentionally missing')
+    [IO.File]::WriteAllText($CatalogConfig, $KnifeChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'knife_knife9'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Malformed knife catalog partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($CatalogConfig, $CatalogConfigOriginal, (New-Object Text.UTF8Encoding($false)))
+    $LayoutMalformed = $LayoutOriginal.Replace('virtual_radii = 1.5,2.5', 'virtual_radii = 1.5,nope')
+    [IO.File]::WriteAllText($Layout, $LayoutMalformed, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'virtual_radii'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Malformed virtual radii partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Layout, $LayoutOriginal, (New-Object Text.UTF8Encoding($false)))
+    $Bootstrap = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+    $BootstrapOriginal = [IO.File]::ReadAllText($Bootstrap)
+    $BootstrapChanged = $BootstrapOriginal.Replace('first.value.power = 100', 'first.value.power = 99')
+    [IO.File]::WriteAllText($Bootstrap, $BootstrapChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'powered exo charge'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Changed powered exo charge rule partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Bootstrap, $BootstrapOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
     $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
+
+    $KnifePickChanged = $GeneratorText.Replace(
+        'local choice = rng:pick(knives)',
+        'local choice = knives[1]'
+    )
+    [IO.File]::WriteAllText($Generator, $KnifePickChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture } 'random knife selection'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Changed knife selection partially rewrote the document'
+    }
+
+    [IO.File]::WriteAllText($Generator, $GeneratorText, (New-Object Text.UTF8Encoding($false)))
 
     $FormulaChanged = $GeneratorText.Replace(
         'local primary_count = math.ceil(enemy_count * difficulty.primary_share_percent / 100)',
