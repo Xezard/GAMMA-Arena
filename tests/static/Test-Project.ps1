@@ -956,6 +956,9 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
     Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v5') 'Catalog loader must bind exact v5 catalog semantics'
     Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v4') 'Catalog loader must bind exact v4 difficulty semantics'
+    foreach ($Diagnostic in @('Catalog group id count differs from v5', 'Catalog group contains a non-v5 id', 'Catalog group is missing a v5 id')) {
+        Assert-True ($Task3CatalogScriptContent.Contains($Diagnostic)) "Strict catalog manifest diagnostic must identify v5: $Diagnostic"
+    }
     foreach ($Marker in @('armor_class','player_weapon_weights','player_armor_weights','w_pistol','w_smg','w_shotgun','w_rifle','w_sniper','light','medium','scientific','heavy','powered_exo')) {
         Assert-True ($Task3CatalogScriptContent -match [regex]::Escape($Marker)) "Catalog loader must cover $Marker"
     }
@@ -1007,6 +1010,7 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($GeneratorTests -match 'weighted_player_class_pair_selection') 'Generator tests must cover weighted player class-pair selection'
     Assert-True ($GeneratorTests -match 'player_class_pair_ignores_concrete_cardinality') 'Generator tests must prove concrete duplicate cardinality cannot change class selection'
     Assert-True ($GeneratorTests -match 'master_player_class_diversity') 'Generator tests must cover Master player class diversity'
+    Assert-True ($GeneratorTests -match 'master_powered_exo_rate_is_rare') 'Generator tests must lock the rare Master powered-exoskeleton rate'
     Assert-True ($Task3GeneratorContent -match 'value\.knife') 'Stable encoding must include the generated knife'
 }
 if (Test-Path -LiteralPath $DifficultyPath) {
@@ -1488,6 +1492,9 @@ foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reco
 Assert-True ($Task12OrchestratorContent -match 'reconcile_active_integrity\s*\([\s\S]{0,500}reconcile_active_victory\s*\(') 'Integrity recovery must be reconciled before victory'
 Assert-True ($Task12BootstrapContent.Contains('object_position')) 'Bootstrap must bind guarded opponent position evidence'
 $Task13RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($RuntimeRegression in @('runtime_fatal_main_menu_bypasses_terminal_cleanup_error', 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error', 'runtime_entity_wounded_cleanup_holds_offline_before_release', 'runtime_entity_living_defeat_cleanup_holds_offline', 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release')) {
+    Assert-True ($Task13RuntimeTests.Contains($RuntimeRegression)) "Runtime regression suite is missing case: $RuntimeRegression"
+}
 foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
     Assert-True ($Task13RuntimeTests.Contains($IntegrityTest)) "Runtime integrity suite is missing case: $IntegrityTest"
 }
@@ -1506,6 +1513,22 @@ if ($Task2DriveOnlineStart -ge 0 -and $Task2DriveOnlineEnd -gt $Task2DriveOnline
 }
 foreach ($CleanupMarker in @('quiesce_live_owned_npcs', 'GA_ENTITY_CLEANUP_QUIESCE_FAILED', 'cleanup_phase', 'release_index', 'session_id')) {
     Assert-True ($Task12EntityContent.Contains($CleanupMarker)) "Entity cleanup quiescence contract is missing marker: $CleanupMarker"
+}
+$Task4FatalEnterStart = $Task12OrchestratorContent.IndexOf('function Orchestrator:enter_fatal')
+$Task4FatalEnterEnd = if ($Task4FatalEnterStart -ge 0) { $Task12OrchestratorContent.IndexOf('function Orchestrator:on_callback_error', $Task4FatalEnterStart) } else { -1 }
+if ($Task4FatalEnterStart -ge 0 -and $Task4FatalEnterEnd -gt $Task4FatalEnterStart) {
+    $Task4FatalEnterBlock = $Task12OrchestratorContent.Substring($Task4FatalEnterStart, $Task4FatalEnterEnd - $Task4FatalEnterStart)
+    Assert-True ($Task4FatalEnterBlock -match 'show_fatal[\s\S]{0,700}self:fatal_main_menu_action\(\)') 'Fatal UI must bind its Main menu action to the fatal-only cleanup-bypass exit.'
+} else {
+    Assert-True $false 'Fatal entry path must remain structurally testable.'
+}
+$Task4DriveCleanupStart = $Task12EntityContent.IndexOf('function EntityAdapter:drive_cleanup')
+$Task4DriveCleanupEnd = if ($Task4DriveCleanupStart -ge 0) { $Task12EntityContent.IndexOf('function EntityAdapter:fail_and_rollback', $Task4DriveCleanupStart) } else { -1 }
+if ($Task4DriveCleanupStart -ge 0 -and $Task4DriveCleanupEnd -gt $Task4DriveCleanupStart) {
+    $Task4DriveCleanupBlock = $Task12EntityContent.Substring($Task4DriveCleanupStart, $Task4DriveCleanupEnd - $Task4DriveCleanupStart)
+    Assert-True ($Task4DriveCleanupBlock.Contains('self:quiesce_live_owned_npcs()')) 'Entity cleanup must quiesce living owned NPCs before it can submit releases.'
+} else {
+    Assert-True $false 'Entity cleanup path must remain structurally testable.'
 }
 $Task2CleanupAccumulatorStart = $Task12EntityContent.IndexOf('function EntityAdapter:add_cleanup_error')
 $Task2CleanupAccumulatorEnd = if ($Task2CleanupAccumulatorStart -ge 0) { $Task12EntityContent.IndexOf('function EntityAdapter:quiesce_live_owned_npcs', $Task2CleanupAccumulatorStart) } else { -1 }

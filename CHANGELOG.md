@@ -8,6 +8,10 @@ All notable changes to Gamma Arena are documented in this file.
 - Powered exoskeleton loadouts now start at 100 percent charge after verified readback.
 - Arena defeats use natural actor death, then offer a fresh-fight action from the post-death menu.
 - Arena-owned bots are neutralized when the actor dies.
+- Reduced Master powered-exoskeleton class weight from 20% to 5% while preserving budget-bounded weighted randomness.
+- Quiesced living and critically wounded Arena-owned NPCs offline before safe release to prevent cleanup races.
+- Added a fatal-only emergency disconnect so terminal cleanup errors cannot trap the player or leave the main menu unusable.
+- Added per-entity cleanup diagnostics and deduplicated repeated fatal display lines.
 
 ## 0.1.0 - 2026-08-21
 
