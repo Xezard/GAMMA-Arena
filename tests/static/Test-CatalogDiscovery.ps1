@@ -26,6 +26,9 @@ foreach ($Marker in @(
     'enumerate_sections',
     'read_string',
     'read_u32',
+    'ammo_variants',
+    'armor_piercing',
+    'dynamic_catalog_v6',
     'fingerprint_parts',
     'w_pistol',
     'w_smg',
@@ -64,7 +67,11 @@ foreach ($CaseName in @(
     'catalog_discovery_powered_exo_is_separate_from_heavy',
     'catalog_discovery_prefilters_irrelevant_system_sections',
     'catalog_discovery_is_order_stable',
-    'catalog_discovery_enumeration_failure_falls_back'
+    'catalog_discovery_enumeration_failure_falls_back',
+    'catalog_discovery_retains_clean_compatible_ammo_variants',
+    'catalog_discovery_classifies_bonus_ammo_categories',
+    'catalog_discovery_classifies_all_bonus_suffixes',
+    'catalog_discovery_skips_invalid_variants_and_fingerprints_metadata'
 )) {
     if (-not $Tests.Contains($CaseName)) {
         throw "Dynamic catalog discovery test is missing: $CaseName"
@@ -106,7 +113,7 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v4' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*4' -or $Catalog -notmatch 'revision\s*=\s*5' -or $Catalog -notmatch 'generator_version\s*=\s*5') {
+if ($Catalog -notmatch 'schema_version\s*=\s*5' -or $Catalog -notmatch 'revision\s*=\s*6' -or $Catalog -notmatch 'generator_version\s*=\s*6') {
     throw 'Catalog snapshot version markers are stale'
 }
 Write-Host 'PASS: dynamic catalog integration static contract passed'
@@ -126,6 +133,24 @@ foreach ($Contract in @(
     }
 }
 Write-Host 'PASS: staged loadout static contract passed'
+
+foreach ($Contract in @(
+    @{ Content = $Generator; Marker = 'function select_bonus_ammo' },
+    @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
+    @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
+    @{ Content = $Generator; Marker = 'FightSpecV4' },
+    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
+    @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
+    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' },
+    @{ Content = $GeneratorTests; Marker = 'validator_rejects_invalid_bonus_ammo' },
+    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_AMMO_INVALID' },
+    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_SCOPE_INVALID' }
+)) {
+    if (-not $Contract.Content.Contains($Contract.Marker)) {
+        throw "FightSpec v4 bonus-ammo contract is missing marker: $($Contract.Marker)"
+    }
+}
+Write-Host 'PASS: FightSpec v4 bonus-ammo static contract passed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'

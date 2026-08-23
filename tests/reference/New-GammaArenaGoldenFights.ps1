@@ -3,7 +3,7 @@ param([switch]$Verify)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v3.txt'
+$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v4.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
@@ -33,11 +33,11 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 4 -or [int]$catalog.meta.revision -ne 5 -or [int]$catalog.meta.generator_version -ne 5 -or
+if ([int]$catalog.meta.schema_version -ne 5 -or [int]$catalog.meta.revision -ne 6 -or [int]$catalog.meta.generator_version -ne 6 -or
     [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 4 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
-    $generatorText -notmatch 'schema_version\s*=\s*3' -or $generatorText -notmatch 'FightSpecV3') {
-    throw 'Reference oracle requires catalog v5, generator v5, difficulty v4, layout v2, and FightSpec v3.'
+    $generatorText -notmatch 'schema_version\s*=\s*4' -or $generatorText -notmatch 'FightSpecV4') {
+    throw 'Reference oracle requires catalog schema 5, generator/catalog 6/6, difficulty v4, layout v2, and FightSpec v4.'
 }
 
 $difficultyManifest = @{
@@ -92,7 +92,7 @@ function Get-GaNextRaw([hashtable]$Rng) {
 }
 function Get-GaNextInt([hashtable]$Rng, [int]$Minimum, [int]$Maximum) { return $Minimum + (Get-GaNextRaw $Rng) % ($Maximum - $Minimum + 1) }
 function New-GaStream([pscustomobject]$Request, [int]$FightIndex, [string]$Tag) {
-    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,5,5,2,$Tag)
+    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,6,6,2,$Tag)
 }
 function Select-GaPick([hashtable]$Rng, [array]$Values) { return $Values[(Get-GaNextInt $Rng 1 $Values.Count) - 1] }
 function Select-GaWeightedPair {
@@ -190,7 +190,12 @@ function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscust
     $eligibleOutfits = @($outfits | Where-Object { $_.ArmorClass -eq $pair.ArmorClass -and $weapon.Cost + $ammoCosts[$weapon.Ammo] * $ammoBoxes + $_.Cost + $bandageCost -le $Difficulty.PlayerBudget })
     $outfit = Select-GaPick (New-GaStream $Request $FightIndex 'actor_outfit') $eligibleOutfits
     $cost = $weapon.Cost + $ammoCosts[$weapon.Ammo] * $ammoBoxes + $outfit.Cost + $bandageCost
-    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$ammoBoxes,$($outfit.Section),$Knife,bandage,$cost";Cost=[int]$cost;Kind=$weapon.Kind}
+    $bonusDraw=Get-GaNextInt (New-GaStream $Request $FightIndex 'actor_bonus_ammo_category') 1 100
+    $requestedCategory=$(if($bonusDraw -le 60){'standard'}elseif($bonusDraw -le 75){'special'}else{'armor_piercing'})
+    $bonusSection=$weapon.Ammo
+    if($requestedCategory-eq'standard'){ $bonusSection=(Select-GaPick (New-GaStream $Request $FightIndex 'actor_bonus_ammo_section') @($weapon.Ammo)) }
+    $bonus="bonus:${bonusSection}:${requestedCategory}:standard:1"
+    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$ammoBoxes,$($outfit.Section),$Knife,bandage,$cost,$bonus";Cost=[int]$cost;Kind=$weapon.Kind}
 }
 
 $resolvedSlots = @()
@@ -252,7 +257,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
         $opponents += "${index}:$index,$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($assigned[$zero]),$role,$($profile.Section),$($profile.Cost),$($gear.Encoded),$($profile.Cost+$gear.Cost)"
     }
-    $fields=@('schema_version=3','generator_version=5','catalog_revision=5','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g5-c5-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV3 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=4','generator_version=6','catalog_revision=6','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g6-c6-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV4 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 
@@ -273,8 +278,8 @@ $requests=@(
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
 if((New-GaEncodedFight 0 veteran 7)-cne(New-GaEncodedFight 1 veteran 7)){throw 'Normalized seed aliases must match'}
 if($Verify){
-    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v3 fixture is missing'}
+    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v4 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
-    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v3 reference oracle.'}
+    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v4 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
 }else{$expected}

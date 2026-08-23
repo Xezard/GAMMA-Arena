@@ -174,6 +174,26 @@ function select_player_class_pair(rng, difficulty, available_pairs)
     return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Weighted player class selection exhausted its range")
 end
 
+function select_bonus_ammo(category_rng, section_rng, weapon)
+    if type(weapon) ~= "table" or type(weapon.ammo) ~= "string" or type(weapon.ammo_variants) ~= "table"
+        or type(category_rng) ~= "table" or type(section_rng) ~= "table" then return nil end
+    local draw = category_rng:next_int(1, 100)
+    local requested_category = draw <= 60 and "standard" or (draw <= 75 and "special" or "armor_piercing")
+    local eligible = {}
+    for _, variant in ipairs(weapon.ammo_variants) do
+        if type(variant) == "table" and type(variant.section) == "string" and variant.category == requested_category then
+            eligible[#eligible + 1] = variant
+        end
+    end
+    if #eligible > 0 then
+        local selected = section_rng:pick(eligible)
+        return { section = selected.section, requested_category = requested_category, resolved_category = requested_category, boxes = 1 }
+    end
+    local base = weapon.ammo_variants[1]
+    if type(base) ~= "table" or base.section ~= weapon.ammo or base.category ~= "standard" then return nil end
+    return { section = base.section, requested_category = requested_category, resolved_category = "standard", boxes = 1 }
+end
+
 function player_loadout(request, fight_index, catalogs, difficulty)
     local bandage = catalogs.consumables and catalogs.consumables.bandage
     if type(bandage) ~= "table" then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Dynamic catalog has no bandage") end
@@ -342,7 +362,12 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
     local actor = player_loadout(normalized_request, fight_index, catalogs, difficulty); if not actor.ok then return actor end
     local actor_knife = random_knife(stream(normalized_request, fight_index, catalogs, "actor_knife"), catalogs.knife_list); if not actor_knife.ok then return actor_knife end
     actor.value.knife = actor_knife.value
-    local spec = { schema_version = 3, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV3 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local actor_weapon
+    for _, weapon in ipairs(catalogs.weapon_list or {}) do if weapon.section == actor.value.weapon then actor_weapon = weapon; break end end
+    local bonus = select_bonus_ammo(stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_category"), stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_section"), actor_weapon)
+    if bonus == nil then return gamma_arena_result.err("GA_NO_VALID_PLAYER_BONUS_AMMO", "Selected player weapon has no valid bonus ammo", {}) end
+    actor.value.bonus_ammo = bonus
+    local spec = { schema_version = 4, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV4 skirmish " .. difficulty.id .. " #" .. fight_index }
     local profile_pool = catalogs.profile_list
     if catalogs.selection_mode == "staged" and type(catalogs.faction_ids) == "table" and #catalogs.faction_ids > 0 then
         local enemy_faction = stream(normalized_request, fight_index, catalogs, "enemy_faction"):pick(catalogs.faction_ids)
@@ -384,10 +409,15 @@ end
 
 function stable_encode(spec)
     if type(spec) ~= "table" or type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return "invalid" end
-    local function gear(value)
-        return value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
+    local function gear(value, actor)
+        local encoded = value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
+        if actor and type(value.bonus_ammo) == "table" then
+            local bonus = value.bonus_ammo
+            encoded = encoded .. ",bonus:" .. bonus.section .. ":" .. bonus.requested_category .. ":" .. bonus.resolved_category .. ":" .. bonus.boxes
+        end
+        return encoded
     end
-    local parts = { "schema_version=" .. spec.schema_version, "generator_version=" .. spec.generator_version, "catalog_revision=" .. spec.catalog_revision, "layout_version=" .. spec.layout_version, "session_seed=" .. spec.session_seed, "fight_index=" .. spec.fight_index, "fight_id=" .. spec.fight_id, "mode_id=" .. spec.mode_id, "difficulty_id=" .. spec.difficulty_id, "layout_id=" .. spec.layout_id, "level=" .. spec.level, "actor=" .. spec.actor.spawn_path .. "," .. spec.actor.look_path .. "," .. gear(spec.actor.loadout), "opponents=" }
+    local parts = { "schema_version=" .. spec.schema_version, "generator_version=" .. spec.generator_version, "catalog_revision=" .. spec.catalog_revision, "layout_version=" .. spec.layout_version, "session_seed=" .. spec.session_seed, "fight_index=" .. spec.fight_index, "fight_id=" .. spec.fight_id, "mode_id=" .. spec.mode_id, "difficulty_id=" .. spec.difficulty_id, "layout_id=" .. spec.layout_id, "level=" .. spec.level, "actor=" .. spec.actor.spawn_path .. "," .. spec.actor.look_path .. "," .. gear(spec.actor.loadout, true), "opponents=" }
     for index, opponent in ipairs(spec.opponents) do
         local profile = opponent.profile
         if type(opponent.community) == "string" and opponent.community ~= "" then profile = profile .. "," .. opponent.community end

@@ -762,8 +762,8 @@ function run() end
         'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script',
         'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script',
         'dev\gamedata\scripts\gamma_arena_test_runtime.script',
-        'tests\fixtures\golden-fights-v3.txt',
-        'schemas\fight-spec-v3.md'
+        'tests\fixtures\golden-fights-v4.txt',
+        'schemas\fight-spec-v4.md'
     )
     foreach ($RelativePath in $CurrentContractFiles) {
         $SourcePath = Join-Path $RepoRoot $RelativePath
