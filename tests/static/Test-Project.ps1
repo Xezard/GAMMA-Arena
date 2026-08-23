@@ -1495,9 +1495,25 @@ foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'r
 foreach ($CleanupTest in @('runtime_entity_wounded_cleanup_holds_offline_before_release', 'runtime_entity_living_defeat_cleanup_holds_offline', 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release')) {
     Assert-True ($Task13RuntimeTests.Contains($CleanupTest)) "Runtime cleanup suite is missing case: $CleanupTest"
 }
+Assert-True ($Task13RuntimeTests.Contains('runtime_entity_post_request_online_failure_requiesces_before_release')) 'Runtime cleanup suite must cover post-side-effect online-request failure'
+Assert-True ($Task13RuntimeTests.Contains('runtime_entity_cleanup_error_accumulator_rejects_malformed_and_cyclic_errors')) 'Runtime cleanup suite must cover malformed and cyclic cleanup errors'
+Assert-True ($Task13RuntimeTests.Contains('runtime_entity_lifecycle_cleanup_takes_over_stopping')) 'Runtime cleanup suite must cover STOPPING lifecycle takeover'
+$Task2DriveOnlineStart = $Task12EntityContent.IndexOf('function EntityAdapter:drive_online')
+$Task2DriveOnlineEnd = if ($Task2DriveOnlineStart -ge 0) { $Task12EntityContent.IndexOf('function EntityAdapter:add_cleanup_error', $Task2DriveOnlineStart) } else { -1 }
+if ($Task2DriveOnlineStart -ge 0 -and $Task2DriveOnlineEnd -gt $Task2DriveOnlineStart) {
+    $Task2DriveOnlineBlock = $Task12EntityContent.Substring($Task2DriveOnlineStart, $Task2DriveOnlineEnd - $Task2DriveOnlineStart)
+    Assert-True ($Task2DriveOnlineBlock -match 'record\.held_offline\s*=\s*false[\s\S]{0,300}result_call\("GA_ENTITY_ONLINE_REQUEST_FAILED"') 'Online-request side effects must clear offline authority before request invocation'
+}
 foreach ($CleanupMarker in @('quiesce_live_owned_npcs', 'GA_ENTITY_CLEANUP_QUIESCE_FAILED', 'cleanup_phase', 'release_index', 'session_id')) {
     Assert-True ($Task12EntityContent.Contains($CleanupMarker)) "Entity cleanup quiescence contract is missing marker: $CleanupMarker"
 }
+$Task2CleanupAccumulatorStart = $Task12EntityContent.IndexOf('function EntityAdapter:add_cleanup_error')
+$Task2CleanupAccumulatorEnd = if ($Task2CleanupAccumulatorStart -ge 0) { $Task12EntityContent.IndexOf('function EntityAdapter:quiesce_live_owned_npcs', $Task2CleanupAccumulatorStart) } else { -1 }
+if ($Task2CleanupAccumulatorStart -ge 0 -and $Task2CleanupAccumulatorEnd -gt $Task2CleanupAccumulatorStart) {
+    $Task2CleanupAccumulatorBlock = $Task12EntityContent.Substring($Task2CleanupAccumulatorStart, $Task2CleanupAccumulatorEnd - $Task2CleanupAccumulatorStart)
+    Assert-True ($Task2CleanupAccumulatorBlock.Contains('pcall(copy_plain')) 'Cleanup error accumulation must safely validate copy_plain failures'
+}
+Assert-True ($Task12BootstrapContent.Contains('snapshot.state ~= "STOPPING"')) 'Lifecycle entity cleanup must treat STOPPING as a retryable pending state'
 
 $Task7CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $Task7DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'

@@ -2908,6 +2908,9 @@ local function fake_entity_environment(options)
         hold_offline = function(entity)
             env.events[#env.events + 1] = "hold_offline:" .. tostring(entity:id())
             if options.fail_phase == "hold_offline" then return false end
+            if options.hold_offline_fails_after_online_request and env.online_request_started then
+                return gamma_arena_result.err("GA_TEST_OFFLINE_HOLD", "injected post-request offline-hold failure")
+            end
             env.held_offline[entity:id()] = true
             env.online_pending[entity:id()] = nil
             env.online[entity:id()] = nil
@@ -2915,6 +2918,7 @@ local function fake_entity_environment(options)
         end,
         request_online = function(entity, id)
             env.events[#env.events + 1] = "request_online:" .. tostring(id)
+            env.online_request_started = true
             env.held_offline[id] = nil
             env.online_pending[id] = options.online_delay or 1
             if options.fail_phase == "request_online" then return gamma_arena_result.err("GA_TEST_ONLINE_REQUEST_FAIL", "injected post-request failure") end
@@ -4329,10 +4333,18 @@ local function runtime_entity_living_defeat_cleanup_holds_offline()
     local adapter = gamma_arena_entity_adapter.new(deps)
     begin_entity_apply(adapter, env, entity_spec(2), "session-living-cleanup")
     pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
     gamma_arena_test_assert.is_true(adapter:neutralize_owned_opponents().ok, "living opponents are neutralized after actor death")
+    env.events = {}
     adapter:cleanup()
     local cleaned, snapshot = pump_entity(adapter, env)
     gamma_arena_test_assert.is_true(cleaned.ok and snapshot.state == "CLEAN", "neutralized living opponents clean after offline hold")
+    local held_index, release_index = nil, nil
+    for index, event in ipairs(env.events) do
+        if event == "hold_offline:" .. tostring(npc_id) then held_index = index end
+        if release_index == nil and string.find(event, "release:", 1, true) == 1 then release_index = index end
+    end
+    gamma_arena_test_assert.is_true(held_index ~= nil and held_index < release_index, "living actor-death-neutralized NPC is offline before first release")
 end
 
 local function runtime_entity_cleanup_quiesce_failure_is_terminal_without_release()
@@ -4356,6 +4368,51 @@ local function runtime_entity_cleanup_quiesce_failure_is_terminal_without_releas
     gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "quiesce", "quiesce leaf keeps cleanup phase")
 end
 
+local function runtime_entity_post_request_online_failure_requiesces_before_release()
+    local env, deps = fake_entity_environment({
+        fail_phase = "request_online",
+        hold_offline_fails_after_online_request = true
+    })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-post-request-offline")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_false(result.ok, "post-request activation failure remains terminal")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "post-request activation failure reaches ERROR")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "cleanup requires a fresh offline hold after a post-side-effect online request")
+    local leaf = snapshot.error.context.errors[1]
+    gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_CLEANUP_QUIESCE_FAILED", "fresh offline-hold failure is retained as the cleanup leaf")
+end
+
+local function runtime_entity_cleanup_error_accumulator_rejects_malformed_and_cyclic_errors()
+    local cases = {
+        { label = "non-table", make_error = function() return "not-an-error-table" end },
+        { label = "cyclic", make_error = function()
+            local error_value = { code = "GA_TEST_CYCLIC", message = "cyclic dependency error", context = {} }
+            error_value.context.self = error_value.context
+            return error_value
+        end }
+    }
+    for _, case in ipairs(cases) do
+        local env, deps = fake_entity_environment()
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        begin_entity_apply(adapter, env, entity_spec(1), "session-cleanup-error-" .. case.label)
+        pump_entity(adapter, env)
+        deps.entity_exists = function()
+            return { ok = false, error = case.make_error() }
+        end
+        gamma_arena_test_assert.is_true(adapter:cleanup().ok, case.label .. " cleanup starts")
+        local result, snapshot = pump_entity(adapter, env)
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " dependency error remains terminal rather than throwing")
+        gamma_arena_test_assert.equals(snapshot.state, "ERROR", case.label .. " cleanup reaches ERROR")
+        gamma_arena_test_assert.equals(snapshot.error.code, "GA_ENTITY_CLEANUP_FAILED", case.label .. " preserves aggregate cleanup error")
+        local leaf = snapshot.error.context.errors[1]
+        gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_CLEANUP_FAILED", case.label .. " uses deterministic plain fallback leaf")
+        gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "existence", case.label .. " fallback leaf retains cleanup phase")
+        gamma_arena_test_assert.equals(leaf.context.session_id, "session-cleanup-error-" .. case.label, case.label .. " fallback leaf retains session")
+        gamma_arena_test_assert.equals(env.tactical_warnings[#env.tactical_warnings], "GA_ENTITY_CLEANUP_FAILED", case.label .. " fallback leaf is logged")
+    end
+end
+
 local function runtime_entity_lifecycle_cleanup_takes_over_mid_rollback()
     local env, deps = fake_entity_environment({ fail_phase = "item", fail_item_at = 2, release_delay = 3 })
     local adapter = gamma_arena_entity_adapter.new(deps)
@@ -4376,6 +4433,49 @@ local function runtime_entity_lifecycle_cleanup_takes_over_mid_rollback()
     end
     gamma_arena_test_assert.is_true(result.ok and result.value.pending == false, "mid-rollback lifecycle teardown reaches CLEAN instead of resurfacing the superseded transaction error")
     gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "CLEAN", "entity cleanup no longer strands later teardown stages behind ERROR")
+end
+
+local function runtime_entity_lifecycle_cleanup_takes_over_stopping()
+    local env, deps = fake_entity_environment({ tactical_stop_failures = 2 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-stopping-takeover")
+    pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "cleanup takes ownership of the first tactical-stop failure")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "STOPPING", "fixture enters retryable STOPPING")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "initial STOPPING state submits no release")
+
+    local context = {}
+    local first = gamma_arena_bootstrap.step_entity_cleanup(adapter, context, {
+        clock = function() return env.now end,
+        timeout_ms = 1000,
+        max_updates = 16
+    })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending == true, "lifecycle cleanup accepts STOPPING as cross-frame pending")
+    gamma_arena_test_assert.equals(env.tactical_stop_calls, 2, "lifecycle cleanup retries tactical stop while STOPPING")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "failed STOPPING retry still submits no release")
+
+    env:advance(1)
+    local second = gamma_arena_bootstrap.step_entity_cleanup(adapter, context, {
+        clock = function() return env.now end,
+        timeout_ms = 1000,
+        max_updates = 16
+    })
+    gamma_arena_test_assert.is_true(second.ok and second.value.pending == true, "lifecycle cleanup remains cross-frame after STOPPING retry succeeds")
+    gamma_arena_test_assert.equals(env.tactical_stop_calls, 3, "successful STOPPING retry is observed")
+    gamma_arena_test_assert.is_true(#env.release_requests > 0, "release starts only after tactical stop succeeds")
+
+    local settled = second
+    for _ = 1, 16 do
+        if settled.value.pending ~= true then break end
+        env:advance(1)
+        settled = gamma_arena_bootstrap.step_entity_cleanup(adapter, context, {
+            clock = function() return env.now end,
+            timeout_ms = 1000,
+            max_updates = 16
+        })
+    end
+    gamma_arena_test_assert.is_true(settled.ok and settled.value.pending == false, "STOPPING lifecycle takeover reaches exact CLEAN within its existing budget")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "CLEAN", "STOPPING lifecycle takeover ends CLEAN")
 end
 
 local function runtime_entity_existence_result_must_be_boolean()
@@ -6354,7 +6454,10 @@ local cases = {
     ,{ name = "runtime_entity_wounded_cleanup_holds_offline_before_release", fn = runtime_entity_wounded_cleanup_holds_offline_before_release }
     ,{ name = "runtime_entity_living_defeat_cleanup_holds_offline", fn = runtime_entity_living_defeat_cleanup_holds_offline }
     ,{ name = "runtime_entity_cleanup_quiesce_failure_is_terminal_without_release", fn = runtime_entity_cleanup_quiesce_failure_is_terminal_without_release }
+    ,{ name = "runtime_entity_post_request_online_failure_requiesces_before_release", fn = runtime_entity_post_request_online_failure_requiesces_before_release }
+    ,{ name = "runtime_entity_cleanup_error_accumulator_rejects_malformed_and_cyclic_errors", fn = runtime_entity_cleanup_error_accumulator_rejects_malformed_and_cyclic_errors }
     ,{ name = "runtime_entity_lifecycle_cleanup_takes_over_mid_rollback", fn = runtime_entity_lifecycle_cleanup_takes_over_mid_rollback }
+    ,{ name = "runtime_entity_lifecycle_cleanup_takes_over_stopping", fn = runtime_entity_lifecycle_cleanup_takes_over_stopping }
     ,{ name = "runtime_entity_existence_result_must_be_boolean", fn = runtime_entity_existence_result_must_be_boolean }
     ,{ name = "runtime_entity_duplicate_death_is_idempotent", fn = runtime_entity_duplicate_death_is_idempotent }
     ,{ name = "runtime_entity_unregistered_death_is_ignored", fn = runtime_entity_unregistered_death_is_ignored }
