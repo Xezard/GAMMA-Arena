@@ -1532,7 +1532,9 @@ if ($Task2QuiesceStart -ge 0 -and $Task2QuiesceEnd -gt $Task2QuiesceStart) {
     $Task2TaggedProof = $Task2QuiesceBlock.IndexOf('record.tagged ~= true')
     $Task2OwnerProof = $Task2QuiesceBlock.IndexOf('self:load_owner_tag(record.id)')
     $Task2ServerLookup = $Task2QuiesceBlock.IndexOf('self.deps.server_entity')
-    Assert-True ($Task2IdentityProof -ge 0 -and $Task2TaggedProof -gt $Task2IdentityProof -and $Task2OwnerProof -gt $Task2TaggedProof -and $Task2ServerLookup -gt $Task2OwnerProof) 'Quiescence must re-prove registry identity, recorded tag, and current owner tag before server lookup or offline hold.'
+    $Task2ExistenceProof = $Task2QuiesceBlock.IndexOf('self:entity_exists(record.id)')
+    $Task2OfflineHold = $Task2QuiesceBlock.IndexOf('self.deps.hold_offline')
+    Assert-True ($Task2IdentityProof -ge 0 -and $Task2TaggedProof -gt $Task2IdentityProof -and $Task2ServerLookup -gt $Task2TaggedProof -and $Task2ExistenceProof -gt $Task2ServerLookup -and $Task2OwnerProof -gt $Task2ExistenceProof -and $Task2OfflineHold -gt $Task2OwnerProof) 'Quiescence must prove internal identity before server lookup, retire authoritative absence before persisted-tag proof, and prove the current owner before offline hold.'
 } else {
     Assert-True $false 'Quiescence ownership proof must remain structurally testable.'
 }

@@ -4448,22 +4448,36 @@ local function runtime_entity_dead_cleanup_bypasses_offline_hold()
 end
 
 local function runtime_entity_authoritative_absence_cleanup_bypasses_offline_hold()
-    local env, deps = fake_entity_environment()
-    local adapter = gamma_arena_entity_adapter.new(deps)
-    begin_entity_apply(adapter, env, entity_spec(1), "session-absent-cleanup")
-    pump_entity(adapter, env)
-    local npc_id = adapter:registry_snapshot().npcs[1].id
-    env:remove_entity(npc_id)
-    env:advance(250)
-    gamma_arena_test_assert.is_true(adapter:update().ok, "authoritative absence reconciliation succeeds")
-    gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, "DEFEATED_MISSING", "absent cleanup fixture has authoritative state")
-    env.events = {}
+    for _, case in ipairs({
+        { label = "alive", expected_state = "ALIVE" },
+        { label = "missing-pending", expected_state = "MISSING_PENDING", enter_missing_pending = true }
+    }) do
+        local env, deps = fake_entity_environment()
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        local session_id = "session-absent-cleanup-" .. case.label
+        begin_entity_apply(adapter, env, entity_spec(1), session_id)
+        pump_entity(adapter, env)
+        local npc_id = adapter:registry_snapshot().npcs[1].id
+        if case.enter_missing_pending then
+            env.online[npc_id] = nil
+            env:advance(250)
+            gamma_arena_test_assert.is_true(adapter:update().ok, case.label .. " enters pending state")
+        end
+        gamma_arena_test_assert.equals(adapter:registry_snapshot().npcs[1].terminal_state, case.expected_state, case.label .. " fixture preserves pre-absence state")
+        env:remove_entity(npc_id)
+        env.tags[npc_id] = nil
+        env.events = {}
+        env.release_requests = {}
 
-    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "absent cleanup starts")
-    local result, snapshot = pump_entity(adapter, env)
-    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "CLEAN", "authoritatively absent NPC cleanup reaches exact CLEAN")
-    for _, event in ipairs(env.events) do
-        gamma_arena_test_assert.is_false(event == "hold_offline:" .. tostring(npc_id), "authoritatively absent NPC bypasses offline hold")
+        gamma_arena_test_assert.is_true(adapter:cleanup().ok, case.label .. " absent cleanup starts")
+        local result, snapshot = pump_entity(adapter, env)
+        gamma_arena_test_assert.is_true(result.ok and snapshot.state == "CLEAN", case.label .. " authoritative absence reaches exact CLEAN despite cleared persisted tag")
+        for _, event in ipairs(env.events) do
+            gamma_arena_test_assert.is_false(event == "hold_offline:" .. tostring(npc_id), case.label .. " authoritative absence bypasses offline hold")
+        end
+        for _, released_id in ipairs(env.release_requests) do
+            gamma_arena_test_assert.is_true(released_id ~= npc_id, case.label .. " authoritative absence submits no NPC release")
+        end
     end
 end
 
