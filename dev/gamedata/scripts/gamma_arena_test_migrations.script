@@ -1556,6 +1556,115 @@ local function defeat_main_menu_exit_consumes_without_launch()
     gamma_arena_test_assert.equals(menu.shown, 1, "main-menu exit restores Show")
 end
 
+local function defeat_main_menu_waits_for_first_stock_update()
+    local events = {}
+    local show_calls = 0
+    local menu = {}
+    function menu:Update()
+        events[#events + 1] = "stock_update"
+    end
+    function menu:HideDialog()
+        events[#events + 1] = "menu_hidden"
+    end
+    function menu:Show(value)
+        if value == false then events[#events + 1] = "menu_invisible" end
+    end
+
+    local ports = {
+        config = {},
+        peek_defeat = function()
+            return gamma_arena_result.ok({
+                schema_version = 1,
+                session_id = "ga_deferred_session",
+                session_nonce = "ga_deferred_nonce",
+                mode_id = "skirmish",
+                difficulty_id = "master",
+                token = "gad1:1000:deferred"
+            })
+        end,
+        show_result = function()
+            show_calls = show_calls + 1
+            events[#events + 1] = "result_shown"
+            return gamma_arena_result.ok(true)
+        end
+    }
+
+    local deferred = gamma_arena_main_menu.defer_confirmed_defeat(menu, ports)
+    gamma_arena_test_assert.is_true(deferred.ok and deferred.value == true, "confirmed defeat is queued during menu construction")
+    gamma_arena_test_assert.equals(#events, 0, "menu construction does not open or hide either dialog")
+    gamma_arena_test_assert.equals(show_calls, 0, "result is not shown inside main_menu_on_init timing")
+
+    menu:Update()
+    gamma_arena_test_assert.equals(events[1], "stock_update", "stock menu completes its first Update before Arena changes dialog ownership")
+    gamma_arena_test_assert.equals(events[2], "menu_hidden", "deferred defeat hides the active stock menu")
+    gamma_arena_test_assert.equals(events[3], "menu_invisible", "deferred defeat hides the stock menu visuals")
+    gamma_arena_test_assert.equals(events[4], "result_shown", "deferred defeat then opens the Arena result")
+    gamma_arena_test_assert.equals(show_calls, 1, "deferred result opens exactly once")
+
+    menu:Update()
+    gamma_arena_test_assert.equals(show_calls, 1, "later menu updates do not reopen the Arena result")
+end
+
+local function defeat_main_menu_deferred_failures_fail_open()
+    local function fixture(with_update)
+        local calls = { clear_result = 0, clear_fatal = 0, clear_defeat = 0, restored = 0 }
+        local menu = {}
+        if with_update then function menu:Update() end end
+        function menu:ShowDialog(value)
+            if value then calls.restored = calls.restored + 1 end
+        end
+        function menu:Show() end
+        local ports = {
+            config = {},
+            clear_result = function() calls.clear_result = calls.clear_result + 1; return gamma_arena_result.ok(true) end,
+            clear_fatal = function() calls.clear_fatal = calls.clear_fatal + 1; return gamma_arena_result.ok(true) end,
+            clear_defeat = function() calls.clear_defeat = calls.clear_defeat + 1; return gamma_arena_result.ok(true) end
+        }
+        return menu, ports, calls
+    end
+
+    local init_menu, init_ports, init_calls = fixture(true)
+    init_ports.peek_defeat = function()
+        return gamma_arena_result.err("GA_DEFEAT_READ_FAILED", "fixture init read failure")
+    end
+    local init_failed = gamma_arena_main_menu.defer_confirmed_defeat(init_menu, init_ports)
+    gamma_arena_test_assert.is_false(init_failed.ok, "scheduling read failure remains observable")
+    gamma_arena_test_assert.equals(init_calls.clear_result, 1, "scheduling read failure clears partial result UI")
+    gamma_arena_test_assert.equals(init_calls.clear_fatal, 1, "scheduling read failure clears partial fatal UI")
+    gamma_arena_test_assert.equals(init_calls.clear_defeat, 1, "scheduling read failure clears defeat intent")
+    gamma_arena_test_assert.equals(init_calls.restored, 1, "scheduling read failure restores stock menu")
+
+    local update_menu, update_ports, update_calls = fixture(true)
+    local peek_calls = 0
+    update_ports.peek_defeat = function()
+        peek_calls = peek_calls + 1
+        if peek_calls == 1 then
+            return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:update_failure" })
+        end
+        return gamma_arena_result.err("GA_DEFEAT_READ_FAILED", "fixture deferred read failure")
+    end
+    gamma_arena_test_assert.is_true(gamma_arena_main_menu.defer_confirmed_defeat(update_menu, update_ports).ok, "deferred failure fixture queues")
+    update_menu:Update()
+    gamma_arena_test_assert.equals(update_calls.clear_result, 1, "deferred display failure clears partial result UI")
+    gamma_arena_test_assert.equals(update_calls.clear_fatal, 1, "deferred display failure clears partial fatal UI")
+    gamma_arena_test_assert.equals(update_calls.clear_defeat, 1, "deferred display failure clears defeat intent")
+    gamma_arena_test_assert.equals(update_calls.restored, 1, "deferred display failure restores stock menu")
+    update_menu:Update()
+    gamma_arena_test_assert.equals(peek_calls, 2, "failed deferred display is never retried on later updates")
+
+    local hook_menu, hook_ports, hook_calls = fixture(false)
+    hook_ports.peek_defeat = function()
+        return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:hook_failure" })
+    end
+    local hook_failed = gamma_arena_main_menu.defer_confirmed_defeat(hook_menu, hook_ports)
+    gamma_arena_test_assert.is_false(hook_failed.ok, "missing Update hook fails structurally")
+    gamma_arena_test_assert.equals(hook_failed.error.code, "GA_MAIN_MENU_UPDATE_UNAVAILABLE", "missing Update hook uses exact code")
+    gamma_arena_test_assert.equals(hook_calls.clear_result, 1, "hook failure clears partial result UI")
+    gamma_arena_test_assert.equals(hook_calls.clear_fatal, 1, "hook failure clears partial fatal UI")
+    gamma_arena_test_assert.equals(hook_calls.clear_defeat, 1, "hook failure clears defeat intent")
+    gamma_arena_test_assert.equals(hook_calls.restored, 1, "hook failure restores stock menu")
+end
+
 local function matching_resume_cleanup_is_session_scoped()
     local intent = {
         schema_version = 1,
@@ -1656,6 +1765,8 @@ local cases = {
     { name = "start_game_failures_restore_bridge", fn = start_game_failures_restore_bridge_immediately },
     { name = "defeat_main_menu_fresh_fight", fn = defeat_main_menu_fresh_fight_promotes_once },
     { name = "defeat_main_menu_exit", fn = defeat_main_menu_exit_consumes_without_launch },
+    { name = "defeat_main_menu_deferred_update", fn = defeat_main_menu_waits_for_first_stock_update },
+    { name = "defeat_main_menu_deferred_fail_open", fn = defeat_main_menu_deferred_failures_fail_open },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
     { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift },
     { name = "defeat_intent_cross_vm", fn = defeat_intent_is_transactional_and_cross_vm_safe },

@@ -1,4 +1,6 @@
 local bound_menus = setmetatable({}, { __mode = "k" })
+local deferred_menus = setmetatable({}, { __mode = "k" })
+local update_wrapped_menus = setmetatable({}, { __mode = "k" })
 
 local function log_result(result)
     if result and not result.ok then
@@ -66,6 +68,84 @@ end
 
 local function default_config()
     return axr_main and axr_main.config or nil
+end
+
+local function recover_unexpected_deferred_failure(menu, ports, config, failure)
+    local clear_result = port_or_default(ports, "clear_result", gamma_arena_ui_result.clear_result)
+    log_result(call_result_port("clear_result", function() return clear_result() end))
+    local clear_fatal = port_or_default(ports, "clear_fatal", gamma_arena_ui_start.clear_fatal)
+    log_result(call_result_port("clear_fatal", function() return clear_fatal() end))
+    local clear_defeat = port_or_default(ports, "clear_defeat", gamma_arena_session_store.clear_defeat)
+    log_result(call_result_port("clear_defeat", function() return clear_defeat(config) end))
+    log_result(restore_main_menu(menu))
+    return failure
+end
+
+local function run_deferred_defeat(menu)
+    local deferred = deferred_menus[menu]
+    if deferred == nil then return gamma_arena_result.ok(false) end
+    deferred_menus[menu] = nil
+
+    local called, result = pcall(show_confirmed_defeat, menu, deferred.ports)
+    if not called then
+        return recover_unexpected_deferred_failure(menu, deferred.ports, deferred.config,
+            gamma_arena_result.err("GA_DEFEAT_DEFERRED_FAILED", "Deferred defeat result failed safely", {
+                reason = tostring(result)
+            }))
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return recover_unexpected_deferred_failure(menu, deferred.ports, deferred.config,
+            gamma_arena_result.err("GA_DEFEAT_DEFERRED_FAILED", "Deferred defeat result returned an invalid Result", {
+                result_type = type(result)
+            }))
+    end
+    if not result.ok then
+        return recover_unexpected_deferred_failure(menu, deferred.ports, deferred.config, result)
+    end
+    return result
+end
+
+local function install_deferred_update(menu)
+    if update_wrapped_menus[menu] then return gamma_arena_result.ok(false) end
+    if type(menu.Update) ~= "function" then
+        return gamma_arena_result.err("GA_MAIN_MENU_UPDATE_UNAVAILABLE", "Main menu does not expose Update for deferred defeat display")
+    end
+
+    local original_update = menu.Update
+    local installed, reason = pcall(function()
+        menu.Update = function(owner, ...)
+            local value = original_update(owner, ...)
+            log_result(run_deferred_defeat(owner))
+            return value
+        end
+    end)
+    if not installed then
+        return gamma_arena_result.err("GA_MAIN_MENU_UPDATE_UNAVAILABLE", "Main-menu Update could not be wrapped for deferred defeat display", {
+            reason = tostring(reason)
+        })
+    end
+    update_wrapped_menus[menu] = true
+    return gamma_arena_result.ok(true)
+end
+
+function defer_confirmed_defeat(menu, ports)
+    if menu == nil then
+        return gamma_arena_result.err("GA_MAIN_MENU_INVALID", "Confirmed defeat deferral requires a main-menu owner")
+    end
+    ports = ports or {}
+    local config = ports.config
+    if config == nil then config = default_config() end
+    local peek_defeat = port_or_default(ports, "peek_defeat", gamma_arena_session_store.peek_defeat)
+    local peeked = call_result_port("peek_defeat", function() return peek_defeat(config) end)
+    if not peeked.ok then return recover_unexpected_deferred_failure(menu, ports, config, peeked) end
+    if not peeked.value or deferred_menus[menu] ~= nil then return gamma_arena_result.ok(false) end
+
+    local installed = install_deferred_update(menu)
+    if not installed.ok then
+        return recover_unexpected_deferred_failure(menu, ports, config, installed)
+    end
+    deferred_menus[menu] = { ports = ports, config = config }
+    return gamma_arena_result.ok(true)
 end
 
 local function recover_from_fresh_failure(menu, ports, config, failure)
@@ -239,7 +319,7 @@ end
 
 function on_main_menu_init(menu)
     log_result(bind(menu))
-    local result = show_confirmed_defeat(menu)
+    local result = defer_confirmed_defeat(menu)
     log_result(result)
     return result
 end

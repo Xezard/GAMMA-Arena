@@ -585,9 +585,15 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
     Assert-True ($Task6MainMenuContent -match 'restore_main_menu[\s\S]{0,500}menu:ShowDialog\(true\)[\s\S]{0,180}menu:Show\(true\)[\s\S]{0,350}dialog:HideDialog\(\)') 'Task 6 owner restoration must succeed before dismissing its recovery dialog'
     Assert-True ($Task6MainMenuContent -match 'GA_DEFEAT_MENU_HIDE_FAILED[\s\S]{0,900}show_fatal') 'Task 6 partial menu-hide failure must retain fatal recovery when owner restoration fails'
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+shown\s+then[\s\S]{0,260}local\s+fallback\s*=\s*restore_main_menu\s*\(\s*menu\s*\)[\s\S]{0,500}Partial main-menu hide recovery') 'Task 6 fatal construction failure after partial hide must retry owner restoration'
+    Assert-True ($Task6MainMenuContent -match '(?m)^function\s+defer_confirmed_defeat\s*\(') 'Confirmed defeat must expose a post-construction deferral seam'
+    Assert-True ($Task6MainMenuContent -match 'local\s+original_update\s*=\s*menu\.Update[\s\S]{0,900}menu\.Update\s*=\s*function[\s\S]{0,900}original_update\s*\(') 'Confirmed defeat must run only after the stock main-menu Update begins'
+    Assert-True ($Task6MainMenuContent -match 'deferred_menus\s*\[\s*menu\s*\]\s*=\s*nil[\s\S]{0,700}pcall\s*\(\s*show_confirmed_defeat') 'Deferred defeat must be removed before its one-shot display attempt'
+    Assert-True ($Task6MainMenuContent -match 'if\s+not\s+result\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Every ordinary deferred-display failure must fail open through complete recovery'
+    Assert-True ($Task6MainMenuContent -match 'if\s+not\s+peeked\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Scheduling-time defeat read failures must fail open through complete recovery'
+    Assert-True ($Task6MainMenuContent -match 'clear_result[\s\S]{0,400}clear_fatal[\s\S]{0,400}clear_defeat[\s\S]{0,400}restore_main_menu') 'Deferred recovery must dismiss every Arena modal, clear defeat state, and restore the stock menu'
     $Task6BindIndex = $Task6MainMenuContent.IndexOf('bind(menu)')
-    $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('show_confirmed_defeat(menu', $Task6BindIndex + 1)
-    Assert-True ($Task6BindIndex -ge 0 -and $Task6DefeatIndex -gt $Task6BindIndex) 'Task 6 main-menu init must bind normally before checking the confirmed defeat'
+    $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('defer_confirmed_defeat(menu', $Task6BindIndex + 1)
+    Assert-True ($Task6BindIndex -ge 0 -and $Task6DefeatIndex -gt $Task6BindIndex) 'Task 6 main-menu init must bind normally before deferring the confirmed defeat'
 }
 if (Test-Path -LiteralPath $Task9UiScriptPath) {
     Assert-True ($Task9UiContent -match 'next_title_key') 'Task 6 result UI must accept a primary-action title key'
@@ -606,6 +612,7 @@ if (Test-Path -LiteralPath $Task9UiScriptPath) {
 if (Test-Path -LiteralPath $Task6UiStartPath) {
     $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
     Assert-True ($Task6UiStartContent -match '(?m)^function\s+handoff_start_game\s*\(') 'Task 6 must expose the shared StartGame handoff'
+    Assert-True ($Task6UiStartContent -match '(?m)^function\s+clear_fatal\s*\(') 'Task 6 must expose fail-open dismissal for a partial fatal dialog'
 }
 if (Test-Path -LiteralPath $Task6UiStartPath) {
     $Task6UiStartContent = Get-Content -LiteralPath $Task6UiStartPath -Raw
