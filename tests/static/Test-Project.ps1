@@ -1700,6 +1700,7 @@ if ($BonusPreflightStart -ge 0 -and $BonusPreflightMutation -gt $BonusPreflightS
 }
 Assert-True ($BonusAmmoBootstrapContent -match 'bonus_ammo_rounds') 'Actor loadout must retain bonus_ammo_rounds in its readiness state.'
 Assert-True ($BonusAmmoBootstrapContent -match 'role\s*=\s*"bonus_ammo"') 'Actor loadout must ownership-tag the bonus ammo descriptor role.'
+Assert-True ($BonusAmmoBootstrapContent -match 'records_snapshot\s*=\s*function') 'Actor loadout must expose a read-only copied-record snapshot for ownership regression proof.'
 Assert-True ($BonusAmmoBootstrapContent -match 'expected_created_quantity\(descriptor, index, #entities, descriptor\.box_size\)') 'Unreadable actor ammo quantities must use each descriptor box_size.'
 foreach ($Name in @('runtime_actor_loadout_creates_exact_bonus_ammo_box','runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation','runtime_actor_loadout_bonus_ammo_rollback_is_owned')) {
     Assert-True ($BonusAmmoRuntimeContent -match [regex]::Escape($Name)) "Bonus ammo runtime regression must cover $Name"

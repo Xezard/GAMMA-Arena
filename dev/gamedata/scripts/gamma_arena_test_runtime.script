@@ -3934,6 +3934,9 @@ local function runtime_actor_loadout_bonus_ammo_rollback_is_owned()
     local bonus_id = nil
     for id, item in pairs(success.current) do if item.section_name == "ammo_9x18_ap" then bonus_id = id end end
     gamma_arena_test_assert.is_true(bonus_id ~= nil, "bonus descriptor remains in the shared owned-record snapshot")
+    local owned_bonus = nil
+    for _, record in ipairs(success.port.records_snapshot()) do if record.id == bonus_id then owned_bonus = record end end
+    gamma_arena_test_assert.equals(owned_bonus.role, "bonus_ammo", "copied owned record retains the bonus ammo role")
     gamma_arena_test_assert.is_true(success.port.cleanup().ok, "bonus record routes through shared ownership cleanup")
     local bonus_releases = 0
     for _, id in ipairs(success.releases) do if id == bonus_id then bonus_releases = bonus_releases + 1 end end
@@ -4207,11 +4210,13 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
 end
 
 local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
-    local next_id, created, tags = 2400, {}, {}
+    local next_id, created, tags, present, slots, magazine = 2400, {}, {}, {}, {}, {}
+    local active = nil
     local function entity(section, parent_id, quantity)
         local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity }
         next_id = next_id + 1
         function value:id() return self.runtime_id end
+        present[value.runtime_id] = value
         return value
     end
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
@@ -4230,7 +4235,20 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         save_owner_tag = function(id, token) tags[id] = token; return true end,
         load_owner_tag = function(id) return tags[id] end,
         reserve_magazines = 3,
-        magazine_capacity = function() return 30 end
+        magazine_capacity = function() return 30 end,
+        online_item = function(_, id) return present[id] end,
+        item_slot = function(section)
+            if section == "novice_outfit" then return 7 end
+            if section == "wpn_knife" then return 1 end
+            if section == "wpn_pm" then return 3 end
+        end,
+        move_to_slot = function(_, item, slot) slots[slot] = item; return true end,
+        item_in_slot = function(_, slot) return slots[slot] end,
+        set_ammo_elapsed = function(item, count) magazine[item:id()] = count; return true end,
+        get_ammo_in_magazine = function(item) return magazine[item:id()] or 0 end,
+        make_item_active = function(_, item) active = item; return true end,
+        active_item = function() return active end,
+        outfit_requires_power = function() return false end
     })
     local result = port.apply({ id = function() return 77 end }, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "actor loadout creates the validated bonus ammo box")
@@ -4248,6 +4266,14 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         gamma_arena_test_assert.equals(created[index].count, expected_descriptor.count, "base reserve floor never inflates bonus ammo")
         gamma_arena_test_assert.equals(created[index].ammo, expected_descriptor.ammo, "bonus descriptor uses the ammo creation path")
     end
+    local ready = nil
+    for _ = 1, 20 do
+        ready = port.update({ id = function() return 77 end })
+        if ready.ok and ready.value.ready == true then break end
+    end
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "exact bonus actor loadout reaches READY")
+    gamma_arena_test_assert.equals(ready.value.reserve_rounds, 90, "READY summary retains the base reserve magazine floor")
+    gamma_arena_test_assert.equals(ready.value.bonus_ammo_rounds, 7, "READY summary reports the exact resolved bonus ammo rounds")
 end
 
 local function runtime_entity_derives_unreadable_server_ammo_quantity()
