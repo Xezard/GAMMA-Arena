@@ -1023,6 +1023,32 @@ end
             Assert-True ($QuiesceResult.ExitCode -ne 0 -and $QuiesceResult.Output -match [regex]::Escape($QuiesceDiagnostic)) 'Static policy must reject removing cleanup quiescence before release submission through its intended diagnostic.'
         }
     }
+
+    $OwnerBeforeRetirementFixture = New-Task7Fixture 'owner-before-absence-retirement'
+    $OwnerBeforeRetirementPath = Join-Path $OwnerBeforeRetirementFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+    $OwnerBeforeRetirementContent = Get-Content -LiteralPath $OwnerBeforeRetirementPath -Raw
+    $OwnerBeforeRetirementStart = $OwnerBeforeRetirementContent.IndexOf('function EntityAdapter:quiesce_live_owned_npcs')
+    $OwnerBeforeRetirementEnd = if ($OwnerBeforeRetirementStart -ge 0) { $OwnerBeforeRetirementContent.IndexOf('function EntityAdapter:quarantine_live_records', $OwnerBeforeRetirementStart) } else { -1 }
+    Assert-True ($OwnerBeforeRetirementStart -ge 0 -and $OwnerBeforeRetirementEnd -gt $OwnerBeforeRetirementStart) 'Owner-before-retirement negative fixture must find the quiesce slice.'
+    if ($OwnerBeforeRetirementStart -ge 0 -and $OwnerBeforeRetirementEnd -gt $OwnerBeforeRetirementStart) {
+        $OwnerBeforeRetirementSlice = $OwnerBeforeRetirementContent.Substring($OwnerBeforeRetirementStart, $OwnerBeforeRetirementEnd - $OwnerBeforeRetirementStart)
+        $OwnerRead = 'self:load_owner_tag(record.id)'
+        $AbsenceRetirement = 'record.released = true'
+        $OriginalOwnerReadCount = ([regex]::Matches($OwnerBeforeRetirementSlice, [regex]::Escape($OwnerRead))).Count
+        $AbsenceRetirementIndex = $OwnerBeforeRetirementSlice.IndexOf($AbsenceRetirement)
+        Assert-True ($OriginalOwnerReadCount -eq 1 -and $AbsenceRetirementIndex -ge 0) 'Owner-before-retirement negative fixture must start with one owner read and one absence retirement marker.'
+        if ($OriginalOwnerReadCount -eq 1 -and $AbsenceRetirementIndex -ge 0) {
+            $PrematureOwnerRead = 'local premature_owner = ' + $OwnerRead + [Environment]::NewLine + '                '
+            $MutatedOwnerBeforeRetirementSlice = $OwnerBeforeRetirementSlice.Insert($AbsenceRetirementIndex, $PrematureOwnerRead)
+            $MutatedOwnerReadCount = ([regex]::Matches($MutatedOwnerBeforeRetirementSlice, [regex]::Escape($OwnerRead))).Count
+            Assert-True ($MutatedOwnerReadCount -eq ($OriginalOwnerReadCount + 1)) 'Owner-before-retirement negative fixture must inject exactly one owner read before absence retirement.'
+            $MutatedOwnerBeforeRetirement = $OwnerBeforeRetirementContent.Substring(0, $OwnerBeforeRetirementStart) + $MutatedOwnerBeforeRetirementSlice + $OwnerBeforeRetirementContent.Substring($OwnerBeforeRetirementEnd)
+            Write-FixtureFile $OwnerBeforeRetirementFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $MutatedOwnerBeforeRetirement
+            $OwnerBeforeRetirementResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $OwnerBeforeRetirementFixture) -CaptureOutput
+            $OwnerBeforeRetirementDiagnostic = 'Quiescence must prove internal identity before server lookup, retire authoritative absence before persisted-tag proof, and prove the current owner before offline hold.'
+            Assert-True ($OwnerBeforeRetirementResult.ExitCode -ne 0 -and $OwnerBeforeRetirementResult.Output -match [regex]::Escape($OwnerBeforeRetirementDiagnostic)) 'Static policy must reject owner reads moved before authoritative-absence retirement through its intended ordering diagnostic.'
+        }
+    }
     }
 
     if ($StaticFixturesOnly) {

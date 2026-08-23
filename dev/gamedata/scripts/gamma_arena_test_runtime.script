@@ -4399,34 +4399,40 @@ local function runtime_entity_cleanup_quiesce_rejects_lost_npc_tag_before_hold()
 end
 
 local function runtime_entity_cleanup_quiesce_rejects_reused_npc_id_before_hold()
-    local env, deps = fake_entity_environment()
-    local adapter = gamma_arena_entity_adapter.new(deps)
-    begin_entity_apply(adapter, env, entity_spec(1), "session-quiesce-id-reuse")
-    pump_entity(adapter, env)
-    local record = adapter.registry.npcs[1]
-    local foreign = env:add_entity("foreign_reused_npc", nil, 1, record.id)
-    local foreign_online = { runtime_id = record.id }
-    function foreign_online:id() return self.runtime_id end
-    env.online[record.id] = foreign_online
-    env.tags[record.id] = "session-quiesce-id-reuse"
-    adapter.record_by_id[record.id] = { id = record.id }
-    env.events = {}
-    env.release_requests = {}
+    for _, case in ipairs({
+        { label = "cleared-owner-tag", owner_tag = nil },
+        { label = "foreign-owner-tag", owner_tag = "foreign-session" }
+    }) do
+        local env, deps = fake_entity_environment()
+        local adapter = gamma_arena_entity_adapter.new(deps)
+        begin_entity_apply(adapter, env, entity_spec(1), "session-quiesce-id-reuse")
+        pump_entity(adapter, env)
+        local record = adapter.registry.npcs[1]
+        env:remove_entity(record.id)
+        local foreign = env:add_entity("foreign_reused_npc", nil, 1, record.id)
+        local foreign_online = { runtime_id = record.id }
+        function foreign_online:id() return self.runtime_id end
+        env.online[record.id] = foreign_online
+        env.tags[record.id] = case.owner_tag
+        env.events = {}
+        env.release_requests = {}
 
-    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "reused-id cleanup starts")
-    local result, snapshot = pump_entity(adapter, env)
-    gamma_arena_test_assert.is_false(result.ok, "reused NPC id fails quiescence closed")
-    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "reused NPC id reaches terminal ERROR")
-    gamma_arena_test_assert.equals(#env.release_requests, 0, "reused NPC id submits zero cleanup releases")
-    for _, event in ipairs(env.events) do
-        gamma_arena_test_assert.is_false(string.find(event, "hold_offline:", 1, true) == 1, "reused NPC id performs zero offline holds")
+        gamma_arena_test_assert.is_true(adapter.record_by_id[record.id] == record, case.label .. " preserves the Arena registry record")
+        gamma_arena_test_assert.is_true(adapter:cleanup().ok, case.label .. " reused-id cleanup starts")
+        local result, snapshot = pump_entity(adapter, env)
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " reused NPC id fails quiescence closed")
+        gamma_arena_test_assert.equals(snapshot.state, "ERROR", case.label .. " reused NPC id reaches terminal ERROR")
+        gamma_arena_test_assert.equals(#env.release_requests, 0, case.label .. " reused NPC id submits zero cleanup releases")
+        for _, event in ipairs(env.events) do
+            gamma_arena_test_assert.is_false(string.find(event, "hold_offline:", 1, true) == 1, case.label .. " reused NPC id performs zero offline holds")
+        end
+        gamma_arena_test_assert.is_true(env.objects[record.id] == foreign and env.online[record.id] == foreign_online, case.label .. " reused foreign NPC references remain unchanged")
+        local leaf = snapshot.error.context.errors[1]
+        gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_CLEANUP_QUIESCE_FAILED", case.label .. " reused NPC id is normalized at quiescence")
+        gamma_arena_test_assert.equals(leaf.context.entity_id, record.id, case.label .. " reused NPC id leaf retains entity id")
+        gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "quiesce", case.label .. " reused NPC id leaf retains cleanup phase")
+        gamma_arena_test_assert.equals(leaf.context.cause.code, "GA_ENTITY_RELEASE_TAG_MISMATCH", case.label .. " reused NPC id leaf retains current-owner cause")
     end
-    gamma_arena_test_assert.is_true(env.objects[record.id] == foreign and env.online[record.id] == foreign_online, "reused foreign NPC remains unmutated")
-    local leaf = snapshot.error.context.errors[1]
-    gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_CLEANUP_QUIESCE_FAILED", "reused NPC id is normalized at quiescence")
-    gamma_arena_test_assert.equals(leaf.context.entity_id, record.id, "reused NPC id leaf retains entity id")
-    gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "quiesce", "reused NPC id leaf retains cleanup phase")
-    gamma_arena_test_assert.equals(leaf.context.cause.code, "GA_ENTITY_RELEASE_UNREGISTERED", "reused NPC id leaf retains identity cause")
 end
 
 local function runtime_entity_dead_cleanup_bypasses_offline_hold()

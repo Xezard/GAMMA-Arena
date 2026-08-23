@@ -1533,8 +1533,10 @@ if ($Task2QuiesceStart -ge 0 -and $Task2QuiesceEnd -gt $Task2QuiesceStart) {
     $Task2OwnerProof = $Task2QuiesceBlock.IndexOf('self:load_owner_tag(record.id)')
     $Task2ServerLookup = $Task2QuiesceBlock.IndexOf('self.deps.server_entity')
     $Task2ExistenceProof = $Task2QuiesceBlock.IndexOf('self:entity_exists(record.id)')
+    $Task2ReleasedRetirement = $Task2QuiesceBlock.IndexOf('record.released = true')
+    $Task2CleanupAbsent = $Task2QuiesceBlock.IndexOf('cleanup_absent')
     $Task2OfflineHold = $Task2QuiesceBlock.IndexOf('self.deps.hold_offline')
-    Assert-True ($Task2IdentityProof -ge 0 -and $Task2TaggedProof -gt $Task2IdentityProof -and $Task2ServerLookup -gt $Task2TaggedProof -and $Task2ExistenceProof -gt $Task2ServerLookup -and $Task2OwnerProof -gt $Task2ExistenceProof -and $Task2OfflineHold -gt $Task2OwnerProof) 'Quiescence must prove internal identity before server lookup, retire authoritative absence before persisted-tag proof, and prove the current owner before offline hold.'
+    Assert-True ($Task2IdentityProof -ge 0 -and $Task2TaggedProof -gt $Task2IdentityProof -and $Task2ServerLookup -gt $Task2TaggedProof -and $Task2ExistenceProof -gt $Task2ServerLookup -and $Task2ReleasedRetirement -gt $Task2ExistenceProof -and $Task2CleanupAbsent -gt $Task2ReleasedRetirement -and $Task2OwnerProof -gt $Task2CleanupAbsent -and $Task2OfflineHold -gt $Task2OwnerProof) 'Quiescence must prove internal identity before server lookup, retire authoritative absence before persisted-tag proof, and prove the current owner before offline hold.'
 } else {
     Assert-True $false 'Quiescence ownership proof must remain structurally testable.'
 }
