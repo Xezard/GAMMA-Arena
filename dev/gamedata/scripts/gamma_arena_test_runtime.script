@@ -1495,6 +1495,11 @@ local function fake_actor_adapter_env()
         never_finishes = false,
         never_finishes_ids = {},
         release_fail_ids = {},
+        release_submission_count = 0,
+        inventory_callback_sequence = nil,
+        inventory_callback_count = 0,
+        actor_id_sequence = nil,
+        actor_id_reads = 0,
         now = 0,
         input_acquires = 0,
         input_releases = 0,
@@ -1513,14 +1518,22 @@ local function fake_actor_adapter_env()
         }
     }
     local actor = { items = {}, actor_id = 700, money_value = 2500 }
-    function actor:id() return self.actor_id end
+    function actor:id()
+        env.actor_id_reads = env.actor_id_reads + 1
+        if env.actor_id_sequence ~= nil then return env.actor_id_sequence[env.actor_id_reads] end
+        return self.actor_id
+    end
     function actor:money() return self.money_value end
     function actor:give_money(value) self.money_delta = value; self.money_value = self.money_value + value end
     function actor:iterate_inventory(callback, context)
         env.iterating = true
-        local snapshot = {}
-        for index = 1, #self.items do snapshot[index] = self.items[index] end
-        for index = 1, #snapshot do callback(context, snapshot[index]) end
+        if env.inventory_callback_sequence ~= nil then
+            for index = 1, env.inventory_callback_count do callback(context, env.inventory_callback_sequence[index]) end
+        else
+            local snapshot = {}
+            for index = 1, #self.items do snapshot[index] = self.items[index] end
+            for index = 1, #snapshot do callback(context, snapshot[index]) end
+        end
         env.iterating = false
     end
     function actor:set_health_ex(value) self.health_value = value end
@@ -1572,6 +1585,7 @@ local function fake_actor_adapter_env()
     end
     local function release(id)
         gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
+        env.release_submission_count = env.release_submission_count + 1
         if env.release_fail_ids[id] then return gamma_arena_result.err("GA_ACTOR_INVENTORY_RELEASE_FAILED", "injected release failure") end
         env.released[#env.released + 1] = id
         env.release_requests[id] = (env.release_requests[id] or 0) + 1
@@ -1712,8 +1726,11 @@ local function runtime_actor_inventory_drain_times_out_with_sorted_evidence()
     gamma_arena_test_assert.equals(context.remaining_count, 2, "timeout reports remaining count")
     gamma_arena_test_assert.equals(context.remaining_ids[1], 12, "timeout sorts remaining ids")
     gamma_arena_test_assert.equals(context.remaining_ids[2], 14, "timeout replaces stale ids in evidence")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].id, 12, "timeout section evidence retains first sorted id")
     gamma_arena_test_assert.equals(context.remaining_sections[1].section, "<unavailable>", "section failures are diagnostic only")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].id, 14, "timeout section evidence retains second sorted id")
     gamma_arena_test_assert.equals(context.remaining_sections[2].section, "wpn_lr300", "timeout retains readable sections")
+    gamma_arena_test_assert.equals(context.poll_count, 4, "timeout counts every verification poll")
     gamma_arena_test_assert.equals(context.elapsed_since_progress_ms, 10000, "timeout uses exact inactivity boundary")
     gamma_arena_test_assert.equals(context.total_elapsed_ms, 19999, "progress does not reset total elapsed")
     gamma_arena_test_assert.equals(context.timeout_ms, 10000, "timeout evidence retains configured timeout")
@@ -1735,6 +1752,97 @@ local function runtime_actor_inventory_drain_timeout_is_wrap_safe()
     gamma_arena_test_assert.is_false(timed_out.ok, "wrapped clock reaches timeout")
     gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 10000, "wrapped elapsed time is exact")
     gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 10000, "wrapped total elapsed is exact")
+end
+
+local function runtime_actor_inventory_drain_rejects_unowned_public_actor()
+    local env, adapter = fake_actor_adapter_env()
+    local foreign = {
+        id = function() return env.actor.actor_id end,
+        iterate_inventory = function() error("foreign actor must not be inspected") end
+    }
+    adapter:begin_update()
+    local result = adapter:purge_inventory(foreign)
+    gamma_arena_test_assert.is_false(result.ok, "public purge argument must be the currently owned Arena actor")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_NOT_OWNED", "public foreign actor uses ownership guard")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "public foreign actor submits no releases")
+end
+
+local function runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values()
+    local actor_id_cases = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(actor_id_cases) do
+        local env, adapter = fake_actor_adapter_env()
+        env.actor.actor_id = case.value
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid public actor id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_ID_INVALID", "invalid actor id error code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid actor id submits no releases")
+    end
+
+    local nil_env, nil_adapter = fake_actor_adapter_env()
+    nil_env.inventory_callback_sequence = { [1] = nil }
+    nil_env.inventory_callback_count = 1
+    nil_adapter:begin_update()
+    local nil_result = nil_adapter:purge_inventory(nil_env.actor)
+    gamma_arena_test_assert.is_false(nil_result.ok, "explicit nil inventory callback item fails closed")
+    gamma_arena_test_assert.equals(nil_result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "nil callback item code")
+    gamma_arena_test_assert.equals(nil_env.release_submission_count, 0, "nil callback item submits no releases")
+
+    local invalid_item_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_item_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env:add_item(case.value)
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid item id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "invalid item id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid item id submits no releases")
+    end
+
+    local invalid_parent_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_parent_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env.actor_id_sequence = { 700, case.value }
+        env:add_item(46)
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid parent id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "invalid parent id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid parent id submits no releases")
+    end
+end
+
+local function runtime_actor_inventory_drain_submits_sorted_deduplicated_ids()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(30)
+    env:add_item(10)
+    env:add_item(30)
+    env:add_item(2)
+    adapter:begin_update()
+    local result = adapter:purge_inventory(env.actor)
+    gamma_arena_test_assert.is_true(result.ok, "unsorted duplicate inventory snapshot purges")
+    gamma_arena_test_assert.equals(result.value, 3, "deduplicated snapshot count")
+    gamma_arena_test_assert.equals(env.release_submission_count, 3, "each observed id submits exactly once")
+    gamma_arena_test_assert.equals(env.released[1], 2, "first submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[2], 10, "second submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[3], 30, "third submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.release_requests[30], 1, "duplicate id submits once")
+    gamma_arena_test_assert.equals(adapter.inventory_drain.last_count, 0, "transaction starts with approved zero last count")
+end
+
+local function runtime_actor_inventory_drain_cleanup_clears_transaction()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:purge_inventory(env.actor).ok, "active drain starts before cleanup")
+    gamma_arena_test_assert.is_true(adapter.inventory_drain ~= nil, "active drain is retained while release is pending")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup clears active drain")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "first cleanup clears transaction state")
+    gamma_arena_test_assert.equals(adapter.purge_tick, nil, "first cleanup clears same-update gate")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup remains idempotent")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "repeated cleanup keeps transaction cleared")
 end
 
 local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
@@ -5328,12 +5436,17 @@ local function task8_environment(options)
         restore_calls = 0,
         actor_loadout_owned = false,
         actor_loadout_cleanup = 0,
+        inventory_pending = options.inventory_pending == true,
+        inventory_verify_calls = 0,
         integrity_fault = nil
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
         normalize_for_arena = function() return gamma_arena_result.ok(true) end,
-        verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        verify_inventory_empty = function()
+            env.inventory_verify_calls = env.inventory_verify_calls + 1
+            return gamma_arena_result.ok(not env.inventory_pending)
+        end,
         acquire_input = function() env.acquired_input = env.acquired_input + 1; return gamma_arena_result.ok(true) end,
         release_input = function() env.released_input = env.released_input + 1; return gamma_arena_result.ok(true) end,
         cleanup_loadout_for_restore = function()
@@ -5550,6 +5663,18 @@ local function runtime_task8_checkpoint_readiness_gates_generation()
     gamma_arena_test_assert.equals(env.generated, 0, "the callback proving READY does not also generate")
     env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(env.generated, 1, "READY opens exactly one generation")
+end
+
+local function runtime_wait_inventory_blocks_fight_generation_and_loadout()
+    local env = task8_environment({ inventory_pending = true })
+    env.orchestrator.runtime_stage = "WAIT_INVENTORY"
+    env.orchestrator.machine_state = gamma_arena_state_machine.states.PREPARING
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "first inventory wait poll succeeds")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "second inventory wait poll succeeds")
+    gamma_arena_test_assert.equals(env.inventory_verify_calls, 2, "inventory absence is polled on every waiting update")
+    gamma_arena_test_assert.equals(env.generated, 0, "pending inventory drain blocks new FightSpec generation")
+    gamma_arena_test_assert.equals(env.applied, 0, "pending inventory drain blocks actor loadout application")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "WAIT_INVENTORY", "pending drain retains inventory wait stage")
 end
 
 local function runtime_task8_generation_and_validation_fail_without_world_mutation()
@@ -6805,6 +6930,10 @@ local cases = {
     ,{ name = "runtime_actor_inventory_drain_releases_newly_surfaced_item_once", fn = runtime_actor_inventory_drain_releases_newly_surfaced_item_once }
     ,{ name = "runtime_actor_inventory_drain_times_out_with_sorted_evidence", fn = runtime_actor_inventory_drain_times_out_with_sorted_evidence }
     ,{ name = "runtime_actor_inventory_drain_timeout_is_wrap_safe", fn = runtime_actor_inventory_drain_timeout_is_wrap_safe }
+    ,{ name = "runtime_actor_inventory_drain_rejects_unowned_public_actor", fn = runtime_actor_inventory_drain_rejects_unowned_public_actor }
+    ,{ name = "runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values", fn = runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values }
+    ,{ name = "runtime_actor_inventory_drain_submits_sorted_deduplicated_ids", fn = runtime_actor_inventory_drain_submits_sorted_deduplicated_ids }
+    ,{ name = "runtime_actor_inventory_drain_cleanup_clears_transaction", fn = runtime_actor_inventory_drain_cleanup_clears_transaction }
     ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
@@ -6906,6 +7035,7 @@ local cases = {
     ,{ name = "runtime_entity_preserves_dynamic_opponent_community", fn = runtime_entity_preserves_dynamic_opponent_community }
     ,{ name = "runtime_orchestrator_living_count_fails_closed", fn = runtime_orchestrator_living_count_fails_closed }
     ,{ name = "runtime_task8_checkpoint_readiness_gates_generation", fn = runtime_task8_checkpoint_readiness_gates_generation }
+    ,{ name = "runtime_wait_inventory_blocks_fight_generation_and_loadout", fn = runtime_wait_inventory_blocks_fight_generation_and_loadout }
     ,{ name = "runtime_task8_generation_and_validation_fail_without_world_mutation", fn = runtime_task8_generation_and_validation_fail_without_world_mutation }
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
