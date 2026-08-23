@@ -13,7 +13,6 @@ if (-not (Test-Path -LiteralPath $ToolPath)) {
     throw 'Arena balance document generator is missing'
 }
 
-& $ToolPath -RepoRoot $RepoRoot -Verify
 $RepositoryDocument = [IO.File]::ReadAllText((Join-Path $RepoRoot 'docs\arena-balance.md'))
 if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
     throw 'Arena balance document has unbalanced Markdown fences'
@@ -322,6 +321,10 @@ try {
     $Document = Join-Path $Fixture 'docs\arena-balance.md'
     & $ToolPath -RepoRoot $Fixture
     $First = [IO.File]::ReadAllText($Document)
+    if ($First.Contains("`r")) {
+        throw 'Generated Arena balance Markdown must use LF line endings only'
+    }
+    & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
         '| Catalog | schema 4 / revision 5 / generator 5 |',
         '| Difficulties | schema 3 / revision 4 |',

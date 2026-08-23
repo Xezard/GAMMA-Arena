@@ -252,7 +252,7 @@ function Set-GeneratedMarkdownBlocks([string]$Document, $Blocks) {
     foreach ($Range in @($Ranges | Sort-Object BeginIndex -Descending)) {
         $Before = $Result.Substring(0, $Range.BeginIndex + $Range.Begin.Length)
         $After = $Result.Substring($Range.EndIndex)
-        $Body = ([string]$Blocks[$Range.Name]).Trim("`r", "`n")
+        $Body = ([string]$Blocks[$Range.Name]).Replace("`r`n", "`n").Replace("`r", "`n").Trim("`n")
         $Result = $Before + "`n" + $Body + "`n" + $After
     }
 
