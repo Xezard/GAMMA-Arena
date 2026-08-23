@@ -82,6 +82,33 @@ local function copy_plain(value, seen)
     return copy
 end
 
+local function diagnostic_query(fn)
+    local called, value = pcall(fn)
+    if not called then return { status = "error", reason = tostring(value) } end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then
+            local copied, error_value = pcall(copy_plain, value.error)
+            if not copied then return { status = "error", reason = tostring(error_value) } end
+            return { status = "error", error = error_value }
+        end
+        value = value.value
+    end
+    return { status = "ok", value = value }
+end
+
+local function diagnostic_query_context(result)
+    local context = { status = result.status }
+    if result.reason ~= nil then context.reason = result.reason end
+    if result.error ~= nil then context.error = result.error end
+    return context
+end
+
+local function copied_finite_position(value)
+    local read, x, y, z = pcall(function() return value.x, value.y, value.z end)
+    if not read or not finite_number(x) or not finite_number(y) or not finite_number(z) then return nil end
+    return { x = x, y = y, z = z }
+end
+
 local function result_call(code, fn, ...)
     if type(fn) ~= "function" then return fail(code, "Required Arena entity dependency is unavailable") end
     local called, value = pcall(fn, ...)
@@ -453,6 +480,7 @@ function EntityAdapter:register_record(kind, id, values)
         terminal_notified = false,
         wound_query_warning_logged = false,
         spawn_y = values.spawn_y,
+        spawn_position = values.spawn_position,
         vertical_escape_since = nil,
         equipped = false,
         held_offline = false,
@@ -590,7 +618,12 @@ function EntityAdapter:spawn_current()
         section = opponent.profile,
         quantity = 1,
         role = "opponent",
-        spawn_y = resolved.value.position.y
+        spawn_y = resolved.value.position.y,
+        spawn_position = {
+            x = resolved.value.position.x,
+            y = resolved.value.position.y,
+            z = resolved.value.position.z
+        }
     })
     if not registered.ok then return registered end
     local held = result_call("GA_ENTITY_OFFLINE_HOLD_FAILED", self.deps.hold_offline, created.value)
@@ -1295,6 +1328,86 @@ function EntityAdapter:accept_registered_death(record, evidence)
     return self:transition_opponent(record, OPPONENT_STATES.DEFEATED_DEAD, evidence or "death_callback", nil)
 end
 
+function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, authoritative_owner)
+    local opponent = self.opponents[record.slot] or {}
+    local diagnostic = {
+        session_id = self.session_id,
+        fight_key = self.fight_key,
+        opponent_id = record.id,
+        killer_id = killer_id,
+        slot = record.slot,
+        elapsed_ms = elapsed,
+        window_ms = EARLY_SELF_DEATH_WINDOW_MS,
+        authoritative_owner = authoritative_owner,
+        profile = {
+            section = record.section,
+            community = opponent.community,
+            tactical_route = opponent.tactical_route,
+            role = opponent.role or record.role
+        },
+        loadout = {
+            weapon = opponent.loadout and opponent.loadout.weapon or nil,
+            ammo = opponent.loadout and opponent.loadout.ammo or nil,
+            ammo_boxes = opponent.loadout and opponent.loadout.ammo_boxes or nil,
+            outfit = opponent.loadout and opponent.loadout.outfit or nil,
+            knife = opponent.loadout and opponent.loadout.knife or nil
+        },
+        spawn_position = copy_plain(record.spawn_position),
+        queries = {}
+    }
+    local server = diagnostic_query(function() return self.deps.server_entity(record.id) end)
+    diagnostic.queries.server_object = diagnostic_query_context(server)
+    if server.status == "ok" then
+        diagnostic.server_available = server.value ~= nil
+        diagnostic.queries.server_object.available = diagnostic.server_available
+    end
+    local online = diagnostic_query(function() return self.deps.online_object(record.id) end)
+    diagnostic.queries.online_object = diagnostic_query_context(online)
+    if online.status == "ok" then
+        diagnostic.online_available = online.value ~= nil
+        diagnostic.queries.online_object.available = diagnostic.online_available
+    end
+    local owner = diagnostic_query(function() return self:load_owner_tag(record.id) end)
+    diagnostic.queries.owner_tag = diagnostic_query_context(owner)
+    if owner.status == "ok" then diagnostic.queries.owner_tag.value = copy_plain(owner.value) end
+    if online.status == "ok" and online.value ~= nil then
+        local position = diagnostic_query(function() return self.deps.object_position(online.value) end)
+        diagnostic.queries.position = diagnostic_query_context(position)
+        if position.status == "ok" then
+            local observed = copied_finite_position(position.value)
+            if observed == nil then
+                diagnostic.queries.position.status = "error"
+                diagnostic.queries.position.reason = "position_not_finite"
+            else
+                diagnostic.observed_position = observed
+            end
+        end
+        local alive = diagnostic_query(function() return self:is_alive(online.value) end)
+        diagnostic.queries.alive = diagnostic_query_context(alive)
+        if alive.status == "ok" then diagnostic.queries.alive.value = alive.value end
+        local wounded = diagnostic_query(function() return self:is_critically_wounded(online.value) end)
+        diagnostic.queries.critically_wounded = diagnostic_query_context(wounded)
+        if wounded.status == "ok" then diagnostic.queries.critically_wounded.value = wounded.value end
+    else
+        local reason = online.status == "ok" and "online_object_absent" or "online_object_unavailable"
+        diagnostic.queries.position = { status = "unavailable", reason = reason }
+        diagnostic.queries.alive = { status = "unavailable", reason = reason }
+        diagnostic.queries.critically_wounded = { status = "unavailable", reason = reason }
+    end
+    local spawn = diagnostic.spawn_position
+    local observed = diagnostic.observed_position
+    if type(spawn) == "table" and type(observed) == "table"
+        and finite_number(spawn.x) and finite_number(spawn.y) and finite_number(spawn.z)
+        and finite_number(observed.x) and finite_number(observed.y) and finite_number(observed.z) then
+        diagnostic.delta_x = observed.x - spawn.x
+        diagnostic.delta_y = observed.y - spawn.y
+        diagnostic.delta_z = observed.z - spawn.z
+        diagnostic.displacement = math.sqrt(diagnostic.delta_x * diagnostic.delta_x
+            + diagnostic.delta_y * diagnostic.delta_y + diagnostic.delta_z * diagnostic.delta_z)
+    end
+    return diagnostic
+end
+
 function EntityAdapter:is_critically_wounded(object)
     return boolean_query("GA_ENTITY_WOUND_CHECK_FAILED", self.deps.is_critically_wounded, object)
 end
@@ -1457,9 +1570,15 @@ function EntityAdapter:on_npc_death(victim_or_id, killer_or_id)
     local accepted = self:accept_registered_death(record)
     if not accepted.ok then return accepted end
     if accepted.value and early_self_death then
+        local built, diagnostic = pcall(function()
+            return self:early_self_death_diagnostic(record, killer_id, self_death_elapsed, owner.value)
+        end)
+        if not built then diagnostic = { status = "error", reason = tostring(diagnostic) } end
+        pcall(self.deps.log_warn, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "Arena opponent self-death requires physical diagnostic evidence", diagnostic)
         local integrity = self:declare_integrity_fault(record, "early_self_death", {
             elapsed_ms = self_death_elapsed,
-            window_ms = EARLY_SELF_DEATH_WINDOW_MS
+            window_ms = EARLY_SELF_DEATH_WINDOW_MS,
+            diagnostic = diagnostic
         })
         if not integrity.ok then return integrity end
     end

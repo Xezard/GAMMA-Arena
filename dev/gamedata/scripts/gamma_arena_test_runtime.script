@@ -3000,6 +3000,8 @@ local function fake_entity_environment(options)
         tactical_death_slots = {},
         tactical_stop_calls = 0,
         tactical_warnings = {},
+        warning_records = {},
+        warnings_by_code = {},
         terminal_transitions = {}
     }
 
@@ -3122,8 +3124,11 @@ local function fake_entity_environment(options)
     local deps = {
         actor = actor_port,
         tactical = tactical,
-        log_warn = function(code)
+        log_warn = function(code, message, context)
             env.tactical_warnings[#env.tactical_warnings + 1] = code
+            local warning = { code = code, message = message, context = clone(context) }
+            env.warning_records[#env.warning_records + 1] = warning
+            env.warnings_by_code[code] = warning
             env.events[#env.events + 1] = "tactical_warn:" .. tostring(code)
         end,
         log_info = function(code, message, context)
@@ -5137,6 +5142,18 @@ local function runtime_entity_missing_is_integrity_not_victory()
     gamma_arena_test_assert.equals(adapter:living_opponent_count(), 1, "missing opponent can never satisfy the victory count")
 end
 
+local function equal_plain_values(first, second)
+    if type(first) ~= type(second) then return false end
+    if type(first) ~= "table" then return first == second end
+    for key, value in pairs(first) do
+        if not equal_plain_values(value, second[key]) then return false end
+    end
+    for key in pairs(second) do
+        if first[key] == nil then return false end
+    end
+    return true
+end
+
 local function runtime_entity_early_self_death_is_integrity()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
@@ -5148,6 +5165,142 @@ local function runtime_entity_early_self_death_is_integrity()
     local fault = adapter:integrity_status()
     gamma_arena_test_assert.is_true(fault.ok and type(fault.value) == "table", "early self-death also marks the round corrupted")
     gamma_arena_test_assert.equals(fault.value.cause, "early_self_death", "self-death cause is stable")
+    gamma_arena_test_assert.equals(env.warning_records[#env.warning_records - 1].code, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "self-death diagnostic is emitted before integrity evidence")
+    gamma_arena_test_assert.equals(env.warning_records[#env.warning_records].code, "GA_FIGHT_INTEGRITY_FAILED", "integrity warning follows its self-death diagnostic")
+    local diagnostic = env.warnings_by_code.GA_EARLY_SELF_DEATH_DIAGNOSTIC.context
+    gamma_arena_test_assert.equals(diagnostic.session_id, "session-self-death-integrity", "diagnostic preserves session identity")
+    gamma_arena_test_assert.equals(diagnostic.fight_key, "stable:ga-entity-test", "diagnostic preserves exact FightSpec key")
+    gamma_arena_test_assert.equals(diagnostic.opponent_id, victim_id, "diagnostic preserves opponent identity")
+    gamma_arena_test_assert.equals(diagnostic.killer_id, victim_id, "diagnostic preserves killer identity")
+    gamma_arena_test_assert.equals(diagnostic.slot, 1, "diagnostic preserves participant slot")
+    gamma_arena_test_assert.equals(diagnostic.elapsed_ms, 0, "diagnostic preserves elapsed self-death time")
+    gamma_arena_test_assert.equals(diagnostic.window_ms, 20000, "diagnostic preserves the early self-death window")
+    gamma_arena_test_assert.equals(diagnostic.profile.section, "gamma_arena_bandit_novice", "diagnostic preserves profile section")
+    gamma_arena_test_assert.equals(diagnostic.profile.community, "bandit", "diagnostic preserves community")
+    gamma_arena_test_assert.equals(diagnostic.profile.tactical_route, "opponent_1", "diagnostic preserves tactical route")
+    gamma_arena_test_assert.equals(diagnostic.profile.role, "leader", "diagnostic preserves role")
+    gamma_arena_test_assert.equals(diagnostic.loadout.weapon, "wpn_pm", "diagnostic preserves weapon")
+    gamma_arena_test_assert.equals(diagnostic.loadout.ammo, "ammo_9x18_fmj", "diagnostic preserves base ammo")
+    gamma_arena_test_assert.equals(diagnostic.loadout.ammo_boxes, 3, "diagnostic preserves base ammo boxes")
+    gamma_arena_test_assert.equals(diagnostic.loadout.outfit, "novice_outfit", "diagnostic preserves outfit")
+    gamma_arena_test_assert.equals(diagnostic.loadout.knife, "wpn_knife", "diagnostic preserves knife")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.x, 2, "diagnostic preserves spawn x")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.y, 2, "diagnostic preserves spawn y")
+    gamma_arena_test_assert.equals(diagnostic.spawn_position.z, 3, "diagnostic preserves spawn z")
+    gamma_arena_test_assert.equals(diagnostic.queries.server_object.status, "ok", "diagnostic records server query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.status, "ok", "diagnostic records online query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.status, "ok", "diagnostic records owner-tag query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.status, "ok", "diagnostic records position query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.alive.status, "ok", "diagnostic records alive query status")
+    gamma_arena_test_assert.equals(diagnostic.queries.critically_wounded.status, "ok", "diagnostic records wound query status")
+    gamma_arena_test_assert.is_true(diagnostic.server_available, "diagnostic records available server entity")
+    gamma_arena_test_assert.is_true(diagnostic.online_available, "diagnostic records available online object")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.x, 2, "diagnostic preserves observed x")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.y, 2, "diagnostic preserves observed y")
+    gamma_arena_test_assert.equals(diagnostic.observed_position.z, 3, "diagnostic preserves observed z")
+    gamma_arena_test_assert.equals(diagnostic.delta_x, 0, "diagnostic calculates x displacement")
+    gamma_arena_test_assert.equals(diagnostic.delta_y, 0, "diagnostic calculates y displacement")
+    gamma_arena_test_assert.equals(diagnostic.delta_z, 0, "diagnostic calculates z displacement")
+    gamma_arena_test_assert.equals(diagnostic.displacement, 0, "diagnostic calculates Euclidean displacement")
+    gamma_arena_test_assert.is_true(equal_plain_values(fault.value.context.diagnostic, diagnostic), "integrity context receives the emitted diagnostic by value")
+    gamma_arena_test_assert.is_false(adapter:on_npc_death(victim, victim).value, "duplicate callback remains ignored")
+    gamma_arena_test_assert.equals(#env.warning_records, 2, "duplicate callback emits no second diagnostic")
+end
+
+local function runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-self-death-diagnostic-failures"); pump_entity(adapter, env)
+    local victim_id = adapter:registry_snapshot().npcs[1].id
+    local owner_reads = 0
+    deps.server_entity = function() error("injected diagnostic server failure") end
+    deps.online_object = function() error("injected diagnostic online failure") end
+    deps.load_tag = function()
+        owner_reads = owner_reads + 1
+        if owner_reads == 1 then return "session-self-death-diagnostic-failures" end
+        error("injected diagnostic owner failure")
+    end
+    deps.object_position = function() error("injected diagnostic position failure") end
+    deps.is_alive = function() error("injected diagnostic alive failure") end
+    deps.is_critically_wounded = function() error("injected diagnostic wound failure") end
+    local logger_calls = 0
+    deps.log_warn = function(code)
+        logger_calls = logger_calls + 1
+        if code == "GA_EARLY_SELF_DEATH_DIAGNOSTIC" then error("injected diagnostic logger failure") end
+        env.warning_records[#env.warning_records + 1] = { code = code }
+    end
+    local victim = { id = function() return victim_id end }
+    local accepted = adapter:on_npc_death(victim, victim)
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value, "diagnostic dependency failures do not suppress accepted death")
+    local fault = adapter:integrity_status()
+    gamma_arena_test_assert.equals(fault.value.cause, "early_self_death", "diagnostic dependency failures preserve integrity cause")
+    local diagnostic = fault.value.context.diagnostic
+    gamma_arena_test_assert.equals(diagnostic.queries.server_object.status, "error", "throwing server diagnostic query is recorded")
+    gamma_arena_test_assert.equals(diagnostic.queries.online_object.status, "error", "throwing online diagnostic query is recorded")
+    gamma_arena_test_assert.equals(diagnostic.queries.owner_tag.status, "error", "throwing diagnostic owner reread is recorded")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.status, "unavailable", "position is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.alive.status, "unavailable", "alive is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.critically_wounded.status, "unavailable", "wound state is explicitly unavailable without an online object")
+    gamma_arena_test_assert.equals(diagnostic.queries.position.reason, "online_object_unavailable", "failed online lookup does not falsely claim absent online object")
+    gamma_arena_test_assert.equals(logger_calls, 2, "throwing diagnostic logger does not suppress integrity logger")
+
+    local nil_env, nil_deps = fake_entity_environment()
+    local nil_adapter = gamma_arena_entity_adapter.new(nil_deps)
+    begin_entity_apply(nil_adapter, nil_env, entity_spec(1), "session-self-death-diagnostic-nil"); pump_entity(nil_adapter, nil_env)
+    local nil_victim_id = nil_adapter:registry_snapshot().npcs[1].id
+    nil_deps.server_entity = function() return nil end
+    nil_deps.online_object = function() return nil end
+    local nil_victim = { id = function() return nil_victim_id end }
+    gamma_arena_test_assert.is_true(nil_adapter:on_npc_death(nil_victim, nil_victim).value, "nil availability still accepts authoritative death")
+    local nil_diagnostic = nil_adapter:integrity_status().value.context.diagnostic
+    gamma_arena_test_assert.is_false(nil_diagnostic.server_available, "nil server lookup records unavailable server")
+    gamma_arena_test_assert.is_false(nil_diagnostic.online_available, "nil online lookup records unavailable object")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.server_object.status, "ok", "nil server lookup remains a successful query")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.online_object.status, "ok", "nil online lookup remains a successful query")
+    gamma_arena_test_assert.equals(nil_diagnostic.queries.position.reason, "online_object_absent", "nil online lookup explains unavailable position")
+
+    for _, case in ipairs({
+        { name = "position", dependency = "object_position", query = "position" },
+        { name = "alive", dependency = "is_alive", query = "alive" },
+        { name = "wound", dependency = "is_critically_wounded", query = "critically_wounded" }
+    }) do
+        local query_env, query_deps = fake_entity_environment()
+        local query_adapter = gamma_arena_entity_adapter.new(query_deps)
+        begin_entity_apply(query_adapter, query_env, entity_spec(1), "session-self-death-diagnostic-" .. case.name); pump_entity(query_adapter, query_env)
+        local query_id = query_adapter:registry_snapshot().npcs[1].id
+        query_deps[case.dependency] = function() error("injected diagnostic " .. case.name .. " failure") end
+        local query_victim = { id = function() return query_id end }
+        gamma_arena_test_assert.is_true(query_adapter:on_npc_death(query_victim, query_victim).value, "throwing " .. case.name .. " diagnostic dependency still accepts death")
+        local query_diagnostic = query_adapter:integrity_status().value.context.diagnostic
+        gamma_arena_test_assert.equals(query_diagnostic.queries[case.query].status, "error", "throwing " .. case.name .. " diagnostic dependency is recorded")
+        gamma_arena_test_assert.equals(query_adapter:integrity_status().value.cause, "early_self_death", "throwing " .. case.name .. " diagnostic dependency preserves integrity")
+    end
+
+    local function ignored_callback_fixture(session_id)
+        local ignored_env, ignored_deps = fake_entity_environment()
+        local ignored_adapter = gamma_arena_entity_adapter.new(ignored_deps)
+        begin_entity_apply(ignored_adapter, ignored_env, entity_spec(1), session_id); pump_entity(ignored_adapter, ignored_env)
+        local ignored_id = ignored_adapter:registry_snapshot().npcs[1].id
+        return ignored_env, ignored_adapter, ignored_id, { id = function() return ignored_id end }
+    end
+    local nonself_env, nonself_adapter, nonself_id, nonself = ignored_callback_fixture("session-self-death-diagnostic-nonself")
+    gamma_arena_test_assert.is_true(nonself_adapter:on_npc_death(nonself, { id = function() return nonself_id + 1 end }).value, "non-self death remains authoritative")
+    gamma_arena_test_assert.equals(#nonself_env.warning_records, 0, "non-self callback emits no diagnostic warning")
+    local late_env, late_adapter, _, late = ignored_callback_fixture("session-self-death-diagnostic-late")
+    late_env:advance(20001)
+    gamma_arena_test_assert.is_true(late_adapter:on_npc_death(late, late).value, "late self-death remains accepted")
+    gamma_arena_test_assert.equals(#late_env.warning_records, 0, "late self-death emits no diagnostic warning")
+    local unregistered_env, unregistered_adapter = ignored_callback_fixture("session-self-death-diagnostic-unregistered")
+    gamma_arena_test_assert.is_false(unregistered_adapter:on_npc_death(999999, 999999).value, "unregistered self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#unregistered_env.warning_records, 0, "unregistered callback emits no diagnostic warning")
+    local mismatch_env, mismatch_adapter, mismatch_id, mismatch = ignored_callback_fixture("session-self-death-diagnostic-mismatch")
+    mismatch_env.tags[mismatch_id] = "foreign-session"
+    gamma_arena_test_assert.is_false(mismatch_adapter:on_npc_death(mismatch, mismatch).value, "mismatched-owner self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#mismatch_env.warning_records, 0, "mismatched-owner callback emits no diagnostic warning")
+    local inactive_env, inactive_adapter, _, inactive = ignored_callback_fixture("session-self-death-diagnostic-inactive")
+    inactive_adapter:cleanup(); pump_entity(inactive_adapter, inactive_env)
+    gamma_arena_test_assert.is_false(inactive_adapter:on_npc_death(inactive, inactive).value, "inactive self-death emits no diagnostic")
+    gamma_arena_test_assert.equals(#inactive_env.warning_records, 0, "inactive callback emits no diagnostic warning")
 end
 
 local function runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only()
@@ -7017,6 +7170,7 @@ local cases = {
     ,{ name = "runtime_entity_vertical_escape_requires_grace", fn = runtime_entity_vertical_escape_requires_grace }
     ,{ name = "runtime_entity_missing_is_integrity_not_victory", fn = runtime_entity_missing_is_integrity_not_victory }
     ,{ name = "runtime_entity_early_self_death_is_integrity", fn = runtime_entity_early_self_death_is_integrity }
+    ,{ name = "runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity", fn = runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity }
     ,{ name = "runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only", fn = runtime_entity_terminal_grace_is_wrap_safe_and_logs_transitions_only }
     ,{ name = "runtime_entity_numeric_death_requires_test_injection", fn = runtime_entity_numeric_death_requires_test_injection }
     ,{ name = "runtime_entity_release_is_async_and_never_direct", fn = runtime_entity_release_is_async_and_never_direct }

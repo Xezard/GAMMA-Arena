@@ -1496,6 +1496,9 @@ Assert-True ($Task12OrchestratorContent -match 'show_victory[\s\S]{0,900}termina
 foreach ($IntegrityMarker in @('VERTICAL_ESCAPE_GRACE_MS', 'EARLY_SELF_DEATH_WINDOW_MS', 'GA_FIGHT_INTEGRITY_FAILED', 'integrity_status', 'vertical_escape', 'early_self_death')) {
     Assert-True ($Task12EntityContent.Contains($IntegrityMarker)) "Arena integrity evidence is missing marker: $IntegrityMarker"
 }
+foreach ($DiagnosticMarker in @('GA_EARLY_SELF_DEATH_DIAGNOSTIC', 'spawn_position', 'observed_position', 'displacement', 'queries', 'server_available', 'online_available')) {
+    Assert-True ($Task12EntityContent.Contains($DiagnosticMarker)) "Early self-death diagnostic is missing marker: $DiagnosticMarker"
+}
 Assert-True ($Task12EntityContent.Contains('VICTORY_DEFEATED_STATES') -and $Task12EntityContent -match 'VICTORY_DEFEATED_STATES\[record\.terminal_state\]') 'Missing opponents must remain non-victory-qualified until integrity recovery starts'
 foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reconcile_active_integrity', 'GA_FIGHT_INTEGRITY_RETRY_EXHAUSTED')) {
     Assert-True ($Task12OrchestratorContent.Contains($IntegrityMarker)) "Arena integrity recovery is missing marker: $IntegrityMarker"
@@ -1517,7 +1520,7 @@ foreach ($RuntimeRegression in @(
     $RuntimeRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeRegression.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeRegression.Function) + '\s*\}'
     Assert-True ($Task13RuntimeTests -match $RuntimeRegistrationPattern) "Regression case must be registered exactly: $($RuntimeRegression.Name) -> $($RuntimeRegression.Function)."
 }
-foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
+foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
     Assert-True ($Task13RuntimeTests.Contains($IntegrityTest)) "Runtime integrity suite is missing case: $IntegrityTest"
 }
 
