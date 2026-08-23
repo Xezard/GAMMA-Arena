@@ -1489,6 +1489,13 @@ local function fake_actor_adapter_env()
         owned = true,
         iterating = false,
         released = {},
+        release_requests = {},
+        release_queue = {},
+        release_delay_ms = 0,
+        never_finishes = false,
+        never_finishes_ids = {},
+        release_fail_ids = {},
+        now = 0,
         input_acquires = 0,
         input_releases = 0,
         effect_calls = 0,
@@ -1540,15 +1547,36 @@ local function fake_actor_adapter_env()
             if self.options.parent_missing then return nil end
             return self.options.parent or actor
         end
+        function item:section()
+            if self.options.section_throw then error("injected item section failure") end
+            return self.options.section or ("section_" .. tostring(self.item_id))
+        end
         actor.items[#actor.items + 1] = item
         return item
     end
-    local function release(id)
-        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
-        env.released[#env.released + 1] = id
+    function env:remove_item(id)
         for index = #actor.items, 1, -1 do
             if actor.items[index].item_id == id then table.remove(actor.items, index) end
         end
+    end
+    function env:advance(delta)
+        self.now = (self.now + delta) % 4294967296
+        for index = #self.release_queue, 1, -1 do
+            local queued = self.release_queue[index]
+            local elapsed = (self.now - queued.submitted_at) % 4294967296
+            if not self.never_finishes and not self.never_finishes_ids[queued.id] and elapsed >= queued.delay_ms then
+                self:remove_item(queued.id)
+                table.remove(self.release_queue, index)
+            end
+        end
+    end
+    local function release(id)
+        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
+        if env.release_fail_ids[id] then return gamma_arena_result.err("GA_ACTOR_INVENTORY_RELEASE_FAILED", "injected release failure") end
+        env.released[#env.released + 1] = id
+        env.release_requests[id] = (env.release_requests[id] or 0) + 1
+        local delay = type(env.release_delay_ms) == "function" and env.release_delay_ms(id) or env.release_delay_ms
+        env.release_queue[#env.release_queue + 1] = { id = id, submitted_at = env.now, delay_ms = delay }
         return gamma_arena_result.ok(true)
     end
     local deps = {
@@ -1556,6 +1584,9 @@ local function fake_actor_adapter_env()
         is_session_active = function() return env.active end,
         is_actor_owned = function(candidate) return env.owned and candidate == actor end,
         release_item_id = release,
+        clock = function() return env.now end,
+        inventory_drain_timeout_ms = 10000,
+        item_section = function(item) return item:section() end,
         patrol = function(path)
             local object = {}
             function object:point() return env.positions[path] end
@@ -1597,10 +1628,113 @@ local function runtime_actor_inventory_release_is_deferred_and_verified()
     gamma_arena_test_assert.equals(first.parent_calls, 1, "real client item parent object is inspected")
     gamma_arena_test_assert.equals(second.parent_calls, 1, "every inventory item uses game_object:parent()")
     gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "inventory cannot be verified on the purge update")
+    env:advance(0)
     adapter:begin_update()
     gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "a later update confirms the inventory is empty")
     adapter:begin_update()
     gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "inventory verification is idempotent")
+end
+
+local function runtime_actor_inventory_drain_waits_for_looted_items()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 4000
+    env:add_item(12, { section = "wpn_ak74" })
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    local cleanup_calls = 0
+    adapter.deps.loadout = { cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end }
+
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending, "initial inventory drain stays pending")
+    for poll = 1, 3 do
+        env:advance(1000)
+        adapter:begin_update()
+        local pending = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending and pending.value.stage == "inventory_absence", "looted inventory remains a successful pending result for poll " .. poll)
+    end
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "initial weapon release is submitted once")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "initial ammo release is submitted once")
+    gamma_arena_test_assert.equals(cleanup_calls, 1, "victory cleanup runs once while drain is pending")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "victory drain retains one input lease")
+    env:advance(1000)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).value, "authoritative asynchronous removal completes the drain")
+end
+
+local function runtime_actor_inventory_drain_releases_newly_surfaced_item_once()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "initial purge succeeds")
+    env:add_item(13)
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "newly surfaced item keeps inventory drain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "newly surfaced item is submitted once")
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "unchanged submitted items remain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "later polls never duplicate new-item submission")
+
+    env:add_item(99)
+    env.release_fail_ids[99] = true
+    env:advance(1)
+    adapter:begin_update()
+    local failed = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(failed.ok, "new-item release submission failure is immediate")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_INVENTORY_RELEASE_FAILED", "new-item release failure code")
+end
+
+local function runtime_actor_inventory_drain_times_out_with_sorted_evidence()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    env:add_item(12, { section_throw = true })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "never-finishing purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "drain remains pending before exact inactivity deadline")
+    env:remove_item(13)
+    env:add_item(14, { section = "wpn_lr300" })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "same-count id replacement is progress")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "progress immediately before deadline resets inactivity")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "drain times out at the exact inactivity boundary")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_INVENTORY_NOT_EMPTY", "drain timeout code")
+    local context = timed_out.error.context
+    gamma_arena_test_assert.equals(context.remaining_count, 2, "timeout reports remaining count")
+    gamma_arena_test_assert.equals(context.remaining_ids[1], 12, "timeout sorts remaining ids")
+    gamma_arena_test_assert.equals(context.remaining_ids[2], 14, "timeout replaces stale ids in evidence")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].section, "<unavailable>", "section failures are diagnostic only")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].section, "wpn_lr300", "timeout retains readable sections")
+    gamma_arena_test_assert.equals(context.elapsed_since_progress_ms, 10000, "timeout uses exact inactivity boundary")
+    gamma_arena_test_assert.equals(context.total_elapsed_ms, 19999, "progress does not reset total elapsed")
+    gamma_arena_test_assert.equals(context.timeout_ms, 10000, "timeout evidence retains configured timeout")
+end
+
+local function runtime_actor_inventory_drain_timeout_is_wrap_safe()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env.now = 4294967290
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "wrap-safe purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "wrapped clock remains pending below timeout")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "wrapped clock reaches timeout")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 10000, "wrapped elapsed time is exact")
+    gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 10000, "wrapped total elapsed is exact")
 end
 
 local function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
@@ -6667,6 +6801,10 @@ local cases = {
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }
+    ,{ name = "runtime_actor_inventory_drain_waits_for_looted_items", fn = runtime_actor_inventory_drain_waits_for_looted_items }
+    ,{ name = "runtime_actor_inventory_drain_releases_newly_surfaced_item_once", fn = runtime_actor_inventory_drain_releases_newly_surfaced_item_once }
+    ,{ name = "runtime_actor_inventory_drain_times_out_with_sorted_evidence", fn = runtime_actor_inventory_drain_times_out_with_sorted_evidence }
+    ,{ name = "runtime_actor_inventory_drain_timeout_is_wrap_safe", fn = runtime_actor_inventory_drain_timeout_is_wrap_safe }
     ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }

@@ -13,6 +13,22 @@ local function valid_id(value)
     return finite(value) and value == math.floor(value) and value >= 0
 end
 
+local function valid_u32(value)
+    return valid_id(value) and value <= 4294967295
+end
+
+local function elapsed_u32(now, then)
+    return (now - then) % 4294967296
+end
+
+local function same_ids(left, right)
+    if #left ~= #right then return false end
+    for index = 1, #left do
+        if left[index] ~= right[index] then return false end
+    end
+    return true
+end
+
 local function dependency_result(code, fn, ...)
     if type(fn) ~= "function" then return fail(code, "Required Arena actor dependency is unavailable") end
     local called, value = pcall(fn, ...)
@@ -59,6 +75,7 @@ function ActorAdapter:__init(deps)
     self.input_owned = false
     self.update_tick = 0
     self.purge_tick = nil
+    self.inventory_drain = nil
     self.inventory_clean = false
     self.victory_reset_started = false
 end
@@ -100,13 +117,21 @@ function ActorAdapter:release_input()
     return gamma_arena_result.ok(true)
 end
 
-function ActorAdapter:purge_inventory(actor)
+function ActorAdapter:inventory_clock()
+    local clock = dependency_result("GA_ACTOR_INVENTORY_CLOCK_INVALID", self.deps.clock)
+    if not clock.ok or not valid_u32(clock.value) then
+        return fail("GA_ACTOR_INVENTORY_CLOCK_INVALID", "Arena inventory drain clock must return a uint32 integer")
+    end
+    return gamma_arena_result.ok(clock.value)
+end
+
+function ActorAdapter:snapshot_inventory(actor)
     local actor_id_result = call_actor(actor, "id")
     if not actor_id_result.ok or not valid_id(actor_id_result.value) then
         return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id")
     end
     local actor_id = actor_id_result.value
-    local ids, seen, inspection_error = {}, {}, nil
+    local records, seen, inspection_error = {}, {}, nil
     local function collect(_, item)
         if inspection_error ~= nil then return end
         if item == nil then
@@ -122,7 +147,7 @@ function ActorAdapter:purge_inventory(actor)
         end
         local parent = parent_result.value
         local parent_id_result = call_actor(parent, "id")
-        if not parent_id_result.ok or not valid_id(parent_id_result.value) or parent_id_result.value ~= actor_id then
+        if parent ~= actor or not parent_id_result.ok or not valid_id(parent_id_result.value) or parent_id_result.value ~= actor_id then
             inspection_error = fail("GA_ACTOR_INVENTORY_OWNER_INVALID", "Refusing to inspect or release an item not owned by the Arena actor", {
                 parent_is_actor = parent == actor,
                 parent_id = parent_id_result.ok and parent_id_result.value or nil,
@@ -139,40 +164,98 @@ function ActorAdapter:purge_inventory(actor)
         end
         if not seen[id_result.value] then
             seen[id_result.value] = true
-            ids[#ids + 1] = id_result.value
+            local section = "<unavailable>"
+            if type(self.deps.item_section) == "function" then
+                local section_ok, section_value = pcall(self.deps.item_section, item)
+                if section_ok and type(section_value) == "string" then section = section_value end
+            end
+            records[#records + 1] = { id = id_result.value, section = section }
         end
     end
     local iterated = call_actor(actor, "iterate_inventory", collect, nil)
     if not iterated.ok then return iterated end
     if inspection_error ~= nil then return inspection_error end
+    table.sort(records, function(left, right) return left.id < right.id end)
+    return gamma_arena_result.ok(records)
+end
 
-    for index = 1, #ids do
-        local released = dependency_result("GA_ACTOR_INVENTORY_RELEASE_FAILED", self.deps.release_item_id, ids[index])
+function ActorAdapter:purge_inventory(actor)
+    local snapshot = self:snapshot_inventory(actor)
+    if not snapshot.ok then return snapshot end
+    local clock = self:inventory_clock()
+    if not clock.ok then return clock end
+    local drain = {
+        started_at = clock.value,
+        last_progress_at = clock.value,
+        submitted_ids = {},
+        sections_by_id = {},
+        remaining_ids = {},
+        poll_count = 0,
+        last_count = #snapshot.value
+    }
+    for index = 1, #snapshot.value do
+        local record = snapshot.value[index]
+        drain.remaining_ids[index] = record.id
+        drain.sections_by_id[record.id] = record.section
+    end
+    self.inventory_drain = drain
+    for index = 1, #snapshot.value do
+        local record = snapshot.value[index]
+        local released = dependency_result("GA_ACTOR_INVENTORY_RELEASE_FAILED", self.deps.release_item_id, record.id)
         if not released.ok then return released end
+        drain.submitted_ids[record.id] = true
     end
     self.purge_tick = self.update_tick
     self.inventory_clean = false
-    return gamma_arena_result.ok(#ids)
+    return gamma_arena_result.ok(#snapshot.value)
 end
 
 function ActorAdapter:verify_inventory_empty()
     if self.inventory_clean then return gamma_arena_result.ok(true) end
-    if self.purge_tick == nil then return fail("GA_ACTOR_INVENTORY_NOT_PURGED", "Actor inventory has not been purged") end
+    if self.purge_tick == nil or self.inventory_drain == nil then return fail("GA_ACTOR_INVENTORY_NOT_PURGED", "Actor inventory has not been purged") end
     if self.update_tick <= self.purge_tick then return gamma_arena_result.ok(false) end
     local owned = self:owned_actor()
     if not owned.ok then return owned end
-    local count, inspect_error = 0, nil
-    local function inspect(_, item)
-        count = count + 1
-        if item == nil then inspect_error = "nil item" end
+    local clock = self:inventory_clock()
+    if not clock.ok then return clock end
+    local snapshot = self:snapshot_inventory(owned.value)
+    if not snapshot.ok then return snapshot end
+    local drain = self.inventory_drain
+    drain.poll_count = drain.poll_count + 1
+    local remaining_ids = {}
+    for index = 1, #snapshot.value do
+        local record = snapshot.value[index]
+        remaining_ids[index] = record.id
+        drain.sections_by_id[record.id] = record.section
+        if not drain.submitted_ids[record.id] then
+            local released = dependency_result("GA_ACTOR_INVENTORY_RELEASE_FAILED", self.deps.release_item_id, record.id)
+            if not released.ok then return released end
+            drain.submitted_ids[record.id] = true
+        end
     end
-    local iterated = call_actor(owned.value, "iterate_inventory", inspect, nil)
-    if not iterated.ok then return iterated end
-    if inspect_error ~= nil or count ~= 0 then
-        return fail("GA_ACTOR_INVENTORY_NOT_EMPTY", "Arena actor inventory is not empty after deferred release", { count = count, reason = inspect_error })
+    if not same_ids(drain.remaining_ids, remaining_ids) then drain.last_progress_at = clock.value end
+    drain.remaining_ids = remaining_ids
+    drain.last_count = #remaining_ids
+    if #remaining_ids == 0 then
+        self.inventory_clean = true
+        return gamma_arena_result.ok(true)
     end
-    self.inventory_clean = true
-    return gamma_arena_result.ok(true)
+    local elapsed_since_progress_ms = elapsed_u32(clock.value, drain.last_progress_at)
+    if elapsed_since_progress_ms < self.deps.inventory_drain_timeout_ms then return gamma_arena_result.ok(false) end
+    local remaining_sections = {}
+    for index = 1, #remaining_ids do
+        local id = remaining_ids[index]
+        remaining_sections[index] = { id = id, section = drain.sections_by_id[id] or "<unavailable>" }
+    end
+    return fail("GA_ACTOR_INVENTORY_NOT_EMPTY", "Arena actor inventory did not drain after deferred release", {
+        remaining_count = #remaining_ids,
+        remaining_ids = remaining_ids,
+        remaining_sections = remaining_sections,
+        poll_count = drain.poll_count,
+        elapsed_since_progress_ms = elapsed_since_progress_ms,
+        total_elapsed_ms = elapsed_u32(clock.value, drain.started_at),
+        timeout_ms = self.deps.inventory_drain_timeout_ms
+    })
 end
 
 function ActorAdapter:normalize_status(actor)
@@ -339,6 +422,7 @@ function ActorAdapter:cleanup()
     local input = self:release_input()
     if not input.ok then errors[#errors + 1] = input.error end
     self.purge_tick = nil
+    self.inventory_drain = nil
     self.inventory_clean = false
     self.victory_reset_started = false
     if #errors > 0 then return fail("GA_ACTOR_CLEANUP_FAILED", "Arena actor cleanup failed", { errors = errors }) end

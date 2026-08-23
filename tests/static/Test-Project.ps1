@@ -1706,6 +1706,19 @@ foreach ($Name in @('runtime_actor_loadout_creates_exact_bonus_ammo_box','runtim
     Assert-True ($BonusAmmoRuntimeContent -match [regex]::Escape($Name)) "Bonus ammo runtime regression must cover $Name"
 }
 
+$InventoryDrainActorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script') -Raw
+$InventoryDrainBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+$InventoryDrainRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Marker in @('inventory_drain','last_progress_at','submitted_ids','remaining_ids','poll_count','inventory_drain_timeout_ms','elapsed_since_progress_ms','total_elapsed_ms','item_section','snapshot_inventory')) {
+    Assert-True ($InventoryDrainActorContent -match [regex]::Escape($Marker)) "Actor inventory drain must cover $Marker"
+}
+foreach ($Marker in @('clock = function() return time_global() end','inventory_drain_timeout_ms = 10000','item_section = function(item) return item:section() end')) {
+    Assert-True ($InventoryDrainBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap inventory drain composition must cover $Marker"
+}
+foreach ($Name in @('runtime_actor_inventory_drain_waits_for_looted_items','runtime_actor_inventory_drain_releases_newly_surfaced_item_once','runtime_actor_inventory_drain_times_out_with_sorted_evidence','runtime_actor_inventory_drain_timeout_is_wrap_safe')) {
+    Assert-True ($InventoryDrainRuntimeContent -match [regex]::Escape($Name)) "Actor inventory drain runtime regression must cover $Name"
+}
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"
