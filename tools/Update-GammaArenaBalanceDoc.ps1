@@ -602,7 +602,7 @@ if ($Verify) {
         throw "Arena balance document is stale. Run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Update-GammaArenaBalanceDoc.ps1"
     }
     Write-Host 'PASS: Arena balance document is current'
-    exit 0
+    return
 }
 
 [IO.File]::WriteAllText($DocumentPath, $Expected, (New-Object Text.UTF8Encoding($false)))
