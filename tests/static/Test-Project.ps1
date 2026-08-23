@@ -405,7 +405,7 @@ if (Test-Path -LiteralPath $UiScriptPath) {
     Assert-True ($UiContent -match 'return\s+invoke_fatal_main_menu') 'Fatal UI action must propagate the disconnect Result to its caller'
     Assert-True ($UiContent -match 'function\s+handoff_start_game') 'Start UI must expose a total engine-handoff seam for behavioral fault injection'
     Assert-True ($UiContent -match 'detail\s*==\s*false') 'Start UI must treat explicit false StartGame as a structured failure'
-    Assert-True ($UiContent -match 'handoff_start_game\s*\(\s*self\.owner\s*,\s*axr_main\.config\s*\)') 'OnStart must route engine handoff through immediate common cleanup on failure'
+    Assert-True ($UiContent -match 'begin_start\s*\(\s*self\.owner\s*,\s*axr_main\.config\s*,\s*request\.value\s*,\s*self\.ports\s*\)') 'OnStart must route engine handoff through the preflight-gated common start seam'
 }
 
 $UiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
@@ -687,6 +687,30 @@ if (Test-Path -LiteralPath $Task6UiStartPath) {
     Assert-True ($Task6UiStartContent -match '(?m)^function\s+issue_launch_with_defeat_recovery\s*\(') 'Arena start UI must expose bounded confirmed-defeat conflict recovery'
     Assert-True ($Task6UiStartContent -match 'GA_INTENT_CONFLICT[\s\S]{0,1000}peek_defeat[\s\S]{0,1000}clear_defeat[\s\S]{0,1000}retry_stale\s*\(\s*issue\(\)\s*\)') 'Arena start recovery must classify, clear, and retry only a confirmed defeat conflict'
 }
+$Task3UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
+if (Test-Path -LiteralPath $Task3UiStartPath) {
+    $Task3UiStartContent = Get-Content -LiteralPath $Task3UiStartPath -Raw
+    Assert-True ($Task3UiStartContent -match '(?m)^function\s+preflight_runtime\s*\(') 'Ordinary Arena start must expose runtime readiness preflight.'
+    Assert-True ($Task3UiStartContent -match '(?m)^function\s+begin_start\s*\(') 'Ordinary Arena start must expose a centralized start seam.'
+    foreach ($Marker in @('runtime_status', 'GA_START_RUNTIME_UNAVAILABLE', 'GA_START_RUNTIME_STATUS_FAILED', 'GA_START_RUNTIME_STATUS_INVALID')) {
+        Assert-True ($Task3UiStartContent.Contains($Marker)) "Ordinary Arena start runtime preflight must cover $Marker"
+    }
+    foreach ($Port in @('save_preferences', 'issue_launch', 'write_character_creation')) {
+        Assert-True ($Task3UiStartContent -match ('ports\.' + [regex]::Escape($Port))) "Ordinary Arena start must inject $Port for behavioral ordering tests."
+    }
+    $Task3BeginStart = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+begin_start\s*\([^\)]*\)(.*?)^end\s*$').Value
+    $Task3PreflightIndex = $Task3BeginStart.IndexOf('preflight_runtime(ports)')
+    $Task3PreferenceIndex = $Task3BeginStart.IndexOf('save_preferences')
+    $Task3LaunchIndex = $Task3BeginStart.IndexOf('issue_launch_with_defeat_recovery')
+    $Task3BridgeIndex = $Task3BeginStart.IndexOf('write_character_creation')
+    $Task3HandoffIndex = $Task3BeginStart.IndexOf('handoff_start_game')
+    Assert-True ($Task3PreflightIndex -ge 0 -and $Task3PreferenceIndex -gt $Task3PreflightIndex -and $Task3LaunchIndex -gt $Task3PreferenceIndex -and $Task3BridgeIndex -gt $Task3LaunchIndex -and $Task3HandoffIndex -gt $Task3BridgeIndex) 'Ordinary Arena start must preflight before preferences, launch, bridge, and StartGame handoff.'
+    $Task3OnStart = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+UIStart:OnStart\s*\(\)(.*?)^end\s*$').Value
+    Assert-True ($Task3OnStart -match 'begin_start\s*\(\s*self\.owner\s*,\s*axr_main\.config\s*,\s*request\.value\s*,\s*self\.ports\s*\)') 'OnStart must delegate ordinary handoff through the preflight-gated start seam.'
+}
+$Task3RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task3Registration = '\{\s*name\s*=\s*"runtime_ordinary_start_preflight_precedes_mutation"\s*,\s*fn\s*=\s*runtime_ordinary_start_preflight_precedes_mutation\s*\}'
+Assert-True ($Task3RuntimeTests -match $Task3Registration) 'Regression case must be registered exactly: runtime_ordinary_start_preflight_precedes_mutation -> runtime_ordinary_start_preflight_precedes_mutation.'
 if (Test-Path -LiteralPath $Task6TextPath) {
     [xml]$Task6Text = Get-Content -LiteralPath $Task6TextPath -Raw
     Assert-True ($null -ne $Task6Text.SelectSingleNode("//*[local-name()='string' and @id='st_gamma_arena_result_new_fight']")) 'Task 6 localization must define the New fight label'

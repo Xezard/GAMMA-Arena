@@ -1409,6 +1409,99 @@ local function runtime_bootstrap_status_preserves_initialization_result()
     gamma_arena_test_assert.is_true(registered.instance == instance and registered.callbacks == callbacks and registered.registered == registered_entries and registered.last_result == last_result, "readiness must not change registrar fields")
 end
 
+local function runtime_ordinary_start_preflight_precedes_mutation()
+    local request = {
+        schema_version = 1,
+        mode_id = "skirmish",
+        difficulty_id = "master",
+        seed_mode = "random",
+        session_seed = 123
+    }
+    local function begin_with(status)
+        local calls = {}
+        local owner = {}
+        function owner:StartGame()
+            calls[#calls + 1] = "StartGame"
+            return true
+        end
+        local ports = {
+            runtime_status = function()
+                calls[#calls + 1] = "runtime preflight"
+                return status()
+            end,
+            save_preferences = function()
+                calls[#calls + 1] = "save preferences"
+                return gamma_arena_result.ok(true)
+            end,
+            issue_launch = function()
+                calls[#calls + 1] = "issue launch"
+                return gamma_arena_result.ok(true)
+            end,
+            write_character_creation = function()
+                calls[#calls + 1] = "write bridge"
+                return gamma_arena_result.ok(true)
+            end
+        }
+        return gamma_arena_ui_start.begin_start(owner, {}, request, ports), calls
+    end
+    local function assert_blocked(label, status, expected_code)
+        local result, calls = begin_with(status)
+        gamma_arena_test_assert.is_false(result.ok, label .. " must fail safely")
+        gamma_arena_test_assert.equals(result.error.code, expected_code, label .. " code")
+        gamma_arena_test_assert.equals(#calls, 1, label .. " must not save, launch, bridge, or hand off")
+        gamma_arena_test_assert.equals(calls[1], "runtime preflight", label .. " only invokes runtime readiness")
+    end
+
+    local function assert_missing_runtime(label, bootstrap)
+        local calls = {}
+        local owner = {}
+        function owner:StartGame()
+            calls[#calls + 1] = "StartGame"
+            return true
+        end
+        local ports = {
+            save_preferences = function()
+                calls[#calls + 1] = "save preferences"
+                return gamma_arena_result.ok(true)
+            end,
+            issue_launch = function()
+                calls[#calls + 1] = "issue launch"
+                return gamma_arena_result.ok(true)
+            end,
+            write_character_creation = function()
+                calls[#calls + 1] = "write bridge"
+                return gamma_arena_result.ok(true)
+            end
+        }
+        local saved_bootstrap = gamma_arena_bootstrap
+        gamma_arena_bootstrap = bootstrap
+        local began, result = pcall(function()
+            return gamma_arena_ui_start.begin_start(owner, {}, request, ports)
+        end)
+        gamma_arena_bootstrap = saved_bootstrap
+        gamma_arena_test_assert.is_true(began, label .. " must become a Result")
+        gamma_arena_test_assert.is_false(result.ok, label .. " blocks start")
+        gamma_arena_test_assert.equals(result.error.code, "GA_START_RUNTIME_UNAVAILABLE", label .. " code")
+        gamma_arena_test_assert.equals(#calls, 0, label .. " has zero downstream side effects")
+    end
+
+    assert_missing_runtime("missing bootstrap namespace", nil)
+    assert_missing_runtime("missing runtime_status", {})
+
+    assert_blocked("thrown runtime_status", function() error("injected readiness throw") end, "GA_START_RUNTIME_STATUS_FAILED")
+    assert_blocked("malformed runtime_status", function() return "not a Result" end, "GA_START_RUNTIME_STATUS_INVALID")
+
+    local original_failure = gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "original bootstrap failure", { registration_state = "poisoned" })
+    local failed, failed_calls = begin_with(function() return original_failure end)
+    gamma_arena_test_assert.is_true(failed == original_failure, "failed runtime Result reaches the UI-facing start failure unchanged")
+    gamma_arena_test_assert.equals(failed.error.context.registration_state, "poisoned", "failed runtime Result retains context")
+    gamma_arena_test_assert.equals(#failed_calls, 1, "failed runtime Result has zero downstream side effects")
+
+    local success, calls = begin_with(function() return gamma_arena_result.ok(true) end)
+    gamma_arena_test_assert.is_true(success.ok, "ready runtime begins Arena start")
+    gamma_arena_test_assert.equals(table.concat(calls, " -> "), "runtime preflight -> save preferences -> issue launch -> write bridge -> StartGame", "ordinary start performs runtime preflight before every launch mutation")
+end
+
 local function net_destroy_teardown_honors_checkpoint_latch()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local reasons = {}
@@ -7219,6 +7312,7 @@ local cases = {
     { name = "runtime_bootstrap_registration_poison_blocks_retry", fn = bootstrap_registration_poison_blocks_retry },
     { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
     { name = "runtime_bootstrap_status_preserves_initialization_result", fn = runtime_bootstrap_status_preserves_initialization_result },
+    { name = "runtime_ordinary_start_preflight_precedes_mutation", fn = runtime_ordinary_start_preflight_precedes_mutation },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }

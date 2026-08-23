@@ -205,6 +205,64 @@ function handoff_start_game(owner, config)
     return gamma_arena_result.ok(detail)
 end
 
+function preflight_runtime(ports)
+    ports = ports or {}
+    local runtime_status = ports.runtime_status
+    if runtime_status == nil then
+        local namespace_ok, bootstrap = pcall(function() return gamma_arena_bootstrap end)
+        if not namespace_ok or type(bootstrap) ~= "table" then
+            return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime bootstrap is unavailable")
+        end
+        local method_ok, method = pcall(function() return bootstrap.runtime_status end)
+        if not method_ok or type(method) ~= "function" then
+            return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime readiness check is unavailable")
+        end
+        runtime_status = method
+    end
+    if type(runtime_status) ~= "function" then
+        return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime readiness check is unavailable")
+    end
+    local called, status = pcall(runtime_status)
+    if not called then
+        return gamma_arena_result.err("GA_START_RUNTIME_STATUS_FAILED", "Arena runtime readiness check failed", { detail = tostring(status) })
+    end
+    if type(status) ~= "table" or type(status.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_START_RUNTIME_STATUS_INVALID", "Arena runtime readiness check returned an invalid Result")
+    end
+    if status.ok == false then
+        if type(status.error) ~= "table" or type(status.error.code) ~= "string" or type(status.error.message) ~= "string" then
+            return gamma_arena_result.err("GA_START_RUNTIME_STATUS_INVALID", "Arena runtime readiness check returned an invalid Result")
+        end
+        return status
+    end
+    return status
+end
+
+function begin_start(owner, config, request, ports)
+    ports = ports or {}
+    local runtime = preflight_runtime(ports)
+    if not runtime.ok then return runtime end
+
+    local save_preferences = ports.save_preferences or gamma_arena_session_store.save_preferences
+    local preferences = save_preferences(config, request.difficulty_id, request.seed_mode)
+    if not preferences.ok then return preferences end
+
+    local launch = issue_launch_with_defeat_recovery(config, request, ports)
+    if not launch.ok then return launch end
+
+    local write_character_creation = ports.write_character_creation or gamma_arena_session_store.write_character_creation
+    local bridge = write_character_creation(config)
+    if not bridge.ok then
+        local clear_transient = ports.clear_transient or gamma_arena_session_store.clear_transient
+        clear_transient(config)
+        return bridge
+    end
+
+    local handoff = (ports.handoff_start_game or handoff_start_game)(owner, config)
+    if not handoff.ok then return handoff end
+    return handoff
+end
+
 function UIStart:OnStart()
     local seed_text = self.seed_edit:GetText()
     local seed_result = gamma_arena_session_store.parse_manual_seed(seed_text)
@@ -228,25 +286,8 @@ function UIStart:OnStart()
         return
     end
     self.validation:Show(false)
-
-    local preferences = gamma_arena_session_store.save_preferences(axr_main.config, request.value.difficulty_id, request.value.seed_mode)
-    if not preferences.ok then
-        self:ShowFatal({ preferences })
-        return
-    end
-    local launch = issue_launch_with_defeat_recovery(axr_main.config, request.value, self.ports)
-    if not launch.ok then
-        self:ShowFatal({ launch })
-        return
-    end
-    local bridge = gamma_arena_session_store.write_character_creation(axr_main.config)
-    if not bridge.ok then
-        gamma_arena_session_store.clear_transient(axr_main.config)
-        self:ShowFatal({ bridge })
-        return
-    end
-    local handoff = handoff_start_game(self.owner, axr_main.config)
-    if not handoff.ok then self:ShowFatal({ handoff }) end
+    local started = begin_start(self.owner, axr_main.config, request.value, self.ports)
+    if not started.ok then self:ShowFatal({ started }) end
 end
 
 function UIStart:RestoreOwner()
