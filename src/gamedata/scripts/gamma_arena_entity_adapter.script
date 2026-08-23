@@ -109,6 +109,17 @@ local function copied_finite_position(value)
     return { x = x, y = y, z = z }
 end
 
+local function finite_displacement(delta_x, delta_y, delta_z)
+    if not finite_number(delta_x) or not finite_number(delta_y) or not finite_number(delta_z) then return nil end
+    local scale = math.max(math.abs(delta_x), math.abs(delta_y), math.abs(delta_z))
+    if scale == 0 then return 0 end
+    local normalized = math.sqrt((delta_x / scale) * (delta_x / scale)
+        + (delta_y / scale) * (delta_y / scale) + (delta_z / scale) * (delta_z / scale))
+    local displacement = scale * normalized
+    if not finite_number(displacement) then return nil end
+    return displacement
+end
+
 local function result_call(code, fn, ...)
     if type(fn) ~= "function" then return fail(code, "Required Arena entity dependency is unavailable") end
     local called, value = pcall(fn, ...)
@@ -1399,11 +1410,16 @@ function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, a
     if type(spawn) == "table" and type(observed) == "table"
         and finite_number(spawn.x) and finite_number(spawn.y) and finite_number(spawn.z)
         and finite_number(observed.x) and finite_number(observed.y) and finite_number(observed.z) then
-        diagnostic.delta_x = observed.x - spawn.x
-        diagnostic.delta_y = observed.y - spawn.y
-        diagnostic.delta_z = observed.z - spawn.z
-        diagnostic.displacement = math.sqrt(diagnostic.delta_x * diagnostic.delta_x
-            + diagnostic.delta_y * diagnostic.delta_y + diagnostic.delta_z * diagnostic.delta_z)
+        local delta_x = observed.x - spawn.x
+        local delta_y = observed.y - spawn.y
+        local delta_z = observed.z - spawn.z
+        local displacement = finite_displacement(delta_x, delta_y, delta_z)
+        if finite_number(delta_x) and finite_number(delta_y) and finite_number(delta_z) and displacement ~= nil then
+            diagnostic.delta_x = delta_x
+            diagnostic.delta_y = delta_y
+            diagnostic.delta_z = delta_z
+            diagnostic.displacement = displacement
+        end
     end
     return diagnostic
 end
@@ -1569,9 +1585,15 @@ function EntityAdapter:on_npc_death(victim_or_id, killer_or_id)
     end
     local accepted = self:accept_registered_death(record)
     if not accepted.ok then return accepted end
-    if accepted.value and early_self_death then
+    if accepted.value and early_self_death and self.integrity_fault == nil then
+        local diagnostic_builder = self.deps.early_self_death_diagnostic_builder
+        if type(diagnostic_builder) ~= "function" then
+            diagnostic_builder = function(record_value, killer_value, elapsed_value, owner_value)
+                return self:early_self_death_diagnostic(record_value, killer_value, elapsed_value, owner_value)
+            end
+        end
         local built, diagnostic = pcall(function()
-            return self:early_self_death_diagnostic(record, killer_id, self_death_elapsed, owner.value)
+            return diagnostic_builder(record, killer_id, self_death_elapsed, owner.value)
         end)
         if not built then diagnostic = { status = "error", reason = tostring(diagnostic) } end
         pcall(self.deps.log_warn, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "Arena opponent self-death requires physical diagnostic evidence", diagnostic)
