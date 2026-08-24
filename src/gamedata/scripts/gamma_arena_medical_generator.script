@@ -1,0 +1,153 @@
+local ACTOR_MAX_ITEMS = 5
+local OPTIONAL_SLOTS = 3
+local CATEGORY_CAPS = { health = 2, boost = 1, rare = 1 }
+local ROLE_WEIGHTS = { leader = 4, primary = 2, secondary = 1 }
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function sorted_candidates(values)
+    local result = {}
+    for _, value in ipairs(values or {}) do result[#result + 1] = value end
+    table.sort(result, function(left, right) return left.section < right.section end)
+    return result
+end
+
+local function weighted_pick(rng, weights, available)
+    if type(rng) ~= "table" or type(rng.next_int) ~= "function" then return nil end
+    local total = 0
+    for _, category in ipairs({ "bleed", "health", "boost", "rare" }) do
+        if available[category] and (weights[category] or 0) > 0 then total = total + weights[category] end
+    end
+    if total <= 0 then return nil end
+    local draw = rng:next_int(1, total)
+    local cumulative = 0
+    for _, category in ipairs({ "bleed", "health", "boost", "rare" }) do
+        if available[category] and (weights[category] or 0) > 0 then
+            cumulative = cumulative + weights[category]
+            if draw <= cumulative then return category end
+        end
+    end
+    return nil
+end
+
+local function category_allowed(category, category_counts)
+    local cap = CATEGORY_CAPS[category]
+    return cap == nil or (category_counts[category] or 0) < cap
+end
+
+local function actor_candidates(catalogs, difficulty, remaining, section_counts, category_counts, required)
+    local by_category, available = {}, {}
+    for _, item in ipairs(catalogs.medical_item_list or {}) do
+        local category_is_required = item.category == "health" or item.category == "rare"
+        local count = section_counts[item.section] or 0
+        if item.min_tier <= difficulty.tier and item.actor_cost <= remaining and count < item.max_count
+            and category_allowed(item.category, category_counts) and (not required or category_is_required) then
+            by_category[item.category] = by_category[item.category] or {}
+            by_category[item.category][#by_category[item.category] + 1] = item
+            available[item.category] = true
+        end
+    end
+    for category, values in pairs(by_category) do by_category[category] = sorted_candidates(values) end
+    return by_category, available
+end
+
+local function add_actor_item(result, item, section_counts, category_counts)
+    result.sections[#result.sections + 1] = item.section
+    result.medical_cost = result.medical_cost + item.actor_cost
+    section_counts[item.section] = (section_counts[item.section] or 0) + 1
+    category_counts[item.category] = (category_counts[item.category] or 0) + 1
+end
+
+function generate_actor(catalogs, difficulty, streams)
+    if type(catalogs) ~= "table" or type(difficulty) ~= "table" or type(streams) ~= "table"
+        or type(catalogs.medical_items) ~= "table" or type(difficulty.medical_weights) ~= "table"
+        or not gamma_arena_number.is_positive_integer(difficulty.player_medical_budget) then
+        return fail("GA_MEDICAL_ARGUMENT_INVALID", "Actor medical generation requires a normalized catalog, difficulty, and streams")
+    end
+    local bandage = catalogs.medical_items.bandage
+    if type(bandage) ~= "table" or bandage.section ~= "bandage" or bandage.actor_cost > difficulty.player_medical_budget then
+        return fail("GA_NO_VALID_PLAYER_MEDICAL_LOADOUT", "Mandatory Arena bandage is unavailable")
+    end
+    local result = { sections = {}, medical_cost = 0 }
+    local section_counts, category_counts = {}, {}
+    add_actor_item(result, bandage, section_counts, category_counts)
+
+    local remaining = difficulty.player_medical_budget - result.medical_cost
+    local by_category, available = actor_candidates(catalogs, difficulty, remaining, section_counts, category_counts, true)
+    local required_category = weighted_pick(streams.required_category, difficulty.medical_weights, available)
+    local required_rng = streams.required_section
+    local required_item = required_category and type(required_rng) == "table" and type(required_rng.pick) == "function" and required_rng:pick(by_category[required_category]) or nil
+    if type(required_item) ~= "table" then return fail("GA_NO_VALID_PLAYER_MEDICAL_LOADOUT", "No affordable healing-capable medicine fits the player budget", { budget = difficulty.player_medical_budget, tier = difficulty.tier }) end
+    add_actor_item(result, required_item, section_counts, category_counts)
+
+    for index = 1, OPTIONAL_SLOTS do
+        if #result.sections >= ACTOR_MAX_ITEMS then break end
+        remaining = difficulty.player_medical_budget - result.medical_cost
+        by_category, available = actor_candidates(catalogs, difficulty, remaining, section_counts, category_counts, false)
+        local category_rng = type(streams.optional_category) == "table" and streams.optional_category[index] or nil
+        local section_rng = type(streams.optional_section) == "table" and streams.optional_section[index] or nil
+        if type(category_rng) ~= "table" or type(section_rng) ~= "table" or type(section_rng.pick) ~= "function" then break end
+        local category = weighted_pick(category_rng, difficulty.medical_weights, available)
+        if category == nil then break end
+        local item = section_rng:pick(by_category[category])
+        if type(item) ~= "table" then break end
+        add_actor_item(result, item, section_counts, category_counts)
+    end
+    return gamma_arena_result.ok(result)
+end
+
+local function weighted_recipient(rng, opponents, allocations, section)
+    if type(rng) ~= "table" or type(rng.next_int) ~= "function" then return nil end
+    local eligible, total = {}, 0
+    for index, opponent in ipairs(opponents) do
+        local already_has = false
+        for _, existing in ipairs(allocations[index].sections) do if existing == section then already_has = true; break end end
+        local weight = ROLE_WEIGHTS[opponent.role]
+        if not already_has and weight then
+            total = total + weight
+            eligible[#eligible + 1] = { index = index, weight = weight }
+        end
+    end
+    if total <= 0 then return nil end
+    local draw = rng:next_int(1, total)
+    local cumulative = 0
+    for _, candidate in ipairs(eligible) do
+        cumulative = cumulative + candidate.weight
+        if draw <= cumulative then return candidate.index end
+    end
+    return nil
+end
+
+local function allocate_section(catalogs, opponents, streams, allocations, section, count)
+    local item = catalogs.medical_items[section]
+    if type(item) ~= "table" or not gamma_arena_number.is_positive_integer(item.npc_cost) then return false end
+    local recipient_streams = type(streams.recipients) == "table" and streams.recipients[section] or nil
+    for item_index = 1, count do
+        local recipient = weighted_recipient(type(recipient_streams) == "table" and recipient_streams[item_index] or nil, opponents, allocations, section)
+        if recipient == nil then return false end
+        local allocation = allocations[recipient]
+        allocation.sections[#allocation.sections + 1] = section
+        allocation.medical_cost = allocation.medical_cost + item.npc_cost
+    end
+    return true
+end
+
+function allocate_enemies(catalogs, opponents, streams)
+    if type(catalogs) ~= "table" or type(catalogs.medical_items) ~= "table" or type(opponents) ~= "table" or type(streams) ~= "table" or #opponents < 2 then
+        return fail("GA_ENEMY_MEDICAL_ARGUMENT_INVALID", "Enemy medical generation requires at least two normalized opponents and streams")
+    end
+    local count = #opponents
+    local medkit_cap = math.min(math.floor(count / 2), math.ceil(count / 4))
+    if medkit_cap < 1 or type(streams.mix) ~= "table" or type(streams.mix.next_int) ~= "function" then return fail("GA_NO_VALID_ENEMY_MEDICAL_LOADOUT", "Enemy medical mix stream or capacity is invalid") end
+    local medkit_count = streams.mix:next_int(1, medkit_cap)
+    local bandage_count = count - 2 * medkit_count
+    local allocations = {}
+    for index = 1, count do allocations[index] = { sections = {}, medical_cost = 0 } end
+    if not allocate_section(catalogs, opponents, streams, allocations, "medkit", medkit_count)
+        or not allocate_section(catalogs, opponents, streams, allocations, "bandage", bandage_count) then
+        return fail("GA_NO_VALID_ENEMY_MEDICAL_LOADOUT", "Enemy medical items could not be assigned within recipient caps", { opponents = count })
+    end
+    return gamma_arena_result.ok({ allocations = allocations, medical_cost = count, medkit_count = medkit_count, bandage_count = bandage_count })
+end

@@ -738,8 +738,115 @@ local function catalog_skips_optional_missing_medicine()
     gamma_arena_test_assert.equals(loaded.value.medical_skipped[1], "rebirth", "skipped medical sections are diagnostic data")
 end
 
+local function medical_scripted_rng(draw, pick_index)
+    return {
+        next_int = function(_, minimum, maximum)
+            if draw == "maximum" then return maximum end
+            if draw == "minimum" then return minimum end
+            return math.max(minimum, math.min(maximum, draw or minimum))
+        end,
+        pick = function(_, values)
+            local index = pick_index == "last" and #values or (pick_index or 1)
+            return values[index]
+        end
+    }
+end
+
+local function actor_medical_generation_enforces_budget_and_healer()
+    local snapshot = catalogs()
+    local streams = {
+        required_category = medical_scripted_rng("minimum"),
+        required_section = medical_scripted_rng("minimum", 1),
+        optional_category = { medical_scripted_rng("maximum"), medical_scripted_rng("minimum"), medical_scripted_rng("maximum") },
+        optional_section = { medical_scripted_rng("minimum", 1), medical_scripted_rng("minimum", 1), medical_scripted_rng("minimum", 1) }
+    }
+    local generated = gamma_arena_medical_generator.generate_actor(snapshot, snapshot.difficulties.master, streams)
+    gamma_arena_test_assert.is_true(generated.ok, "actor medical generation succeeds")
+    gamma_arena_test_assert.equals(generated.value.sections[1], "bandage", "mandatory bandage remains first")
+    gamma_arena_test_assert.is_true(generated.value.medical_cost <= snapshot.difficulties.master.player_medical_budget, "actor medical budget")
+    local healing = false
+    for _, section_name in ipairs(generated.value.sections) do
+        local medical = snapshot.medical_items[section_name]
+        if medical and (medical.category == "health" or medical.category == "rare") then healing = true end
+    end
+    gamma_arena_test_assert.is_true(healing, "actor receives a healing-capable item")
+end
+
+local function actor_medical_generation_reaches_master_rare()
+    local snapshot = catalogs()
+    local streams = {
+        required_category = medical_scripted_rng("maximum"),
+        required_section = medical_scripted_rng("minimum", 1),
+        optional_category = {}, optional_section = {}
+    }
+    local generated = gamma_arena_medical_generator.generate_actor(snapshot, snapshot.difficulties.master, streams)
+    gamma_arena_test_assert.is_true(generated.ok, "Master rare medical generation succeeds")
+    gamma_arena_test_assert.equals(generated.value.sections[2], "rebirth", "Master required-healer draw can reach rebirth")
+    gamma_arena_test_assert.equals(generated.value.medical_cost, 8, "bandage plus rebirth exactly spends Master medical budget")
+end
+
+local function enemy_medical_generation_spends_team_budget()
+    local snapshot = catalogs()
+    local opponents = {
+        { role = "leader" }, { role = "primary" }, { role = "primary" },
+        { role = "primary" }, { role = "primary" }, { role = "secondary" }, { role = "secondary" }
+    }
+    local streams = { mix = medical_scripted_rng("maximum"), recipients = {} }
+    for _, section_name in ipairs({ "medkit", "bandage" }) do
+        streams.recipients[section_name] = {}
+        for index = 1, #opponents do streams.recipients[section_name][index] = medical_scripted_rng("minimum") end
+    end
+    local generated = gamma_arena_medical_generator.allocate_enemies(snapshot, opponents, streams)
+    gamma_arena_test_assert.is_true(generated.ok, "enemy medical allocation succeeds")
+    gamma_arena_test_assert.equals(generated.value.medkit_count, 2, "seven enemies cap medkits at ceil(N/4)")
+    gamma_arena_test_assert.equals(generated.value.bandage_count, 3, "remaining team budget becomes bandages")
+    gamma_arena_test_assert.equals(generated.value.medical_cost, #opponents, "enemy team medical cost exactly equals count")
+    for _, allocation in ipairs(generated.value.allocations) do
+        local seen = {}
+        for _, section_name in ipairs(allocation.sections) do
+            gamma_arena_test_assert.is_true(seen[section_name] == nil, "one NPC cannot receive a duplicate medical section")
+            seen[section_name] = true
+        end
+    end
+end
+
+local function medical_generation_100000_fights()
+    local snapshot = catalogs()
+    local function rng(seed, tag) return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ "medical_sweep", seed, tag })) end
+    for difficulty_index, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
+        local difficulty = snapshot.difficulties[difficulty_id]
+        local seen = {}
+        for seed = 0, 24999 do
+            local streams = { required_category = rng(seed, difficulty_id .. ":required_category"), required_section = rng(seed, difficulty_id .. ":required_section"), optional_category = {}, optional_section = {} }
+            for index = 1, 3 do
+                streams.optional_category[index] = rng(seed, difficulty_id .. ":optional_category:" .. index)
+                streams.optional_section[index] = rng(seed, difficulty_id .. ":optional_section:" .. index)
+            end
+            local actor = gamma_arena_medical_generator.generate_actor(snapshot, difficulty, streams)
+            gamma_arena_test_assert.is_true(actor.ok, "100k actor medical generation succeeds")
+            gamma_arena_test_assert.is_true(actor.value.medical_cost <= difficulty.player_medical_budget, "100k actor medical budget")
+            gamma_arena_test_assert.equals(actor.value.sections[1], "bandage", "100k mandatory bandage ordering")
+            seen[table.concat(actor.value.sections, ",")] = true
+
+            local enemy_count = 2 + ((seed + difficulty_index) % 9)
+            local opponents, enemy_streams = {}, { mix = rng(seed, difficulty_id .. ":mix"), recipients = { medkit = {}, bandage = {} } }
+            for index = 1, enemy_count do
+                opponents[index] = { role = index == 1 and "leader" or (index <= math.ceil(enemy_count * 0.7) and "primary" or "secondary") }
+                enemy_streams.recipients.medkit[index] = rng(seed, difficulty_id .. ":medkit:" .. index)
+                enemy_streams.recipients.bandage[index] = rng(seed, difficulty_id .. ":bandage:" .. index)
+            end
+            local enemies = gamma_arena_medical_generator.allocate_enemies(snapshot, opponents, enemy_streams)
+            gamma_arena_test_assert.is_true(enemies.ok, "100k enemy medical allocation succeeds")
+            gamma_arena_test_assert.equals(enemies.value.medical_cost, enemy_count, "100k enemy medical budget")
+            gamma_arena_test_assert.is_true(enemies.value.medkit_count >= 1 and enemies.value.medkit_count <= math.ceil(enemy_count / 4), "100k enemy medkit cap")
+        end
+        local combination_count = 0; for _ in pairs(seen) do combination_count = combination_count + 1 end
+        gamma_arena_test_assert.is_true(combination_count >= 2, "every difficulty produces varied medical combinations")
+    end
+end
+
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v4",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v4",fn=golden_fights_v4}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="actor_medical_generation_enforces_budget_and_healer",fn=actor_medical_generation_enforces_budget_and_healer},{name="actor_medical_generation_reaches_master_rare",fn=actor_medical_generation_reaches_master_rare},{name="enemy_medical_generation_spends_team_budget",fn=enemy_medical_generation_spends_team_budget},{name="medical_generation_100000_fights",fn=medical_generation_100000_fights},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v4",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v4",fn=golden_fights_v4}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end
