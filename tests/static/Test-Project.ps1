@@ -1054,6 +1054,10 @@ if (Test-Path -LiteralPath $CatalogPath) {
     foreach ($Profile in @('gamma_arena_bandit_novice', 'gamma_arena_bandit_trainee', 'gamma_arena_bandit_experienced', 'gamma_arena_bandit_veteran')) {
         Assert-True ($CatalogContent -match [regex]::Escape($Profile)) "Human profile catalog must include $Profile"
     }
+    Assert-True ($CatalogContent -match '(?m)^\[medical_items\]\r?$') 'Catalog must declare the curated medical_items group'
+    foreach ($Marker in @('section = rebirth','category = rare','actor_cost = 7','npc_cost = 2','max_count = 2')) {
+        Assert-True ($CatalogContent.Contains($Marker)) "Medical catalog must declare $Marker"
+    }
 }
 $Task3CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
@@ -1068,6 +1072,7 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
     Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v6') 'Catalog loader must bind exact v6 catalog semantics'
     Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v4') 'Catalog loader must bind exact v4 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'medical_skipped') 'Catalog loader must retain bounded diagnostics for missing optional medicine'
     foreach ($Diagnostic in @('Catalog group id count differs from v6', 'Catalog group contains a non-v6 id', 'Catalog group is missing a v6 id')) {
         Assert-True ($Task3CatalogScriptContent.Contains($Diagnostic)) "Strict catalog manifest diagnostic must identify v6: $Diagnostic"
     }
@@ -1118,6 +1123,7 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
         Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Player selection must use the $Marker deterministic stream"
     }
     $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
+    Assert-True ($GeneratorTests -match 'catalog_skips_optional_missing_medicine') 'Generator tests must cover optional missing medicine normalization'
     Assert-True ($GeneratorTests -match 'generator_primary_pool_affordability_falls_back') 'Generator tests must cover unaffordable non-empty faction primary pools'
     Assert-True ($GeneratorTests -match 'weighted_player_class_pair_selection') 'Generator tests must cover weighted player class-pair selection'
     Assert-True ($GeneratorTests -match 'player_class_pair_ignores_concrete_cardinality') 'Generator tests must prove concrete duplicate cardinality cannot change class selection'
@@ -1131,6 +1137,9 @@ if (Test-Path -LiteralPath $DifficultyPath) {
     $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw
     foreach ($Difficulty in @('rookie', 'stalker', 'veteran', 'master')) {
         Assert-True ($DifficultyContent -match ("(?m)^\[ga_difficulty_" + $Difficulty + "\]\r?$")) "Difficulty catalog must include $Difficulty"
+    }
+    foreach ($Marker in @('tier = 4','player_gear_budget = 15','player_medical_budget = 8','medical_weight_rare = 10')) {
+        Assert-True ($DifficultyContent.Contains($Marker)) "Difficulty medical contract must declare $Marker"
     }
 }
 if (Test-Path -LiteralPath $LayoutPath) {
