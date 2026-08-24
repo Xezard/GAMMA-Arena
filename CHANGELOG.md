@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.
 - Retained bootstrap diagnostics when Arena launch validation fails.
 - Added fail-closed preflight for ordinary Arena starts and post-defeat rematches.
