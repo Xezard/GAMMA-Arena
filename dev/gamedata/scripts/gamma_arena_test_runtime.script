@@ -6613,6 +6613,91 @@ local function runtime_defeat_menu_fresh_failures_are_bounded()
     end
 end
 
+local function runtime_defeat_menu_preflight_failure_identity_is_preserved()
+    local injected_context = { phase = "compose", generation = 17 }
+    local default_context = { phase = "compose", generation = 18 }
+    local injected_failure = gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "injected bootstrap compose failure", injected_context)
+    local default_failure = gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "default bootstrap compose failure", default_context)
+    local scenarios = {
+        { name = "injected", failure = injected_failure, context = injected_context, runtime_preflight = function() return injected_failure end },
+        { name = "default", failure = default_failure, context = default_context, use_default = true },
+        { name = "thrown", code = "GA_DEFEAT_PORT_FAILED", port = "runtime_preflight", runtime_preflight = function() error("injected thrown runtime preflight") end },
+        { name = "malformed", code = "GA_DEFEAT_PORT_FAILED", port = "runtime_preflight", result_type = "boolean", runtime_preflight = function() return true end }
+    }
+    local original_preflight = gamma_arena_ui_start.preflight_runtime
+    for _, scenario in ipairs(scenarios) do
+        local menu = defeat_menu_test_owner()
+        local model
+        local preflight_calls = 0
+        local seed_calls = 0
+        local promotion_calls = 0
+        local bridge_calls = 0
+        local handoff_calls = 0
+        local clears = 0
+        local fatal_failure
+        local recovered = false
+        if scenario.use_default then
+            gamma_arena_ui_start.preflight_runtime = function()
+                preflight_calls = preflight_calls + 1
+                return scenario.failure
+            end
+        end
+        local ports = {
+            config = {},
+            peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:" .. scenario.name }) end,
+            show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+            clear_result = function() return gamma_arena_result.ok(true) end,
+            clear_transient = function() clears = clears + 1; return gamma_arena_result.ok(true) end,
+            random_session_seed = function() seed_calls = seed_calls + 1; return gamma_arena_result.ok(987654321) end,
+            issue_launch_from_defeat = function() promotion_calls = promotion_calls + 1; return gamma_arena_result.ok(true) end,
+            write_character_creation = function() bridge_calls = bridge_calls + 1; return gamma_arena_result.ok(true) end,
+            handoff_start_game = function() handoff_calls = handoff_calls + 1; return gamma_arena_result.ok(true) end,
+            show_fatal = function(owner, errors, callback, context)
+                gamma_arena_test_assert.equals(owner, menu, scenario.name .. " preflight fatal retains menu owner")
+                gamma_arena_test_assert.equals(#errors, 1, scenario.name .. " preflight fatal reports only the readiness failure")
+                fatal_failure = errors[1]
+                local dialog = { HideDialog = function() end, Show = function() end }
+                recovered = callback(context, dialog).ok
+                return dialog
+            end
+        }
+        if not scenario.use_default then
+            ports.runtime_preflight = function()
+                preflight_calls = preflight_calls + 1
+                return scenario.runtime_preflight()
+            end
+        end
+        gamma_arena_test_assert.is_true(gamma_arena_main_menu.show_confirmed_defeat(menu, ports).ok, scenario.name .. " preflight identity fixture displays")
+        local failed = model.on_next()
+        gamma_arena_ui_start.preflight_runtime = original_preflight
+        gamma_arena_test_assert.is_false(failed.ok, scenario.name .. " preflight failure remains structured")
+        gamma_arena_test_assert.equals(preflight_calls, 1, scenario.name .. " preflight runs exactly once")
+        gamma_arena_test_assert.equals(seed_calls, 0, scenario.name .. " preflight failure generates no seed")
+        gamma_arena_test_assert.equals(promotion_calls, 0, scenario.name .. " preflight failure makes no promotion")
+        gamma_arena_test_assert.equals(bridge_calls, 0, scenario.name .. " preflight failure makes no bridge")
+        gamma_arena_test_assert.equals(handoff_calls, 0, scenario.name .. " preflight failure makes no handoff")
+        gamma_arena_test_assert.equals(clears, 0, scenario.name .. " preflight failure does not clear transient state")
+        gamma_arena_test_assert.equals(fatal_failure, failed, scenario.name .. " fatal feedback retains the returned failure")
+        gamma_arena_test_assert.is_true(recovered, scenario.name .. " fatal recovery restores the main menu")
+        gamma_arena_test_assert.equals(menu.show_dialog, 1, scenario.name .. " fatal recovery restores owner dialog")
+        gamma_arena_test_assert.equals(menu.shown, 1, scenario.name .. " fatal recovery restores owner visibility")
+        if scenario.failure then
+            gamma_arena_test_assert.equals(failed, scenario.failure, scenario.name .. " returns the original bootstrap Result")
+            gamma_arena_test_assert.equals(failed.error.code, "GA_BOOTSTRAP_COMPOSE_FAILED", scenario.name .. " retains bootstrap failure code")
+            gamma_arena_test_assert.equals(failed.error.context, scenario.context, scenario.name .. " retains bootstrap failure context")
+            gamma_arena_test_assert.equals(fatal_failure.error.context, scenario.context, scenario.name .. " fatal feedback retains bootstrap failure context")
+        else
+            gamma_arena_test_assert.equals(failed.error.code, scenario.code, scenario.name .. " normalizes the failed port code")
+            gamma_arena_test_assert.equals(failed.error.context.port, scenario.port, scenario.name .. " normalizes the failed port name")
+            if scenario.result_type then
+                gamma_arena_test_assert.equals(failed.error.context.result_type, scenario.result_type, scenario.name .. " records the malformed result type")
+            else
+                gamma_arena_test_assert.is_true(type(failed.error.context.reason) == "string", scenario.name .. " records the thrown port reason")
+            end
+        end
+    end
+end
+
 local function runtime_defeat_menu_exit_retries_consumption_safely()
     local menu = defeat_menu_test_owner()
     local model
@@ -7472,6 +7557,7 @@ local cases = {
     ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
     ,{ name = "runtime_defeat_menu_rejects_invalid_or_expired_handoff", fn = runtime_defeat_menu_rejects_invalid_or_expired_handoff }
     ,{ name = "runtime_defeat_menu_fresh_failures_are_bounded", fn = runtime_defeat_menu_fresh_failures_are_bounded }
+    ,{ name = "runtime_defeat_menu_preflight_failure_identity_is_preserved", fn = runtime_defeat_menu_preflight_failure_identity_is_preserved }
     ,{ name = "runtime_defeat_menu_exit_retries_consumption_safely", fn = runtime_defeat_menu_exit_retries_consumption_safely }
     ,{ name = "runtime_defeat_menu_fatal_ui_failure_restores_owner", fn = runtime_defeat_menu_fatal_ui_failure_restores_owner }
     ,{ name = "runtime_defeat_result_construction_failure_clears_intent_and_restores_owner", fn = runtime_defeat_result_construction_failure_clears_intent_and_restores_owner }
