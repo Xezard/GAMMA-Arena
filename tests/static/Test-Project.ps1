@@ -239,6 +239,13 @@ foreach ($Marker in @(
 )) {
     Assert-True ($Task5UniversalRuntimeTests -match [regex]::Escape($Marker)) "Task 5 runtime tests must cover $Marker"
 }
+foreach ($Pattern in @(
+    'successful_env\.stage_counts',
+    'for\s+occurrence\s*=\s*1\s*,\s*occurrence_count',
+    'fail_occurrence\s*=\s*occurrence'
+)) {
+    Assert-True ($Task5UniversalRuntimeTests -match $Pattern) "Task 5 runtime fault matrix must cover every dependency occurrence: $Pattern"
+}
 $Task5UniversalBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 foreach ($Marker in @('function set_character_rank', 'function character_rank', 'npc:set_character_rank(value)', 'npc:character_rank()')) {
     Assert-True ($Task5UniversalBootstrapContent -match [regex]::Escape($Marker)) "Task 5 bootstrap rank port is missing: $Marker"

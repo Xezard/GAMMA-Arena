@@ -8190,20 +8190,31 @@ local function runtime_universal_items_materialize_exact_entities_and_slot_order
 end
 
 local function runtime_universal_items_rollback_every_failure_in_reverse()
-    for _, stage in ipairs({
+    local stages = {
         "create_item", "entity_id", "register", "verify_ownership", "resolve_item",
         "move_to_slot", "item_in_slot", "fill_magazine", "magazine_ammo", "activate_slot"
-    }) do
-        local env, port = universal_item_fixture({ fail_stage = stage })
-        local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
-        gamma_arena_test_assert.is_false(result.ok, "dependency failure is surfaced: " .. stage)
-        gamma_arena_test_assert.equals(result.error.code, "GA_TEST_MATERIALIZE", "original dependency failure is retained: " .. stage)
-        gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "every created entity is rolled back: " .. stage)
-        for index, id in ipairs(env.rollback_attempts) do
-            gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "rollback is reverse creation order: " .. stage)
-        end
-        for index = (env.failed_at or #env.events) + 1, #env.events do
-            gamma_arena_test_assert.is_true(string.find(env.events[index], "^rollback:") ~= nil, "no unsafe stage follows failure: " .. stage)
+    }
+    local successful_env, successful_port = universal_item_fixture()
+    local successful_result = successful_port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_true(successful_result.ok, "fault matrix control materialization succeeds")
+    for _, stage in ipairs(stages) do
+        local occurrence_count = successful_env.stage_counts[stage] or 0
+        gamma_arena_test_assert.is_true(occurrence_count > 0, "fault matrix control reaches dependency: " .. stage)
+        for occurrence = 1, occurrence_count do
+            local label = stage .. "#" .. tostring(occurrence)
+            local env, port = universal_item_fixture({ fail_stage = stage, fail_occurrence = occurrence })
+            local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+            gamma_arena_test_assert.is_false(result.ok, "dependency failure is surfaced: " .. label)
+            gamma_arena_test_assert.equals(result.error.code, "GA_TEST_MATERIALIZE", "original dependency failure is retained: " .. label)
+            gamma_arena_test_assert.equals(result.error.context.stage, stage, "original dependency failure context is retained: " .. label)
+            gamma_arena_test_assert.equals(env.stage_counts[stage], occurrence, "requested dependency occurrence is reached: " .. label)
+            gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "every created entity is rolled back: " .. label)
+            for index, id in ipairs(env.rollback_attempts) do
+                gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "rollback is reverse creation order: " .. label)
+            end
+            for index = (env.failed_at or #env.events) + 1, #env.events do
+                gamma_arena_test_assert.is_true(string.find(env.events[index], "^rollback:") ~= nil, "no unsafe stage follows failure: " .. label)
+            end
         end
     end
 end
