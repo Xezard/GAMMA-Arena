@@ -53,10 +53,15 @@ local function guarded(source, method_name, ...)
     return true, value
 end
 
-local function read_string(source, section, key)
+local function read_string_result(source, section, key)
     local ok, value = guarded(source, "read_string", section, key)
-    if not ok then return nil end
-    return trimmed(value)
+    if not ok then return false, nil end
+    return true, trimmed(value)
+end
+
+local function read_string(source, section, key)
+    local _, value = read_string_result(source, section, key)
+    return value
 end
 
 local function read_u32(source, section, key, minimum)
@@ -113,6 +118,24 @@ local function compatible_ammo_variants(source, raw_ammo)
     return variants
 end
 
+local function compatible_weapon_variant(source, section)
+    local parent_read, parent = read_string_result(source, section, "parent_section")
+    if not parent_read then return false end
+    if parent == nil or parent == section then return true end
+    if WEAPON_COST[read_string(source, parent, "kind")] == nil then return false end
+    local grandparent_read, grandparent = read_string_result(source, parent, "parent_section")
+    if not grandparent_read then return false end
+    if grandparent ~= nil and grandparent ~= parent then return false end
+    local prefix = parent .. "_"
+    if string.sub(section, 1, #prefix) ~= prefix then return false end
+    local attachment = string.sub(section, #prefix + 1)
+    if attachment == "" then return false end
+    for _, allowed in ipairs(split_csv(read_string(source, parent, "scopes"))) do
+        if allowed ~= "none" and attachment == allowed then return true end
+    end
+    return false
+end
+
 local function sort_records(records)
     table.sort(records, function(left, right) return left.section < right.section end)
 end
@@ -146,32 +169,36 @@ function discover(source)
         local kind = read_string(source, section, "kind")
         local weapon_cost = WEAPON_COST[kind]
         if weapon_cost ~= nil then
-            local slot = read_u32(source, section, "slot", 0)
-            local magazine = read_u32(source, section, "ammo_mag_size", 1)
-            local ammo_variants, ammo_error = compatible_ammo_variants(source, read_string(source, section, "ammo_class"))
-            if ammo_error ~= nil then return ammo_error end
-            local ammo_section = ammo_variants[1] and ammo_variants[1].section or nil
-            if (slot == 1 or slot == 2) and magazine ~= nil and ammo_section ~= nil then
-                weapons[#weapons + 1] = {
-                    id = section,
-                    section = section,
-                    ammo = ammo_section,
-                    ammo_variants = ammo_variants,
-                    cost = weapon_cost,
-                    ammo_box_min = 1,
-                    ammo_box_max = 2,
-                    kind = kind,
-                    slot = slot
-                }
-                for _, variant in ipairs(ammo_variants) do
-                    if not ammo_by_section[variant.section] then
-                        local record = { id = variant.section, section = variant.section, cost = 1 }
-                        ammo_by_section[variant.section] = record
-                        ammo[#ammo + 1] = record
-                    end
-                end
-            else
+            if not compatible_weapon_variant(source, section) then
                 skipped = skipped + 1
+            else
+                local slot = read_u32(source, section, "slot", 0)
+                local magazine = read_u32(source, section, "ammo_mag_size", 1)
+                local ammo_variants, ammo_error = compatible_ammo_variants(source, read_string(source, section, "ammo_class"))
+                if ammo_error ~= nil then return ammo_error end
+                local ammo_section = ammo_variants[1] and ammo_variants[1].section or nil
+                if (slot == 1 or slot == 2) and magazine ~= nil and ammo_section ~= nil then
+                    weapons[#weapons + 1] = {
+                        id = section,
+                        section = section,
+                        ammo = ammo_section,
+                        ammo_variants = ammo_variants,
+                        cost = weapon_cost,
+                        ammo_box_min = 1,
+                        ammo_box_max = 2,
+                        kind = kind,
+                        slot = slot
+                    }
+                    for _, variant in ipairs(ammo_variants) do
+                        if not ammo_by_section[variant.section] then
+                            local record = { id = variant.section, section = variant.section, cost = 1 }
+                            ammo_by_section[variant.section] = record
+                            ammo[#ammo + 1] = record
+                        end
+                    end
+                else
+                    skipped = skipped + 1
+                end
             end
         elseif OUTFIT_COST[kind] ~= nil then
             if read_u32(source, section, "slot", 0) == 6 then
