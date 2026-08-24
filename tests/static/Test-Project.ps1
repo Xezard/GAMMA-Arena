@@ -2012,6 +2012,22 @@ foreach ($UnsafeMutation in @('hit.power\s*=','hit.impulse\s*=','flags\.[A-Za-z_
     Assert-True ($ArenaEntityContent -notmatch $UnsafeMutation) "Arena NPC forensics must not mutate engine hit data: $UnsafeMutation"
 }
 Assert-True ($ArenaOrchestratorContent -match 'GA_SAVE_GUARD_BREACH') 'Arena save_state must expose native-save breach evidence.'
+$ArenaComposeStart = $ArenaBootstrapContent.IndexOf('function compose')
+$ArenaComposeEnd = if ($ArenaComposeStart -ge 0) { $ArenaBootstrapContent.IndexOf('local function call_instance', $ArenaComposeStart) } else { -1 }
+Assert-True ($ArenaComposeStart -ge 0 -and $ArenaComposeEnd -gt $ArenaComposeStart) 'Arena bootstrap composition boundary must remain structurally testable.'
+if ($ArenaComposeStart -ge 0 -and $ArenaComposeEnd -gt $ArenaComposeStart) {
+    $ArenaComposeBlock = $ArenaBootstrapContent.Substring($ArenaComposeStart, $ArenaComposeEnd - $ArenaComposeStart)
+    Assert-True ($ArenaComposeBlock -notmatch 'save_guard\s*:\s*install') 'Arena bootstrap must not install the global save guard before MCM starts the new game.'
+}
+$ArenaArmGuardStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:arm_save_guard')
+$ArenaArmGuardEnd = if ($ArenaArmGuardStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:maintain_save_guard', $ArenaArmGuardStart) } else { -1 }
+Assert-True ($ArenaArmGuardStart -ge 0 -and $ArenaArmGuardEnd -gt $ArenaArmGuardStart) 'Arena save-guard activation boundary must remain structurally testable.'
+if ($ArenaArmGuardStart -ge 0 -and $ArenaArmGuardEnd -gt $ArenaArmGuardStart) {
+    $ArenaArmGuardBlock = $ArenaOrchestratorContent.Substring($ArenaArmGuardStart, $ArenaArmGuardEnd - $ArenaArmGuardStart)
+    $ArenaInstallIndex = $ArenaArmGuardBlock.IndexOf('"install"')
+    $ArenaArmMethodIndex = $ArenaArmGuardBlock.IndexOf('"arm"')
+    Assert-True ($ArenaInstallIndex -ge 0 -and $ArenaArmMethodIndex -gt $ArenaInstallIndex) 'Arena launch acceptance must install save suppression immediately before arming it.'
+}
 $ArenaGuardedStart = $ArenaBootstrapContent.IndexOf('local guarded_callbacks = {')
 $ArenaGuardedEnd = if ($ArenaGuardedStart -ge 0) { $ArenaBootstrapContent.IndexOf('}', $ArenaGuardedStart) } else { -1 }
 Assert-True ($ArenaGuardedStart -ge 0 -and $ArenaGuardedEnd -gt $ArenaGuardedStart) 'Arena guarded callback table must remain structurally testable.'
@@ -2037,7 +2053,7 @@ if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
     $ArenaDeferIndex = $ArenaActivateBlock.IndexOf('mark_launch_deferred')
     Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
 }
-foreach ($Name in @('runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
+foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }

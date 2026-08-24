@@ -594,10 +594,18 @@ local function fake_store(intent_state)
 end
 
 local function fake_orchestrator_deps(store)
-    local save_guard = { installed = true, armed = false, install_calls = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0 }
-    function save_guard:install() self.install_calls = self.install_calls + 1; return gamma_arena_result.ok(false) end
+    local save_guard = { installed = false, armed = false, install_calls = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0, call_order = {} }
+    function save_guard:install()
+        self.install_calls = self.install_calls + 1
+        self.call_order[#self.call_order + 1] = "install"
+        if self.installed then return gamma_arena_result.ok(false) end
+        self.installed = true
+        return gamma_arena_result.ok(true)
+    end
     function save_guard:is_armed() return self.armed end
     function save_guard:arm(context)
+        if not self.installed then return gamma_arena_result.err("GA_SAVE_GUARD_NOT_INSTALLED", "Save guard must be installed before arming") end
+        self.call_order[#self.call_order + 1] = "arm"
         if self.armed then return gamma_arena_result.ok(false) end
         self.armed = true
         self.arm_calls = self.arm_calls + 1
@@ -730,6 +738,7 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     gamma_arena_test_assert.is_false(fake_start_vm.activation_attempted, "fake_start cannot latch activation")
     gamma_arena_test_assert.is_true(fake_start_vm.awaiting_activation, "fake_start retains activation ownership")
     gamma_arena_test_assert.is_true(fake_start_deps._save_guard.armed, "fake_start owns save suppression before GAMMA autosave fires")
+    gamma_arena_test_assert.equals(fake_start_deps._save_guard.install_calls, 1, "deferred launch installs suppression only after launch ownership")
     gamma_arena_test_assert.equals(fake_start_deps._save_guard.arm_calls, 1, "deferred launch arms its VM exactly once")
     gamma_arena_test_assert.is_true(fake_start_deps._save_guard.maintain_calls >= 1, "deferred launch immediately maintains timer cancellation")
 
@@ -782,7 +791,23 @@ local function ordinary_no_intent_activation_latches_once()
     gamma_arena_test_assert.equals(store.inspect_count, 1, "ordinary game inspects intents once")
     gamma_arena_test_assert.is_true(orchestrator.activation_attempted, "ordinary game latches completed activation probe")
     gamma_arena_test_assert.is_false(orchestrator.awaiting_activation, "ordinary game clears activation wait")
+    gamma_arena_test_assert.equals(deps._save_guard.install_calls, 0, "ordinary campaign VM never installs Arena save suppression")
     gamma_arena_test_assert.equals(deps._save_guard.arm_calls, 0, "ordinary campaign VM never arms Arena save suppression")
+end
+
+local function runtime_save_guard_installs_only_after_launch_ownership()
+    local overrides = fake_orchestrator_deps(fake_store({ launch_pending = false, resume_pending = false }))
+    gamma_arena_bootstrap.compose(overrides)
+    gamma_arena_test_assert.equals(overrides._save_guard.install_calls, 0, "bootstrap cannot intercept the MCM new-game command")
+
+    local launch_store = fake_store({ launch_pending = true, resume_pending = false })
+    local launch_deps = fake_orchestrator_deps(launch_store)
+    local orchestrator = gamma_arena_orchestrator.new(launch_deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "accepted launch installs and arms suppression")
+    gamma_arena_test_assert.equals(launch_deps._save_guard.install_calls, 1, "accepted launch installs suppression once")
+    gamma_arena_test_assert.equals(launch_deps._save_guard.arm_calls, 1, "accepted launch arms suppression once")
+    gamma_arena_test_assert.equals(table.concat(launch_deps._save_guard.call_order, ","), "install,arm", "save guard ordering is deterministic")
 end
 
 local function bootstrap_default_store_exposes_complete_launch_contract()
@@ -7937,6 +7962,7 @@ local function runtime_entity_forensics_are_bounded_non_mutating_and_classified(
 end
 
 local cases = {
+    { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },
     { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },
     { name = "runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed", fn = runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed },
     { name = "runtime_entity_forensics_are_bounded_non_mutating_and_classified", fn = runtime_entity_forensics_are_bounded_non_mutating_and_classified },
