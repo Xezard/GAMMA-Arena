@@ -7504,6 +7504,66 @@ local function runtime_task9_resume_completion_transition_failure_normalizes()
     gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_TEST_RESUME_TRANSITION", "resume completion transition preserves its exact cause")
 end
 
+local function active_medical_entity_fixture()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    gamma_arena_test_assert.is_true(begin_entity_apply(adapter, env, entity_spec(1), "session-medical").ok, "medical fixture begins")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "medical fixture reaches ACTIVE")
+    return env, adapter, snapshot
+end
+
+local function registered_medical(snapshot, npc_id, section)
+    for _, record in ipairs(snapshot.items) do
+        if record.parent_id == npc_id and record.role == "consumable" and record.section == section then return record end
+    end
+    return nil
+end
+
+local function runtime_entity_consumes_owned_medical_item_once()
+    local env, adapter, snapshot = active_medical_entity_fixture()
+    local npc = snapshot.npcs[1]
+    local medkit = registered_medical(snapshot, npc.id, "medkit")
+    local bandage = registered_medical(snapshot, npc.id, "bandage")
+    gamma_arena_test_assert.is_true(medkit ~= nil and bandage ~= nil and medkit.id ~= bandage.id, "each generated medical entry has a distinct registered entity")
+
+    local consumed = adapter:consume_medical_item("ga-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(consumed.ok and consumed.value.item_id == medkit.id, "owned physical medkit is consumed")
+    gamma_arena_test_assert.equals(consumed.value.section, "medkit", "consumption returns the proved section")
+    gamma_arena_test_assert.equals(env.release_requests[#env.release_requests], medkit.id, "consumption uses the safe release port")
+
+    local release_count = #env.release_requests
+    local duplicate = adapter:consume_medical_item("ga-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "duplicate consumption is idempotent")
+    gamma_arena_test_assert.equals(#env.release_requests, release_count, "duplicate consumption never releases twice")
+
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "teardown accepts a consumed child")
+    pump_entity(adapter, env)
+    local medkit_releases = 0
+    for _, id in ipairs(env.release_requests) do if id == medkit.id then medkit_releases = medkit_releases + 1 end end
+    gamma_arena_test_assert.equals(medkit_releases, 1, "teardown ignores the consumed child")
+end
+
+local function runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items()
+    local env, adapter, snapshot = active_medical_entity_fixture()
+    local npc = snapshot.npcs[1]
+    local stale = adapter:consume_medical_item("ga-stale-fight", npc.id, "medkit")
+    gamma_arena_test_assert.is_false(stale.ok, "stale fight identity is rejected")
+    gamma_arena_test_assert.equals(stale.error.code, "GA_ENTITY_MEDICAL_FIGHT_STALE", "stale fight uses a stable error")
+
+    local medkit = registered_medical(snapshot, npc.id, "medkit")
+    env.objects[medkit.id].parent_id = 9999
+    local transferred = adapter:consume_medical_item("ga-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(transferred.ok and transferred.value == false, "transferred medicine cancels without an effect token")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "foreign medicine is never released")
+
+    local bandage = registered_medical(snapshot, npc.id, "bandage")
+    env:remove_entity(bandage.id)
+    local absent = adapter:consume_medical_item("ga-entity-test", npc.id, "bandage")
+    gamma_arena_test_assert.is_true(absent.ok and absent.value == false, "looted or absent medicine cancels without an effect token")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "absent medicine is never released")
+end
+
 local cases = {
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_accepts_natural_death_without_invulnerability", fn = preflight_accepts_natural_death_without_invulnerability },
@@ -7591,6 +7651,8 @@ local cases = {
     ,{ name = "runtime_failed_teardown_retries_then_latches_success", fn = runtime_failed_teardown_retries_then_latches_success }
     ,{ name = "runtime_dedicated_start_reaches_preparing_without_checkpoint", fn = runtime_dedicated_start_reaches_preparing_without_checkpoint }
     ,{ name = "runtime_entity_does_not_spawn_before_begin_apply", fn = runtime_entity_does_not_spawn_before_begin_apply }
+    ,{ name = "runtime_entity_consumes_owned_medical_item_once", fn = runtime_entity_consumes_owned_medical_item_once }
+    ,{ name = "runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items", fn = runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items }
     ,{ name = "runtime_entity_actor_loadout_precedes_spawn", fn = runtime_entity_actor_loadout_precedes_spawn }
     ,{ name = "runtime_entity_npcs_are_offline_until_atomic_activation", fn = runtime_entity_npcs_are_offline_until_atomic_activation }
     ,{ name = "runtime_entity_online_wait_is_bounded_and_wrap_safe", fn = runtime_entity_online_wait_is_bounded_and_wrap_safe }
