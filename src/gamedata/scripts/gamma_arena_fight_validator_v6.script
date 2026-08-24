@@ -1,0 +1,491 @@
+local MAX_SAFE_INTEGER = 9007199254740991
+local GENERATOR_VERSION = 8
+local FORBIDDEN = {
+    mode_id = true, difficulty_id = true, budget = true, player_budget = true,
+    price = true, weight = true, weight_total = true, points = true, threat = true,
+    custom_config = true, generation_recipe = true, generation_provenance = true,
+    generation_rules = true, provenance = true
+}
+local ROOT_KEYS = { schema_version = true, identity = true, arena = true, actor = true, opponents = true }
+local IDENTITY_KEYS = {
+    session_seed = true, fight_index = true, generator_version = true,
+    catalog_fingerprint = true, layout_version = true, content_hash = true, fight_id = true
+}
+local ARENA_KEYS = { layout_id = true, level = true, tactical_routes = true }
+local ACTOR_KEYS = { spawn_path = true, look_path = true, items = true }
+local ITEM_KEYS = { section = true, quantity = true, equipped_slot = true }
+local OPPONENT_KEYS = {
+    slot = true, faction = true, rank = true, profile = true, role = true,
+    spawn_slot_id = true, spawn = true, tactical_route = true, items = true
+}
+local RANK_KEYS = { id = true, value = true }
+local SPAWN_KEYS = { position = true, level_vertex_id = true, game_vertex_id = true }
+local POSITION_KEYS = { x = true, y = true, z = true }
+local PARTICIPANT_ROLES = { leader = true, primary = true, secondary = true }
+local ITEM_CATEGORIES = {
+    weapon = true, ammo = true, outfit = true, helmet = true, knife = true, medicine = true
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function text(value)
+    return type(value) == "string" and value ~= ""
+end
+
+local function finite(value)
+    return gamma_arena_number.is_finite(value)
+end
+
+local function non_negative_integer(value)
+    return gamma_arena_number.is_integer(value) and value >= 0 and value <= MAX_SAFE_INTEGER
+end
+
+local function positive_integer(value)
+    return gamma_arena_number.is_positive_integer(value) and value <= MAX_SAFE_INTEGER
+end
+
+local function dense_array(value, path, allow_empty)
+    if type(value) ~= "table" then
+        return nil, failure("GA_FIGHTSPEC_ARRAY_INVALID", "FightSpec array must be a table", { path = path })
+    end
+    local maximum, count = 0, 0
+    for key in pairs(value) do
+        if not positive_integer(key) then
+            return nil, failure("GA_FIGHTSPEC_ARRAY_INVALID", "FightSpec arrays require positive integer keys", { path = path })
+        end
+        maximum = math.max(maximum, key)
+        count = count + 1
+    end
+    if maximum ~= count or (not allow_empty and count == 0) then
+        return nil, failure("GA_FIGHTSPEC_ARRAY_INVALID", "FightSpec arrays must be non-sparse", { path = path })
+    end
+    return count, nil
+end
+
+local function exact_keys(value, allowed, path)
+    if type(value) ~= "table" then
+        return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec object must be a table", { path = path })
+    end
+    for key in pairs(value) do
+        if type(key) ~= "string" or not allowed[key] then
+            if type(key) == "string" and FORBIDDEN[key] then
+                return failure("GA_FIGHTSPEC_FORBIDDEN_FIELD", "FightSpec contains generation provenance", { path = path .. "." .. key })
+            end
+            return failure("GA_FIGHTSPEC_UNKNOWN_FIELD", "FightSpec contains an unknown field", { path = path .. "." .. tostring(key) })
+        end
+    end
+    return nil
+end
+
+local function valid_band(record)
+    return type(record) == "table" and non_negative_integer(record.minimum)
+        and (record.maximum == nil or (non_negative_integer(record.maximum) and record.maximum >= record.minimum))
+end
+
+local function rank_contains(record, value)
+    return valid_band(record) and value >= record.minimum and (record.maximum == nil or value <= record.maximum)
+end
+
+local function validate_catalog(catalog)
+    if type(catalog) ~= "table" or not text(catalog.fingerprint)
+        or type(catalog.items) ~= "table" or type(catalog.ranks) ~= "table"
+        or type(catalog.factions) ~= "table" then
+        return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Universal catalog is incomplete")
+    end
+
+    local item_count = 0
+    for section, definition in pairs(catalog.items) do
+        item_count = item_count + 1
+        if not text(section) or type(definition) ~= "table" or not ITEM_CATEGORIES[definition.category] then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog item definition is invalid", { section = section })
+        end
+        if definition.category == "weapon" then
+            local ammo_count, invalid = dense_array(definition.ammo_sections, "catalog.items." .. section .. ".ammo_sections", false)
+            if invalid then return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog weapon ammunition is invalid", { section = section, cause = invalid.error }) end
+            if definition.ltx_slot ~= 1 and definition.ltx_slot ~= 2 then
+                return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog weapon slot is invalid", { section = section })
+            end
+            local seen = {}
+            for index = 1, ammo_count do
+                local ammo_section = definition.ammo_sections[index]
+                if not text(ammo_section) or seen[ammo_section] then
+                    return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog weapon ammunition is duplicated", { section = section })
+                end
+                seen[ammo_section] = true
+            end
+        elseif definition.category == "ammo" then
+            if not positive_integer(definition.box_size) then
+                return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog ammunition box size is invalid", { section = section })
+            end
+        elseif definition.category == "outfit" then
+            if definition.helmet_allowed ~= nil and type(definition.helmet_allowed) ~= "boolean" then
+                return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog outfit helmet compatibility is invalid", { section = section })
+            end
+        elseif definition.category == "medicine" and type(definition.healing) ~= "boolean" then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog medicine healing metadata is invalid", { section = section })
+        end
+    end
+    if item_count == 0 then return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Universal item catalog is empty") end
+
+    for section, definition in pairs(catalog.items) do
+        if definition.category == "weapon" then
+            for _, ammo_section in ipairs(definition.ammo_sections) do
+                local ammo = catalog.items[ammo_section]
+                if type(ammo) ~= "table" or ammo.category ~= "ammo" then
+                    return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog weapon references unknown ammunition", { section = section, ammo = ammo_section })
+                end
+            end
+        end
+    end
+
+    local rank_count = 0
+    for rank_id, rank in pairs(catalog.ranks) do
+        rank_count = rank_count + 1
+        if not text(rank_id) or type(rank) ~= "table" or rank.id ~= rank_id
+            or not valid_band(rank) or not positive_integer(rank.threat) then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Named rank definition is invalid", { rank = rank_id })
+        end
+    end
+    if rank_count == 0 then return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Named rank catalog is empty") end
+
+    local faction_count = 0
+    for faction_id, faction in pairs(catalog.factions) do
+        faction_count = faction_count + 1
+        if not text(faction_id) or type(faction) ~= "table" or faction.id ~= faction_id
+            or faction.community ~= faction_id or type(faction.ranks) ~= "table" then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Faction definition is invalid", { faction = faction_id })
+        end
+        local faction_rank_count = 0
+        for rank_id, profile in pairs(faction.ranks) do
+            faction_rank_count = faction_rank_count + 1
+            local named = catalog.ranks[rank_id]
+            if type(named) ~= "table" or type(profile) ~= "table" or profile.id ~= rank_id
+                or not text(profile.profile_section) or profile.community ~= faction.community
+                or not valid_band(profile) or not positive_integer(profile.threat)
+                or profile.minimum < named.minimum
+                or (named.maximum ~= nil and (profile.maximum == nil or profile.maximum > named.maximum)) then
+                return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Faction profile rank definition is invalid", { faction = faction_id, rank = rank_id })
+            end
+        end
+        if faction_rank_count ~= rank_count then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Faction does not expose every named rank", { faction = faction_id })
+        end
+        for rank_id in pairs(catalog.ranks) do
+            if type(faction.ranks[rank_id]) ~= "table" then
+                return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Faction named rank is missing", { faction = faction_id, rank = rank_id })
+            end
+        end
+    end
+    if faction_count == 0 then return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Faction catalog is empty") end
+    return gamma_arena_result.ok(true)
+end
+
+local function copy_position(value)
+    if type(value) ~= "table" or not finite(value.x) or not finite(value.y) or not finite(value.z) then return nil end
+    return { x = value.x, y = value.y, z = value.z }
+end
+
+local function same_position(left, right)
+    return left ~= nil and right ~= nil and left.x == right.x and left.y == right.y and left.z == right.z
+end
+
+local function validate_layout(layout)
+    if type(layout) ~= "table" or not text(layout.id) or not positive_integer(layout.version)
+        or not text(layout.level) or not text(layout.actor_spawn_path) or not text(layout.actor_look_path)
+        or not positive_integer(layout.capacity) then
+        return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved layout identity is invalid")
+    end
+    local route_count, invalid = dense_array(layout.tactical_routes, "layout.tactical_routes", false)
+    if invalid then return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved layout routes are invalid", { cause = invalid.error }) end
+    local routes = {}
+    for index = 1, route_count do
+        local route = layout.tactical_routes[index]
+        if not text(route) or routes[route] then
+            return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved layout routes must be unique", { index = index })
+        end
+        routes[route] = true
+    end
+    local slot_count; slot_count, invalid = dense_array(layout.opponent_spawn_slots, "layout.opponent_spawn_slots", false)
+    if invalid or slot_count ~= layout.capacity then
+        return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved layout capacity does not match physical slots")
+    end
+    local slots = {}
+    for index = 1, slot_count do
+        local slot = layout.opponent_spawn_slots[index]
+        local position = type(slot) == "table" and copy_position(slot.position) or nil
+        if type(slot) ~= "table" or not text(slot.id) or slots[slot.id] or not text(slot.base_route)
+            or not routes[slot.base_route] or type(slot.native) ~= "boolean" or position == nil
+            or not non_negative_integer(slot.level_vertex_id) or not non_negative_integer(slot.game_vertex_id) then
+            return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved physical spawn slot is invalid", { index = index })
+        end
+        slots[slot.id] = {
+            base_route = slot.base_route, position = position,
+            level_vertex_id = slot.level_vertex_id, game_vertex_id = slot.game_vertex_id
+        }
+    end
+    return { routes = routes, route_count = route_count, slots = slots, slot_count = slot_count }, nil
+end
+
+local function validate_item(entry, catalog, occupied_slots, seen_sections, path)
+    local invalid = exact_keys(entry, ITEM_KEYS, path)
+    if invalid then return invalid end
+    if not text(entry.section) or not positive_integer(entry.quantity) or seen_sections[entry.section] then
+        return failure("GA_FIGHTSPEC_ITEM_INVALID", "Item entry is invalid", { path = path })
+    end
+    local definition = catalog.items[entry.section]
+    if type(definition) ~= "table" then
+        return failure("GA_FIGHTSPEC_ITEM_UNKNOWN", "Item section is not cataloged", { path = path, section = entry.section })
+    end
+    if entry.equipped_slot ~= nil then
+        if not text(entry.equipped_slot) then
+            return failure("GA_FIGHTSPEC_ITEM_INVALID", "Equipped slot is invalid", { path = path })
+        end
+        if occupied_slots[entry.equipped_slot] then
+            return failure("GA_FIGHTSPEC_SLOT_DUPLICATE", "Equipped slot is duplicated", { path = path, equipped_slot = entry.equipped_slot })
+        end
+        occupied_slots[entry.equipped_slot] = true
+    end
+    seen_sections[entry.section] = true
+    return gamma_arena_result.ok(definition)
+end
+
+local function compatible_ammo(definition, selected_ammo)
+    for _, section in ipairs(definition.ammo_sections) do
+        if selected_ammo[section] then return true end
+    end
+    return false
+end
+
+local function validate_items(items, catalog, actor, path)
+    local count, invalid = dense_array(items, path, false)
+    if invalid then return invalid end
+    local occupied_slots, seen_sections = {}, {}
+    local outfits, helmets, knives, firearms = 0, 0, 0, 0
+    local outfit, selected_ammo, weapons = nil, {}, {}
+    local healing = false
+    for index = 1, count do
+        local entry = items[index]
+        local item = validate_item(entry, catalog, occupied_slots, seen_sections, path .. "." .. tostring(index))
+        if not item.ok then return item end
+        local definition = item.value
+        local category = definition.category
+        local expected_slot
+        if category == "outfit" then expected_slot = "outfit"; outfits = outfits + 1; outfit = definition
+        elseif category == "helmet" then expected_slot = "helmet"; helmets = helmets + 1
+        elseif category == "knife" then expected_slot = "knife"; knives = knives + 1
+        elseif category == "weapon" then expected_slot = "weapon_" .. tostring(definition.ltx_slot); firearms = firearms + 1; weapons[#weapons + 1] = definition
+        elseif category == "ammo" then selected_ammo[entry.section] = true
+        elseif category == "medicine" and definition.healing then healing = true end
+
+        if expected_slot ~= nil then
+            if entry.equipped_slot ~= expected_slot or entry.quantity ~= 1 then
+                return failure("GA_FIGHTSPEC_ITEM_EQUIPMENT_INVALID", "Equipped physical item does not match its logical slot", { path = path, section = entry.section })
+            end
+        elseif entry.equipped_slot ~= nil then
+            return failure("GA_FIGHTSPEC_ITEM_EQUIPMENT_INVALID", "Unequippable physical item owns a logical slot", { path = path, section = entry.section })
+        end
+    end
+    if outfits ~= 1 or knives ~= 1 or helmets > 1 or firearms < 1 then
+        return failure("GA_FIGHTSPEC_LOADOUT_INVALID", "Participant equipment is incomplete", { path = path })
+    end
+    if helmets == 1 and outfit.helmet_allowed ~= true then
+        return failure("GA_FIGHTSPEC_HELMET_INCOMPATIBLE", "Selected outfit does not allow a helmet", { path = path })
+    end
+    for _, weapon in ipairs(weapons) do
+        if not compatible_ammo(weapon, selected_ammo) then
+            return failure("GA_FIGHTSPEC_AMMO_MISSING", "Selected firearm has no compatible ammunition", { path = path })
+        end
+    end
+    for ammo_section in pairs(selected_ammo) do
+        local owned = false
+        for _, weapon in ipairs(weapons) do
+            for _, compatible in ipairs(weapon.ammo_sections) do
+                if compatible == ammo_section then owned = true; break end
+            end
+            if owned then break end
+        end
+        if not owned then
+            return failure("GA_FIGHTSPEC_AMMO_ORPHAN", "Selected ammunition is not used by a selected firearm", { path = path, section = ammo_section })
+        end
+    end
+    if actor and not healing then
+        return failure("GA_FIGHTSPEC_ACTOR_HEALING_MISSING", "Actor requires at least one healing item", { path = path })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_runtime_profile(runtime, opponent, profile)
+    if runtime == nil then return gamma_arena_result.ok(true) end
+    if type(runtime) ~= "table" or type(runtime.effective_profile) ~= "function" then
+        return failure("GA_FIGHTSPEC_PROFILE_RUNTIME_INVALID", "Runtime profile resolver is unavailable", { slot = opponent.slot })
+    end
+    local called, value = pcall(runtime.effective_profile, opponent.profile)
+    if not called then
+        return failure("GA_FIGHTSPEC_PROFILE_RUNTIME_INVALID", "Runtime profile could not be read safely", { slot = opponent.slot, reason = tostring(value) })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return value end
+        value = value.value
+    end
+    if type(value) ~= "table" or value.class ~= "AI_STL_S" or value.community ~= profile.community then
+        return failure("GA_FIGHTSPEC_PROFILE_RUNTIME_INVALID", "Runtime profile class or community does not match the catalog", { slot = opponent.slot })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_opponent(opponent, index, catalog, resolved, used_spawns, runtime)
+    local path = "spec.opponents." .. tostring(index)
+    local invalid = exact_keys(opponent, OPPONENT_KEYS, path)
+    if invalid then return invalid end
+    if not positive_integer(opponent.slot) or opponent.slot ~= index or not text(opponent.faction)
+        or not text(opponent.profile) or not PARTICIPANT_ROLES[opponent.role]
+        or not text(opponent.spawn_slot_id) or not text(opponent.tactical_route) then
+        return failure("GA_FIGHTSPEC_OPPONENT_INVALID", "Opponent fields are invalid", { index = index })
+    end
+    local faction = catalog.factions[opponent.faction]
+    if type(faction) ~= "table" then
+        return failure("GA_FIGHTSPEC_FACTION_UNKNOWN", "Opponent faction is not cataloged", { index = index })
+    end
+    invalid = exact_keys(opponent.rank, RANK_KEYS, path .. ".rank")
+    if invalid then return invalid end
+    if not text(opponent.rank.id) or not non_negative_integer(opponent.rank.value) then
+        return failure("GA_FIGHTSPEC_RANK_INVALID", "Opponent rank is invalid", { index = index })
+    end
+    local named, profile = catalog.ranks[opponent.rank.id], faction.ranks[opponent.rank.id]
+    if type(named) ~= "table" or type(profile) ~= "table"
+        or not rank_contains(named, opponent.rank.value) or not rank_contains(profile, opponent.rank.value) then
+        return failure("GA_FIGHTSPEC_RANK_INVALID", "Opponent rank is outside named or profile bands", { index = index })
+    end
+    if opponent.profile ~= profile.profile_section or profile.community ~= faction.community then
+        return failure("GA_FIGHTSPEC_PROFILE_INVALID", "Opponent profile does not exactly match faction, rank, and community", { index = index })
+    end
+
+    local physical = resolved.slots[opponent.spawn_slot_id]
+    if physical == nil or used_spawns[opponent.spawn_slot_id] then
+        return failure("GA_FIGHTSPEC_SPAWN_INVALID", "Opponent spawn slot is unknown or duplicated", { index = index })
+    end
+    used_spawns[opponent.spawn_slot_id] = true
+    if not resolved.routes[opponent.tactical_route] then
+        return failure("GA_FIGHTSPEC_ROUTE_INVALID", "Opponent route is not declared by the resolved layout", { index = index })
+    end
+    invalid = exact_keys(opponent.spawn, SPAWN_KEYS, path .. ".spawn")
+    if invalid then return invalid end
+    invalid = exact_keys(opponent.spawn.position, POSITION_KEYS, path .. ".spawn.position")
+    if invalid then return invalid end
+    local position = copy_position(opponent.spawn.position)
+    if position == nil or not same_position(position, physical.position)
+        or opponent.spawn.level_vertex_id ~= physical.level_vertex_id
+        or opponent.spawn.game_vertex_id ~= physical.game_vertex_id then
+        return failure("GA_FIGHTSPEC_SPAWN_INVALID", "Opponent spawn does not match the resolved physical slot", { index = index })
+    end
+    local items = validate_items(opponent.items, catalog, false, path .. ".items")
+    if not items.ok then return items end
+    return validate_runtime_profile(runtime, opponent, profile)
+end
+
+local function validate_impl(spec, catalog, layout, runtime)
+    local catalog_result = validate_catalog(catalog)
+    if not catalog_result.ok then return catalog_result end
+    local resolved, layout_error = validate_layout(layout)
+    if resolved == nil then return layout_error end
+
+    local invalid = exact_keys(spec, ROOT_KEYS, "spec")
+    if invalid then return invalid end
+    if spec.schema_version ~= 6 then
+        return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema must be exactly 6")
+    end
+    invalid = exact_keys(spec.identity, IDENTITY_KEYS, "spec.identity")
+    if invalid then return invalid end
+    local identity = spec.identity
+    if not positive_integer(identity.session_seed)
+        or identity.session_seed ~= gamma_arena_rng.normalize_uint32(identity.session_seed)
+        or not non_negative_integer(identity.fight_index)
+        or identity.generator_version ~= GENERATOR_VERSION
+        or identity.catalog_fingerprint ~= catalog.fingerprint
+        or identity.layout_version ~= layout.version
+        or not text(identity.content_hash) or #identity.content_hash ~= 16
+        or not text(identity.fight_id) then
+        return failure("GA_FIGHTSPEC_IDENTITY_INVALID", "FightSpec identity is invalid")
+    end
+
+    invalid = exact_keys(spec.arena, ARENA_KEYS, "spec.arena")
+    if invalid then return invalid end
+    if spec.arena.layout_id ~= layout.id or spec.arena.level ~= layout.level then
+        return failure("GA_FIGHTSPEC_ARENA_INVALID", "FightSpec arena identity does not match the resolved layout")
+    end
+    local route_count, route_error = dense_array(spec.arena.tactical_routes, "spec.arena.tactical_routes", false)
+    if route_error or route_count ~= resolved.route_count then
+        return failure("GA_FIGHTSPEC_ROUTE_INVALID", "FightSpec routes do not exactly match the resolved layout")
+    end
+    for index = 1, route_count do
+        if spec.arena.tactical_routes[index] ~= layout.tactical_routes[index] then
+            return failure("GA_FIGHTSPEC_ROUTE_INVALID", "FightSpec route order is not canonical", { index = index })
+        end
+    end
+
+    invalid = exact_keys(spec.actor, ACTOR_KEYS, "spec.actor")
+    if invalid then return invalid end
+    if spec.actor.spawn_path ~= layout.actor_spawn_path or spec.actor.look_path ~= layout.actor_look_path then
+        return failure("GA_FIGHTSPEC_ACTOR_INVALID", "FightSpec actor paths do not match the resolved layout")
+    end
+    local actor_items = validate_items(spec.actor.items, catalog, true, "spec.actor.items")
+    if not actor_items.ok then return actor_items end
+
+    local opponent_count, opponent_error = dense_array(spec.opponents, "spec.opponents", false)
+    if opponent_error or opponent_count > resolved.slot_count then
+        return failure("GA_FIGHTSPEC_OPPONENT_INVALID", "FightSpec opponent array exceeds resolved capacity")
+    end
+    local used_spawns = {}
+    for index = 1, opponent_count do
+        local opponent = validate_opponent(spec.opponents[index], index, catalog, resolved, used_spawns, runtime)
+        if not opponent.ok then return opponent end
+    end
+
+    local canonical_source = gamma_arena_fight_spec.copy(spec)
+    local canonical = gamma_arena_fight_spec.canonicalize(
+        { arena = canonical_source.arena, actor = canonical_source.actor, opponents = canonical_source.opponents },
+        {
+            session_seed = identity.session_seed, fight_index = identity.fight_index,
+            generator_version = identity.generator_version, catalog_fingerprint = identity.catalog_fingerprint,
+            layout_version = identity.layout_version
+        },
+        catalog,
+        layout)
+    if not canonical.ok then
+        return failure("GA_FIGHTSPEC_CANONICAL_INVALID", "FightSpec could not be canonically reconstructed", { cause = canonical.error })
+    end
+    if identity.content_hash ~= canonical.value.identity.content_hash
+        or identity.fight_id ~= canonical.value.identity.fight_id
+        or identity.fight_id ~= "ga6-" .. identity.content_hash then
+        return failure("GA_FIGHTSPEC_INTEGRITY_INVALID", "FightSpec hash or id does not match canonical content")
+    end
+    local supplied_encoding = gamma_arena_fight_spec.stable_encode(spec)
+    local canonical_encoding = gamma_arena_fight_spec.stable_encode(canonical.value)
+    if supplied_encoding ~= canonical_encoding then
+        return failure("GA_FIGHTSPEC_CANONICAL_INVALID", "FightSpec ordering or encoding is not canonical")
+    end
+
+    local private = gamma_arena_fight_spec.copy(canonical.value)
+    local encoded = gamma_arena_fight_spec.stable_encode(private)
+    return gamma_arena_result.ok({
+        session_seed = function() return private.identity.session_seed end,
+        fight_index = function() return private.identity.fight_index end,
+        fight_id = function() return private.identity.fight_id end,
+        actor = function() return gamma_arena_fight_spec.copy(private).actor end,
+        opponents = function() return gamma_arena_fight_spec.copy(private).opponents end,
+        tactical_routes = function()
+            local routes = {}
+            for index = 1, #private.arena.tactical_routes do routes[index] = private.arena.tactical_routes[index] end
+            return routes
+        end,
+        stable_encode = function() return encoded end
+    })
+end
+
+function validate(spec, catalog, layout, runtime)
+    local succeeded, result = pcall(validate_impl, spec, catalog, layout, runtime)
+    if succeeded then return result end
+    return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec validation failed safely", { reason = tostring(result) })
+end
