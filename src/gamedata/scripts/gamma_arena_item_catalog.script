@@ -1,0 +1,605 @@
+local rules_path = "gamma_arena\\gamma_arena_custom_rules.ltx"
+local new_game_loadout_path = "items\\settings\\new_game_loadouts.ltx"
+local UINT32_MOD = 4294967296
+
+local CATEGORY_BY_KIND = {
+    w_pistol = "weapon", w_smg = "weapon", w_shotgun = "weapon",
+    w_rifle = "weapon", w_sniper = "weapon", w_melee = "knife",
+    w_ammo = "ammo", o_light = "outfit", o_medium = "outfit",
+    o_sci = "outfit", o_heavy = "outfit", o_helmet = "helmet"
+}
+
+local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine" }
+
+local PLAYABLE_LOADOUT_SECTIONS = {
+    "shared", "stalker_loadout", "bandit_loadout", "ecolog_loadout",
+    "dolg_loadout", "freedom_loadout", "killer_loadout", "army_loadout",
+    "monolith_loadout", "csky_loadout", "renegade_loadout", "greh_loadout",
+    "isg_loadout", "zombied_loadout"
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function trimmed(value)
+    if type(value) ~= "string" then return nil end
+    local result = string.gsub(value, "^%s*(.-)%s*$", "%1")
+    return result ~= "" and result or nil
+end
+
+local function finite_number(value)
+    local parsed = tonumber(value)
+    if type(parsed) ~= "number" or parsed ~= parsed or parsed == math.huge or parsed == -math.huge then return nil end
+    return parsed
+end
+
+local function finite_integer(value, minimum)
+    local parsed = finite_number(value)
+    if parsed == nil or parsed ~= math.floor(parsed) or parsed < (minimum or 0) then return nil end
+    return parsed
+end
+
+local function parse_boolean(value)
+    if value == true or value == "true" or value == "1" then return true end
+    if value == false or value == "false" or value == "0" then return false end
+    return nil
+end
+
+local function split_csv(value)
+    local values = {}
+    for token in string.gmatch(value or "", "[^,]+") do
+        local normalized = trimmed(token)
+        if normalized ~= nil then values[#values + 1] = normalized end
+    end
+    return values
+end
+
+local function sorted_unique(values)
+    local normalized, seen = {}, {}
+    for _, value in ipairs(values or {}) do
+        local candidate = trimmed(value)
+        if candidate ~= nil and not seen[candidate] then
+            seen[candidate] = true
+            normalized[#normalized + 1] = candidate
+        end
+    end
+    table.sort(normalized)
+    return normalized
+end
+
+local function copy_sorted(values)
+    local copied = {}
+    for _, value in ipairs(values or {}) do copied[#copied + 1] = value end
+    table.sort(copied)
+    return copied
+end
+
+local function guarded(target, method_name, ...)
+    local method = type(target) == "table" and target[method_name] or nil
+    if type(method) ~= "function" then return false, nil end
+    local called, value = pcall(method, ...)
+    if not called then return false, value end
+    return true, value
+end
+
+local function read_ini(ini, section, key)
+    if type(ini) == "table" and type(ini.sections) == "table" then
+        local values = ini.sections[section]
+        return values and values[key] or nil
+    end
+    local called, value = pcall(function() return ini:r_string_ex(section, key) end)
+    if called then return value end
+    called, value = pcall(function() return ini:r_string(section, key) end)
+    return called and value or nil
+end
+
+local function runtime_source()
+    local base = system_ini()
+    return {
+        open_rules = function() return ini_file(rules_path) end,
+        enumerate_system_sections = function()
+            local sections = {}
+            base:section_for_each(function(section) sections[#sections + 1] = section end)
+            table.sort(sections)
+            return sections
+        end,
+        read_system_string = function(section, key) return base:r_string_ex(section, key) end,
+        read_system_number = function(section, key) return tonumber(base:r_string_ex(section, key)) end,
+        section_spawnable = function(section)
+            if not base:section_exist(section) then return false end
+            local class = trimmed(base:r_string_ex(section, "class"))
+            local spawn_path = trimmed(base:r_string_ex(section, "$spawn"))
+            return class ~= nil and class ~= "SCRPTART" and spawn_path ~= nil
+        end,
+        open_loadouts = function() return ini_file(new_game_loadout_path) end,
+        enumerate_loadout_sections = function(ini)
+            local sections = {}
+            for _, section in ipairs(PLAYABLE_LOADOUT_SECTIONS) do
+                if ini:section_exist(section) then sections[#sections + 1] = section end
+            end
+            table.sort(sections)
+            return sections
+        end,
+        enumerate_loadout_keys = function(ini, section)
+            local keys = {}
+            local count = ini:line_count(section)
+            for index = 0, count - 1 do
+                local _, key = ini:r_line_ex(section, index)
+                keys[#keys + 1] = key
+            end
+            table.sort(keys)
+            return keys
+        end,
+        read_loadout_string = function(ini, section, key) return ini:r_string_ex(section, key) end,
+        enumerate_rule_keys = function(ini, section)
+            local keys = {}
+            local count = ini:line_count(section)
+            for index = 0, count - 1 do
+                local _, key = ini:r_line_ex(section, index)
+                keys[#keys + 1] = key
+            end
+            table.sort(keys)
+            return keys
+        end,
+        read_base_carry_weight = function() return tonumber(base:r_string_ex("actor", "max_item_mass")) end
+    }
+end
+
+local function per_item_points(points, quantity)
+    return math.ceil(points / quantity)
+end
+
+local function round_up_five(value)
+    return math.max(5, math.ceil(value / 5) * 5)
+end
+
+local function weight_mg(value)
+    local kilograms = finite_number(value)
+    if kilograms == nil or kilograms <= 0 then return nil end
+    local milligrams = math.floor(kilograms * 1000 + 0.5)
+    return milligrams > 0 and milligrams or nil
+end
+
+local function optional_weight_mg(value)
+    if value == nil then return 0 end
+    local kilograms = finite_number(value)
+    if kilograms == nil or kilograms < 0 then return nil end
+    return math.floor(kilograms * 1000 + 0.5)
+end
+
+local function system_string(source, section, key)
+    local ok, value = guarded(source, "read_system_string", section, key)
+    return ok and trimmed(value) or nil
+end
+
+local function system_number(source, section, key)
+    local ok, value = guarded(source, "read_system_number", section, key)
+    return ok and finite_number(value) or nil
+end
+
+local function medical_policy(legacy_catalog)
+    local accepted = {}
+    for _, medical in ipairs(type(legacy_catalog) == "table" and legacy_catalog.medical_item_list or {}) do
+        if type(medical) == "table" and type(medical.section) == "string" and medical.section ~= ""
+            and finite_integer(medical.actor_cost, 1) ~= nil then
+            accepted[medical.section] = medical.category == "health" or medical.category == "rare"
+        end
+    end
+    return accepted
+end
+
+local function valid_slot(category, slot)
+    if category == "weapon" then return slot == 1 or slot == 2 end
+    if category == "knife" then return slot == 0 end
+    if category == "outfit" then return slot == 6 end
+    if category == "helmet" then return slot == 12 end
+    return true
+end
+
+local function physical_candidate(source, section, accepted_medicine)
+    local kind = system_string(source, section, "kind")
+    local category = CATEGORY_BY_KIND[kind]
+    if category == nil and accepted_medicine[section] ~= nil then category = "medicine" end
+    if category == nil then return nil end
+
+    local spawn_ok, spawnable = guarded(source, "section_spawnable", section)
+    if not spawn_ok or spawnable ~= true then return nil end
+    local spawn_class = system_string(source, section, "class")
+    local spawn_path = system_string(source, section, "$spawn")
+    local name_key = system_string(source, section, "inv_name")
+    local cost = system_number(source, section, "cost")
+    local item_weight = weight_mg(system_number(source, section, "inv_weight"))
+    if spawn_class == nil or spawn_path == nil or name_key == nil or cost == nil or cost <= 0 or item_weight == nil then return nil end
+
+    local quest_value = system_string(source, section, "quest_item")
+    if quest_value ~= nil and parse_boolean(quest_value) ~= false then return nil end
+    local take_value = system_string(source, section, "can_take")
+    if take_value ~= nil and parse_boolean(take_value) ~= true then return nil end
+
+    local icon = {
+        x = finite_integer(system_number(source, section, "inv_grid_x"), 0),
+        y = finite_integer(system_number(source, section, "inv_grid_y"), 0),
+        width = finite_integer(system_number(source, section, "inv_grid_width"), 1),
+        height = finite_integer(system_number(source, section, "inv_grid_height"), 1)
+    }
+    if icon.x == nil or icon.y == nil or icon.width == nil or icon.height == nil then return nil end
+
+    local slot = finite_integer(system_number(source, section, "slot"), 0)
+    if not valid_slot(category, slot) then return nil end
+    if category == "ammo" or category == "medicine" then slot = slot or nil end
+
+    local carry_bonus = optional_weight_mg(system_number(source, section, "additional_inventory_weight"))
+    if carry_bonus == nil then return nil end
+    local helmet_allowed = nil
+    local raw_helmet_allowed = system_string(source, section, "helmet_avaliable")
+    if raw_helmet_allowed ~= nil then
+        helmet_allowed = parse_boolean(raw_helmet_allowed)
+        if helmet_allowed == nil then return nil end
+    end
+
+    local candidate = {
+        section = section,
+        category = category,
+        cost = cost,
+        weight_mg = item_weight,
+        ltx_slot = slot,
+        ammo_sections = {},
+        box_size = nil,
+        helmet_allowed = helmet_allowed,
+        carry_bonus_mg = carry_bonus,
+        healing = category == "medicine" and accepted_medicine[section] == true or false,
+        icon = icon,
+        spawn_class = spawn_class,
+        spawn_path = spawn_path,
+        name_key = name_key
+    }
+    if category == "weapon" then
+        local ammo = {}
+        for _, ammo_section in ipairs(split_csv(system_string(source, section, "ammo_class"))) do
+            if not string.match(ammo_section, "_bad$") and not string.match(ammo_section, "_verybad$")
+                and not string.match(ammo_section, "_self$") then
+                ammo[#ammo + 1] = ammo_section
+            end
+        end
+        candidate.ammo_sections = sorted_unique(ammo)
+    elseif category == "ammo" then
+        candidate.box_size = finite_integer(system_number(source, section, "box_size"), 1)
+        if candidate.box_size == nil then return nil end
+    end
+    return candidate
+end
+
+local function enumerate_physical_candidates(source, accepted_medicine)
+    local ok, sections = guarded(source, "enumerate_system_sections")
+    if not ok or type(sections) ~= "table" then
+        return nil, failure("GA_ITEM_CATALOG_ENUMERATION_FAILED", "Effective system sections could not be enumerated")
+    end
+    sections = sorted_unique(sections)
+    local candidates = {}
+    for _, section in ipairs(sections) do
+        local candidate = physical_candidate(source, section, accepted_medicine)
+        if candidate ~= nil then candidates[section] = candidate end
+    end
+
+    local referenced_ammo = {}
+    for section, candidate in pairs(candidates) do
+        if candidate.category == "weapon" then
+            local compatible = {}
+            for _, ammo_section in ipairs(candidate.ammo_sections) do
+                local ammo = candidates[ammo_section]
+                if type(ammo) == "table" and ammo.category == "ammo" then
+                    compatible[#compatible + 1] = ammo_section
+                    referenced_ammo[ammo_section] = true
+                end
+            end
+            candidate.ammo_sections = compatible
+            if #compatible == 0 then candidates[section] = nil end
+        end
+    end
+    for section, candidate in pairs(candidates) do
+        if candidate.category == "ammo" and not referenced_ammo[section] then candidates[section] = nil end
+    end
+    return candidates
+end
+
+local function load_price_overrides(source)
+    local ok, rules = guarded(source, "open_rules")
+    if not ok or rules == nil then return nil, failure("GA_ITEM_CATALOG_RULES_OPEN_FAILED", "Arena item pricing rules could not be opened") end
+    local keys = {}
+    if type(rules) == "table" and type(rules.sections) == "table" then
+        for key in pairs(rules.sections.price_overrides or {}) do keys[#keys + 1] = key end
+    else
+        local keys_ok, values = guarded(source, "enumerate_rule_keys", rules, "price_overrides")
+        if not keys_ok or type(values) ~= "table" then
+            return nil, failure("GA_ITEM_CATALOG_OVERRIDE_ENUMERATION_FAILED", "Arena item price overrides could not be enumerated")
+        end
+        keys = values
+    end
+    keys = sorted_unique(keys)
+    local overrides = {}
+    for _, section in ipairs(keys) do
+        local price = finite_integer(read_ini(rules, "price_overrides", section), 1)
+        if price == nil then
+            return nil, failure("GA_ITEM_CATALOG_OVERRIDE_INVALID", "Arena item price override must be a positive integer", { section = section })
+        end
+        overrides[section] = price
+    end
+    return overrides
+end
+
+local function parse_grant(value)
+    local fields = split_csv(value)
+    if #fields < 3 or parse_boolean(fields[1]) == nil then return nil end
+    local quantity = finite_integer(fields[2], 1)
+    local points = finite_integer(fields[3], 0)
+    if quantity == nil or points == nil then return nil end
+    return { quantity = quantity, points = points }
+end
+
+local function load_gamma_prices(source)
+    local opened, loadouts = guarded(source, "open_loadouts")
+    if not opened or loadouts == nil then
+        return nil, nil, failure("GA_ITEM_CATALOG_LOADOUT_OPEN_FAILED", "Effective new-game loadouts could not be opened")
+    end
+    local sections_ok, sections = guarded(source, "enumerate_loadout_sections", loadouts)
+    if not sections_ok or type(sections) ~= "table" then
+        return nil, nil, failure("GA_ITEM_CATALOG_LOADOUT_ENUMERATION_FAILED", "Effective playable loadout sections could not be enumerated")
+    end
+    local prices, zero_grants = {}, {}
+    for _, loadout_section in ipairs(sorted_unique(sections)) do
+        local keys_ok, keys = guarded(source, "enumerate_loadout_keys", loadouts, loadout_section)
+        if not keys_ok or type(keys) ~= "table" then
+            return nil, nil, failure("GA_ITEM_CATALOG_LOADOUT_ENUMERATION_FAILED", "Effective loadout grants could not be enumerated", { section = loadout_section })
+        end
+        for _, section in ipairs(sorted_unique(keys)) do
+            local value_ok, raw = guarded(source, "read_loadout_string", loadouts, loadout_section, section)
+            local grant = value_ok and parse_grant(raw) or nil
+            if grant ~= nil then
+                if grant.points == 0 then
+                    zero_grants[section] = true
+                else
+                    local price = per_item_points(grant.points, grant.quantity)
+                    if prices[section] == nil or price > prices[section] then prices[section] = price end
+                end
+            end
+        end
+    end
+    return prices, zero_grants
+end
+
+local function median(values)
+    if #values == 0 then return nil end
+    table.sort(values)
+    local middle = math.floor(#values / 2)
+    if #values % 2 == 1 then return values[middle + 1] end
+    return (values[middle] + values[middle + 1]) / 2
+end
+
+local function price_candidates(candidates, overrides, gamma_prices, zero_grants)
+    local ratios_by_category, global_ratios = {}, {}
+    for _, category in ipairs(CATEGORY_IDS) do ratios_by_category[category] = {} end
+    for section, item in pairs(candidates) do
+        local gamma_price = gamma_prices[section]
+        if gamma_price ~= nil and gamma_price > 0 then
+            local ratio = item.cost / gamma_price
+            ratios_by_category[item.category][#ratios_by_category[item.category] + 1] = ratio
+            global_ratios[#global_ratios + 1] = ratio
+        end
+    end
+    local global_ratio = median(global_ratios)
+    local category_ratios = {}
+    for _, category in ipairs(CATEGORY_IDS) do
+        local values = ratios_by_category[category]
+        category_ratios[category] = #values >= 3 and median(values) or global_ratio
+    end
+
+    local items = {}
+    for section, item in pairs(candidates) do
+        local override = overrides[section]
+        local gamma_price = gamma_prices[section]
+        if override ~= nil then
+            item.price = override
+            item.price_origin = "override"
+            items[section] = item
+        elseif gamma_price ~= nil and gamma_price > 0 then
+            item.price = gamma_price
+            item.price_origin = "gamma"
+            items[section] = item
+        elseif not zero_grants[section] then
+            local ratio = category_ratios[item.category]
+            if ratio == nil or ratio <= 0 then
+                return nil, failure("GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING", "Installed combat item has no available median price anchor", { section = section, category = item.category })
+            end
+            item.price = round_up_five(item.cost / ratio)
+            item.price_origin = "derived"
+            items[section] = item
+        end
+    end
+    return items
+end
+
+local function prune_compatibility(items)
+    local referenced_ammo = {}
+    for section, item in pairs(items) do
+        if item.category == "weapon" then
+            local compatible = {}
+            for _, ammo_section in ipairs(item.ammo_sections) do
+                if type(items[ammo_section]) == "table" and items[ammo_section].category == "ammo" then
+                    compatible[#compatible + 1] = ammo_section
+                    referenced_ammo[ammo_section] = true
+                end
+            end
+            item.ammo_sections = compatible
+            if #compatible == 0 then items[section] = nil end
+        end
+    end
+    for section, item in pairs(items) do
+        if item.category == "ammo" and not referenced_ammo[section] then items[section] = nil end
+    end
+end
+
+local function canonical_add(parts, tag, value)
+    local encoded
+    if value == nil then encoded = "nil"
+    elseif value == true then encoded = "true"
+    elseif value == false then encoded = "false"
+    else encoded = tostring(value) end
+    parts[#parts + 1] = tag .. ":" .. tostring(#encoded) .. ":" .. encoded
+end
+
+local function canonical_array(parts, tag, values)
+    local sorted = copy_sorted(values)
+    canonical_add(parts, tag .. "_count", #sorted)
+    for index, value in ipairs(sorted) do canonical_add(parts, tag .. "_" .. index, value) end
+end
+
+local function canonical_item_parts(parts, item_ids, items)
+    canonical_add(parts, "item_count", #item_ids)
+    for _, section in ipairs(item_ids) do
+        local item = items[section]
+        canonical_add(parts, "item", item.section)
+        canonical_add(parts, "category", item.category)
+        canonical_add(parts, "price", item.price)
+        canonical_add(parts, "price_origin", item.price_origin)
+        canonical_add(parts, "weight_mg", item.weight_mg)
+        canonical_add(parts, "ltx_slot", item.ltx_slot)
+        canonical_array(parts, "ammo_sections", item.ammo_sections)
+        canonical_add(parts, "box_size", item.box_size)
+        canonical_add(parts, "helmet_allowed", item.helmet_allowed)
+        canonical_add(parts, "carry_bonus_mg", item.carry_bonus_mg)
+        canonical_add(parts, "healing", item.healing)
+        canonical_add(parts, "spawn_class", item.spawn_class)
+        canonical_add(parts, "spawn_path", item.spawn_path)
+        canonical_add(parts, "icon_x", item.icon.x)
+        canonical_add(parts, "icon_y", item.icon.y)
+        canonical_add(parts, "icon_width", item.icon.width)
+        canonical_add(parts, "icon_height", item.icon.height)
+    end
+end
+
+local function canonical_rank_parts(parts, rank_catalog)
+    canonical_add(parts, "base_budget", rank_catalog.base_budget)
+    canonical_add(parts, "max_entries", rank_catalog.max_entries)
+    for _, rank_id in ipairs(copy_sorted(rank_catalog.rank_ids)) do
+        local rank = rank_catalog.ranks[rank_id]
+        canonical_add(parts, "rank_id", rank_id)
+        canonical_add(parts, "rank_minimum", rank.minimum)
+        canonical_add(parts, "rank_maximum", rank.maximum)
+        canonical_add(parts, "rank_threat", rank.threat)
+    end
+    for _, faction_id in ipairs(copy_sorted(rank_catalog.faction_ids)) do
+        local faction = rank_catalog.factions[faction_id]
+        canonical_add(parts, "faction_id", faction_id)
+        canonical_add(parts, "faction_community", faction.community)
+        for _, rank_id in ipairs(copy_sorted(rank_catalog.rank_ids)) do
+            local rank = faction.ranks[rank_id]
+            canonical_add(parts, "faction_rank", rank_id)
+            canonical_add(parts, "alias", rank.alias)
+            canonical_add(parts, "profile_section", rank.profile_section)
+            canonical_add(parts, "community", rank.community)
+            canonical_add(parts, "minimum", rank.minimum)
+            canonical_add(parts, "maximum", rank.maximum)
+            canonical_add(parts, "loadout_section", rank.loadout_section)
+            canonical_add(parts, "threat", rank.threat)
+            canonical_array(parts, "primary_weapons", rank.primary_weapons)
+            canonical_array(parts, "secondary_weapons", rank.secondary_weapons)
+        end
+    end
+end
+
+local function hash32(value)
+    local hash = 5381
+    for index = 1, #value do hash = (hash * 33 + string.byte(value, index)) % UINT32_MOD end
+    return hash
+end
+
+local function lower_hex_u32(value)
+    local digits = "0123456789abcdef"
+    local encoded = {}
+    for index = 8, 1, -1 do
+        local digit = value % 16
+        encoded[index] = string.sub(digits, digit + 1, digit + 1)
+        value = math.floor(value / 16)
+    end
+    return table.concat(encoded)
+end
+
+local function fingerprint(item_ids, items, rank_catalog, base_carry_weight)
+    local parts = {}
+    canonical_add(parts, "domain", "ga-catalog-v8")
+    canonical_add(parts, "base_carry_weight", base_carry_weight)
+    canonical_item_parts(parts, item_ids, items)
+    canonical_rank_parts(parts, rank_catalog)
+    return "ga-catalog-v8-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
+end
+
+local function valid_inputs(source, legacy_catalog, rank_catalog)
+    if type(source) ~= "table" or type(source.open_rules) ~= "function"
+        or type(source.enumerate_system_sections) ~= "function" or type(source.read_system_string) ~= "function"
+        or type(source.read_system_number) ~= "function" or type(source.section_spawnable) ~= "function"
+        or type(source.open_loadouts) ~= "function" or type(source.enumerate_loadout_sections) ~= "function"
+        or type(source.enumerate_loadout_keys) ~= "function" or type(source.read_loadout_string) ~= "function"
+        or type(source.read_base_carry_weight) ~= "function" then
+        return failure("GA_ITEM_CATALOG_SOURCE_INVALID", "Universal item catalog source is incomplete")
+    end
+    if type(legacy_catalog) ~= "table" or type(legacy_catalog.medical_item_list) ~= "table" then
+        return failure("GA_ITEM_CATALOG_LEGACY_INVALID", "Universal item catalog requires the current random-selection catalog")
+    end
+    if type(rank_catalog) ~= "table" or type(rank_catalog.ranks) ~= "table" or type(rank_catalog.rank_ids) ~= "table"
+        or type(rank_catalog.factions) ~= "table" or type(rank_catalog.faction_ids) ~= "table"
+        or finite_integer(rank_catalog.base_budget, 0) == nil or finite_integer(rank_catalog.max_entries, 1) == nil then
+        return failure("GA_ITEM_CATALOG_RANK_INVALID", "Universal item catalog requires the exact rank catalog")
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function load_impl(source, legacy_catalog, rank_catalog)
+    source = source or runtime_source()
+    local inputs = valid_inputs(source, legacy_catalog, rank_catalog)
+    if not inputs.ok then return inputs end
+    local carry_ok, carry_kg = guarded(source, "read_base_carry_weight")
+    local base_carry_weight = carry_ok and weight_mg(carry_kg) or nil
+    if base_carry_weight == nil then
+        return failure("GA_ITEM_CATALOG_CARRY_INVALID", "Effective actor carry capacity must be positive")
+    end
+
+    local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog))
+    if candidates == nil then return candidate_error end
+    local overrides, override_error = load_price_overrides(source)
+    if overrides == nil then return override_error end
+    local gamma_prices, zero_grants, grant_error = load_gamma_prices(source)
+    if gamma_prices == nil then return grant_error end
+    local items, pricing_error = price_candidates(candidates, overrides, gamma_prices, zero_grants)
+    if items == nil then return pricing_error end
+    prune_compatibility(items)
+
+    local item_ids = {}
+    local categories = {}
+    for _, category in ipairs(CATEGORY_IDS) do categories[category] = {} end
+    for section, item in pairs(items) do
+        item_ids[#item_ids + 1] = section
+        categories[item.category][#categories[item.category] + 1] = section
+    end
+    table.sort(item_ids)
+    for _, category in ipairs(CATEGORY_IDS) do table.sort(categories[category]) end
+    if #item_ids == 0 then return failure("GA_ITEM_CATALOG_EMPTY", "Universal combat item catalog is empty") end
+
+    local catalog = {}
+    for key, value in pairs(legacy_catalog) do catalog[key] = value end
+    catalog.items = items
+    catalog.item_ids = item_ids
+    catalog.categories = categories
+    catalog.ranks = rank_catalog.ranks
+    catalog.factions = rank_catalog.factions
+    catalog.base_carry_weight = base_carry_weight
+    catalog.fingerprint = fingerprint(item_ids, items, rank_catalog, base_carry_weight)
+    return gamma_arena_result.ok(catalog)
+end
+
+function load(source, legacy_catalog, rank_catalog)
+    local succeeded, result = pcall(load_impl, source, legacy_catalog, rank_catalog)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    if succeeded then return failure("GA_ITEM_CATALOG_INVALID", "Universal item catalog loader returned an invalid Result") end
+    return failure("GA_ITEM_CATALOG_INVALID", "Universal item catalog loading failed safely", { reason = tostring(result) })
+end

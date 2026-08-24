@@ -203,6 +203,11 @@ $Task1RankScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script'; Namespace = 'gamma_arena_test_rank_catalog'; Required = @('(?m)^function\s+run\s*\(', 'rank_catalog_exposes_all_exact_ranks', 'rank_catalog_rejects_non_monotonic_thresholds', 'rank_catalog_enumeration_order_is_stable') }
 )
 
+$Task2ItemScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v8-', 'base_carry_weight', 'carry_bonus_mg') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors') }
+)
+
 $Task4ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_config_tx.script'; Namespace = 'gamma_arena_config_tx'; Required = @('(?m)^function\s+run\s*\(', '(?m)^function\s+snapshot\s*\(', '(?m)^function\s+recover\s*\(', '(?m)^function\s+is_quarantined\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },
@@ -255,6 +260,20 @@ foreach ($Contract in $Task1RankScriptContracts) {
     }
 }
 
+foreach ($Contract in $Task2ItemScriptContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 2 item script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 2 item script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Task 2 item script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Task 2 item script is missing its contract: $($Contract.Path)"
+        }
+    }
+}
+
 $Task1RulesPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'
 $Task1NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $Task1SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
@@ -294,6 +313,7 @@ if (Test-Path -LiteralPath $Task1SkipPath) {
 }
 $Task1DomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($Task1DomainContent -match 'gamma_arena_test_rank_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 1 domain suite must register rank catalog tests'
+Assert-True ($Task1DomainContent -match 'gamma_arena_test_item_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 2 domain suite must register universal item catalog tests'
 
 foreach ($Contract in $Task4ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path

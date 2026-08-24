@@ -228,3 +228,47 @@ if ($PlayerLoadout -notmatch 'select_player_class_pair[\s\S]{0,400}actor_class_p
     throw 'Player loadouts must retain weighted weapon/armor class-pair selection'
 }
 Write-Host 'PASS: natural-death and weighted-loadout regression policy passed'
+
+$UniversalCatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script'
+$UniversalCatalogTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'
+if (-not (Test-Path -LiteralPath $UniversalCatalogPath)) {
+    throw 'Universal combat item catalog production module is missing'
+}
+if (-not (Test-Path -LiteralPath $UniversalCatalogTestPath)) {
+    throw 'Universal combat item catalog functional fixture is missing'
+}
+$UniversalCatalog = Get-Content -Raw -LiteralPath $UniversalCatalogPath
+$UniversalCatalogTests = Get-Content -Raw -LiteralPath $UniversalCatalogTestPath
+foreach ($Marker in @(
+    'function load', 'CATEGORY_BY_KIND', 'per_item_points', 'round_up_five',
+    'enumerate_system_sections', 'open_loadouts', 'price_overrides',
+    'weight_mg', 'ltx_slot', 'ammo_sections', 'box_size', 'helmet_allowed',
+    'carry_bonus_mg', 'healing', 'base_carry_weight', '$spawn', 'spawn_path', 'fingerprint',
+    'ga-catalog-v8-', 'table.sort'
+)) {
+    if (-not $UniversalCatalog.Contains($Marker)) {
+        throw "Universal combat item catalog contract is missing marker: $Marker"
+    }
+}
+foreach ($CaseName in @(
+    'item_catalog_prices_and_classifies_installed_items',
+    'item_catalog_exposes_physical_metadata_and_legacy_fields',
+    'item_catalog_rejects_invalid_and_zero_price_candidates',
+    'item_catalog_fingerprint_changes_for_semantic_mutations',
+    'item_catalog_fingerprint_is_canonical_and_excludes_localized_names',
+    'item_catalog_rejects_unavailable_median_anchors'
+)) {
+    if (-not $UniversalCatalogTests.Contains($CaseName)) {
+        throw "Universal combat item catalog functional fixture is missing: $CaseName"
+    }
+}
+if ($UniversalCatalog -notmatch 'math\.ceil\s*\(\s*points\s*/\s*quantity\s*\)') {
+    throw 'Universal pricing must round each GAMMA grant to a per-item price'
+}
+if ($UniversalCatalog -notmatch 'math\.ceil\s*\(\s*value\s*/\s*5\s*\)\s*\*\s*5') {
+    throw 'Universal derived pricing must round upward to five'
+}
+if ($UniversalCatalog -match 'inv_name[^\r\n]*fingerprint|fingerprint[^\r\n]*inv_name') {
+    throw 'Localized inventory names must not enter the universal catalog fingerprint'
+}
+Write-Host 'PASS: universal combat item catalog static contract passed'
