@@ -4,6 +4,9 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Fixed actor-adapter parsing for Arena start configuration.
+- Retained bootstrap diagnostics when Arena launch validation fails.
+- Added fail-closed preflight for ordinary Arena starts and post-defeat rematches.
 - Added ordered clean compatible-ammo discovery and deterministic actor-only weighted bonus ammo boxes.
 - Added progress-aware asynchronous removal of looted actor inventory between fights.
 - Added structured fail-soft diagnostic evidence for early opponent self-deaths.
