@@ -3437,6 +3437,9 @@ local function fake_entity_environment(options)
         save_tag = function(id, name, key, value)
             env.tag_writes = env.tag_writes + 1
             if options.fail_phase == "tag" and env.tag_writes == (options.fail_tag_at or 1) then error("injected tag failure") end
+            if options.runtime_child_tag_fail and env.objects[id] and env.objects[id].section_name == "runtime_magazine" then
+                error("injected runtime child tag failure")
+            end
             env.tags[id] = value
             return true
         end,
@@ -3459,6 +3462,12 @@ local function fake_entity_environment(options)
         release = function(descriptor)
             env.release_requests[#env.release_requests + 1] = descriptor.id
             env.events[#env.events + 1] = "release:" .. tostring(descriptor.id)
+            if options.materialize_runtime_child_on_release and not env.runtime_child_materialized then
+                local released = env.objects[descriptor.id]
+                if released and released.parent_id ~= nil then
+                    env.runtime_child_materialized = env:add_entity(options.runtime_child_section or "runtime_magazine", released.parent_id, 1)
+                end
+            end
             env.pending_release[descriptor.id] = options.release_delay or 1
             return true
         end,
@@ -3535,6 +3544,13 @@ local function begin_entity_apply(adapter, env, spec, session_id)
     local result = adapter:begin_apply(spec, session_id)
     if result.ok then env.opponents_enabled = true end
     return result
+end
+
+local function release_request_position(env, id)
+    for index, released_id in ipairs(env.release_requests) do
+        if released_id == id then return index end
+    end
+    return nil
 end
 
 local function runtime_entity_does_not_spawn_before_begin_apply()
@@ -4860,18 +4876,67 @@ local function runtime_entity_tag_loss_fails_safe()
     gamma_arena_test_assert.is_true(env.objects[protected_id] ~= nil, "tag-lost registered entity is never released")
 end
 
-local function runtime_entity_parent_release_blocks_unproven_children()
+local function runtime_entity_cleanup_adopts_unloaded_weapon_child()
     local env, deps = fake_entity_environment({ cascade_parent_release = true })
     local adapter = gamma_arena_entity_adapter.new(deps)
-    begin_entity_apply(adapter, env, entity_spec(1), "session-parent-proof"); pump_entity(adapter, env)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-runtime-child"); pump_entity(adapter, env)
     local npc_id = adapter:registry_snapshot().npcs[1].id
-    local foreign = env:add_entity("foreign_loot", npc_id, 1, 9001)
-    env.tags[foreign:id()] = "session-parent-proof"
-    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env)
-    gamma_arena_test_assert.is_false(result.ok, "foreign child blocks potentially cascading parent release")
-    gamma_arena_test_assert.equals(snapshot.error.code, "GA_ENTITY_CLEANUP_FAILED", "blocked parent release is aggregated safely")
-    gamma_arena_test_assert.is_true(env.objects[npc_id] ~= nil and env.objects[foreign:id()] ~= nil, "NPC and unproven child both remain protected")
-    for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= npc_id, "blocked NPC is never submitted to safe release") end
+    local child = env:add_entity("runtime_magazine", npc_id, 1, 9001)
+    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env, 300)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "CLEAN", "unloaded weapon child is adopted and cleanup completes")
+    gamma_arena_test_assert.equals(env.tags[child:id()], "session-runtime-child", "adopted runtime child receives the current Arena ownership tag")
+    local child_position = release_request_position(env, child:id())
+    local npc_position = release_request_position(env, npc_id)
+    gamma_arena_test_assert.is_true(child_position ~= nil and npc_position ~= nil and child_position < npc_position, "adopted runtime child is released before its NPC parent")
+end
+
+local function runtime_entity_cleanup_adopts_late_child_before_parent()
+    local env, deps = fake_entity_environment({
+        cascade_parent_release = true,
+        materialize_runtime_child_on_release = true
+    })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-late-runtime-child"); pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
+    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env, 300)
+    local child = env.runtime_child_materialized
+    gamma_arena_test_assert.is_true(child ~= nil, "fixture materializes a runtime child after cleanup has begun")
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "CLEAN", "late runtime child is adopted before parent release")
+    local child_position = release_request_position(env, child:id())
+    local npc_position = release_request_position(env, npc_id)
+    gamma_arena_test_assert.is_true(child_position ~= nil and npc_position ~= nil and child_position < npc_position, "late runtime child is released before its NPC parent")
+end
+
+local function runtime_entity_runtime_child_tag_failure_is_terminal()
+    local env, deps = fake_entity_environment({ cascade_parent_release = true, runtime_child_tag_fail = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-runtime-child-tag-fail"); pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
+    local child = env:add_entity("runtime_magazine", npc_id, 1, 9001)
+    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env, 300)
+    gamma_arena_test_assert.is_false(result.ok, "runtime child tag failure is terminal")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "runtime child tag failure reaches ERROR")
+    local leaf = snapshot.error.context.errors[1]
+    gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_RUNTIME_CHILD_TAG_FAILED", "runtime child tag failure keeps a specific leaf code")
+    gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "runtime_children", "runtime child tag failure keeps its cleanup phase")
+    gamma_arena_test_assert.equals(release_request_position(env, child:id()), nil, "untagged runtime child is never submitted for release")
+    gamma_arena_test_assert.equals(release_request_position(env, npc_id), nil, "NPC parent is protected when runtime child ownership cannot be proved")
+end
+
+local function runtime_entity_runtime_child_limit_is_terminal()
+    local env, deps = fake_entity_environment({ cascade_parent_release = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-runtime-child-limit"); pump_entity(adapter, env)
+    local npc_id = adapter:registry_snapshot().npcs[1].id
+    for _ = 1, 129 do env:add_entity("runtime_magazine", npc_id, 1) end
+    adapter:cleanup(); local result, snapshot = pump_entity(adapter, env, 400)
+    gamma_arena_test_assert.is_false(result.ok, "runtime child limit overflow is terminal")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "runtime child limit overflow reaches ERROR")
+    local leaf = snapshot.error.context.errors[1]
+    gamma_arena_test_assert.equals(leaf.code, "GA_ENTITY_RUNTIME_CHILD_LIMIT", "runtime child limit overflow keeps a specific leaf code")
+    gamma_arena_test_assert.equals(leaf.context.limit, 128, "runtime child limit is deterministic")
+    gamma_arena_test_assert.equals(leaf.context.cleanup_phase, "runtime_children", "runtime child limit overflow keeps its cleanup phase")
+    gamma_arena_test_assert.equals(release_request_position(env, npc_id), nil, "NPC parent is protected after runtime child limit overflow")
 end
 
 local function runtime_entity_cleanup_retires_vanished_owned_child()
@@ -7637,7 +7702,10 @@ local cases = {
     ,{ name = "runtime_entity_cleanup_requires_registry_and_tag", fn = runtime_entity_cleanup_requires_registry_and_tag }
     ,{ name = "runtime_entity_forged_tag_is_ignored", fn = runtime_entity_forged_tag_is_ignored }
     ,{ name = "runtime_entity_tag_loss_fails_safe", fn = runtime_entity_tag_loss_fails_safe }
-    ,{ name = "runtime_entity_parent_release_blocks_unproven_children", fn = runtime_entity_parent_release_blocks_unproven_children }
+    ,{ name = "runtime_entity_cleanup_adopts_unloaded_weapon_child", fn = runtime_entity_cleanup_adopts_unloaded_weapon_child }
+    ,{ name = "runtime_entity_cleanup_adopts_late_child_before_parent", fn = runtime_entity_cleanup_adopts_late_child_before_parent }
+    ,{ name = "runtime_entity_runtime_child_tag_failure_is_terminal", fn = runtime_entity_runtime_child_tag_failure_is_terminal }
+    ,{ name = "runtime_entity_runtime_child_limit_is_terminal", fn = runtime_entity_runtime_child_limit_is_terminal }
     ,{ name = "runtime_entity_cleanup_retires_vanished_owned_child", fn = runtime_entity_cleanup_retires_vanished_owned_child }
     ,{ name = "runtime_entity_parent_release_blocks_unreadable_child_parent", fn = runtime_entity_parent_release_blocks_unreadable_child_parent }
     ,{ name = "runtime_entity_cleanup_is_idempotent", fn = runtime_entity_cleanup_is_idempotent }
