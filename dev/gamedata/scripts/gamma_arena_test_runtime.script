@@ -6698,6 +6698,82 @@ local function runtime_defeat_menu_preflight_failure_identity_is_preserved()
     end
 end
 
+local function runtime_defeat_menu_default_fatal_path_skips_start_settings()
+    local menu = defeat_menu_test_owner()
+    local model
+    local load_settings_calls = 0
+    local preference_mutations = 0
+    local seed_generations = 0
+    local transient_clears = 0
+    local promotion_calls = 0
+    local bridge_calls = 0
+    local handoff_calls = 0
+    local fatal_shows = 0
+    local fatal_dialog_shows = 0
+    local captured_ports
+    local recovery_callback
+    local recovery_context
+    local fatal_dialog = {}
+    function fatal_dialog:ShowFatal(errors, callback, context)
+        fatal_shows = fatal_shows + 1
+        gamma_arena_test_assert.equals(errors[1].error.code, "GA_BOOTSTRAP_COMPOSE_FAILED", "default fatal path retains the preflight failure")
+        recovery_callback = callback
+        recovery_context = context
+    end
+    function fatal_dialog:ShowDialog(value) if value then fatal_dialog_shows = fatal_dialog_shows + 1 end end
+    function fatal_dialog:HideDialog() end
+    function fatal_dialog:Show() end
+
+    local original_create = gamma_arena_ui_start.create
+    gamma_arena_ui_start.create = function(owner, ports)
+        gamma_arena_test_assert.equals(owner, menu, "default fatal construction retains the stock menu owner")
+        captured_ports = ports
+        gamma_arena_ui_start.initialize_settings({
+            LoadSettings = function()
+                load_settings_calls = load_settings_calls + 1
+                preference_mutations = preference_mutations + 1
+                seed_generations = seed_generations + 1
+            end
+        }, ports)
+        return fatal_dialog
+    end
+
+    local displayed = gamma_arena_main_menu.show_confirmed_defeat(menu, {
+        config = {},
+        peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:default_fatal" }) end,
+        show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
+        clear_result = function() return gamma_arena_result.ok(true) end,
+        clear_transient = function() transient_clears = transient_clears + 1; return gamma_arena_result.ok(true) end,
+        runtime_preflight = function() return gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "default fatal preflight") end,
+        random_session_seed = function() seed_generations = seed_generations + 1; return gamma_arena_result.ok(987654321) end,
+        issue_launch_from_defeat = function() promotion_calls = promotion_calls + 1; return gamma_arena_result.ok(true) end,
+        write_character_creation = function() bridge_calls = bridge_calls + 1; return gamma_arena_result.ok(true) end,
+        handoff_start_game = function() handoff_calls = handoff_calls + 1; return gamma_arena_result.ok(true) end
+    })
+    local failed = model.on_next()
+    local recovered = recovery_callback(recovery_context, fatal_dialog)
+    gamma_arena_ui_start.create = original_create
+    gamma_arena_ui_start.clear_fatal()
+
+    gamma_arena_test_assert.is_true(displayed.ok, "default fatal path fixture displays")
+    gamma_arena_test_assert.is_false(failed.ok, "default fatal path preserves the preflight failure")
+    gamma_arena_test_assert.is_true(type(captured_ports) == "table" and captured_ports.fatal_only == true, "default fatal path requests fatal-only construction")
+    gamma_arena_test_assert.equals(load_settings_calls, 0, "fatal-only construction never calls LoadSettings")
+    gamma_arena_test_assert.equals(preference_mutations, 0, "fatal-only construction never migrates or reconciles preferences")
+    gamma_arena_test_assert.equals(seed_generations, 0, "fatal-only construction and failed preflight generate no seed")
+    gamma_arena_test_assert.equals(transient_clears, 0, "fatal-only preflight recovery does not clear transient launch state")
+    gamma_arena_test_assert.equals(promotion_calls + bridge_calls + handoff_calls, 0, "fatal-only preflight recovery performs no launch, bridge, or handoff mutation")
+    gamma_arena_test_assert.equals(fatal_shows, 1, "default fatal path creates one usable fatal screen")
+    gamma_arena_test_assert.equals(fatal_dialog_shows, 1, "default fatal path shows its fatal dialog")
+    gamma_arena_test_assert.is_true(recovered.ok, "default fatal path recovery succeeds")
+    gamma_arena_test_assert.equals(menu.show_dialog, 1, "default fatal path restores the original menu dialog")
+    gamma_arena_test_assert.equals(menu.shown, 1, "default fatal path restores original menu visibility")
+
+    local ordinary_load_settings = 0
+    gamma_arena_ui_start.initialize_settings({ LoadSettings = function() ordinary_load_settings = ordinary_load_settings + 1 end }, {})
+    gamma_arena_test_assert.equals(ordinary_load_settings, 1, "ordinary UI construction still loads settings exactly once")
+end
+
 local function runtime_defeat_menu_exit_retries_consumption_safely()
     local menu = defeat_menu_test_owner()
     local model
@@ -7558,6 +7634,7 @@ local cases = {
     ,{ name = "runtime_defeat_menu_rejects_invalid_or_expired_handoff", fn = runtime_defeat_menu_rejects_invalid_or_expired_handoff }
     ,{ name = "runtime_defeat_menu_fresh_failures_are_bounded", fn = runtime_defeat_menu_fresh_failures_are_bounded }
     ,{ name = "runtime_defeat_menu_preflight_failure_identity_is_preserved", fn = runtime_defeat_menu_preflight_failure_identity_is_preserved }
+    ,{ name = "runtime_defeat_menu_default_fatal_path_skips_start_settings", fn = runtime_defeat_menu_default_fatal_path_skips_start_settings }
     ,{ name = "runtime_defeat_menu_exit_retries_consumption_safely", fn = runtime_defeat_menu_exit_retries_consumption_safely }
     ,{ name = "runtime_defeat_menu_fatal_ui_failure_restores_owner", fn = runtime_defeat_menu_fatal_ui_failure_restores_owner }
     ,{ name = "runtime_defeat_result_construction_failure_clears_intent_and_restores_owner", fn = runtime_defeat_result_construction_failure_clears_intent_and_restores_owner }

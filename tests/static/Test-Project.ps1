@@ -694,6 +694,13 @@ if (Test-Path -LiteralPath $Task3UiStartPath) {
     $Task3UiStartContent = Get-Content -LiteralPath $Task3UiStartPath -Raw
     Assert-True ($Task3UiStartContent -match '(?m)^function\s+preflight_runtime\s*\(') 'Ordinary Arena start must expose runtime readiness preflight.'
     Assert-True ($Task3UiStartContent -match '(?m)^function\s+begin_start\s*\(') 'Ordinary Arena start must expose a centralized start seam.'
+    Assert-True ($Task3UiStartContent -match '(?m)^function\s+initialize_settings\s*\(') 'Start UI must expose its settings initialization decision for runtime regression coverage.'
+    $Task3Constructor = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+UIStart:__init\s*\([^\)]*\)(.*?)^end\s*$').Value
+    Assert-True ($Task3Constructor -match 'initialize_settings\s*\(\s*self\s*,\s*self\.ports\s*\)') 'Start UI construction must route settings initialization through the fatal-only guard.'
+    $Task3InitializeSettings = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+initialize_settings\s*\([^\)]*\)(.*?)^end\s*$').Value
+    Assert-True ($Task3InitializeSettings -match 'ports\.fatal_only\s*==\s*true[\s\S]{0,160}return\s+false[\s\S]{0,240}dialog:LoadSettings\s*\(\s*\)') 'Fatal-only UI construction must return before LoadSettings while ordinary construction still loads settings.'
+    $Task3ShowFatal = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+show_fatal\s*\([^\)]*\)(.*?)^end\s*$').Value
+    Assert-True ($Task3ShowFatal -match 'create\s*\(\s*owner\s*,\s*\{\s*fatal_only\s*=\s*true\s*\}\s*\)') 'Production fatal recovery must request fatal-only UI construction.'
     foreach ($Marker in @('runtime_status', 'GA_START_RUNTIME_UNAVAILABLE', 'GA_START_RUNTIME_STATUS_FAILED', 'GA_START_RUNTIME_STATUS_INVALID')) {
         Assert-True ($Task3UiStartContent.Contains($Marker)) "Ordinary Arena start runtime preflight must cover $Marker"
     }
@@ -713,6 +720,8 @@ if (Test-Path -LiteralPath $Task3UiStartPath) {
 $Task3RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 $Task3Registration = '\{\s*name\s*=\s*"runtime_ordinary_start_preflight_precedes_mutation"\s*,\s*fn\s*=\s*runtime_ordinary_start_preflight_precedes_mutation\s*\}'
 Assert-True ($Task3RuntimeTests -match $Task3Registration) 'Regression case must be registered exactly: runtime_ordinary_start_preflight_precedes_mutation -> runtime_ordinary_start_preflight_precedes_mutation.'
+$FatalOnlyRegistration = '\{\s*name\s*=\s*"runtime_defeat_menu_default_fatal_path_skips_start_settings"\s*,\s*fn\s*=\s*runtime_defeat_menu_default_fatal_path_skips_start_settings\s*\}'
+Assert-True ($Task3RuntimeTests -match $FatalOnlyRegistration) 'Regression case must be registered exactly: runtime_defeat_menu_default_fatal_path_skips_start_settings -> runtime_defeat_menu_default_fatal_path_skips_start_settings.'
 if (Test-Path -LiteralPath $Task6TextPath) {
     [xml]$Task6Text = Get-Content -LiteralPath $Task6TextPath -Raw
     Assert-True ($null -ne $Task6Text.SelectSingleNode("//*[local-name()='string' and @id='st_gamma_arena_result_new_fight']")) 'Task 6 localization must define the New fight label'
