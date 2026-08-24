@@ -468,7 +468,8 @@ end
 
 local function launch_token_is_volatile_ttl_bound_and_one_shot()
     local config = fake_config()
-    local issued = gamma_arena_session_store.issue_launch(config, valid_request(99), {
+    local store = gamma_arena_session_store.new_store()
+    local issued = store:issue_launch(config, valid_request(99), {
         clock = function() return 1000 end,
         nonce = function() return "nonce_1" end
     })
@@ -481,13 +482,23 @@ local function launch_token_is_volatile_ttl_bound_and_one_shot()
     gamma_arena_test_assert.is_false(gamma_arena_session_store.parse_launch_token(issued.value.token, 1601).ok, "expired token rejects")
     gamma_arena_test_assert.is_false(gamma_arena_session_store.parse_launch_token("ga1:bad:nonce", 1000).ok, "malformed token rejects")
 
-    local consumed = gamma_arena_session_store.consume_launch(config, { clock = function() return 1001 end })
+    local ownership = store:validate_launch_ownership(config, { clock = function() return 1001 end })
+    gamma_arena_test_assert.is_true(ownership.ok, "fresh launch ownership validates without consumption")
+    gamma_arena_test_assert.equals(ownership.value.session_seed, 99, "ownership validation returns the exact request")
+    gamma_arena_test_assert.equals(config.save_count, 1, "ownership validation performs no persisted mutation")
+    gamma_arena_test_assert.equals(config.data.launch_pending, "true", "ownership validation leaves the launch pending")
+    local expired_ownership = store:validate_launch_ownership(config, { clock = function() return 1601 end })
+    gamma_arena_test_assert.equals(expired_ownership.error.code, "GA_LAUNCH_TOKEN_EXPIRED", "ownership validation enforces token TTL")
+    gamma_arena_test_assert.equals(config.save_count, 1, "rejected ownership validation remains non-mutating")
+    gamma_arena_test_assert.equals(config.data.launch_pending, "true", "rejected validation leaves cleanup to fatal routing")
+
+    local consumed = store:consume_launch(config, { clock = function() return 1001 end })
     gamma_arena_test_assert.is_true(consumed.ok, "fresh volatile launch consumes")
     gamma_arena_test_assert.equals(consumed.value.session_seed, 99, "consumed request restored")
     gamma_arena_test_assert.equals(config.save_count, 2, "launch consume saves once")
     gamma_arena_test_assert.equals(config.data.launch_pending, nil, "launch keys removed")
 
-    local repeated = gamma_arena_session_store.consume_launch(config, { clock = function() return 1002 end })
+    local repeated = store:consume_launch(config, { clock = function() return 1002 end })
     gamma_arena_test_assert.is_false(repeated.ok, "stale-cache repeated consume rejects")
     gamma_arena_test_assert.equals(repeated.error.code, "GA_LAUNCH_NOT_PENDING", "repeated consume code")
 
@@ -623,6 +634,23 @@ local function serialized_launch_requires_fake_start_phase_proof()
 
     local target_store = gamma_arena_session_store.new_store()
     local target_config = fake_config(nil, backend)
+    local wrong_direct = target_store:validate_launch_activation(target_config, {
+        serialized = false,
+        current_level = "l01_escape",
+        expected_level = "l05_bar"
+    })
+    gamma_arena_test_assert.is_false(wrong_direct.ok, "non-serialized launch rejects an unexpected current level")
+    gamma_arena_test_assert.equals(wrong_direct.error.code, "GA_LAUNCH_REQUIRES_NEW_GAME", "unexpected direct route preserves public code")
+    gamma_arena_test_assert.is_true(target_store:validate_launch_activation(target_config, {
+        serialized = false,
+        current_level = "l05_bar",
+        expected_level = "l05_bar"
+    }).ok, "non-serialized launch accepts the exact target level")
+    gamma_arena_test_assert.is_true(target_store:validate_launch_activation(target_config, {
+        serialized = false,
+        current_level = "fake_start",
+        expected_level = "l05_bar"
+    }).ok, "non-serialized launch accepts the character-creation handoff level")
     local unproven = target_store:validate_launch_activation(target_config, {
         serialized = true,
         current_level = "l05_bar",
@@ -633,6 +661,16 @@ local function serialized_launch_requires_fake_start_phase_proof()
 
     local fake_start_store = gamma_arena_session_store.new_store()
     gamma_arena_test_assert.is_true(fake_start_store:mark_launch_deferred(fake_config(nil, backend), "fake_start", "l05_bar").ok, "fake_start phase persists")
+    gamma_arena_test_assert.is_true(gamma_arena_session_store.new_store():validate_launch_activation(fake_config(nil, backend), {
+        serialized = false,
+        current_level = "fake_start",
+        expected_level = "l05_bar"
+    }).ok, "repeated fake_start update accepts the exact persisted deferred route")
+    gamma_arena_test_assert.is_false(gamma_arena_session_store.new_store():validate_launch_activation(fake_config(nil, backend), {
+        serialized = false,
+        current_level = "l05_bar",
+        expected_level = "l05_bar"
+    }).ok, "deferred target requires serialized fake_start proof")
     local proven = gamma_arena_session_store.new_store():validate_launch_activation(fake_config(nil, backend), {
         serialized = true,
         current_level = "l05_bar",

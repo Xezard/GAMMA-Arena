@@ -2012,6 +2012,15 @@ foreach ($UnsafeMutation in @('hit.power\s*=','hit.impulse\s*=','flags\.[A-Za-z_
     Assert-True ($ArenaEntityContent -notmatch $UnsafeMutation) "Arena NPC forensics must not mutate engine hit data: $UnsafeMutation"
 }
 Assert-True ($ArenaOrchestratorContent -match 'GA_SAVE_GUARD_BREACH') 'Arena save_state must expose native-save breach evidence.'
+Assert-True ($Task5StoreContent -match 'function\s+Store:validate_launch_ownership') 'Arena store must expose non-mutating full launch-ownership validation.'
+$ArenaRouteValidatorStart = $Task5StoreContent.IndexOf('function Store:validate_launch_activation')
+$ArenaRouteValidatorEnd = if ($ArenaRouteValidatorStart -ge 0) { $Task5StoreContent.IndexOf('function Store:consume_launch', $ArenaRouteValidatorStart) } else { -1 }
+Assert-True ($ArenaRouteValidatorStart -ge 0 -and $ArenaRouteValidatorEnd -gt $ArenaRouteValidatorStart) 'Arena launch-route validator must remain structurally testable.'
+if ($ArenaRouteValidatorStart -ge 0 -and $ArenaRouteValidatorEnd -gt $ArenaRouteValidatorStart) {
+    $ArenaRouteValidatorBlock = $Task5StoreContent.Substring($ArenaRouteValidatorStart, $ArenaRouteValidatorEnd - $ArenaRouteValidatorStart)
+    Assert-True ($ArenaRouteValidatorBlock -notmatch 'if\s+context\.serialized\s*~=\s*true\s+then\s+return\s+gamma_arena_result\.ok') 'Non-serialized Arena launches must not accept arbitrary current levels.'
+    Assert-True ($ArenaRouteValidatorBlock -match '"fake_start"') 'Non-serialized Arena route validation must explicitly own the fake_start handoff.'
+}
 $ArenaComposeStart = $ArenaBootstrapContent.IndexOf('function compose')
 $ArenaComposeEnd = if ($ArenaComposeStart -ge 0) { $ArenaBootstrapContent.IndexOf('local function call_instance', $ArenaComposeStart) } else { -1 }
 Assert-True ($ArenaComposeStart -ge 0 -and $ArenaComposeEnd -gt $ArenaComposeStart) 'Arena bootstrap composition boundary must remain structurally testable.'
@@ -2049,11 +2058,17 @@ $ArenaActivateEnd = if ($ArenaActivateStart -ge 0) { $ArenaOrchestratorContent.I
 Assert-True ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) 'Arena activation boundary must remain structurally testable.'
 if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
     $ArenaActivateBlock = $ArenaOrchestratorContent.Substring($ArenaActivateStart, $ArenaActivateEnd - $ArenaActivateStart)
+    $ArenaRouteValidationIndex = $ArenaActivateBlock.IndexOf('validate_launch_activation')
+    $ArenaOwnershipIndex = $ArenaActivateBlock.IndexOf('validate_launch_ownership')
     $ArenaArmIndex = $ArenaActivateBlock.IndexOf('self:arm_save_guard')
     $ArenaDeferIndex = $ArenaActivateBlock.IndexOf('mark_launch_deferred')
+    Assert-True ($ArenaRouteValidationIndex -ge 0 -and $ArenaOwnershipIndex -gt $ArenaRouteValidationIndex) 'Arena route proof must be validated before full launch ownership.'
+    Assert-True ($ArenaOwnershipIndex -ge 0 -and $ArenaArmIndex -gt $ArenaOwnershipIndex) 'Arena save suppression must begin only after complete launch ownership validation.'
+    Assert-True ($ArenaActivateBlock -notmatch 'enter_fatal\s*\(\s*activation\s*,\s*true') 'Rejected non-mutating launch route proof must be cleared by common fatal routing.'
+    Assert-True ($ArenaActivateBlock -notmatch 'enter_fatal\s*\(\s*ownership\s*,\s*true') 'Rejected non-mutating launch ownership must be cleared by common fatal routing.'
     Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
 }
-foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
+foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }

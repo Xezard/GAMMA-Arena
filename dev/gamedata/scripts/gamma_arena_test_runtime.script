@@ -525,6 +525,7 @@ local function fake_store(intent_state)
         inspect_count = 0,
         mark_deferred_count = 0,
         validate_launch_activation_count = 0,
+        validate_launch_ownership_count = 0,
         launch_deferred = false
     }
     function store:inspect_intents()
@@ -546,6 +547,10 @@ local function fake_store(intent_state)
     end
     function store:validate_launch_activation(_, context)
         self.validate_launch_activation_count = self.validate_launch_activation_count + 1
+        if self.activation_result then return self.activation_result end
+        if context.serialized ~= true and context.current_level ~= context.expected_level and context.current_level ~= "fake_start" then
+            return gamma_arena_result.err("GA_LAUNCH_REQUIRES_NEW_GAME", "direct launch is outside the target or fake_start route")
+        end
         if context.serialized == true and (not self.launch_deferred
             or self.deferred_current_level ~= "fake_start"
             or self.deferred_expected_level ~= context.expected_level
@@ -553,6 +558,10 @@ local function fake_store(intent_state)
             return gamma_arena_result.err("GA_LAUNCH_REQUIRES_NEW_GAME", "serialized launch lacks fake_start handoff proof")
         end
         return gamma_arena_result.ok(true)
+    end
+    function store:validate_launch_ownership()
+        self.validate_launch_ownership_count = self.validate_launch_ownership_count + 1
+        return self.launch_validation_result or gamma_arena_result.ok({ schema_version = 1, mode_id = "skirmish", difficulty_id = "stalker", seed_mode = "manual", session_seed = 42 })
     end
     function store:prepare_resume(_, expected)
         self.prepare_resume_count = self.prepare_resume_count + 1
@@ -594,10 +603,11 @@ local function fake_store(intent_state)
 end
 
 local function fake_orchestrator_deps(store)
-    local save_guard = { installed = false, armed = false, install_calls = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0, call_order = {} }
+    local save_guard = { installed = false, armed = false, install_calls = 0, arm_attempts = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0, call_order = {} }
     function save_guard:install()
         self.install_calls = self.install_calls + 1
         self.call_order[#self.call_order + 1] = "install"
+        if self.install_result then return self.install_result end
         if self.installed then return gamma_arena_result.ok(false) end
         self.installed = true
         return gamma_arena_result.ok(true)
@@ -605,7 +615,9 @@ local function fake_orchestrator_deps(store)
     function save_guard:is_armed() return self.armed end
     function save_guard:arm(context)
         if not self.installed then return gamma_arena_result.err("GA_SAVE_GUARD_NOT_INSTALLED", "Save guard must be installed before arming") end
+        self.arm_attempts = self.arm_attempts + 1
         self.call_order[#self.call_order + 1] = "arm"
+        if self.arm_result then return self.arm_result end
         if self.armed then return gamma_arena_result.ok(false) end
         self.armed = true
         self.arm_calls = self.arm_calls + 1
@@ -737,6 +749,8 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     gamma_arena_test_assert.equals(store.mark_deferred_count, 1, "fake_start persists one cross-VM phase proof")
     gamma_arena_test_assert.is_false(fake_start_vm.activation_attempted, "fake_start cannot latch activation")
     gamma_arena_test_assert.is_true(fake_start_vm.awaiting_activation, "fake_start retains activation ownership")
+    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 1, "fake_start validates its direct new-game route before suppression")
+    gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "fake_start validates complete launch ownership before suppression")
     gamma_arena_test_assert.is_true(fake_start_deps._save_guard.armed, "fake_start owns save suppression before GAMMA autosave fires")
     gamma_arena_test_assert.equals(fake_start_deps._save_guard.install_calls, 1, "deferred launch installs suppression only after launch ownership")
     gamma_arena_test_assert.equals(fake_start_deps._save_guard.arm_calls, 1, "deferred launch arms its VM exactly once")
@@ -748,7 +762,8 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     rostok_vm:load_state({})
     rostok_vm:on_game_load()
     gamma_arena_test_assert.is_true(rostok_vm:actor_on_first_update().ok, "serialized target-level VM activates")
-    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 1, "target VM validates persisted fake_start phase proof")
+    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 2, "target VM validates persisted fake_start phase proof after the direct fake_start route")
+    gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 2, "each launch VM validates complete launch ownership before suppression")
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
     gamma_arena_test_assert.is_true(rostok_vm:is_active(), "target level owns Arena session")
     gamma_arena_test_assert.is_true(rostok_deps._save_guard.armed, "target Arena VM keeps save suppression armed")
@@ -805,9 +820,34 @@ local function runtime_save_guard_installs_only_after_launch_ownership()
     local orchestrator = gamma_arena_orchestrator.new(launch_deps)
     orchestrator:on_game_load()
     gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "accepted launch installs and arms suppression")
+    gamma_arena_test_assert.equals(launch_store.validate_launch_ownership_count, 1, "complete launch ownership is validated once")
     gamma_arena_test_assert.equals(launch_deps._save_guard.install_calls, 1, "accepted launch installs suppression once")
     gamma_arena_test_assert.equals(launch_deps._save_guard.arm_calls, 1, "accepted launch arms suppression once")
     gamma_arena_test_assert.equals(table.concat(launch_deps._save_guard.call_order, ","), "install,arm", "save guard ordering is deterministic")
+end
+
+local function runtime_save_guard_failures_block_launch_mutation()
+    local cases = {
+        { field = "install_result", code = "GA_TEST_SAVE_GUARD_INSTALL_FAILED", arm_attempts = 0 },
+        { field = "arm_result", code = "GA_TEST_SAVE_GUARD_ARM_FAILED", arm_attempts = 1 }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        local deps = fake_orchestrator_deps(store)
+        deps._save_guard[case.field] = gamma_arena_result.err(case.code, "injected save-guard failure")
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.field .. " blocks Arena activation")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.field .. " preserves its structured error")
+        gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.field .. " enters fatal ERROR")
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, case.field .. " occurs only after launch ownership validation")
+        gamma_arena_test_assert.equals(store.mark_deferred_count, 0, case.field .. " cannot persist launch deferral")
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0, case.field .. " cannot consume launch")
+        gamma_arena_test_assert.equals(deps._save_guard.arm_attempts, case.arm_attempts, case.field .. " preserves install-before-arm short circuiting")
+        gamma_arena_test_assert.is_false(deps._save_guard.armed, case.field .. " leaves save suppression unarmed")
+        gamma_arena_test_assert.is_false(orchestrator:is_active(), case.field .. " cannot create an Arena session")
+    end
 end
 
 local function bootstrap_default_store_exposes_complete_launch_contract()
@@ -817,6 +857,7 @@ local function bootstrap_default_store_exposes_complete_launch_contract()
     local store = orchestrator.deps.store
     gamma_arena_test_assert.is_true(type(store.mark_launch_deferred) == 'function', 'production store exposes launch deferral')
     gamma_arena_test_assert.is_true(type(store.validate_launch_activation) == 'function', 'production store exposes launch validation')
+    gamma_arena_test_assert.is_true(type(store.validate_launch_ownership) == 'function', 'production store exposes non-mutating launch ownership validation')
 end
 
 local function missing_dependency_method_routes_fatal_once()
@@ -928,7 +969,7 @@ end
 local function invalid_or_expired_launch_never_reaches_preflight()
     for _, code in ipairs({ "GA_LAUNCH_TOKEN_INVALID", "GA_LAUNCH_TOKEN_EXPIRED" }) do
         local store = fake_store({ launch_pending = true, resume_pending = false })
-        store.launch_result = gamma_arena_result.err(code, "rejected launch")
+        store.launch_validation_result = gamma_arena_result.err(code, "rejected launch")
         local preflight_calls = 0
         local deps = fake_orchestrator_deps(store)
         deps.preflight = function() preflight_calls = preflight_calls + 1; return gamma_arena_result.ok(true) end
@@ -937,11 +978,26 @@ local function invalid_or_expired_launch_never_reaches_preflight()
         local result = orchestrator:actor_on_first_update()
         gamma_arena_test_assert.is_false(result.ok, "invalid/expired launch must fail")
         gamma_arena_test_assert.equals(result.error.code, code, "launch rejection code")
-        gamma_arena_test_assert.equals(store.consume_launch_count, 1, "invalid one-shot is consumed/rejected once")
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "invalid one-shot is validated once")
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0, "invalid one-shot is rejected before consumption")
+        gamma_arena_test_assert.equals(store.clear_count, 1, "fatal routing clears rejected launch ownership once")
+        gamma_arena_test_assert.equals(deps._save_guard.install_calls, 0, "invalid launch cannot install save suppression")
         gamma_arena_test_assert.equals(preflight_calls, 0, "invalid launch cannot reach preflight")
         orchestrator:actor_on_update()
-        gamma_arena_test_assert.equals(store.consume_launch_count, 1, "rejected launch cannot be reused")
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "rejected launch cannot be reused")
     end
+
+    local route_store = fake_store({ launch_pending = true, resume_pending = false })
+    local route_deps = fake_orchestrator_deps(route_store)
+    route_deps.current_level = function() return gamma_arena_result.ok("l01_escape") end
+    local route_orchestrator = gamma_arena_orchestrator.new(route_deps)
+    route_orchestrator:on_game_load()
+    local route_result = route_orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.equals(route_result.error.code, "GA_LAUNCH_REQUIRES_NEW_GAME", "invalid route proof preserves its code")
+    gamma_arena_test_assert.equals(route_store.clear_count, 1, "invalid route proof clears launch and bridge state immediately")
+    gamma_arena_test_assert.equals(route_store.validate_launch_ownership_count, 0, "invalid route cannot reach full ownership validation")
+    gamma_arena_test_assert.equals(route_deps._save_guard.install_calls, 0, "invalid route cannot install save suppression")
+    gamma_arena_test_assert.equals(route_store.consume_launch_count, 0, "invalid route cannot consume launch")
 end
 
 local function inactive_callbacks_are_inert()
@@ -7963,6 +8019,7 @@ end
 
 local cases = {
     { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },
+    { name = "runtime_save_guard_failures_block_launch_mutation", fn = runtime_save_guard_failures_block_launch_mutation },
     { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },
     { name = "runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed", fn = runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed },
     { name = "runtime_entity_forensics_are_bounded_non_mutating_and_classified", fn = runtime_entity_forensics_are_bounded_non_mutating_and_classified },

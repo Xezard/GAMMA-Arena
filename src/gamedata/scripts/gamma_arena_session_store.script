@@ -950,6 +950,36 @@ function Store:validate_launch_handoff(config, token)
     return gamma_arena_result.ok({ route = "bridge" })
 end
 
+local function validate_launch_ownership_values(store, config, options, values)
+    local pending = store:pending_value(values.launch_pending, "LAUNCH")
+    if not pending.ok then return pending end
+    if pending.value ~= true then return fail("GA_LAUNCH_NOT_PENDING", "No launch intent is pending") end
+
+    local now = store:current_time(options)
+    if not now.ok then return now end
+    local parsed = parse_launch_token_impl(values.launch_token, now.value)
+    if not parsed.ok then return parsed end
+    local request = validate_persisted_launch_request(values)
+    if not request.ok then return request end
+    if values.launch_stage ~= "issued" and values.launch_stage ~= "deferred" then
+        return fail("GA_LAUNCH_STAGE_INVALID", "Arena launch phase is invalid", { stage = values.launch_stage })
+    end
+    local handoff = store:validate_launch_handoff(config, values.launch_token)
+    if not handoff.ok then return handoff end
+    request.value.launch_handoff = {
+        schema_version = 1,
+        route = handoff.value.route,
+        issued_at = parsed.value.issued_at
+    }
+    return request
+end
+
+function Store:validate_launch_ownership(config, options)
+    local values_result = self:read_all(config, launch_keys)
+    if not values_result.ok then return values_result end
+    return validate_launch_ownership_values(self, config, options, values_result.value)
+end
+
 function Store:mark_launch_deferred(config, current_level, expected_level)
     if current_level ~= "fake_start" or type(expected_level) ~= "string" or expected_level == "" or expected_level == current_level then
         return fail("GA_LAUNCH_DEFER_FAILED", "Arena launch may be deferred only from fake_start to a distinct target level", {
@@ -987,12 +1017,33 @@ function Store:validate_launch_activation(config, context)
     if type(context) ~= "table" or type(context.current_level) ~= "string" or type(context.expected_level) ~= "string" then
         return fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch activation context is invalid")
     end
-    if context.serialized ~= true then return gamma_arena_result.ok({ route = "direct" }) end
     local values_result = self:read_all(config, launch_keys)
     if not values_result.ok then return values_result end
     local values = values_result.value
     local pending = self:pending_value(values.launch_pending, "LAUNCH")
     if not pending.ok then return pending end
+    if context.serialized ~= true then
+        local issued = pending.value == true and values.launch_stage == "issued"
+            and values.launch_deferred_level == nil and values.launch_target_level == nil
+        if issued and context.current_level == context.expected_level then
+            return gamma_arena_result.ok({ route = "direct" })
+        end
+        if context.current_level == "fake_start" and context.expected_level ~= "fake_start" then
+            if issued then return gamma_arena_result.ok({ route = "fake_start" }) end
+            if pending.value == true and values.launch_stage == "deferred"
+                and values.launch_deferred_level == "fake_start"
+                and values.launch_target_level == context.expected_level then
+                return gamma_arena_result.ok({ route = "fake_start_deferred" })
+            end
+        end
+        return fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Non-serialized Arena launch is outside the exact target or fake_start route", {
+            current_level = context.current_level,
+            expected_level = context.expected_level,
+            stage = values.launch_stage,
+            deferred_level = values.launch_deferred_level,
+            target_level = values.launch_target_level
+        })
+    end
     if pending.value ~= true or values.launch_stage ~= "deferred"
         or values.launch_deferred_level ~= "fake_start"
         or values.launch_target_level ~= context.expected_level
@@ -1039,28 +1090,14 @@ function Store:consume_launch(config, options)
         return cleared.ok and fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") or cleared
     end
 
-    local now = self:current_time(options)
-    if not now.ok then return self:reject_launch(config, values.launch_token, now) end
-    local parsed = parse_launch_token_impl(values.launch_token, now.value)
-    if not parsed.ok then return self:reject_launch(config, values.launch_token, parsed) end
-    local request = validate_persisted_launch_request(values)
+    local request = validate_launch_ownership_values(self, config, options, values)
     if not request.ok then return self:reject_launch(config, values.launch_token, request) end
-    if values.launch_stage ~= "issued" and values.launch_stage ~= "deferred" then
-        return self:reject_launch(config, values.launch_token, fail("GA_LAUNCH_STAGE_INVALID", "Arena launch phase is invalid", { stage = values.launch_stage }))
-    end
-    local handoff = self:validate_launch_handoff(config, values.launch_token)
-    if not handoff.ok then return self:reject_launch(config, values.launch_token, handoff) end
 
     local restored = self:restore_character_creation(config)
     if not restored.ok then return restored end
     local cleared = self:clear_intent(config, launch_keys, "launch_pending", "GA_LAUNCH_CONSUME_FAILED")
     self.volatile_launch_permits[values.launch_token] = nil
     if not cleared.ok then return cleared end
-    request.value.launch_handoff = {
-        schema_version = 1,
-        route = handoff.value.route,
-        issued_at = parsed.value.issued_at
-    }
     return request
 end
 
