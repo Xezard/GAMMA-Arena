@@ -329,6 +329,24 @@ local function runtime_object_id(object)
     return nil
 end
 
+local function runtime_game_object_id(object)
+    local looked_up, method = pcall(function() return object and object.id end)
+    if not looked_up or type(method) ~= "function" then return nil end
+    local called, id = pcall(method, object)
+    if not called or type(id) ~= "number" or id ~= id or id == math.huge or id == -math.huge
+        or id ~= math.floor(id) or id < 0 then
+        return nil
+    end
+    return id
+end
+
+function actor_ownership_matches(candidate, current_actor, session_active, current_level)
+    if session_active ~= true or current_level ~= "l05_bar" then return false end
+    local candidate_id = runtime_game_object_id(candidate)
+    local actor_id = runtime_game_object_id(current_actor)
+    return candidate_id ~= nil and actor_id ~= nil and candidate_id == actor_id
+end
+
 local function runtime_parent_id(object)
     local ok, value = pcall(function() return object and object.parent_id end)
     if ok and type(value) == "function" then
@@ -1061,13 +1079,8 @@ local function default_actor_adapter(active_instance)
         is_session_active = function() return active_instance() and active_instance():is_active() end,
         is_actor_owned = function(candidate)
             local instance = active_instance()
-            if instance == nil or not instance:is_active()
-                or not level or type(level.name) ~= "function" or level.name() ~= "l05_bar" then
-                return false
-            end
-            local candidate_id = runtime_object_id(candidate)
-            local actor_id = runtime_object_id(db and db.actor)
-            return candidate_id ~= nil and actor_id ~= nil and candidate_id == actor_id
+            if instance == nil or not level or type(level.name) ~= "function" then return false end
+            return actor_ownership_matches(candidate, db and db.actor, instance:is_active(), level.name())
         end,
         release_item_id = function(id)
             if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then

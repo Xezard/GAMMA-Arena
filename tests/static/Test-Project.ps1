@@ -1853,7 +1853,7 @@ foreach ($UnsafeEquality in @(
 )) {
     Assert-True ($InventoryDrainBootstrapContent -notmatch $UnsafeEquality) "Bootstrap actor ownership must not compare native game_object values: $UnsafeEquality"
 }
-foreach ($Marker in @('function actor_ownership_matches','runtime_game_object_id','type(method) ~= "function"','id ~= math.huge','id ~= -math.huge','return actor_ownership_matches')) {
+foreach ($Marker in @('function actor_ownership_matches','runtime_game_object_id','type(method) ~= "function"','id == math.huge','id == -math.huge','return actor_ownership_matches')) {
     Assert-True ($InventoryDrainBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap actor ownership must use strict protected game_object IDs: $Marker"
 }
 $NativeIdentityRegistration = '\{\s*name\s*=\s*"runtime_actor_inventory_native_identity_uses_ids"\s*,\s*fn\s*=\s*runtime_actor_inventory_native_identity_uses_ids\s*\}'

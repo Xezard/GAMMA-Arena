@@ -954,6 +954,28 @@ end
     $NativeEqualityResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NativeEqualityFixture) -CaptureOutput
     Assert-True ($NativeEqualityResult.ExitCode -ne 0 -and $NativeEqualityResult.Output -match 'Actor inventory ownership must not compare native game_object values') 'Static policy must reject native game_object equality through its intended diagnostic.'
 
+    $PurgeEqualityFixture = New-Task7Fixture 'native-purge-game-object-equality'
+    $PurgeEqualityPath = Join-Path $PurgeEqualityFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
+    $PurgeEqualityContent = Get-Content -LiteralPath $PurgeEqualityPath -Raw
+    $PurgeEqualityNeedle = 'if owned_actor_id ~= requested_actor_id then'
+    Assert-True (([regex]::Matches($PurgeEqualityContent, [regex]::Escape($PurgeEqualityNeedle))).Count -eq 1) 'Purge-equality negative fixture must find exactly one actor-ID ownership guard.'
+    $PurgeEqualityMutant = $PurgeEqualityContent.Replace($PurgeEqualityNeedle, 'if owned.value ~= actor or owned_actor_id ~= requested_actor_id then')
+    Assert-True ($PurgeEqualityMutant -ne $PurgeEqualityContent) 'Purge-equality negative fixture must reintroduce one unsafe comparison.'
+    Write-FixtureFile $PurgeEqualityFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script' $PurgeEqualityMutant
+    $PurgeEqualityResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PurgeEqualityFixture) -CaptureOutput
+    Assert-True ($PurgeEqualityResult.ExitCode -ne 0 -and $PurgeEqualityResult.Output -match 'Actor inventory ownership must not compare native game_object values') 'Static policy must reject purge game_object equality through its intended diagnostic.'
+
+    $BootstrapEqualityFixture = New-Task7Fixture 'native-bootstrap-game-object-equality'
+    $BootstrapEqualityPath = Join-Path $BootstrapEqualityFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+    $BootstrapEqualityContent = Get-Content -LiteralPath $BootstrapEqualityPath -Raw
+    $BootstrapEqualityNeedle = 'return candidate_id ~= nil and actor_id ~= nil and candidate_id == actor_id'
+    Assert-True (([regex]::Matches($BootstrapEqualityContent, [regex]::Escape($BootstrapEqualityNeedle))).Count -eq 1) 'Bootstrap-equality negative fixture must find exactly one strict actor-ID return.'
+    $BootstrapEqualityMutant = $BootstrapEqualityContent.Replace($BootstrapEqualityNeedle, 'return candidate == current_actor')
+    Assert-True ($BootstrapEqualityMutant -ne $BootstrapEqualityContent) 'Bootstrap-equality negative fixture must reintroduce one unsafe comparison.'
+    Write-FixtureFile $BootstrapEqualityFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $BootstrapEqualityMutant
+    $BootstrapEqualityResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $BootstrapEqualityFixture) -CaptureOutput
+    Assert-True ($BootstrapEqualityResult.ExitCode -ne 0 -and $BootstrapEqualityResult.Output -match 'Bootstrap actor ownership must not compare native game_object values') 'Static policy must reject bootstrap game_object equality through its intended diagnostic.'
+
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
     $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, difficulty.player_loadout_budget)')
@@ -989,6 +1011,8 @@ end
         [PSCustomObject]@{ Name = 'runtime_entity_living_defeat_cleanup_holds_offline'; Function = 'runtime_entity_living_defeat_cleanup_holds_offline'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
         [PSCustomObject]@{ Name = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Function = 'runtime_entity_cleanup_quiesce_failure_is_terminal_without_release'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
         [PSCustomObject]@{ Name = 'runtime_bootstrap_status_preserves_initialization_result'; Function = 'runtime_bootstrap_status_preserves_initialization_result'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_actor_inventory_native_identity_uses_ids'; Function = 'runtime_actor_inventory_native_identity_uses_ids'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
+        [PSCustomObject]@{ Name = 'runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed'; Function = 'runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
         [PSCustomObject]@{ Name = 'runtime_ordinary_start_preflight_precedes_mutation'; Function = 'runtime_ordinary_start_preflight_precedes_mutation'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
         [PSCustomObject]@{ Name = 'runtime_defeat_menu_fresh_failures_are_bounded'; Function = 'runtime_defeat_menu_fresh_failures_are_bounded'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
         [PSCustomObject]@{ Name = 'runtime_defeat_menu_preflight_failure_identity_is_preserved'; Function = 'runtime_defeat_menu_preflight_failure_identity_is_preserved'; Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script' },
