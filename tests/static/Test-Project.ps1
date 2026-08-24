@@ -198,6 +198,11 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script'; Namespace = 'gamma_arena_test_layout_adapter'; Required = @('(?m)^function\s+run\s*\(') }
 )
 
+$Task1RankScriptContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_rank_catalog.script'; Namespace = 'gamma_arena_rank_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_RANK_PROFILE_RANGE_EMPTY', 'GA_RANK_THRESHOLD_INVALID', 'GA_RANK_LOADOUT_MISSING', 'GA_RANK_ALIAS_MISSING', 'GA_RANK_FACTION_DUPLICATE') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script'; Namespace = 'gamma_arena_test_rank_catalog'; Required = @('(?m)^function\s+run\s*\(', 'rank_catalog_exposes_all_exact_ranks', 'rank_catalog_rejects_non_monotonic_thresholds', 'rank_catalog_enumeration_order_is_stable') }
+)
+
 $Task4ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_config_tx.script'; Namespace = 'gamma_arena_config_tx'; Required = @('(?m)^function\s+run\s*\(', '(?m)^function\s+snapshot\s*\(', '(?m)^function\s+recover\s*\(', '(?m)^function\s+is_quarantined\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },
@@ -235,6 +240,60 @@ foreach ($Contract in $Task3ScriptContracts) {
         }
     }
 }
+
+foreach ($Contract in $Task1RankScriptContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 1 rank script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 1 rank script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Task 1 rank script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Task 1 rank script is missing its contract: $($Contract.Path)"
+        }
+    }
+}
+
+$Task1RulesPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'
+$Task1NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
+$Task1SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
+Assert-True (Test-Path -LiteralPath $Task1RulesPath) 'Task 1 custom rank rules are missing'
+if (Test-Path -LiteralPath $Task1RulesPath) {
+    $Task1RulesContent = Get-Content -LiteralPath $Task1RulesPath -Raw
+    foreach ($Marker in @(
+        'schema_version = 1', 'revision = 1', 'base_budget = 600', 'max_entries = 64',
+        'ids = army, bandit, csky, dolg, ecolog, freedom, greh, isg, killer, monolith, renegade, stalker, zombied',
+        'ids = novice, trainee, experienced, professional, veteran, expert, master, legend',
+        'threat = 100', 'threat = 120', 'threat = 150', 'threat = 180',
+        'threat = 220', 'threat = 270', 'threat = 330', 'threat = 400', '[price_overrides]'
+    )) {
+        Assert-True ($Task1RulesContent.Contains($Marker)) "Task 1 custom rank rules must declare $Marker"
+    }
+}
+if (Test-Path -LiteralPath $Task1NpcPath) {
+    $Task1NpcContent = Get-Content -LiteralPath $Task1NpcPath -Raw
+    $Task1ProfileBases = @{ army='military'; bandit='bandit'; csky='csky'; dolg='duty'; ecolog='ecolog'; freedom='freedom'; greh='greh'; isg='isg'; killer='killer'; monolith='monolith'; renegade='renegade'; stalker='stalker'; zombied='zombied' }
+    $Task1ProfileTiers = @{ novice=0; trainee=1; experienced=2; professional=2; veteran=3; expert=3; master=4; legend=4 }
+    foreach ($Faction in @('army','bandit','csky','dolg','ecolog','freedom','greh','isg','killer','monolith','renegade','stalker','zombied')) {
+        foreach ($Rank in @('novice','trainee','experienced','professional','veteran','expert','master','legend')) {
+            $Alias = "gamma_arena_${Faction}_${Rank}"
+            $Expected = "(?m)^\[" + [regex]::Escape($Alias) + "\]:sim_default_" + [regex]::Escape($Task1ProfileBases[$Faction]) + "_" + $Task1ProfileTiers[$Rank] + "\r?$"
+            Assert-True ($Task1NpcContent -match $Expected) "Task 1 NPC profile must map exact alias: $Alias"
+        }
+    }
+}
+if (Test-Path -LiteralPath $Task1SkipPath) {
+    $Task1SkipContent = Get-Content -LiteralPath $Task1SkipPath -Raw
+    Assert-True (([regex]::Matches($Task1SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|greh|isg|killer|monolith|renegade|stalker|zombied)_(novice|trainee|experienced|professional|veteran|expert|master|legend)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|greh|isg|killer|monolith|renegade|stalker|zombied)\s*$')).Count -eq 104) 'Task 1 loadout patch must add all 104 exact Arena aliases to skip_npcs'
+    foreach ($Faction in @('army','bandit','csky','dolg','ecolog','freedom','greh','isg','killer','monolith','renegade','stalker','zombied')) {
+        foreach ($Rank in @('novice','trainee','experienced','professional','veteran','expert','master','legend')) {
+            Assert-True ($Task1SkipContent -match ("(?m)^gamma_arena_" + $Faction + "_" + $Rank + "\s*=\s*" + $Faction + "\s*$")) "Task 1 loadout patch must map the exact engine faction: gamma_arena_${Faction}_${Rank}"
+        }
+    }
+}
+$Task1DomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($Task1DomainContent -match 'gamma_arena_test_rank_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 1 domain suite must register rank catalog tests'
 
 foreach ($Contract in $Task4ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path

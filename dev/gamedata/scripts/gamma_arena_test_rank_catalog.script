@@ -1,0 +1,220 @@
+local RANK_IDS = {
+    "novice", "trainee", "experienced", "professional",
+    "veteran", "expert", "master", "legend"
+}
+
+local FACTION_IDS = {
+    "army", "bandit", "csky", "dolg", "ecolog", "freedom", "greh",
+    "isg", "killer", "monolith", "renegade", "stalker", "zombied"
+}
+
+local PROFILE_TIER = {
+    novice = 0, trainee = 1, experienced = 2, professional = 2,
+    veteran = 3, expert = 3, master = 4, legend = 4
+}
+
+local function section(values)
+    return values
+end
+
+local function copy_array(values)
+    local copied = {}
+    for index, value in ipairs(values) do copied[index] = value end
+    return copied
+end
+
+local function reverse(values)
+    local result = {}
+    for index = #values, 1, -1 do result[#result + 1] = values[index] end
+    return result
+end
+
+local function rules_fixture(options)
+    local faction_ids = copy_array(FACTION_IDS)
+    if options.duplicate_faction then faction_ids[#faction_ids + 1] = "stalker" end
+    local rules = {
+        meta = section({ schema_version = "1", revision = "1" }),
+        limits = section({ base_budget = "600", max_entries = "64" }),
+        factions = section({ ids = table.concat(faction_ids, ",") }),
+        ranks = section({ ids = table.concat(RANK_IDS, ",") }),
+        price_overrides = section({})
+    }
+    local threats = { 100, 120, 150, 180, 220, 270, 330, 400 }
+    for index, rank_id in ipairs(RANK_IDS) do
+        rules["rank_" .. rank_id] = section({ threat = tostring(threats[index]) })
+    end
+    return { sections = rules }
+end
+
+local function rank_rating(options)
+    if options.non_monotonic then
+        return "novice,100,trainee,90,experienced,300,professional,400,veteran,500,expert,600,master,700,legend"
+    end
+    return "novice,100,trainee,200,experienced,300,professional,400,veteran,500,expert,600,master,700,legend"
+end
+
+local function fixture_source(options)
+    options = options or {}
+    local profile_ranges = {
+        [0] = "0,99", [1] = "100,199", [2] = "200,399",
+        [3] = "400,599", [4] = "600,899"
+    }
+    local aliases, loadouts, pools = {}, {}, {
+        arena_primary = { "wpn_rifle:100", "wpn_missing:100", "wpn_shotgun:100", "wpn_rifle:50" },
+        arena_secondary = { "wpn_pistol:100" }
+    }
+    for _, faction_id in ipairs(FACTION_IDS) do
+        for _, rank_id in ipairs(RANK_IDS) do
+            local alias = "gamma_arena_" .. faction_id .. "_" .. rank_id
+            aliases[alias] = profile_ranges[PROFILE_TIER[rank_id]]
+            loadouts[faction_id .. "_" .. rank_id] = {
+                primary = "arena_primary",
+                secondary = "arena_secondary"
+            }
+        end
+    end
+    if options.empty_intersection then aliases.gamma_arena_stalker_professional = "900,999" end
+    if options.missing_alias then aliases.gamma_arena_stalker_expert = nil end
+    if options.missing_expert_loadout then loadouts.stalker_expert = nil end
+
+    local rules = rules_fixture(options)
+    return {
+        open = function(path)
+            if string.find(path, "custom_rules", 1, true) then return rules end
+            error("unexpected fixture path: " .. tostring(path))
+        end,
+        section_exists = function(name) return aliases[name] ~= nil end,
+        read_system_string = function(name, key)
+            if name == "game_relations" and key == "rating" then return rank_rating(options) end
+            if key == "rank" then return aliases[name] end
+            return nil
+        end,
+        open_loadouts = function() return { sections = loadouts } end,
+        loadout_section_exists = function(_, name) return loadouts[name] ~= nil or pools[name] ~= nil end,
+        read_loadout_string = function(_, name, key)
+            local values = loadouts[name]
+            return values and values[key] or nil
+        end,
+        enumerate_loadout_keys = function(_, name)
+            local values = copy_array(pools[name] or {})
+            return options.reverse_enumeration and reverse(values) or values
+        end
+    }
+end
+
+local function legacy_catalog()
+    return {
+        weapon_list = {
+            { section = "wpn_shotgun", slot = 2 },
+            { section = "wpn_pistol", slot = 1 },
+            { section = "wpn_rifle", slot = 2 }
+        }
+    }
+end
+
+local function assert_rank_catalog(options)
+    local loaded = gamma_arena_rank_catalog.load(fixture_source(options), legacy_catalog())
+    gamma_arena_test_assert.is_true(loaded.ok, "rank catalog fixture must load")
+    return loaded.value
+end
+
+local function assert_array_same(actual, expected, message)
+    gamma_arena_test_assert.equals(#actual, #expected, message .. " length")
+    for index, value in ipairs(expected) do
+        gamma_arena_test_assert.equals(actual[index], value, message .. " item")
+    end
+end
+
+local function exposes_all_exact_ranks()
+    local catalog = assert_rank_catalog()
+    local ids = {
+        "novice", "trainee", "experienced", "professional",
+        "veteran", "expert", "master", "legend"
+    }
+    local threats = { 100, 120, 150, 180, 220, 270, 330, 400 }
+    assert_array_same(catalog.rank_ids, ids, "exact rank order")
+    for index, id in ipairs(ids) do
+        gamma_arena_test_assert.equals(catalog.ranks[id].threat, threats[index], "rank threat")
+    end
+    gamma_arena_test_assert.equals(catalog.base_budget + threats[1], 700, "one novice")
+    gamma_arena_test_assert.equals(catalog.base_budget + threats[8], 1000, "one legend")
+    gamma_arena_test_assert.equals(catalog.base_budget + threats[1] * 10, 1600, "ten novices")
+    gamma_arena_test_assert.equals(catalog.base_budget + threats[8] * 10, 4600, "ten legends")
+end
+
+local function exposes_exact_faction_rank_records()
+    local catalog = assert_rank_catalog()
+    assert_array_same(catalog.faction_ids, FACTION_IDS, "exact faction order")
+    gamma_arena_test_assert.equals(catalog.max_entries, 64, "entry cap")
+    local record = catalog.factions.stalker.ranks.legend
+    gamma_arena_test_assert.equals(record.alias, "gamma_arena_stalker_legend", "rank alias")
+    gamma_arena_test_assert.equals(record.community, "stalker", "rank community")
+    gamma_arena_test_assert.equals(record.loadout_section, "stalker_legend", "rank loadout")
+    gamma_arena_test_assert.equals(record.minimum, 700, "legend intersection minimum")
+    gamma_arena_test_assert.equals(record.maximum, 899, "legend terminal maximum comes from profile")
+    gamma_arena_test_assert.equals(record.threat, 400, "rank record threat")
+    assert_array_same(record.primary_weapons, { "wpn_rifle", "wpn_shotgun" }, "sorted primary pool")
+    assert_array_same(record.secondary_weapons, { "wpn_pistol" }, "sorted secondary pool")
+end
+
+local function rejects_non_monotonic_thresholds()
+    local loaded = gamma_arena_rank_catalog.load(fixture_source({ non_monotonic = true }), legacy_catalog())
+    gamma_arena_test_assert.is_false(loaded.ok, "non-monotonic thresholds must fail")
+    gamma_arena_test_assert.equals(loaded.error.code, "GA_RANK_THRESHOLD_INVALID", "non-monotonic threshold code")
+end
+
+local function rejects_empty_profile_rank_intersection()
+    local loaded = gamma_arena_rank_catalog.load(fixture_source({ empty_intersection = true }), legacy_catalog())
+    gamma_arena_test_assert.is_false(loaded.ok, "empty profile/rank intersection must fail")
+    gamma_arena_test_assert.equals(loaded.error.code, "GA_RANK_PROFILE_RANGE_EMPTY", "empty intersection code")
+end
+
+local function rejects_missing_expert_loadout_pool()
+    local loaded = gamma_arena_rank_catalog.load(fixture_source({ missing_expert_loadout = true }), legacy_catalog())
+    gamma_arena_test_assert.is_false(loaded.ok, "missing expert loadout must fail")
+    gamma_arena_test_assert.equals(loaded.error.code, "GA_RANK_LOADOUT_MISSING", "missing loadout code")
+end
+
+local function rejects_missing_alias()
+    local loaded = gamma_arena_rank_catalog.load(fixture_source({ missing_alias = true }), legacy_catalog())
+    gamma_arena_test_assert.is_false(loaded.ok, "missing rank alias must fail")
+    gamma_arena_test_assert.equals(loaded.error.code, "GA_RANK_ALIAS_MISSING", "missing alias code")
+end
+
+local function rejects_duplicate_faction()
+    local loaded = gamma_arena_rank_catalog.load(fixture_source({ duplicate_faction = true }), legacy_catalog())
+    gamma_arena_test_assert.is_false(loaded.ok, "duplicate faction must fail")
+    gamma_arena_test_assert.equals(loaded.error.code, "GA_RANK_FACTION_DUPLICATE", "duplicate faction code")
+end
+
+local function enumeration_order_is_stable()
+    local forward = assert_rank_catalog()
+    local reverse_catalog = assert_rank_catalog({ reverse_enumeration = true })
+    for _, faction_id in ipairs(FACTION_IDS) do
+        for _, rank_id in ipairs(RANK_IDS) do
+            local left = forward.factions[faction_id].ranks[rank_id]
+            local right = reverse_catalog.factions[faction_id].ranks[rank_id]
+            assert_array_same(left.primary_weapons, right.primary_weapons, "primary enumeration stability")
+            assert_array_same(left.secondary_weapons, right.secondary_weapons, "secondary enumeration stability")
+        end
+    end
+end
+
+local cases = {
+    { name = "rank_catalog_exposes_all_exact_ranks", fn = exposes_all_exact_ranks },
+    { name = "rank_catalog_exposes_exact_faction_rank_records", fn = exposes_exact_faction_rank_records },
+    { name = "rank_catalog_rejects_non_monotonic_thresholds", fn = rejects_non_monotonic_thresholds },
+    { name = "rank_catalog_rejects_empty_profile_rank_intersection", fn = rejects_empty_profile_rank_intersection },
+    { name = "rank_catalog_rejects_missing_expert_loadout_pool", fn = rejects_missing_expert_loadout_pool },
+    { name = "rank_catalog_rejects_missing_alias", fn = rejects_missing_alias },
+    { name = "rank_catalog_rejects_duplicate_faction", fn = rejects_duplicate_faction },
+    { name = "rank_catalog_enumeration_order_is_stable", fn = enumeration_order_is_stable }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end
