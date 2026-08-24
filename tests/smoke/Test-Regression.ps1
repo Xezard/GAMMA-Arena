@@ -500,7 +500,7 @@ function Orchestrator:show_defeat()
 end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_actor_adapter.script' @'
-local markers = "normalize_for_arena verify_inventory_empty apply_loadout update_loadout reset_for_rematch hold_after_logical_death cleanup_loadout_for_restore release_logical_death_hold begin_update iterate_inventory release_item_id set_health_ex set_actor_condition power radiation bleeding psy_health give_money disable_effects_timer set_actor_position set_actor_direction input_owned GA_ACTOR_INACTIVE mod_body_health_reset inventory_drain last_progress_at submitted_ids remaining_ids poll_count last_count = 0 inventory_drain_timeout_ms elapsed_since_progress_ms total_elapsed_ms item_section snapshot_inventory owned.value ~= actor"
+local markers = "normalize_for_arena verify_inventory_empty apply_loadout update_loadout reset_for_rematch hold_after_logical_death cleanup_loadout_for_restore release_logical_death_hold begin_update iterate_inventory release_item_id set_health_ex set_actor_condition power radiation bleeding psy_health give_money disable_effects_timer set_actor_position set_actor_direction input_owned GA_ACTOR_INACTIVE mod_body_health_reset inventory_drain last_progress_at submitted_ids remaining_ids poll_count last_count = 0 inventory_drain_timeout_ms elapsed_since_progress_ms total_elapsed_ms item_section snapshot_inventory parent_id_matches_actor owned_actor_id requested_actor_id"
 local parent_method = "parent"
 local effects = { "bleeding", 1 }
 local function set_actor_condition(actor, field_name, value) actor[field_name] = value end
@@ -942,6 +942,17 @@ end
     Write-FixtureFile $UnverifiedExoFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $UnverifiedExo
     $UnverifiedExoResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $UnverifiedExoFixture) -CaptureOutput
     Assert-True ($UnverifiedExoResult.ExitCode -ne 0 -and $UnverifiedExoResult.Output -match 'Powered-exo CHARGE_OUTFIT must initialize fresh state, then read back and verify 100-percent charge after writing it\.') 'Static policy must reject a powered exo write without CHARGE_OUTFIT readback verification.'
+
+    $NativeEqualityFixture = New-Task7Fixture 'native-game-object-equality'
+    $NativeEqualityPath = Join-Path $NativeEqualityFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script'
+    $NativeEqualityContent = Get-Content -LiteralPath $NativeEqualityPath -Raw
+    $NativeEqualityNeedle = 'if not parent_id_matches_actor then'
+    Assert-True (([regex]::Matches($NativeEqualityContent, [regex]::Escape($NativeEqualityNeedle))).Count -eq 1) 'Native-equality negative fixture must find exactly one parent-ID ownership guard.'
+    $NativeEqualityMutant = $NativeEqualityContent.Replace($NativeEqualityNeedle, 'if parent ~= actor or not parent_id_matches_actor then')
+    Assert-True ($NativeEqualityMutant -ne $NativeEqualityContent) 'Native-equality negative fixture must reintroduce one unsafe comparison.'
+    Write-FixtureFile $NativeEqualityFixture 'src\gamedata\scripts\gamma_arena_actor_adapter.script' $NativeEqualityMutant
+    $NativeEqualityResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $NativeEqualityFixture) -CaptureOutput
+    Assert-True ($NativeEqualityResult.ExitCode -ne 0 -and $NativeEqualityResult.Output -match 'Actor inventory ownership must not compare native game_object values') 'Static policy must reject native game_object equality through its intended diagnostic.'
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
     $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'

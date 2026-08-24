@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.
 - Retained bootstrap diagnostics when Arena launch validation fails.
