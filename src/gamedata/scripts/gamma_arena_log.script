@@ -1,3 +1,6 @@
+local MAX_NATIVE_PAYLOAD_BYTES = 1024
+local CHUNK_BODY_BYTES = 896
+
 local function safe_tostring(value)
     local ok, text = pcall(tostring, value)
     if ok then
@@ -90,8 +93,24 @@ local function format_context(context)
     return " context=<unserializable>"
 end
 
+local function emit_native(native_payload)
+    pcall(printf, "%s", native_payload)
+end
+
 local function write(code, message, context)
-    pcall(printf, "[GammaArena][%s] %s%s", safe_tostring(code), safe_tostring(message), format_context(context))
+    local logical_line = "[GammaArena][" .. safe_tostring(code) .. "] "
+        .. safe_tostring(message) .. format_context(context)
+    if #logical_line <= MAX_NATIVE_PAYLOAD_BYTES then
+        emit_native(logical_line)
+        return
+    end
+    local total = math.ceil(#logical_line / CHUNK_BODY_BYTES)
+    for part = 1, total do
+        local first = ((part - 1) * CHUNK_BODY_BYTES) + 1
+        local body = string.sub(logical_line, first, first + CHUNK_BODY_BYTES - 1)
+        local native_payload = "[GammaArena][GA_LOG_CHUNK " .. tostring(part) .. "/" .. tostring(total) .. "] " .. body
+        if #native_payload <= MAX_NATIVE_PAYLOAD_BYTES then emit_native(native_payload) end
+    end
 end
 
 function info(code, message, context)

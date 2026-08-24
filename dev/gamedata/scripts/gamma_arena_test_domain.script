@@ -36,6 +36,44 @@ local function log_context_key_policy_is_safe()
     gamma_arena_test_assert.is_true(logged, "logging must not depend on unsupported key identity")
 end
 
+local function log_native_payload_is_bounded_and_reconstructable()
+    local original_printf = printf
+    local calls = {}
+    printf = function(format, payload)
+        calls[#calls + 1] = { format = format, payload = payload }
+    end
+    local message = string.rep("m", 2600)
+    local context_value = string.rep("c", 2600)
+    local called, reason = pcall(gamma_arena_log.info, "GA_TEST_LONG", message, { payload = context_value })
+    printf = original_printf
+    gamma_arena_test_assert.is_true(called, "long logger call remains protected: " .. tostring(reason))
+    gamma_arena_test_assert.is_true(#calls > 1, "oversized logical line is split")
+    local pieces = {}
+    for index, call in ipairs(calls) do
+        gamma_arena_test_assert.equals(call.format, "%s", "native logger always uses a constant format")
+        gamma_arena_test_assert.is_true(#call.payload <= 1024, "native logger payload stays bounded")
+        local part, total, body = string.match(call.payload, "^%[GammaArena%]%[GA_LOG_CHUNK (%d+)/(%d+)%] (.*)$")
+        gamma_arena_test_assert.equals(tonumber(part), index, "chunk part is ordered")
+        gamma_arena_test_assert.equals(tonumber(total), #calls, "chunk total is stable")
+        pieces[#pieces + 1] = body
+    end
+    local expected = "[GammaArena][GA_TEST_LONG] " .. message
+        .. " context={string:7:payload=" .. string.format("%q", context_value) .. "}"
+    gamma_arena_test_assert.equals(table.concat(pieces), expected, "chunks reconstruct the complete logical line")
+end
+
+local function log_small_payload_remains_one_line()
+    local original_printf = printf
+    local calls = {}
+    printf = function(format, payload) calls[#calls + 1] = { format = format, payload = payload } end
+    local called = pcall(gamma_arena_log.info, "GA_TEST_SMALL", "small", { value = true })
+    printf = original_printf
+    gamma_arena_test_assert.is_true(called, "small logger call remains protected")
+    gamma_arena_test_assert.equals(#calls, 1, "small payload remains one native call")
+    gamma_arena_test_assert.equals(calls[1].format, "%s", "small payload uses constant format")
+    gamma_arena_test_assert.equals(calls[1].payload, "[GammaArena][GA_TEST_SMALL] small context={string:5:value=true}", "small visible line stays exact")
+end
+
 local function rng_seed_normalization()
     gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(0), 1, "zero seed")
     gamma_arena_test_assert.equals(gamma_arena_rng.normalize_uint32(1), 1, "one seed")
@@ -142,6 +180,8 @@ local cases = {
     { name = "result_shapes", fn = result_shapes },
     { name = "log_context_is_safe", fn = log_context_is_safe },
     { name = "log_context_key_policy_is_safe", fn = log_context_key_policy_is_safe },
+    { name = "log_native_payload_is_bounded_and_reconstructable", fn = log_native_payload_is_bounded_and_reconstructable },
+    { name = "log_small_payload_remains_one_line", fn = log_small_payload_remains_one_line },
     { name = "rng_seed_normalization", fn = rng_seed_normalization },
     { name = "rng_normalizes_non_finite_seed", fn = rng_normalizes_non_finite_seed },
     { name = "rng_known_sequence", fn = rng_known_sequence },

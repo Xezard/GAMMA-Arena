@@ -1205,6 +1205,12 @@ if (Test-Path -LiteralPath $Task2LogPath) {
     Assert-True ($Task2LogContent -match 'seen_keys\s*\[\s*canonical\s*\]') 'Logger must handle canonical key collisions without depending on pairs order'
     Assert-True ($Task2LogContent -match '<canonical-key-collision>') 'Logger must emit a stable collision placeholder'
     Assert-True ($Task2LogContent -match 'pcall\s*\(\s*printf\s*,') 'Logger must protect the printf sink with pcall'
+    foreach ($BoundedLogMarker in @('MAX_NATIVE_PAYLOAD_BYTES = 1024','CHUNK_BODY_BYTES = 896','GA_LOG_CHUNK','pcall(printf, "%s", native_payload)')) {
+        Assert-True ($Task2LogContent.Contains($BoundedLogMarker)) "Logger bounded native-sink contract is missing: $BoundedLogMarker"
+    }
+    foreach ($BoundedLogCase in @('log_native_payload_is_bounded_and_reconstructable','log_small_payload_remains_one_line')) {
+        Assert-True ($Task4DomainTestContent.Contains($BoundedLogCase)) "Logger runtime regression is missing: $BoundedLogCase"
+    }
 }
 if (Test-Path -LiteralPath $Task2RngPath) {
     $Task2RngContent = Get-Content -LiteralPath $Task2RngPath -Raw
