@@ -46,6 +46,10 @@ local function positive_integer(value)
     return gamma_arena_number.is_positive_integer(value) and value <= MAX_SAFE_INTEGER
 end
 
+local function valid_vertex(value)
+    return gamma_arena_number.is_integer(value) and value >= 0 and value < 4294967295
+end
+
 local function dense_array(value, path, allow_empty)
     if type(value) ~= "table" then
         return nil, failure("GA_FIGHTSPEC_ARRAY_INVALID", "FightSpec array must be a table", { path = path })
@@ -217,7 +221,7 @@ local function validate_layout(layout)
         local position = type(slot) == "table" and copy_position(slot.position) or nil
         if type(slot) ~= "table" or not text(slot.id) or slots[slot.id] or not text(slot.base_route)
             or not routes[slot.base_route] or type(slot.native) ~= "boolean" or position == nil
-            or not non_negative_integer(slot.level_vertex_id) or not non_negative_integer(slot.game_vertex_id) then
+            or not valid_vertex(slot.level_vertex_id) or not valid_vertex(slot.game_vertex_id) then
             return nil, failure("GA_FIGHTSPEC_LAYOUT_INVALID", "Resolved physical spawn slot is invalid", { index = index })
         end
         slots[slot.id] = {
@@ -335,15 +339,19 @@ local function validate_runtime_profile(runtime, opponent, profile)
     return gamma_arena_result.ok(true)
 end
 
-local function validate_opponent(opponent, index, catalog, resolved, used_spawns, runtime)
+local function validate_opponent(opponent, index, catalog, resolved, used_opponent_slots, used_spawns, runtime)
     local path = "spec.opponents." .. tostring(index)
     local invalid = exact_keys(opponent, OPPONENT_KEYS, path)
     if invalid then return invalid end
-    if not positive_integer(opponent.slot) or opponent.slot ~= index or not text(opponent.faction)
+    if not positive_integer(opponent.slot) or not text(opponent.faction)
         or not text(opponent.profile) or not PARTICIPANT_ROLES[opponent.role]
         or not text(opponent.spawn_slot_id) or not text(opponent.tactical_route) then
         return failure("GA_FIGHTSPEC_OPPONENT_INVALID", "Opponent fields are invalid", { index = index })
     end
+    if used_opponent_slots[opponent.slot] then
+        return failure("GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE", "Opponent logical slots must be unique", { index = index, slot = opponent.slot })
+    end
+    used_opponent_slots[opponent.slot] = true
     local faction = catalog.factions[opponent.faction]
     if type(faction) ~= "table" then
         return failure("GA_FIGHTSPEC_FACTION_UNKNOWN", "Opponent faction is not cataloged", { index = index })
@@ -375,7 +383,8 @@ local function validate_opponent(opponent, index, catalog, resolved, used_spawns
     invalid = exact_keys(opponent.spawn.position, POSITION_KEYS, path .. ".spawn.position")
     if invalid then return invalid end
     local position = copy_position(opponent.spawn.position)
-    if position == nil or not same_position(position, physical.position)
+    if position == nil or not valid_vertex(opponent.spawn.level_vertex_id)
+        or not valid_vertex(opponent.spawn.game_vertex_id) or not same_position(position, physical.position)
         or opponent.spawn.level_vertex_id ~= physical.level_vertex_id
         or opponent.spawn.game_vertex_id ~= physical.game_vertex_id then
         return failure("GA_FIGHTSPEC_SPAWN_INVALID", "Opponent spawn does not match the resolved physical slot", { index = index })
@@ -437,9 +446,9 @@ local function validate_impl(spec, catalog, layout, runtime)
     if opponent_error or opponent_count > resolved.slot_count then
         return failure("GA_FIGHTSPEC_OPPONENT_INVALID", "FightSpec opponent array exceeds resolved capacity")
     end
-    local used_spawns = {}
+    local used_opponent_slots, used_spawns = {}, {}
     for index = 1, opponent_count do
-        local opponent = validate_opponent(spec.opponents[index], index, catalog, resolved, used_spawns, runtime)
+        local opponent = validate_opponent(spec.opponents[index], index, catalog, resolved, used_opponent_slots, used_spawns, runtime)
         if not opponent.ok then return opponent end
     end
 

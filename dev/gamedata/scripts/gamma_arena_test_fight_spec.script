@@ -234,6 +234,29 @@ local function valid_spec()
     return result.value
 end
 
+local function two_opponent_spec()
+    local draft = item_draft()
+    local second = clone(draft.opponents[1])
+    second.slot = 2
+    second.role = "primary"
+    second.spawn_slot_id = "virtual_02"
+    second.spawn = { position = { x = 3, y = 0, z = 4 }, level_vertex_id = 124, game_vertex_id = 457 }
+    second.tactical_route = "route_2"
+    draft.opponents[2] = second
+    local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "two-opponent v6 fixture canonicalizes")
+    return result.value
+end
+
+local function spec_with_vertex(field, value)
+    local draft, arena = item_draft(), layout()
+    draft.opponents[1].spawn[field] = value
+    arena.opponent_spawn_slots[1][field] = value
+    local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), arena)
+    gamma_arena_test_assert.is_true(result.ok, "vertex-boundary v6 fixture canonicalizes")
+    return result.value, arena
+end
+
 local function remove_item(items, section)
     for index = #items, 1, -1 do
         if items[index].section == section then table.remove(items, index) end
@@ -345,7 +368,7 @@ local function validator_rejects_mutation_matrix()
         { name = "item slot", mutate = function(value) value.actor.items[1].equipped_slot = "weapon_1" end },
         { name = "item order", mutate = function(value) value.actor.items[1], value.actor.items[2] = value.actor.items[2], value.actor.items[1] end },
         { name = "duplicate physical item", mutate = function(value) table.insert(value.actor.items, clone(value.actor.items[#value.actor.items])) end },
-        { name = "opponent slot", mutate = function(value) value.opponents[1].slot = 2 end },
+        { name = "opponent slot bounds", mutate = function(value) value.opponents[1].slot = 0 end },
         { name = "opponent faction", mutate = function(value) value.opponents[1].faction = "unknown" end },
         { name = "opponent named rank", mutate = function(value) value.opponents[1].rank.id = "legend" end },
         { name = "opponent named rank band", mutate = function(value) value.opponents[1].rank.value = 50000 end },
@@ -364,6 +387,57 @@ local function validator_rejects_mutation_matrix()
         gamma_arena_test_assert.is_false(
             gamma_arena_fight_validator_v6.validate(forged, catalog(), layout()).ok,
             "mutation must fail: " .. case.name)
+    end
+end
+
+local function validator_accepts_unique_nonsequential_logical_slots()
+    local draft = item_draft()
+    draft.opponents[1].slot = 2
+    local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(canonical.ok, "Task 3 canonicalizer accepts a unique logical slot 2")
+    local result = gamma_arena_fight_validator_v6.validate(canonical.value, catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "v6 validator accepts a unique nonsequential logical slot")
+    gamma_arena_test_assert.equals(result.value.opponents()[1].slot, 2, "immutable view retains logical slot")
+end
+
+local function validator_distinguishes_duplicate_logical_and_physical_slots()
+    local logical = two_opponent_spec()
+    logical.opponents[2].slot = logical.opponents[1].slot
+    local logical_result = gamma_arena_fight_validator_v6.validate(logical, catalog(), layout())
+    gamma_arena_test_assert.is_false(logical_result.ok, "duplicate logical opponent slots fail")
+    gamma_arena_test_assert.equals(logical_result.error.code, "GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE", "logical slot duplicate code")
+
+    local physical = two_opponent_spec()
+    physical.opponents[2].spawn_slot_id = physical.opponents[1].spawn_slot_id
+    physical.opponents[2].spawn = clone(physical.opponents[1].spawn)
+    local physical_result = gamma_arena_fight_validator_v6.validate(physical, catalog(), layout())
+    gamma_arena_test_assert.is_false(physical_result.ok, "duplicate physical spawn slots fail")
+    gamma_arena_test_assert.equals(physical_result.error.code, "GA_FIGHTSPEC_SPAWN_INVALID", "physical spawn duplicate remains distinct")
+end
+
+local function validator_enforces_engine_vertex_uint32_boundaries()
+    for _, case in ipairs({
+        { field = "level_vertex_id", value = 0 },
+        { field = "level_vertex_id", value = 4294967294 },
+        { field = "game_vertex_id", value = 0 },
+        { field = "game_vertex_id", value = 4294967294 }
+    }) do
+        local spec, arena = spec_with_vertex(case.field, case.value)
+        gamma_arena_test_assert.is_true(
+            gamma_arena_fight_validator_v6.validate(spec, catalog(), arena).ok,
+            "engine vertex boundary is valid: " .. case.field .. "=" .. tostring(case.value))
+    end
+
+    for _, case in ipairs({
+        { field = "level_vertex_id", value = 4294967295 },
+        { field = "level_vertex_id", value = 4294967296 },
+        { field = "game_vertex_id", value = 4294967295 },
+        { field = "game_vertex_id", value = 4294967296 }
+    }) do
+        local spec, arena = spec_with_vertex(case.field, case.value)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v6.validate(spec, catalog(), arena).ok,
+            "engine vertex boundary is rejected: " .. case.field .. "=" .. tostring(case.value))
     end
 end
 
@@ -421,6 +495,9 @@ function run(run_case_fn)
         { name = "fight_validator_v6_rejects_unknown_keys_at_every_schema_level", fn = validator_rejects_unknown_keys_at_every_schema_level },
         { name = "fight_validator_v6_rejects_generation_provenance_recursively", fn = validator_rejects_generation_provenance_recursively },
         { name = "fight_validator_v6_rejects_mutation_matrix", fn = validator_rejects_mutation_matrix },
+        { name = "fight_validator_v6_accepts_unique_nonsequential_logical_slots", fn = validator_accepts_unique_nonsequential_logical_slots },
+        { name = "fight_validator_v6_distinguishes_duplicate_logical_and_physical_slots", fn = validator_distinguishes_duplicate_logical_and_physical_slots },
+        { name = "fight_validator_v6_enforces_engine_vertex_uint32_boundaries", fn = validator_enforces_engine_vertex_uint32_boundaries },
         { name = "fight_validator_v6_enforces_physical_participant_contracts", fn = validator_enforces_physical_participant_contracts },
         { name = "fight_validator_v6_rejects_invalid_catalog_and_layout_without_mutation", fn = validator_rejects_invalid_catalog_and_layout_without_mutation }
     }) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
