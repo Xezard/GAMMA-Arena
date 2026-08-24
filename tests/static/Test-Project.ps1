@@ -190,6 +190,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_medical_generator.script'; Namespace = 'gamma_arena_medical_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+allocate_enemies\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_npc_medical.script'; Namespace = 'gamma_arena_npc_medical'; Required = @('(?m)^function\s+new\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_layout_adapter.script'; Namespace = 'gamma_arena_layout_adapter'; Required = @('(?m)^function\s+new\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
@@ -530,6 +531,9 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
     Assert-True ($Task5CompatContent -match 'engine_callable_present') 'Preflight must accept callable engine objects whose Lua type is not function'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.ini_file\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable ini_file engine object by Lua type'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.patrol\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable patrol engine object by Lua type'
+    foreach ($Marker in @('npc_medical_ini','medkits','bandages','GA_NPC_MEDICAL_AI_CONFLICT')) {
+        Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "NPC medical compatibility preflight must cover $Marker"
+    }
 }
 
 $Task5OrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
@@ -576,6 +580,9 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     $Task5BeforeDeathBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:actor_on_before_death[\s\S]*?[\r\n]+end').Value
     Assert-True ($Task5BeforeDeathBlock -notmatch 'ret_value|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
     Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:(show_defeat|defeat_next_action)') 'Natural death must remove the in-level logical-defeat UI and retry path'
+    foreach ($Marker in @('npc_medical','start_npc_medical','update_npc_medical','stop_npc_medical')) {
+        Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator must compose NPC medical lifecycle marker $Marker"
+    }
 }
 
 $Task5StorePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script'
@@ -936,6 +943,8 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'expected_created_quantity') 'Opponent loadout must derive exact ammo allocation when server quantity is unavailable'
     Assert-True ($Task7EntityContent -match 'community\s*=\s*participant\.community') 'Entity adapter participant copies must preserve dynamic FightSpec community'
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
+    $MedicalActivationBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:drive_online[\s\S]*?function\s+EntityAdapter:add_cleanup_error').Value
+    Assert-True ($MedicalActivationBlock.IndexOf('hidden_charge_cleared') -ge 0 -and $MedicalActivationBlock.IndexOf('clear_hidden_charge') -lt $MedicalActivationBlock.IndexOf('set_actor_hostile')) 'Entity activation must clear stock hidden healing before combat hostility'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:consume_medical_item\s*\(') 'Entity adapter must expose guarded physical medicine consumption'
     foreach ($Marker in @('GA_ENTITY_MEDICAL_FIGHT_STALE','release_reason','consumed','current_fight_id')) {
         Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Physical medicine consumption must cover $Marker"
@@ -979,6 +988,9 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($Task5BootstrapContent -match 'local\s+function\s+entity_ammo_quantity[\s\S]{0,900}return\s+nil\s*[\r\n]+end') 'NPC production quantity port must expose unavailable server ammo quantity as nil for exact box-size derivation'
     Assert-True ($Task5BootstrapContent -notmatch 'Ammo server entity does not expose its exact round count') 'NPC production quantity port must not turn unavailable server binding metadata into a fatal Result'
     Assert-True ($Task5BootstrapContent -notmatch 'ensure_entity_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'Bootstrap must leave NPC weapon selection to combat AI after validated inventory ownership'
+    foreach ($Marker in @('gamma_arena_npc_medical.new','healing_charge','change_health','cap_bleeding','npc_medical_ini')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Bootstrap NPC medical composition must cover $Marker"
+    }
     $Task11HostilityBlock = [regex]::Match($Task5BootstrapContent, 'function\s+apply_actor_hostility[\s\S]*?local\s+function\s+apply_actor_activation_hold').Value
     Assert-True ($Task11HostilityBlock -match 'set_relation[\s\S]*force_set_goodwill') 'Hostile activation must apply relation then goodwill'
     Assert-True ($Task11HostilityBlock -notmatch 'make_object_visible_somewhen|set_enemy') 'Hostile activation must not seed omniscient memory or force a current target'
@@ -1017,6 +1029,18 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_entity_consumes_owned_medical_item_once','runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Physical medicine Dev tests must cover $Marker"
     }
+    foreach ($Marker in @('runtime_preflight_rejects_npc_medical_ai_conflict','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
+    }
+}
+
+$NpcMedicalPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
+if (Test-Path -LiteralPath $NpcMedicalPath) {
+    $NpcMedicalContent = Get-Content -LiteralPath $NpcMedicalPath -Raw
+    foreach ($Marker in @('RECONCILE_INTERVAL_MS = 250','MEDICAL_EPOCH = 1','HEALTH_THRESHOLD = 0.60','BLEEDING_THRESHOLD = 0.15','MEDKIT_PULSES = 13','MEDKIT_HEALTH_PER_PULSE = 0.05','MEDKIT_BLEEDING_CAP = 0.01','BANDAGE_BLEEDING_CAP = 0.07','action_ordinal','GA_NPC_MEDICAL_SCHEDULED','GA_NPC_MEDICAL_CONSUMED','GA_NPC_MEDICAL_CANCELLED','GA_NPC_MEDICAL_COMPLETED')) {
+        Assert-True ($NpcMedicalContent -match [regex]::Escape($Marker)) "NPC medical state machine must contain $Marker"
+    }
+    Assert-True ($NpcMedicalContent -notmatch '\bmath\.(random|randomseed)\b') 'NPC medical state machine must not use global randomness'
 }
 
 $Task3DataFiles = @(

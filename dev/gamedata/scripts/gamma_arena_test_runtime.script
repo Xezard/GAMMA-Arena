@@ -38,6 +38,7 @@ local function all_sections(snapshot)
     for _, ammo in pairs(snapshot.ammo) do sections[ammo.section] = { box_size = 20 } end
     for _, outfit in ipairs(snapshot.outfit_list) do sections[outfit.section] = {} end
     for _, consumable in pairs(snapshot.consumables) do sections[consumable.section] = {} end
+    for _, medical in pairs(snapshot.medical_items or {}) do sections[medical.section] = {} end
     return sections
 end
 
@@ -107,6 +108,12 @@ local function valid_preflight_probes()
     function tactical_ini:r_u32(section, key) return section == "director" and tactical_values[key] or nil end
     function tactical_ini:r_string_ex(section, key) return section == "director" and tactical_values[key] or nil end
 
+    local npc_medical_values = {}
+    local npc_medical_ini = {}
+    function npc_medical_ini:section_exist(section) return section == "plugin" end
+    function npc_medical_ini:line_exist(section, key) return section == "plugin" and npc_medical_values[key] ~= nil end
+    function npc_medical_ini:r_string_ex(section, key) return section == "plugin" and npc_medical_values[key] or nil end
+
     local fs = {}
     function fs:update_path() return "C:\\fake\\appdata\\savedgames\\" end
     function fs:exist() return false end
@@ -159,7 +166,7 @@ local function valid_preflight_probes()
             enable_input = function() return true end
         },
         db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
-        game_object = { friend = 1, enemy = 2 },
+        game_object = { friend = 1, enemy = 2, name = function() return "test_npc" end, change_health = function() return true end },
         xr_logic = {
             configure_schemes = function() return true end,
             activate_by_section = function() return true end,
@@ -167,6 +174,7 @@ local function valid_preflight_probes()
         },
         modules = { stype_stalker = 1 },
         tactical_ini = function() return tactical_ini end,
+        npc_medical_ini = function() return npc_medical_ini end,
         relation_registry = { set_goodwill = function() return true end },
         axr_main = { config = config },
         safe_release_manager = { release = function() return true end },
@@ -174,7 +182,8 @@ local function valid_preflight_probes()
         _sections = sections,
         _positions = positions,
         _tactical_values = tactical_values,
-        _tactical_sections = tactical_sections
+        _tactical_sections = tactical_sections,
+        _npc_medical_values = npc_medical_values
     }
     return probes
 end
@@ -268,6 +277,16 @@ local function preflight_requires_tactical_director_config()
         local result = gamma_arena_compat.preflight(probes)
         gamma_arena_test_assert.is_false(result.ok, "invalid tactical config fails: " .. case.label)
         gamma_arena_test_assert.is_true(string.find(error_codes(result), case.code, 1, true) ~= nil, "stable tactical config code: " .. case.label)
+    end
+end
+
+local function preflight_rejects_npc_medical_ai_conflict()
+    for _, key in ipairs({ "medkits", "bandages" }) do
+        local probes = valid_preflight_probes()
+        probes._npc_medical_values[key] = key == "medkits" and "medkit" or "bandage"
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "stock physical-item consumer conflict fails: " .. key)
+        gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_MEDICAL_AI_CONFLICT", 1, true) ~= nil, "stock consumer conflict has a stable code: " .. key)
     end
 end
 
@@ -3227,7 +3246,8 @@ local function fake_entity_environment(options)
         tactical_warnings = {},
         warning_records = {},
         warnings_by_code = {},
-        terminal_transitions = {}
+        terminal_transitions = {},
+        hidden_charge_clears = 0
     }
 
     local function server_entity(id, section, parent_id, quantity)
@@ -3455,6 +3475,11 @@ local function fake_entity_environment(options)
             if options.fail_phase == "death_flag_read" then error("injected death flag read failure") end
             if options.death_flag_roundtrip_false then return false end
             return env.death_flags[id]
+        end,
+        clear_hidden_charge = function(id)
+            env.hidden_charge_clears = env.hidden_charge_clears + 1
+            env.events[#env.events + 1] = "hidden_charge:" .. tostring(id)
+            return gamma_arena_result.ok(true)
         end,
         release = function(descriptor)
             env.release_requests[#env.release_requests + 1] = descriptor.id
@@ -5681,13 +5706,16 @@ local function runtime_entity_relations_friend_first_then_actor_hostile()
     local adapter = gamma_arena_entity_adapter.new(deps)
     begin_entity_apply(adapter, env, entity_spec(2), "session-relations"); local result, snapshot = pump_entity(adapter, env)
     gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "relations complete before ACTIVE")
-    local first_friend, first_hostile = nil, nil
+    local first_friend, first_hidden_clear, first_hostile = nil, nil, nil
     for index, event in ipairs(env.events) do
         if first_friend == nil and string.find(event, "^friend:") then first_friend = index end
+        if first_hidden_clear == nil and string.find(event, "^hidden_charge:") then first_hidden_clear = index end
         if first_hostile == nil and string.find(event, "^hostile:") then first_hostile = index end
         if string.find(event, "^hostile:") then gamma_arena_test_assert.is_true(string.find(event, ":-5000$") ~= nil, "actor goodwill is exactly -5000") end
     end
     gamma_arena_test_assert.is_true(first_friend ~= nil and first_hostile ~= nil and first_friend < first_hostile, "all NPC friendship is established before actor hostility")
+    gamma_arena_test_assert.is_true(first_hidden_clear ~= nil and first_hidden_clear < first_hostile, "stock hidden healing charges are cleared before hostility activates combat")
+    gamma_arena_test_assert.equals(env.hidden_charge_clears, 2, "every registered opponent clears its hidden healing charge once before ACTIVE")
 end
 
 local function runtime_entity_tactical_begin_precedes_hostility()
@@ -5897,7 +5925,11 @@ local function task8_environment(options)
         actor_loadout_cleanup = 0,
         inventory_pending = options.inventory_pending == true,
         inventory_verify_calls = 0,
-        integrity_fault = nil
+        integrity_fault = nil,
+        npc_medical_starts = 0,
+        npc_medical_updates = 0,
+        npc_medical_stops = 0,
+        npc_medical_stop_reasons = {}
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
@@ -5962,6 +5994,24 @@ local function task8_environment(options)
         return gamma_arena_result.ok(true)
     end
     function entities:registry_snapshot() return clone(env.registry) end
+    local npc_medical = {}
+    function npc_medical:start(fight)
+        self.active = true
+        env.npc_medical_starts = env.npc_medical_starts + 1
+        env.npc_medical_fight_id = fight.fight_id
+        return gamma_arena_result.ok(true)
+    end
+    function npc_medical:update()
+        env.npc_medical_updates = env.npc_medical_updates + 1
+        return gamma_arena_result.ok(true)
+    end
+    function npc_medical:stop(reason)
+        if not self.active then return gamma_arena_result.ok(false) end
+        self.active = false
+        env.npc_medical_stops = env.npc_medical_stops + 1
+        env.npc_medical_stop_reasons[#env.npc_medical_stop_reasons + 1] = reason
+        return gamma_arena_result.ok(true)
+    end
     local store
     local checkpoint = { current = "READY" }
     function checkpoint:create() env.checkpoint_create = env.checkpoint_create + 1; return gamma_arena_result.ok(true) end
@@ -6062,6 +6112,7 @@ local function task8_environment(options)
         end,
         actor = actor,
         entities = entities,
+        npc_medical = npc_medical,
         checkpoint = checkpoint,
         layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end,
         mode_policy = gamma_arena_mode_skirmish,
@@ -6134,6 +6185,21 @@ local function runtime_wait_inventory_blocks_fight_generation_and_loadout()
     gamma_arena_test_assert.equals(env.generated, 0, "pending inventory drain blocks new FightSpec generation")
     gamma_arena_test_assert.equals(env.applied, 0, "pending inventory drain blocks actor loadout application")
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "WAIT_INVENTORY", "pending drain retains inventory wait stage")
+end
+
+local function runtime_npc_medical_lifecycle_is_active_only()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    gamma_arena_test_assert.equals(env.npc_medical_starts, 1, "NPC medical controller starts exactly when entities commit ACTIVE")
+    gamma_arena_test_assert.equals(env.npc_medical_fight_id, "ga-task8-0", "NPC medical controller binds the immutable fight id")
+    gamma_arena_test_assert.is_true(env.npc_medical_updates >= 1, "NPC medical controller updates after entity reconciliation in ACTIVE")
+    local updates = env.npc_medical_updates
+    env.living = 0
+    env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(env.npc_medical_updates > updates, "last ACTIVE reconciliation still updates medicine before victory detection")
+    env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(env.npc_medical_stops, 1, "victory stops NPC medicine before the result state")
+    gamma_arena_test_assert.equals(env.npc_medical_stop_reasons[1], "victory", "victory stop reason is explicit")
 end
 
 local function runtime_task8_generation_and_validation_fail_without_world_mutation()
@@ -7564,6 +7630,87 @@ local function runtime_entity_medical_consumption_rejects_stale_foreign_and_abse
     gamma_arena_test_assert.equals(#env.release_requests, 0, "absent medicine is never released")
 end
 
+local function npc_medical_fixture(values)
+    values = values or {}
+    local env = {
+        now = 0, health = values.health or 0.5, bleeding = values.bleeding or 0.3,
+        alive = true, combat_capable = true, consumed = {}, health_pulses = 0,
+        bleeding_caps = {}, hidden_clears = 0, logs = {}
+    }
+    env.npc = { runtime_id = 301 }
+    local registry = {
+        state = "ACTIVE",
+        npcs = { { id = 301, slot = 1, section = values.profile or "gamma_arena_bandit_veteran", terminal_state = "ALIVE", released = false } },
+        items = {
+            { id = 401, parent_id = 301, section = "medkit", role = "consumable", source = "assigned", released = false },
+            { id = 402, parent_id = 301, section = "bandage", role = "consumable", source = "assigned", released = false }
+        }
+    }
+    local controller = gamma_arena_npc_medical.new({
+        clock = function() return env.now end,
+        registry_snapshot = function() return clone(registry) end,
+        clear_hidden_charge = function() env.hidden_clears = env.hidden_clears + 1; return gamma_arena_result.ok(true) end,
+        status = function()
+            return gamma_arena_result.ok({ npc = env.npc, health = env.health, bleeding = env.bleeding, alive = env.alive, combat_capable = env.combat_capable })
+        end,
+        consume_medical_item = function(fight_id, npc_id, section)
+            if values.consume_false then return gamma_arena_result.ok(false) end
+            env.consumed[#env.consumed + 1] = section
+            for _, item in ipairs(registry.items) do if item.parent_id == npc_id and item.section == section then item.released = true end end
+            return gamma_arena_result.ok({ npc = env.npc, item_id = section == "medkit" and 401 or 402, section = section })
+        end,
+        change_health = function(npc, delta)
+            env.health_pulses = env.health_pulses + 1
+            env.health = math.min(1, env.health + delta)
+            return gamma_arena_result.ok(true)
+        end,
+        cap_bleeding = function(npc, maximum)
+            env.bleeding = math.min(env.bleeding, maximum)
+            env.bleeding_caps[#env.bleeding_caps + 1] = maximum
+            return gamma_arena_result.ok(true)
+        end,
+        log = function(code) env.logs[#env.logs + 1] = code; return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(controller:start({ fight_id = "ga-medical-test" }).ok, "medical controller starts")
+    function env:advance(delta) self.now = (self.now + delta) % 4294967296 end
+    return env, controller, registry
+end
+
+local function runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses()
+    local env, controller = npc_medical_fixture({ health = 0.4, bleeding = 0.8 })
+    gamma_arena_test_assert.is_true(controller:update().ok, "low health schedules medicine")
+    env:advance(1000)
+    gamma_arena_test_assert.is_true(controller:update().ok, "veteran delay expires deterministically")
+    gamma_arena_test_assert.equals(env.consumed[1], "medkit", "health has priority over bleeding")
+    for _ = 1, 12 do env:advance(250); gamma_arena_test_assert.is_true(controller:update().ok, "medkit pulse advances") end
+    gamma_arena_test_assert.equals(env.health_pulses, 13, "medkit applies exactly thirteen pulses")
+    gamma_arena_test_assert.is_true(env.health <= 1, "medkit pulses never exceed full health")
+    gamma_arena_test_assert.is_true(env.bleeding <= 0.01, "medkit caps bleeding")
+    gamma_arena_test_assert.is_true(env.hidden_clears >= 13, "hidden healing charge is cleared on every reconciliation")
+end
+
+local function runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed()
+    local env, controller = npc_medical_fixture({ health = 0.6, bleeding = 0.15 })
+    gamma_arena_test_assert.is_true(controller:update().ok, "exact thresholds do not schedule")
+    env:advance(1000); controller:update()
+    gamma_arena_test_assert.equals(#env.consumed, 0, "exact health and bleeding thresholds are strict")
+    env.bleeding = 0.16
+    env:advance(250); controller:update()
+    env:advance(1000); controller:update()
+    gamma_arena_test_assert.equals(env.consumed[1], "bandage", "bleeding above threshold consumes bandage")
+    gamma_arena_test_assert.equals(env.bleeding, 0.07, "bandage caps bleeding without adding health")
+    gamma_arena_test_assert.equals(env.health_pulses, 0, "bandage never heals health")
+
+    local cancelled, stopped = npc_medical_fixture({ health = 0.4, bleeding = 0.8 })
+    stopped:update()
+    cancelled.alive = false
+    cancelled:advance(1000); stopped:update()
+    gamma_arena_test_assert.equals(#cancelled.consumed, 0, "death cancels a pending action before consumption")
+    gamma_arena_test_assert.is_true(stopped:stop("teardown").ok, "teardown stops medical controller")
+    cancelled.alive = true; cancelled:advance(1000); stopped:update()
+    gamma_arena_test_assert.equals(#cancelled.consumed, 0, "stopped controller cannot consume or pulse")
+end
+
 local cases = {
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_accepts_natural_death_without_invulnerability", fn = preflight_accepts_natural_death_without_invulnerability },
@@ -7571,6 +7718,7 @@ local cases = {
     { name = "runtime_preflight_accepts_actor_condition_properties", fn = preflight_accepts_actor_condition_properties },
     { name = "runtime_preflight_requires_tactical_director_apis", fn = preflight_requires_tactical_director_apis },
     { name = "runtime_preflight_requires_tactical_director_config", fn = preflight_requires_tactical_director_config },
+    { name = "runtime_preflight_rejects_npc_medical_ai_conflict", fn = preflight_rejects_npc_medical_ai_conflict },
     { name = "runtime_preflight_aggregates_in_stable_order", fn = preflight_aggregates_in_stable_order },
     { name = "runtime_preflight_requires_task6_actor_checkpoint_ports", fn = preflight_requires_task6_actor_checkpoint_ports },
     { name = "runtime_preflight_requires_task7_entity_ports_and_ammo_metadata", fn = preflight_requires_task7_entity_ports_and_ammo_metadata },
@@ -7653,6 +7801,8 @@ local cases = {
     ,{ name = "runtime_entity_does_not_spawn_before_begin_apply", fn = runtime_entity_does_not_spawn_before_begin_apply }
     ,{ name = "runtime_entity_consumes_owned_medical_item_once", fn = runtime_entity_consumes_owned_medical_item_once }
     ,{ name = "runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items", fn = runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items }
+    ,{ name = "runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses", fn = runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses }
+    ,{ name = "runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed", fn = runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed }
     ,{ name = "runtime_entity_actor_loadout_precedes_spawn", fn = runtime_entity_actor_loadout_precedes_spawn }
     ,{ name = "runtime_entity_npcs_are_offline_until_atomic_activation", fn = runtime_entity_npcs_are_offline_until_atomic_activation }
     ,{ name = "runtime_entity_online_wait_is_bounded_and_wrap_safe", fn = runtime_entity_online_wait_is_bounded_and_wrap_safe }
@@ -7742,6 +7892,7 @@ local cases = {
     ,{ name = "runtime_orchestrator_living_count_fails_closed", fn = runtime_orchestrator_living_count_fails_closed }
     ,{ name = "runtime_task8_checkpoint_readiness_gates_generation", fn = runtime_task8_checkpoint_readiness_gates_generation }
     ,{ name = "runtime_wait_inventory_blocks_fight_generation_and_loadout", fn = runtime_wait_inventory_blocks_fight_generation_and_loadout }
+    ,{ name = "runtime_npc_medical_lifecycle_is_active_only", fn = runtime_npc_medical_lifecycle_is_active_only }
     ,{ name = "runtime_task8_generation_and_validation_fail_without_world_mutation", fn = runtime_task8_generation_and_validation_fail_without_world_mutation }
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
