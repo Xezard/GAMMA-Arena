@@ -830,6 +830,58 @@ local function random_draft_malformed_inputs_are_total_results()
     end
 end
 
+local function random_draft_nested_malformed_and_throwing_inputs_are_total_results()
+    local malformed_cases = {
+        {
+            name = "nested difficulty field",
+            mutate = function(snapshot) snapshot.difficulties.stalker.enemy_max = {} end
+        },
+        {
+            name = "profile entry",
+            mutate = function(snapshot) snapshot.profile_list[1] = "invalid-profile" end
+        },
+        {
+            name = "loadout entry",
+            mutate = function(snapshot)
+                snapshot.selection_mode = "combinations"
+                snapshot.combinations = { "invalid-loadout" }
+            end
+        },
+        {
+            name = "weapon entry",
+            mutate = function(snapshot) snapshot.weapon_list[1] = "invalid-weapon" end
+        }
+    }
+    for _, case in ipairs(malformed_cases) do
+        local snapshot = random_draft_catalogs()
+        local layout = fixture_resolved_layout(snapshot)
+        case.mutate(snapshot)
+        local called, result = pcall(function()
+            return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, snapshot, layout)
+        end)
+        gamma_arena_test_assert.is_true(called, "nested malformed " .. case.name .. " never throws")
+        gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "nested malformed " .. case.name .. " returns failed Result")
+        gamma_arena_test_assert.equals(result.error.code, "GA_RANDOM_CATALOG_INVALID", "nested malformed " .. case.name .. " catalog code")
+    end
+
+    local snapshot = random_draft_catalogs()
+    local layout = fixture_resolved_layout(snapshot)
+    local generate_actor = gamma_arena_medical_generator.generate_actor
+    gamma_arena_medical_generator.generate_actor = function() error({ private_payload = snapshot }) end
+    local called, result = pcall(function()
+        return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, snapshot, layout)
+    end)
+    gamma_arena_medical_generator.generate_actor = generate_actor
+    gamma_arena_test_assert.is_true(called, "throwing medical dependency never escapes build_draft")
+    gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "throwing medical dependency returns failed Result")
+    gamma_arena_test_assert.equals(result.error.code, "GA_RANDOM_GENERATION_FAILED", "unexpected generation failure code")
+    gamma_arena_test_assert.equals(result.error.message, "Random fight generation failed", "unexpected generation failure message is deterministic")
+    gamma_arena_test_assert.equals(result.error.context.phase, "build_draft", "unexpected generation failure exposes only a bounded phase")
+    local context_keys = 0
+    for _ in pairs(result.error.context) do context_keys = context_keys + 1 end
+    gamma_arena_test_assert.equals(context_keys, 1, "unexpected generation context cannot leak thrown values")
+end
+
 local function random_draft_matches_frozen_semantic_snapshot()
     local snapshot = random_draft_catalogs()
     local reviewed = {
@@ -1039,6 +1091,7 @@ function run(run_case_fn)
     local all_passed = true
     if not run_case_fn("random_draft_pipeline_canonicalizes_and_strictly_validates", random_draft_pipeline_canonicalizes_and_strictly_validates) then all_passed = false end
     if not run_case_fn("random_draft_malformed_inputs_are_total_results", random_draft_malformed_inputs_are_total_results) then all_passed = false end
+    if not run_case_fn("random_draft_nested_malformed_and_throwing_inputs_are_total_results", random_draft_nested_malformed_and_throwing_inputs_are_total_results) then all_passed = false end
     for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="actor_medical_generation_enforces_budget_and_healer",fn=actor_medical_generation_enforces_budget_and_healer},{name="actor_medical_generation_reaches_master_rare",fn=actor_medical_generation_reaches_master_rare},{name="enemy_medical_generation_spends_team_budget",fn=enemy_medical_generation_spends_team_budget},{name="medical_generation_100000_fights",fn=medical_generation_100000_fights},{name="fight_spec_v5_separates_gear_and_medical_costs",fn=fight_spec_v5_separates_gear_and_medical_costs},{name="medical_tuning_does_not_reroll_core_fight",fn=medical_tuning_does_not_reroll_core_fight},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v5",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v5",fn=golden_fights_v5},{name="random_draft_matches_frozen_semantic_snapshot",fn=random_draft_matches_frozen_semantic_snapshot},{name="random_numeric_rank_stream_is_isolated",fn=random_numeric_rank_stream_is_isolated}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end

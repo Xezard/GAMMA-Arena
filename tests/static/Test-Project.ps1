@@ -212,7 +212,7 @@ $Task2ItemScriptContracts = @(
 )
 
 $Task6RandomDraftContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'GA_RANDOM_CATALOG_INVALID', 'enemy_numeric_rank:', 'kind\s*=\s*"legacy"', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^local function\s+build_draft_internal\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'pcall\s*\(\s*build_draft_internal', 'GA_RANDOM_CATALOG_INVALID', 'GA_RANDOM_GENERATION_FAILED', 'enemy_numeric_rank:', 'kind\s*=\s*"legacy"', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
     [PSCustomObject]@{ Path = 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'; Required = @('golden-random-selections-v7\.txt', 'golden-fights-v5\.txt', 'Read-GaLtx', 'Independent LTX semantics differ from the reviewed v5 projection') },
     [PSCustomObject]@{ Path = 'tests\fixtures\golden-random-selections-v7.txt'; Required = @('seed=0,difficulty=rookie,fight=0', 'seed=1,difficulty=stalker,fight=0', 'seed=3735928559,difficulty=veteran,fight=7', 'seed=4294967295,difficulty=master,fight=31') }
 )
@@ -233,7 +233,7 @@ if ($Task6ArtifactsPresent) {
     $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v7.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
     Assert-True ($Task6SnapshotLines.Count -eq 4) 'Task 6 semantic snapshot must contain exactly four reviewed random scenarios.'
     $Task6GeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
-    foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
+    foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
         Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
     }
     $Task6FightSpecTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script') -Raw

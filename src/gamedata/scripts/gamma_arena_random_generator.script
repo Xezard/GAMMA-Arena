@@ -456,21 +456,118 @@ local function bind_profile_pool(catalog, source)
     return gamma_arena_result.ok(profiles)
 end
 
-local function valid_random_catalog(catalog)
+local function nonempty_text(value)
+    return type(value) == "string" and value ~= ""
+end
+
+local function valid_dense_array(values, validator, require_nonempty)
+    if type(values) ~= "table" then return false end
+    local count = 0
+    for key, value in pairs(values) do
+        if not gamma_arena_number.is_positive_integer(key) or not validator(value) then return false end
+        count = count + 1
+    end
+    return count == #values and (not require_nonempty or count > 0)
+end
+
+local function valid_weight_row(row, keys)
+    if type(row) ~= "table" then return false end
+    for _, key in ipairs(keys) do
+        if not gamma_arena_number.is_integer(row[key]) or row[key] < 0 then return false end
+    end
+    return true
+end
+
+local function valid_difficulty(difficulty)
+    if type(difficulty) ~= "table" then return false end
+    for _, key in ipairs({ "tier", "enemy_min", "enemy_max", "enemy_total_budget", "player_gear_budget", "player_medical_budget", "primary_share_percent" }) do
+        if not gamma_arena_number.is_positive_integer(difficulty[key]) then return false end
+    end
+    if difficulty.tier > 4 or difficulty.enemy_max < difficulty.enemy_min or difficulty.primary_share_percent > 100 then return false end
+    return valid_weight_row(difficulty.player_weapon_weights, PLAYER_WEAPON_CLASSES)
+        and valid_weight_row(difficulty.player_armor_weights, PLAYER_ARMOR_CLASSES)
+        and valid_weight_row(difficulty.medical_weights, { "bleed", "health", "boost", "rare" })
+end
+
+local function valid_profile(profile)
+    return type(profile) == "table" and nonempty_text(profile.section) and gamma_arena_number.is_positive_integer(profile.cost)
+end
+
+local function valid_ammo_variant(variant)
+    return type(variant) == "table" and nonempty_text(variant.section) and nonempty_text(variant.category)
+end
+
+local function valid_weapon(weapon)
+    return type(weapon) == "table" and nonempty_text(weapon.section) and nonempty_text(weapon.ammo) and nonempty_text(weapon.kind)
+        and (weapon.slot == 1 or weapon.slot == 2) and gamma_arena_number.is_positive_integer(weapon.cost)
+        and gamma_arena_number.is_positive_integer(weapon.ammo_box_min) and gamma_arena_number.is_positive_integer(weapon.ammo_box_max)
+        and weapon.ammo_box_min <= weapon.ammo_box_max
+        and valid_dense_array(weapon.ammo_variants, valid_ammo_variant, true)
+end
+
+local function valid_outfit(outfit)
+    return type(outfit) == "table" and nonempty_text(outfit.section) and nonempty_text(outfit.armor_class)
+        and gamma_arena_number.is_positive_integer(outfit.cost)
+end
+
+local function valid_knife(knife)
+    return type(knife) == "table" and nonempty_text(knife.section)
+end
+
+local function valid_medical_item(item)
+    return type(item) == "table" and nonempty_text(item.section) and nonempty_text(item.category)
+        and gamma_arena_number.is_positive_integer(item.actor_cost) and gamma_arena_number.is_integer(item.npc_cost) and item.npc_cost >= 0
+        and gamma_arena_number.is_positive_integer(item.min_tier) and gamma_arena_number.is_positive_integer(item.max_count)
+end
+
+local function valid_combination(choice)
+    return type(choice) == "table" and nonempty_text(choice.weapon) and nonempty_text(choice.ammo) and nonempty_text(choice.outfit)
+        and gamma_arena_number.is_positive_integer(choice.ammo_boxes) and gamma_arena_number.is_positive_integer(choice.cost)
+        and valid_dense_array(choice.consumables, nonempty_text, true)
+end
+
+local function valid_random_catalog(catalog, difficulty_id)
     if type(catalog) ~= "table" or type(catalog.layouts) ~= "table" or type(catalog.difficulties) ~= "table"
         or type(catalog.profile_list) ~= "table" or type(catalog.weapon_list) ~= "table"
         or type(catalog.primary_weapon_list) ~= "table" or type(catalog.secondary_weapon_list) ~= "table"
         or type(catalog.outfit_list) ~= "table" or type(catalog.knife_list) ~= "table"
         or type(catalog.ammo) ~= "table" or type(catalog.consumables) ~= "table"
-        or type(catalog.medical_item_list) ~= "table" or type(catalog.factions) ~= "table"
+        or type(catalog.medical_items) ~= "table" or type(catalog.medical_item_list) ~= "table" or type(catalog.factions) ~= "table"
         or (catalog.selection_mode ~= "combinations" and catalog.selection_mode ~= "staged") then return false end
+    if not valid_difficulty(catalog.difficulties[difficulty_id])
+        or not valid_dense_array(catalog.profile_list, valid_profile, true)
+        or not valid_dense_array(catalog.weapon_list, valid_weapon, true)
+        or not valid_dense_array(catalog.primary_weapon_list, valid_weapon, true)
+        or not valid_dense_array(catalog.secondary_weapon_list, valid_weapon, true)
+        or not valid_dense_array(catalog.outfit_list, valid_outfit, true)
+        or not valid_dense_array(catalog.knife_list, valid_knife, true)
+        or not valid_dense_array(catalog.medical_item_list, valid_medical_item, true) then return false end
+    local ammo_count = 0
+    for section, ammo in pairs(catalog.ammo) do
+        if not nonempty_text(section) or type(ammo) ~= "table" or ammo.section ~= section or not gamma_arena_number.is_positive_integer(ammo.cost) then return false end
+        ammo_count = ammo_count + 1
+    end
+    if ammo_count == 0 then return false end
+    local bandage, medkit = catalog.consumables.bandage, catalog.medical_items.medkit
+    if type(bandage) ~= "table" or bandage.section ~= "bandage" or not gamma_arena_number.is_positive_integer(bandage.cost)
+        or not valid_medical_item(catalog.medical_items.bandage) or not valid_medical_item(medkit) then return false end
+    if catalog.selection_mode == "combinations" then
+        if not valid_dense_array(catalog.combinations, valid_combination, true) then return false end
+    end
     if catalog.selection_mode == "staged" and (type(catalog.faction_ids) ~= "table" or type(catalog.profiles_by_faction) ~= "table") then return false end
+    if catalog.selection_mode == "staged" then
+        if not valid_dense_array(catalog.faction_ids, nonempty_text, false) then return false end
+        for _, faction_id in ipairs(catalog.faction_ids) do
+            local profiles = catalog.profiles_by_faction[faction_id]
+            if profiles ~= nil and not valid_dense_array(profiles, valid_profile, true) then return false end
+        end
+    end
     return true
 end
 
-function build_draft(session, fight_index, catalog, layout)
+local function build_draft_internal(session, fight_index, catalog, layout)
     if type(session) ~= "table" or type(catalog) ~= "table" then return gamma_arena_result.err("GA_GENERATE_ARGUMENT_INVALID", "Fight generation requires session and catalog", {}) end
-    if not valid_random_catalog(catalog) then return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {}) end
+    if not valid_random_catalog(catalog, session.difficulty_id) then return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {}) end
     local validated = gamma_arena_mode_skirmish.validate_session(session); if not validated.ok then return validated end
     if not gamma_arena_number.is_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > 4294967295 then return gamma_arena_result.err("GA_SESSION_SEED_INVALID", "Session seed must be a finite uint32 integer", { session_seed = session.session_seed }) end
     if not gamma_arena_number.is_integer(fight_index) or fight_index < 0 then return gamma_arena_result.err("GA_FIGHT_INDEX_INVALID", "Fight index must be a finite non-negative integer", { fight_index = fight_index }) end
@@ -551,4 +648,10 @@ function build_draft(session, fight_index, catalog, layout)
         opponent.rank.value = rank_value
     end
     return gamma_arena_result.ok(draft)
+end
+
+function build_draft(session, fight_index, catalog, layout)
+    local completed, result = pcall(build_draft_internal, session, fight_index, catalog, layout)
+    if completed and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return gamma_arena_result.err("GA_RANDOM_GENERATION_FAILED", "Random fight generation failed", { phase = "build_draft" })
 end
