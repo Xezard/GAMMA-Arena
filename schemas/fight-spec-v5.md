@@ -6,12 +6,12 @@ Arena fight with separately budgeted equipment and combat medicine.
 | Field | Contract |
 | --- | --- |
 | schema_version | exactly 5 |
-| generator_version | equals the normalized catalog generator version |
-| catalog_revision | equals the normalized effective catalog revision |
+| generator_version | exactly 7 |
+| catalog_revision | exactly 7 |
 | layout_version | exactly the resolved layout version |
 | session_seed | normalized Park-Miller state |
 | fight_index | finite non-negative integer |
-| fight_id | `ga-<seed>-<index>-g<generator>-c<catalog>-l<layout>` |
+| fight_id | `ga-<seed>-<index>-g7-c7-l2` |
 | actor | actor paths plus one validated gear-and-medicine loadout |
 | opponents | ordered human participants using unique resolved physical slots |
 | diagnostic | stable `FightSpecV5` text |

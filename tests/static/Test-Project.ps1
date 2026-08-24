@@ -949,7 +949,10 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     foreach ($Marker in @('GA_ENTITY_MEDICAL_FIGHT_STALE','release_reason','consumed','current_fight_id')) {
         Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Physical medicine consumption must cover $Marker"
     }
-}
+    $MedicalConsumptionBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:consume_medical_item[\s\S]*?function\s+EntityAdapter:warn_wound_query_once').Value
+    Assert-True ($MedicalConsumptionBlock -match 'candidate\.source\s*==\s*"assigned"[\s\S]*candidate\.parent_id\s*==\s*npc_id[\s\S]*candidate\.section\s*==\s*section') 'Physical medicine consumption must select an assigned registered item for the requested NPC and section.'
+    Assert-True ($MedicalConsumptionBlock -match 'parent_id\s*~=\s*npc_id[\s\S]*actual_section\.value\s*~=\s*section[\s\S]*item_owner\.value\s*~=\s*self\.session_id\s+or\s+record\.tagged\s*~=\s*true[\s\S]*self\.deps\.release') 'Physical medicine consumption must prove registry, live parent/section, and persisted owner before release.'
+    }
 
 $Task7ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
 if (Test-Path -LiteralPath $Task7ValidatorPath) {
@@ -1034,6 +1037,12 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     }
 }
 
+$MedicalGeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
+if (Test-Path -LiteralPath $MedicalGeneratorPath) {
+    $MedicalGeneratorContent = Get-Content -LiteralPath $MedicalGeneratorPath -Raw
+    Assert-True ($MedicalGeneratorContent -match 'local\s+category_is_required\s*=\s*item\.category\s*==\s*"health"\s+or\s+item\.category\s*==\s*"rare"[\s\S]{0,500}\(not\s+required\s+or\s+category_is_required\)') 'Actor medical generation must require a health/rare healer before optional picks.'
+}
+
 $NpcMedicalPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
 if (Test-Path -LiteralPath $NpcMedicalPath) {
     $NpcMedicalContent = Get-Content -LiteralPath $NpcMedicalPath -Raw
@@ -1078,9 +1087,9 @@ if (Test-Path -LiteralPath $FightSpecV3Path) {
 }
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
-    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*5\s*$') 'Catalog must declare schema_version = 5'
-    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*6\s*$') 'Catalog must declare revision = 6'
-    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*6\s*$') 'Catalog must declare generator_version = 6'
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*6\s*$') 'Catalog must declare schema_version = 6'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*7\s*$') 'Catalog must declare revision = 7'
+    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*7\s*$') 'Catalog must declare generator_version = 7'
     Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s+armor_class\s*=\s*light\s*$') 'Novice outfit must declare the light armor class'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_stalker\]\s+section\s*=\s*stalker_outfit\s+cost\s*=\s*3\s+armor_class\s*=\s*medium\s*$') 'Stalker outfit must declare the medium armor class'
@@ -1102,13 +1111,13 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'r_line') 'Runtime catalog enumeration must use r_line'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_SECTION_CHECK_FAILED') 'Catalog section checks must return structured errors'
     Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
-    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v6 semantic manifest'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v7 semantic manifest'
     Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
-    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v6') 'Catalog loader must bind exact v6 catalog semantics'
-    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v4') 'Catalog loader must bind exact v4 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v7') 'Catalog loader must bind exact v7 catalog semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v5') 'Catalog loader must bind exact v5 difficulty semantics'
     Assert-True ($Task3CatalogScriptContent -match 'medical_skipped') 'Catalog loader must retain bounded diagnostics for missing optional medicine'
-    foreach ($Diagnostic in @('Catalog group id count differs from v6', 'Catalog group contains a non-v6 id', 'Catalog group is missing a v6 id')) {
-        Assert-True ($Task3CatalogScriptContent.Contains($Diagnostic)) "Strict catalog manifest diagnostic must identify v6: $Diagnostic"
+    foreach ($Diagnostic in @('Catalog group id count differs from v7', 'Catalog group contains a non-v7 id', 'Catalog group is missing a v7 id')) {
+        Assert-True ($Task3CatalogScriptContent.Contains($Diagnostic)) "Strict catalog manifest diagnostic must identify v7: $Diagnostic"
     }
     foreach ($Marker in @('armor_class','player_weapon_weights','player_armor_weights','w_pistol','w_smg','w_shotgun','w_rifle','w_sniper','light','medium','scientific','heavy','powered_exo')) {
         Assert-True ($Task3CatalogScriptContent -match [regex]::Escape($Marker)) "Catalog loader must cover $Marker"
@@ -1236,11 +1245,13 @@ if (Test-Path -LiteralPath $GoldenV5Path) {
     $GoldenV5Content = Get-Content -LiteralPath $GoldenV5Path -Raw
     Assert-True (([regex]::Matches($GoldenV5Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=5\|.+\|diagnostic=FightSpecV5 .+$')).Count -eq 4) 'Golden fixture must contain four complete v5 stable encodings'
     Assert-True ($GoldenV5Content -match 'medical:[^|,]*\+?[^|,]*,\d+,\d+,\d+') 'Golden v5 fixture must encode medicine plus separated costs'
+    Assert-True ($GoldenV5Content -match 'generator_version=7\|catalog_revision=7' -and $GoldenV5Content -match 'fight_id=ga-[^|]+-g7-c7-l2') 'Golden v5 fixture must use active generator/catalog identity 7/7'
 }
 $FightSpecV5Path = Join-Path $RepoRoot 'schemas\fight-spec-v5.md'
 if (Test-Path -LiteralPath $FightSpecV5Path) {
     $FightSpecV5Content = Get-Content -LiteralPath $FightSpecV5Path -Raw
     Assert-True ($FightSpecV5Content -match '(?m)^\| schema_version \| exactly 5 \|\s*$') 'FightSpecV5 root schema must be version 5.'
+    Assert-True ($FightSpecV5Content -match '(?m)^\| generator_version \| exactly 7 \|\s*$' -and $FightSpecV5Content -match '(?m)^\| catalog_revision \| exactly 7 \|\s*$') 'FightSpecV5 must declare generator/catalog identity 7/7.'
     foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','enemy medical team budget','core/equipment RNG epoch 6','medical RNG epoch 1')) {
         Assert-True ($FightSpecV5Content -match [regex]::Escape($Marker)) "FightSpecV5 must document $Marker"
     }
@@ -1313,7 +1324,7 @@ if ($IsRepositoryCheckout) {
         )) {
             Assert-True ($BuildContent -match ("(?m)^\s*" + [regex]::Escape($Field) + "\s*=")) "Release manifest must record $Field"
         }
-        Assert-True ($BuildContent -match '(?m)^\s*fight_spec_schema_version\s*=\s*4\s*$' -and $BuildContent -match '(?m)^\s*generator_version\s*=\s*6\s*$' -and $BuildContent -match '(?m)^\s*catalog_revision\s*=\s*6\s*$') 'Release manifest must record active FightSpec/catalog identity 4/6/6'
+        Assert-True ($BuildContent -match '(?m)^\s*fight_spec_schema_version\s*=\s*5\s*$' -and $BuildContent -match '(?m)^\s*generator_version\s*=\s*7\s*$' -and $BuildContent -match '(?m)^\s*catalog_revision\s*=\s*7\s*$') 'Release manifest must record active FightSpec/catalog identity 5/7/7'
         Assert-True ($BuildContent -match 'Get-OrdinalSortedPaths') 'Release manifest files must be sorted ordinally'
         Assert-True ($BuildContent -match 'Get-FileHash[^\r\n]+SHA256') 'Release manifest must checksum raw staged files with SHA-256'
         Assert-True ($BuildContent -match 'UTF8Encoding\(\$false\)') 'Release manifest must use UTF-8 without BOM'
@@ -1774,8 +1785,9 @@ $Task7RussianTextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_ga
 if ((Test-Path -LiteralPath $Task7CatalogPath) -and (Test-Path -LiteralPath $Task7DifficultyPath)) {
     $Task7CatalogContent = Get-Content -LiteralPath $Task7CatalogPath -Raw
     $Task7DifficultyContent = Get-Content -LiteralPath $Task7DifficultyPath -Raw
-    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*5\s*.*?revision\s*=\s*6\s*.*?generator_version\s*=\s*6') 'Natural-death/loadout catalog metadata must retain schema 5, revision 6, and generator 6.'
-    Assert-True ($Task7DifficultyContent -match '(?ms)\[meta\].*?schema_version\s*=\s*3\s*.*?revision\s*=\s*4') 'Weighted player loadouts must retain difficulty schema and revision 4.'
+    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*6\s*.*?revision\s*=\s*7\s*.*?generator_version\s*=\s*7') 'Natural-death/loadout catalog metadata must retain schema 6, revision 7, and generator 7.'
+    Assert-True ($Task7DifficultyContent -match '(?ms)\[meta\].*?schema_version\s*=\s*4\s*.*?revision\s*=\s*5') 'Weighted player loadouts must retain difficulty schema 4 and revision 5.'
+    Assert-True ($Task7DifficultyContent -notmatch '(?m)^player_loadout_budget\s*=') 'Difficulty catalog must expose only separate gear and medical budgets.'
 }
 if (Test-Path -LiteralPath $Task7BootstrapPath) {
     $Task7BootstrapContent = Get-Content -LiteralPath $Task7BootstrapPath -Raw

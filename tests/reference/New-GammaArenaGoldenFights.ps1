@@ -1,7 +1,8 @@
 [CmdletBinding()]
-param([switch]$Verify)
+param([switch]$Verify, [switch]$Update)
 
 $ErrorActionPreference = 'Stop'
+if ($Verify -and $Update) { throw 'Choose either -Verify or -Update.' }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v5.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
@@ -33,26 +34,26 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 5 -or [int]$catalog.meta.revision -ne 6 -or [int]$catalog.meta.generator_version -ne 6 -or
-    [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 4 -or
+if ([int]$catalog.meta.schema_version -ne 6 -or [int]$catalog.meta.revision -ne 7 -or [int]$catalog.meta.generator_version -ne 7 -or
+    [int]$difficulties.meta.schema_version -ne 4 -or [int]$difficulties.meta.revision -ne 5 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
     $generatorText -notmatch 'schema_version\s*=\s*5' -or $generatorText -notmatch 'FightSpecV5') {
-    throw 'Reference oracle requires catalog schema 5, generator/catalog 6/6, transitional medical difficulty v4, layout v2, and FightSpec v5.'
+    throw 'Reference oracle requires catalog schema 6, generator/catalog 7/7, medical difficulty v5, layout v2, and FightSpec v5.'
 }
 
 $difficultyManifest = @{
-    rookie = @(1,2,3,25,8,7,4,50,35,50,15,0,50,30,15,5,0,55,30,10,5,0)
-    stalker = @(2,3,5,50,11,10,5,60,25,50,25,0,25,35,20,18,2,30,40,20,9,1)
-    veteran = @(3,5,7,75,14,13,6,75,20,45,30,5,10,25,20,38,7,15,30,25,25,5)
-    master = @(4,7,10,100,16,15,8,80,15,40,35,10,5,15,15,50,15,10,25,25,35,5)
+    rookie = @(1,2,3,25,7,4,50,35,50,15,0,50,30,15,5,0,55,30,10,5,0)
+    stalker = @(2,3,5,50,10,5,60,25,50,25,0,25,35,20,18,2,30,40,20,9,1)
+    veteran = @(3,5,7,75,13,6,75,20,45,30,5,10,25,20,38,7,15,30,25,25,5)
+    master = @(4,7,10,100,15,8,80,15,40,35,10,5,15,15,50,15,10,25,25,35,5)
 }
 $difficultyCatalog = @{}
 foreach ($id in @('rookie','stalker','veteran','master')) {
     $entry = $difficulties["ga_difficulty_$id"]
-    if ($null -eq $entry -or $entry.Count -ne 22) { throw "Difficulty $id must expose exactly twenty-two transitional medical fields." }
-    $actual = @([int]$entry.tier,[int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_loadout_budget,[int]$entry.player_gear_budget,[int]$entry.player_medical_budget,[int]$entry.primary_share_percent,[int]$entry.medical_weight_bleed,[int]$entry.medical_weight_health,[int]$entry.medical_weight_boost,[int]$entry.medical_weight_rare,[int]$entry.weapon_weight_pistol,[int]$entry.weapon_weight_smg,[int]$entry.weapon_weight_shotgun,[int]$entry.weapon_weight_rifle,[int]$entry.weapon_weight_sniper,[int]$entry.armor_weight_light,[int]$entry.armor_weight_medium,[int]$entry.armor_weight_scientific,[int]$entry.armor_weight_heavy,[int]$entry.armor_weight_powered_exo)
-    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v4 semantic manifest." }
-    $difficultyCatalog[$id] = [pscustomobject]@{Id=$id;Tier=$actual[0];EnemyMin=$actual[1];EnemyMax=$actual[2];EnemyBudget=$actual[3];PlayerBudget=$actual[4];PlayerGearBudget=$actual[5];PlayerMedicalBudget=$actual[6];PrimaryShare=$actual[7];MedicalWeights=@{bleed=$actual[8];health=$actual[9];boost=$actual[10];rare=$actual[11]};WeaponWeights=@{w_pistol=$actual[12];w_smg=$actual[13];w_shotgun=$actual[14];w_rifle=$actual[15];w_sniper=$actual[16]};ArmorWeights=@{light=$actual[17];medium=$actual[18];scientific=$actual[19];heavy=$actual[20];powered_exo=$actual[21]}}
+    if ($null -eq $entry -or $entry.Count -ne 21) { throw "Difficulty $id must expose exactly twenty-one medical loadout fields." }
+    $actual = @([int]$entry.tier,[int]$entry.enemy_min,[int]$entry.enemy_max,[int]$entry.enemy_total_budget,[int]$entry.player_gear_budget,[int]$entry.player_medical_budget,[int]$entry.primary_share_percent,[int]$entry.medical_weight_bleed,[int]$entry.medical_weight_health,[int]$entry.medical_weight_boost,[int]$entry.medical_weight_rare,[int]$entry.weapon_weight_pistol,[int]$entry.weapon_weight_smg,[int]$entry.weapon_weight_shotgun,[int]$entry.weapon_weight_rifle,[int]$entry.weapon_weight_sniper,[int]$entry.armor_weight_light,[int]$entry.armor_weight_medium,[int]$entry.armor_weight_scientific,[int]$entry.armor_weight_heavy,[int]$entry.armor_weight_powered_exo)
+    if (@(Compare-Object $difficultyManifest[$id] $actual -SyncWindow 0).Count -ne 0) { throw "Difficulty $id differs from the v5 semantic manifest." }
+    $difficultyCatalog[$id] = [pscustomobject]@{Id=$id;Tier=$actual[0];EnemyMin=$actual[1];EnemyMax=$actual[2];EnemyBudget=$actual[3];PlayerBudget=($actual[4]+1);PlayerGearBudget=$actual[4];PlayerMedicalBudget=$actual[5];PrimaryShare=$actual[6];MedicalWeights=@{bleed=$actual[7];health=$actual[8];boost=$actual[9];rare=$actual[10]};WeaponWeights=@{w_pistol=$actual[11];w_smg=$actual[12];w_shotgun=$actual[13];w_rifle=$actual[14];w_sniper=$actual[15]};ArmorWeights=@{light=$actual[16];medium=$actual[17];scientific=$actual[18];heavy=$actual[19];powered_exo=$actual[20]}}
 }
 
 $layout = $layouts.ga_layout_rostok_arena_v1
@@ -345,7 +346,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $total=$record.Profile.Cost+$record.Gear.GearCost+$medical.Cost
         $opponents += "$($record.Index):$($record.Index),$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($record.Route),$($record.Role),$($record.Profile.Section),$($record.Profile.Cost),$loadout,$total"
     }
-    $fields=@('schema_version=5','generator_version=6','catalog_revision=6','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g6-c6-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV5 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=5','generator_version=7','catalog_revision=7','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g7-c7-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV5 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 
@@ -370,4 +371,8 @@ if($Verify){
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
     if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v5 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
+}elseif($Update){
+    $lines = @('# Gamma Arena FightSpec v5 deterministic golden encodings.') + $expected
+    [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
+    Write-Host "Updated golden fixture: $fixturePath"
 }else{$expected}
