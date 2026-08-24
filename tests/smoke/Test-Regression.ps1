@@ -1112,6 +1112,42 @@ end
             Assert-True ($OwnerBeforeRetirementResult.ExitCode -ne 0 -and $OwnerBeforeRetirementResult.Output -match [regex]::Escape($OwnerBeforeRetirementDiagnostic)) 'Static policy must reject owner reads moved before authoritative-absence retirement through its intended ordering diagnostic.'
         }
     }
+
+    $BoundedLogFixture = New-Task7Fixture 'bounded-log-native-sink-removed'
+    $BoundedLogPath = Join-Path $BoundedLogFixture 'src\gamedata\scripts\gamma_arena_log.script'
+    $BoundedLogContent = Get-Content -LiteralPath $BoundedLogPath -Raw
+    $BoundedLogCall = 'pcall(printf, "%s", native_payload)'
+    $UnboundedLogCall = 'pcall(printf, "%s%s%s", "", native_payload, "")'
+    $BoundedLogCallCount = ([regex]::Matches($BoundedLogContent, [regex]::Escape($BoundedLogCall))).Count
+    Assert-True ($BoundedLogCallCount -eq 1) 'Bounded logger negative fixture must find exactly one constant-format native sink call.'
+    if ($BoundedLogCallCount -eq 1) {
+        $MutatedBoundedLog = $BoundedLogContent.Replace($BoundedLogCall, $UnboundedLogCall)
+        Write-FixtureFile $BoundedLogFixture 'src\gamedata\scripts\gamma_arena_log.script' $MutatedBoundedLog
+        $BoundedLogResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $BoundedLogFixture) -CaptureOutput
+        $BoundedLogDiagnostic = 'Logger bounded native-sink contract is missing: pcall(printf, "%s", native_payload)'
+        Assert-True ($BoundedLogResult.ExitCode -ne 0 -and $BoundedLogResult.Output -match [regex]::Escape($BoundedLogDiagnostic)) 'Static policy must reject replacing the bounded constant-format native logger sink.'
+    }
+
+    $RuntimeChildFixture = New-Task7Fixture 'runtime-child-adoption-call-removed'
+    $RuntimeChildPath = Join-Path $RuntimeChildFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+    $RuntimeChildContent = Get-Content -LiteralPath $RuntimeChildPath -Raw
+    $RuntimeChildDriveStart = $RuntimeChildContent.IndexOf('function EntityAdapter:drive_cleanup')
+    $RuntimeChildDriveEnd = if ($RuntimeChildDriveStart -ge 0) { $RuntimeChildContent.IndexOf('function EntityAdapter:fail_and_rollback', $RuntimeChildDriveStart) } else { -1 }
+    Assert-True ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) 'Runtime-child negative fixture must find the drive_cleanup slice.'
+    if ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) {
+        $RuntimeChildDrive = $RuntimeChildContent.Substring($RuntimeChildDriveStart, $RuntimeChildDriveEnd - $RuntimeChildDriveStart)
+        $RuntimeChildCall = 'self:adopt_runtime_children(record)'
+        $RuntimeChildCallCount = ([regex]::Matches($RuntimeChildDrive, [regex]::Escape($RuntimeChildCall))).Count
+        Assert-True ($RuntimeChildCallCount -eq 1) 'Runtime-child negative fixture must find exactly one just-in-time adoption call.'
+        if ($RuntimeChildCallCount -eq 1) {
+            $MutatedRuntimeChildDrive = $RuntimeChildDrive.Replace($RuntimeChildCall, 'gamma_arena_result.ok({ adopted = 0 })')
+            $MutatedRuntimeChild = $RuntimeChildContent.Substring(0, $RuntimeChildDriveStart) + $MutatedRuntimeChildDrive + $RuntimeChildContent.Substring($RuntimeChildDriveEnd)
+            Write-FixtureFile $RuntimeChildFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $MutatedRuntimeChild
+            $RuntimeChildResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $RuntimeChildFixture) -CaptureOutput
+            $RuntimeChildDiagnostic = 'Entity cleanup must adopt current runtime children before NPC release.'
+            Assert-True ($RuntimeChildResult.ExitCode -ne 0 -and $RuntimeChildResult.Output -match [regex]::Escape($RuntimeChildDiagnostic)) 'Static policy must reject removing just-in-time runtime-child adoption from cleanup.'
+        }
+    }
     }
 
     if ($StaticFixturesOnly) {

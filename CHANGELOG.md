@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
+- Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
 - Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.

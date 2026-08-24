@@ -1880,6 +1880,16 @@ $RuntimeChildTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\ga
 foreach ($Marker in @('MAX_RUNTIME_CHILDREN','runtime_child_count','adopt_runtime_children','runtime_child','GA_ENTITY_RUNTIME_CHILD_LIMIT','GA_ENTITY_RUNTIME_CHILD_TAG_FAILED','runtime_children')) {
     Assert-True ($RuntimeChildEntityContent -match [regex]::Escape($Marker)) "Runtime NPC child cleanup must cover $Marker"
 }
+$RuntimeChildDriveStart = $RuntimeChildEntityContent.IndexOf('function EntityAdapter:drive_cleanup')
+$RuntimeChildDriveEnd = if ($RuntimeChildDriveStart -ge 0) { $RuntimeChildEntityContent.IndexOf('function EntityAdapter:fail_and_rollback', $RuntimeChildDriveStart) } else { -1 }
+$RuntimeChildAdoptionOrdered = $false
+if ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) {
+    $RuntimeChildDrive = $RuntimeChildEntityContent.Substring($RuntimeChildDriveStart, $RuntimeChildDriveEnd - $RuntimeChildDriveStart)
+    $RuntimeChildAdoptIndex = $RuntimeChildDrive.IndexOf('self:adopt_runtime_children(record)')
+    $RuntimeChildReleaseIndex = $RuntimeChildDrive.IndexOf('self:begin_release(record)')
+    $RuntimeChildAdoptionOrdered = $RuntimeChildAdoptIndex -ge 0 -and $RuntimeChildReleaseIndex -gt $RuntimeChildAdoptIndex
+}
+Assert-True $RuntimeChildAdoptionOrdered 'Entity cleanup must adopt current runtime children before NPC release.'
 foreach ($Name in @('runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($RuntimeChildTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
