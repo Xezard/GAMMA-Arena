@@ -5,6 +5,7 @@ local OWNER_KEY = "gamma_arena_owner"
 local UINT32_MOD = 4294967296
 local DEFAULT_RELEASE_TIMEOUT_MS = 10000
 local DEFAULT_ONLINE_TIMEOUT_MS = 10000
+local MAX_RUNTIME_CHILDREN = 128
 local DEATH_RECONCILE_INTERVAL_MS = 250
 local TERMINAL_GRACE_MS = 1500
 local VERTICAL_ESCAPE_GRACE_MS = 1500
@@ -342,6 +343,7 @@ function EntityAdapter:__init(deps)
     self.registry = { state = "IDLE", session_id = nil, actor_loadout = nil, npcs = {}, items = {}, error = nil }
     self.npc_by_id = {}
     self.record_by_id = {}
+    self.runtime_child_count = 0
     self.pending_release = nil
     self.release_index = nil
     self.cleanup_errors = nil
@@ -735,6 +737,74 @@ function EntityAdapter:entity_section(entity)
     if not result.ok then return result end
     if type(result.value) ~= "string" or result.value == "" then return fail("GA_ENTITY_SECTION_FAILED", "Server entity section is unavailable") end
     return result
+end
+
+function EntityAdapter:adopt_runtime_children(record)
+    if self.record_by_id[record.id] ~= record or record.kind ~= "npc" or record.tagged ~= true then
+        return fail("GA_ENTITY_RUNTIME_CHILD_PARENT_UNOWNED", "Arena runtime children require a registered and tagged NPC parent", { npc_id = record.id })
+    end
+    local owner = self:load_owner_tag(record.id)
+    if not owner.ok then
+        return fail("GA_ENTITY_RUNTIME_CHILD_PARENT_UNOWNED", "Arena NPC ownership could not be proved before adopting runtime children", {
+            npc_id = record.id,
+            cause = owner.error
+        })
+    end
+    if owner.value ~= self.session_id then
+        return fail("GA_ENTITY_RUNTIME_CHILD_PARENT_UNOWNED", "Arena NPC ownership changed before adopting runtime children", {
+            npc_id = record.id,
+            cause = {
+                code = "GA_ENTITY_RELEASE_TAG_MISMATCH",
+                message = "Arena ownership tag is missing or mismatched",
+                context = { id = record.id }
+            }
+        })
+    end
+
+    local children = self:snapshot_child_ids(record.id)
+    if not children.ok then return children end
+    local adopted = 0
+    for _, id in ipairs(children.value) do
+        local entity = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, id)
+        if not entity.ok then return entity end
+        if entity.value ~= nil then
+            local parent_id = read_parent_id(entity.value)
+            if parent_id == nil then
+                return fail("GA_ENTITY_CHILD_PARENT_UNPROVEN", "Arena NPC runtime child parent cannot be proved", { npc_id = record.id, child_id = id })
+            end
+            if parent_id == record.id and self.record_by_id[id] == nil then
+                if self.runtime_child_count >= MAX_RUNTIME_CHILDREN then
+                    return fail("GA_ENTITY_RUNTIME_CHILD_LIMIT", "Arena runtime child adoption exceeded its bounded limit", {
+                        npc_id = record.id,
+                        child_id = id,
+                        limit = MAX_RUNTIME_CHILDREN
+                    })
+                end
+                local section = self:entity_section(entity.value)
+                if not section.ok then return section end
+                local registered = self:register_record("item", id, {
+                    slot = record.slot,
+                    section = section.value,
+                    parent_id = record.id,
+                    quantity = 1,
+                    role = "runtime_child",
+                    source = "runtime_child"
+                })
+                if not registered.ok then return registered end
+                local tagged = self:tag_record(registered.value)
+                if not tagged.ok then
+                    return fail("GA_ENTITY_RUNTIME_CHILD_TAG_FAILED", "Arena runtime child ownership tag could not be proved", {
+                        npc_id = record.id,
+                        child_id = id,
+                        cause = tagged.error
+                    })
+                end
+                self.runtime_child_count = self.runtime_child_count + 1
+                adopted = adopted + 1
+            end
+        end
+    end
+    return gamma_arena_result.ok({ adopted = adopted })
 end
 
 function EntityAdapter:begin_release(record)
@@ -1211,11 +1281,20 @@ function EntityAdapter:drive_cleanup()
                 if record.kind == "npc" then self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil) end
                 self.release_index = self.release_index - 1
             else
-                local release = self:begin_release(record)
-                if not release.ok then
-                    self:add_cleanup_error(release, record, "begin_release"); record.protected = true; self.release_index = self.release_index - 1
-                else
+                local runtime_children = gamma_arena_result.ok({ adopted = 0 })
+                if record.kind == "npc" then runtime_children = self:adopt_runtime_children(record) end
+                if not runtime_children.ok then
+                    self:add_cleanup_error(runtime_children, record, "runtime_children"); record.protected = true; self.release_index = self.release_index - 1
+                elseif runtime_children.value.adopted > 0 then
+                    self.release_index = #self.creation_stack
                     return gamma_arena_result.ok(false)
+                else
+                    local release = self:begin_release(record)
+                    if not release.ok then
+                        self:add_cleanup_error(release, record, "begin_release"); record.protected = true; self.release_index = self.release_index - 1
+                    else
+                        return gamma_arena_result.ok(false)
+                    end
                 end
             end
         end
