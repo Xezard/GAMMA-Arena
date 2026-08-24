@@ -116,7 +116,8 @@ local function generator_10000_seeds()
         for seed = 0, 9999 do
             local generated = generate_fixture(request(seed, difficulty_id), seed % 32, snapshot)
             gamma_arena_test_assert.is_true(generated.ok, "10k generation must succeed")
-            gamma_arena_test_assert.is_true(generated.value.actor.loadout.cost <= difficulty.player_loadout_budget, "10k actor loadout cost must fit the exact player budget")
+            gamma_arena_test_assert.is_true(generated.value.actor.loadout.gear_cost <= difficulty.player_gear_budget, "10k actor gear cost must fit its budget")
+            gamma_arena_test_assert.is_true(generated.value.actor.loadout.medical_cost <= difficulty.player_medical_budget, "10k actor medical cost must fit its budget")
             gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "10k generated FightSpec must validate")
         end
     end
@@ -482,10 +483,13 @@ local function validator_never_throws_for_malformed_specs()
         {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.cost=math.huge end},
         {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.cost=-math.huge end},
         {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.cost=0/0 end},
+        {code="GA_LOADOUT_COST_INVALID",fn=function(s) s.actor.loadout.gear_cost=s.actor.loadout.gear_cost+1;s.actor.loadout.cost=s.actor.loadout.cost+1 end},
+        {code="GA_MEDICAL_COST_INVALID",fn=function(s) s.actor.loadout.medical_cost=s.actor.loadout.medical_cost+1;s.actor.loadout.cost=s.actor.loadout.cost+1 end},
         {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.consumables=nil end},
         {code="GA_LOADOUT_TYPE_INVALID",fn=function(s) s.actor.loadout.consumables="bandage" end},
         {code="GA_LOADOUT_COMBINATION_INVALID",fn=function(s) s.actor.loadout.consumables={};s.actor.loadout.cost=s.actor.loadout.cost-1 end},
-        {code="GA_LOADOUT_COMBINATION_INVALID",fn=function(s) s.actor.loadout.consumables={"medkit"};s.actor.loadout.cost=s.actor.loadout.cost+1 end},
+        {code="GA_LOADOUT_MEDICAL_INVALID",fn=function(s) s.actor.loadout.consumables={"medkit"} end},
+        {code="GA_LOADOUT_MEDICAL_INVALID",fn=function(s) s.opponents[1].loadout.consumables={"stimpack"} end},
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.opponents[1].profile_cost=math.huge end},
         {code="GA_FIGHTSPEC_TYPE_INVALID",fn=function(s) s.opponents[1].total_cost=0/0 end}
     }
@@ -512,13 +516,19 @@ local function validator_rejects_redistributed_slot_budget()
     local snapshot = catalogs()
     local generated = generate_fixture(request(1,"stalker"),0,snapshot)
     gamma_arena_test_assert.is_true(generated.ok and #generated.value.opponents >= 3,"slot budget fixture needs multiple stalker opponents")
-    local function loadout_with_cost(cost)
+    local function loadout_with_cost(cost, original)
         for _, combination in ipairs(snapshot.combinations) do
-            if combination.cost == cost then return { weapon=combination.weapon,ammo=combination.ammo,ammo_boxes=combination.ammo_boxes,outfit=combination.outfit,knife=snapshot.knife_list[1].section,consumables={combination.consumables[1]},cost=combination.cost } end
+            if combination.cost == cost then
+                local consumables = {}; for index, section in ipairs(original.consumables) do consumables[index] = section end
+                local gear_cost = combination.cost - snapshot.consumables.bandage.cost
+                return { weapon=combination.weapon,ammo=combination.ammo,ammo_boxes=combination.ammo_boxes,outfit=combination.outfit,knife=snapshot.knife_list[1].section,consumables=consumables,gear_cost=gear_cost,medical_cost=original.medical_cost,cost=gear_cost+original.medical_cost }
+            end
         end
     end
-    generated.value.opponents[1].profile="gamma_arena_bandit_veteran";generated.value.opponents[1].profile_cost=4;generated.value.opponents[1].loadout=loadout_with_cost(7);generated.value.opponents[1].total_cost=11
-    generated.value.opponents[2].profile="gamma_arena_bandit_novice";generated.value.opponents[2].profile_cost=1;generated.value.opponents[2].loadout=loadout_with_cost(5);generated.value.opponents[2].total_cost=6
+    local first_loadout = loadout_with_cost(7, generated.value.opponents[1].loadout)
+    local second_loadout = loadout_with_cost(5, generated.value.opponents[2].loadout)
+    generated.value.opponents[1].profile="gamma_arena_bandit_veteran";generated.value.opponents[1].profile_cost=4;generated.value.opponents[1].loadout=first_loadout;generated.value.opponents[1].total_cost=4+first_loadout.cost
+    generated.value.opponents[2].profile="gamma_arena_bandit_novice";generated.value.opponents[2].profile_cost=1;generated.value.opponents[2].loadout=second_loadout;generated.value.opponents[2].total_cost=1+second_loadout.cost
     local rejected = validate_fixture(generated.value,snapshot)
     gamma_arena_test_assert.is_false(rejected.ok,"aggregate-valid redistribution must fail deterministic slot budgets")
     gamma_arena_test_assert.equals(rejected.error.code,"GA_ENEMY_SLOT_BUDGET_INVALID","redistributed slot budget code")
@@ -578,7 +588,7 @@ local function actor_bonus_ammo_is_deterministic_and_outside_budget()
     gamma_arena_test_assert.equals(first.value.actor.loadout.bonus_ammo.section, second.value.actor.loadout.bonus_ammo.section, "same seed and catalog select the same bonus section")
     gamma_arena_test_assert.equals(gamma_arena_generator.stable_encode(first.value), gamma_arena_generator.stable_encode(second.value), "bonus fields participate in stable encoding")
     gamma_arena_test_assert.equals(first.value.actor.loadout.bonus_ammo.boxes, 1, "actor receives exactly one bonus box")
-    gamma_arena_test_assert.is_true(first.value.actor.loadout.cost <= difficulty.player_loadout_budget, "bonus does not alter actor loadout cost or affordability")
+    gamma_arena_test_assert.is_true(first.value.actor.loadout.gear_cost <= difficulty.player_gear_budget and first.value.actor.loadout.medical_cost <= difficulty.player_medical_budget, "bonus does not alter actor gear or medical affordability")
     for _, opponent in ipairs(first.value.opponents) do gamma_arena_test_assert.equals(opponent.loadout.bonus_ammo, nil, "opponents never receive bonus ammo") end
     gamma_arena_test_assert.is_true(string.find(gamma_arena_generator.stable_encode(first.value), ",bonus:", 1, true) ~= nil, "actor stable encoding includes bonus fields")
 end
@@ -679,7 +689,8 @@ local function generator_role_first_balance()
             end
             gamma_arena_test_assert.is_true(primary * 100 >= #spec.opponents * difficulty.primary_share_percent, "primary firearm share")
             gamma_arena_test_assert.is_true(spent <= difficulty.enemy_total_budget, "enemy total budget")
-            gamma_arena_test_assert.is_true(spec.actor.loadout.cost <= difficulty.player_loadout_budget, "actor loadout budget")
+            gamma_arena_test_assert.is_true(spec.actor.loadout.gear_cost <= difficulty.player_gear_budget, "actor gear budget")
+            gamma_arena_test_assert.is_true(spec.actor.loadout.medical_cost <= difficulty.player_medical_budget, "actor medical budget")
         end
     end
 end
@@ -700,7 +711,7 @@ local function generator_primary_pool_affordability_falls_back()
     gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
 end
 
-local function golden_fights_v4()
+local function golden_fights_v5()
     local snapshot = catalogs()
     for _, expected in ipairs({
         { seed = 0, difficulty = "rookie", fight = 0 },
@@ -713,7 +724,7 @@ local function golden_fights_v4()
         gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
         local encoded = gamma_arena_generator.stable_encode(first.value)
         gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
-        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=4", 1, true) ~= nil, "FightSpec v4 is encoded")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=5", 1, true) ~= nil, "FightSpec v5 is encoded")
     end
 end
 
@@ -845,8 +856,45 @@ local function medical_generation_100000_fights()
     end
 end
 
+local function fight_spec_v5_separates_gear_and_medical_costs()
+    local snapshot = catalogs()
+    local generated = generate_fixture(request(37, "master"), 5, snapshot)
+    gamma_arena_test_assert.is_true(generated.ok, "FightSpec v5 generation succeeds")
+    gamma_arena_test_assert.equals(generated.value.schema_version, 5, "FightSpec schema advances to v5")
+    local actor = generated.value.actor.loadout
+    gamma_arena_test_assert.equals(actor.cost, actor.gear_cost + actor.medical_cost, "actor total decomposes exactly")
+    gamma_arena_test_assert.is_true(actor.gear_cost <= snapshot.difficulties.master.player_gear_budget, "actor gear budget")
+    gamma_arena_test_assert.is_true(actor.medical_cost <= snapshot.difficulties.master.player_medical_budget, "actor medical budget")
+    local enemy_medical = 0
+    for _, opponent in ipairs(generated.value.opponents) do
+        gamma_arena_test_assert.equals(opponent.loadout.cost, opponent.loadout.gear_cost + opponent.loadout.medical_cost, "enemy total decomposes exactly")
+        enemy_medical = enemy_medical + opponent.loadout.medical_cost
+    end
+    gamma_arena_test_assert.equals(enemy_medical, #generated.value.opponents, "enemy medical team budget equals count")
+    gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "FightSpec v5 validates")
+end
+
+local function medical_tuning_does_not_reroll_core_fight()
+    local baseline, tuned = catalogs(), catalogs()
+    tuned.difficulties.master.medical_weights = { bleed = 0, health = 100, boost = 0, rare = 0 }
+    local first = generate_fixture(request(9137, "master"), 11, baseline)
+    local second = generate_fixture(request(9137, "master"), 11, tuned)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "medical tuning isolation fixtures generate")
+    local left, right = first.value, second.value
+    gamma_arena_test_assert.equals(#left.opponents, #right.opponents, "medical tuning cannot reroll enemy count")
+    for _, key in ipairs({ "weapon", "ammo", "ammo_boxes", "outfit", "knife" }) do gamma_arena_test_assert.equals(left.actor.loadout[key], right.actor.loadout[key], "medical tuning cannot reroll actor " .. key) end
+    gamma_arena_test_assert.equals(left.actor.loadout.bonus_ammo.section, right.actor.loadout.bonus_ammo.section, "medical tuning cannot reroll actor bonus ammo")
+    for index, left_opponent in ipairs(left.opponents) do
+        local right_opponent = right.opponents[index]
+        gamma_arena_test_assert.equals(left_opponent.profile, right_opponent.profile, "medical tuning cannot reroll profile")
+        gamma_arena_test_assert.equals(left_opponent.spawn_slot_id, right_opponent.spawn_slot_id, "medical tuning cannot reroll spawn")
+        gamma_arena_test_assert.equals(left_opponent.tactical_route, right_opponent.tactical_route, "medical tuning cannot reroll route")
+        for _, key in ipairs({ "weapon", "ammo", "ammo_boxes", "outfit", "knife", "gear_cost" }) do gamma_arena_test_assert.equals(left_opponent.loadout[key], right_opponent.loadout[key], "medical tuning cannot reroll enemy " .. key) end
+    end
+end
+
 function run(run_case_fn)
     local all_passed = true
-    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="actor_medical_generation_enforces_budget_and_healer",fn=actor_medical_generation_enforces_budget_and_healer},{name="actor_medical_generation_reaches_master_rare",fn=actor_medical_generation_reaches_master_rare},{name="enemy_medical_generation_spends_team_budget",fn=enemy_medical_generation_spends_team_budget},{name="medical_generation_100000_fights",fn=medical_generation_100000_fights},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v4",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v4",fn=golden_fights_v4}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
+    for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="actor_medical_generation_enforces_budget_and_healer",fn=actor_medical_generation_enforces_budget_and_healer},{name="actor_medical_generation_reaches_master_rare",fn=actor_medical_generation_reaches_master_rare},{name="enemy_medical_generation_spends_team_budget",fn=enemy_medical_generation_spends_team_budget},{name="medical_generation_100000_fights",fn=medical_generation_100000_fights},{name="fight_spec_v5_separates_gear_and_medical_costs",fn=fight_spec_v5_separates_gear_and_medical_costs},{name="medical_tuning_does_not_reroll_core_fight",fn=medical_tuning_does_not_reroll_core_fight},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v5",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v5",fn=golden_fights_v5}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end

@@ -1019,7 +1019,9 @@ $Task3DataFiles = @(
     'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx',
     'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx',
     'tests\fixtures\golden-fights-v4.txt',
-    'schemas\fight-spec-v4.md'
+    'schemas\fight-spec-v4.md',
+    'tests\fixtures\golden-fights-v5.txt',
+    'schemas\fight-spec-v5.md'
 )
 foreach ($RelativePath in $Task3DataFiles) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
@@ -1094,12 +1096,16 @@ if (Test-Path -LiteralPath $Task3ValidatorPath) {
     Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_KNIFE_INVALID') 'Validator must reject non-cataloged knives'
     Assert-True ($Task3ValidatorContent -match 'GA_ENEMY_SLOT_BUDGET_INVALID') 'Validator must enforce deterministic per-slot enemy budgets'
     Assert-True ($Task3ValidatorContent -match 'valid_armor_class') 'Validator must require a recognized outfit armor class'
-    Assert-True ($Task3ValidatorContent -match 'mandatory bandage') 'Validator must recompute player loadout cost with the mandatory bandage'
+    Assert-True ($Task3ValidatorContent -match 'loadout\.consumables\[1\]\s*~=\s*"bandage"') 'Validator must require the actor mandatory bandage first'
     foreach ($Code in @('GA_SPAWN_SLOT_INVALID','GA_SPAWN_SLOT_DUPLICATE','GA_TACTICAL_ROUTE_INVALID','GA_ENEMY_ROLE_INVALID','GA_ENEMY_PRIMARY_SHARE_INVALID','GA_ENEMY_SNIPER_LIMIT_INVALID')) {
         Assert-True ($Task3ValidatorContent -match $Code) "FightSpec v3 validator must return structured $Code"
     }
     Assert-True ($Task3ValidatorContent -match 'math\.floor\s*\(\s*difficulty\.enemy_total_budget\s*/\s*opponent_count\s*\)') 'Validator must recompute the generator slot-budget base'
     Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
+    Assert-True ($Task3ValidatorContent -match 'spec\.schema_version\s*~=\s*5') 'Validator must require FightSpec v5'
+    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','GA_MEDICAL_COST_INVALID','GA_ENEMY_MEDICAL_MIX_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v5 validator must contain $Marker"
+    }
 }
 $Task3GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 if (Test-Path -LiteralPath $Task3GeneratorPath) {
@@ -1113,7 +1119,12 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($Task3GeneratorContent -match 'stream\s*\(\s*normalized_request') 'Every generated RNG stream must use the normalized request'
     Assert-True ($Task3GeneratorContent -match 'gamma_arena_number\.is_integer') 'Generator seed and index checks must use the finite integer contract'
     Assert-True ($Task3GeneratorContent -match '"actor_knife"') 'Player knife must use an independent tagged RNG stream'
-    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*4') 'Generator must emit FightSpecV4'
+    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*5') 'Generator must emit FightSpecV5'
+    Assert-True ($Task3GeneratorContent -match 'CORE_RNG_EPOCH\s*=\s*6') 'Generator must retain core/equipment RNG epoch 6'
+    Assert-True ($Task3GeneratorContent -match 'MEDICAL_RNG_EPOCH\s*=\s*1') 'Generator must declare medical RNG epoch 1'
+    foreach ($Marker in @('gear_cost','medical_cost','gamma_arena_medical_generator.generate_actor','gamma_arena_medical_generator.allocate_enemies')) {
+        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "FightSpec v5 generator must contain $Marker"
+    }
     foreach ($Marker in @('pick_affordable_band','primary_share_percent','spawn_slot_id','tactical_route','role_weapon_pool','resolved_layout')) {
         Assert-True ($Task3GeneratorContent -match $Marker) "FightSpec v3 generator must contain $Marker"
     }
@@ -1124,6 +1135,8 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
         Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Player selection must use the $Marker deterministic stream"
     }
     $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
+    Assert-True ($GeneratorTests -match 'fight_spec_v5_separates_gear_and_medical_costs') 'Generator tests must cover FightSpec v5 cost separation'
+    Assert-True ($GeneratorTests -match 'medical_tuning_does_not_reroll_core_fight') 'Generator tests must prove medical tuning cannot reroll core fight fields'
     Assert-True ($GeneratorTests -match 'catalog_skips_optional_missing_medicine') 'Generator tests must cover optional missing medicine normalization'
     foreach ($MedicalCase in @('actor_medical_generation_enforces_budget_and_healer','actor_medical_generation_reaches_master_rare','enemy_medical_generation_spends_team_budget','medical_generation_100000_fights')) {
         Assert-True ($GeneratorTests -match [regex]::Escape($MedicalCase)) "Generator tests must cover $MedicalCase"
@@ -1186,6 +1199,20 @@ if (Test-Path -LiteralPath $FightSpecV4Path) {
     Assert-True ($FightSpecV4Content -match '(?m)^\| generator_version \| exactly 6 \|\s*$' -and $FightSpecV4Content -match '(?m)^\| catalog_revision \| exactly 6 \|\s*$' -and $FightSpecV4Content.Contains('`ga-<seed>-<index>-g6-c6-l2`')) 'FightSpecV4 must declare generator/catalog 6 and the g6/c6/l2 fight ID.'
     Assert-True ($FightSpecV4Content -match '(?is)actor-only.+bonus_ammo.+standard.+1\.\.60.+special.+61\.\.75.+armor_piercing.+76\.\.100') 'FightSpecV4 must document actor-only weighted bonus ammo.'
     Assert-True ($FightSpecV4Content -match '(?is)actor_bonus_ammo_category.+actor_bonus_ammo_section.+budget.+never') 'FightSpecV4 must document dedicated bonus streams and budget exclusion.'
+}
+$GoldenV5Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v5.txt'
+if (Test-Path -LiteralPath $GoldenV5Path) {
+    $GoldenV5Content = Get-Content -LiteralPath $GoldenV5Path -Raw
+    Assert-True (([regex]::Matches($GoldenV5Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=5\|.+\|diagnostic=FightSpecV5 .+$')).Count -eq 4) 'Golden fixture must contain four complete v5 stable encodings'
+    Assert-True ($GoldenV5Content -match 'medical:[^|,]*\+?[^|,]*,\d+,\d+,\d+') 'Golden v5 fixture must encode medicine plus separated costs'
+}
+$FightSpecV5Path = Join-Path $RepoRoot 'schemas\fight-spec-v5.md'
+if (Test-Path -LiteralPath $FightSpecV5Path) {
+    $FightSpecV5Content = Get-Content -LiteralPath $FightSpecV5Path -Raw
+    Assert-True ($FightSpecV5Content -match '(?m)^\| schema_version \| exactly 5 \|\s*$') 'FightSpecV5 root schema must be version 5.'
+    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','enemy medical team budget','core/equipment RNG epoch 6','medical RNG epoch 1')) {
+        Assert-True ($FightSpecV5Content -match [regex]::Escape($Marker)) "FightSpecV5 must document $Marker"
+    }
 }
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'

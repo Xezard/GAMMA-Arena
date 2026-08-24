@@ -3,7 +3,7 @@ param([switch]$Verify)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v4.txt'
+$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v5.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
@@ -36,8 +36,8 @@ $generatorText = Get-Content -Raw -LiteralPath $generatorPath
 if ([int]$catalog.meta.schema_version -ne 5 -or [int]$catalog.meta.revision -ne 6 -or [int]$catalog.meta.generator_version -ne 6 -or
     [int]$difficulties.meta.schema_version -ne 3 -or [int]$difficulties.meta.revision -ne 4 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
-    $generatorText -notmatch 'schema_version\s*=\s*4' -or $generatorText -notmatch 'FightSpecV4') {
-    throw 'Reference oracle requires catalog schema 5, generator/catalog 6/6, difficulty v4, layout v2, and FightSpec v4.'
+    $generatorText -notmatch 'schema_version\s*=\s*5' -or $generatorText -notmatch 'FightSpecV5') {
+    throw 'Reference oracle requires catalog schema 5, generator/catalog 6/6, transitional medical difficulty v4, layout v2, and FightSpec v5.'
 }
 
 $difficultyManifest = @{
@@ -91,8 +91,8 @@ function Get-GaNextRaw([hashtable]$Rng) {
     return $Rng.State
 }
 function Get-GaNextInt([hashtable]$Rng, [int]$Minimum, [int]$Maximum) { return $Minimum + (Get-GaNextRaw $Rng) % ($Maximum - $Minimum + 1) }
-function New-GaStream([pscustomobject]$Request, [int]$FightIndex, [string]$Tag) {
-    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,6,6,2,$Tag)
+function New-GaStream([pscustomobject]$Request, [int]$FightIndex, [string]$Tag, [int]$Epoch = 6) {
+    return New-GaRng @($Request.ModeId,$Request.DifficultyId,[int64]$Request.SessionSeed,$FightIndex,$Epoch,2,$Tag)
 }
 function Select-GaPick([hashtable]$Rng, [array]$Values) { return $Values[(Get-GaNextInt $Rng 1 $Values.Count) - 1] }
 function Select-GaWeightedPair {
@@ -136,6 +136,11 @@ $outfits = @($catalog.outfits.ids.Split(',') | ForEach-Object { $_.Trim() } | So
 $profiles = @($catalog.profiles.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["profile_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
 $knives = @($catalog.knives.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $catalog["knife_$_"].section })
 $bandageCost = [int]$catalog.consumable_bandage.cost
+$medicalItems = @($catalog.medical_items.ids.Split(',') | ForEach-Object { $_.Trim() } | ForEach-Object {
+    $entry = $catalog["medical_$_"]
+    [pscustomobject]@{Id=$_;Section=$entry.section;Category=$entry.category;ActorCost=[int]$entry.actor_cost;NpcCost=[int]$entry.npc_cost;MinTier=[int]$entry.min_tier;MaxCount=[int]$entry.max_count}
+} | Sort-Object Section)
+$medicalBySection = @{}; foreach ($item in $medicalItems) { $medicalBySection[$item.Section] = $item }
 $combinations = @()
 foreach ($weapon in $weapons) { foreach ($outfit in $outfits) { foreach ($boxes in $weapon.AmmoBoxMin..$weapon.AmmoBoxMax) {
     $combinations += [pscustomobject]@{Weapon=$weapon.Section;Ammo=$weapon.Ammo;AmmoBoxes=$boxes;Outfit=$outfit.Section;Cost=$weapon.Cost+$ammoCosts[$weapon.Ammo]*$boxes+$outfit.Cost+$bandageCost;Kind=$weapon.Kind}
@@ -149,9 +154,82 @@ function Get-GaRoleCombinations([string]$Role) {
     foreach ($weapon in $(if ($Role -eq 'secondary') { $secondaryWeapons } else { $primaryWeapons })) { $sections[$weapon.Section]=$true }
     return @($combinations | Where-Object { $sections.ContainsKey($_.Weapon) })
 }
+
+function Select-GaMedicalCategory([hashtable]$Rng, [hashtable]$Weights, [hashtable]$Available) {
+    $categories = @('bleed','health','boost','rare')
+    $total = 0
+    foreach ($category in $categories) { if ($Available[$category] -and [int]$Weights[$category] -gt 0) { $total += [int]$Weights[$category] } }
+    if ($total -le 0) { return $null }
+    $draw = Get-GaNextInt $Rng 1 $total; $cumulative = 0
+    foreach ($category in $categories) {
+        if ($Available[$category] -and [int]$Weights[$category] -gt 0) {
+            $cumulative += [int]$Weights[$category]
+            if ($draw -le $cumulative) { return $category }
+        }
+    }
+    throw 'Medical category draw exhausted its range.'
+}
+
+function New-GaActorMedical([pscustomobject]$Request, [int]$FightIndex, [pscustomobject]$Difficulty) {
+    $sections = [Collections.Generic.List[string]]::new(); $sections.Add('bandage')
+    $cost = [int]$medicalBySection.bandage.ActorCost
+    $sectionCounts = @{bandage=1}; $categoryCounts = @{bleed=1}
+    for ($stage = 0; $stage -le 3; $stage++) {
+        $required = $stage -eq 0
+        $remaining = $Difficulty.PlayerMedicalBudget - $cost
+        $byCategory = @{bleed=@();health=@();boost=@();rare=@()}; $available = @{}
+        foreach ($item in $medicalItems) {
+            $count = if ($sectionCounts.ContainsKey($item.Section)) { [int]$sectionCounts[$item.Section] } else { 0 }
+            $categoryCount = if ($categoryCounts.ContainsKey($item.Category)) { [int]$categoryCounts[$item.Category] } else { 0 }
+            $categoryCap = switch ($item.Category) { health {2} boost {1} rare {1} default {999} }
+            $healing = $item.Category -eq 'health' -or $item.Category -eq 'rare'
+            if ($item.MinTier -le $Difficulty.Tier -and $item.ActorCost -le $remaining -and $count -lt $item.MaxCount -and $categoryCount -lt $categoryCap -and (-not $required -or $healing)) {
+                $byCategory[$item.Category] = @($byCategory[$item.Category]) + $item
+                $available[$item.Category] = $true
+            }
+        }
+        $categoryTag = if ($required) { 'actor_medical_required_category' } else { "actor_medical_optional_category:$stage" }
+        $sectionTag = if ($required) { 'actor_medical_required_section' } else { "actor_medical_optional_section:$stage" }
+        $category = Select-GaMedicalCategory (New-GaStream $Request $FightIndex $categoryTag 1) $Difficulty.MedicalWeights $available
+        if ($null -eq $category) { if ($required) { throw 'No required reference healer fits.' }; break }
+        $item = Select-GaPick (New-GaStream $Request $FightIndex $sectionTag 1) @($byCategory[$category] | Sort-Object Section)
+        $sections.Add($item.Section); $cost += $item.ActorCost
+        $sectionCounts[$item.Section] = $(if ($sectionCounts.ContainsKey($item.Section)) { [int]$sectionCounts[$item.Section] + 1 } else { 1 })
+        $categoryCounts[$item.Category] = $(if ($categoryCounts.ContainsKey($item.Category)) { [int]$categoryCounts[$item.Category] + 1 } else { 1 })
+        if ($sections.Count -ge 5) { break }
+    }
+    return [pscustomobject]@{Sections=@($sections);Cost=$cost}
+}
+
+function New-GaEnemyMedical([pscustomobject]$Request, [int]$FightIndex, [array]$Records) {
+    $count = $Records.Count
+    $medkitCap = [math]::Min([math]::Floor($count / 2), [math]::Ceiling($count / 4))
+    $medkitCount = Get-GaNextInt (New-GaStream $Request $FightIndex 'enemy_medical_mix' 1) 1 $medkitCap
+    $bandageCount = $count - 2 * $medkitCount
+    $allocations = @(); for ($index = 0; $index -lt $count; $index++) { $allocations += [pscustomobject]@{Sections=[Collections.Generic.List[string]]::new();Cost=0} }
+    foreach ($pair in @([pscustomobject]@{Section='medkit';Count=$medkitCount},[pscustomobject]@{Section='bandage';Count=$bandageCount})) {
+        $item = $medicalBySection[$pair.Section]
+        for ($itemIndex = 1; $itemIndex -le $pair.Count; $itemIndex++) {
+            $eligible = @(); $total = 0
+            for ($index = 0; $index -lt $count; $index++) {
+                if ($allocations[$index].Sections -contains $pair.Section) { continue }
+                $weight = switch ($Records[$index].Role) { leader {4} primary {2} secondary {1} default {0} }
+                if ($weight -gt 0) { $total += $weight; $eligible += [pscustomobject]@{Index=$index;Weight=$weight} }
+            }
+            $draw = Get-GaNextInt (New-GaStream $Request $FightIndex "enemy_medical_recipient:$($pair.Section):$itemIndex" 1) 1 $total
+            $cumulative = 0; $recipient = -1
+            foreach ($candidate in $eligible) { $cumulative += $candidate.Weight; if ($draw -le $cumulative) { $recipient = $candidate.Index; break } }
+            if ($recipient -lt 0) { throw 'Enemy medical recipient draw exhausted its range.' }
+            $allocations[$recipient].Sections.Add($pair.Section)
+            $allocations[$recipient].Cost += $item.NpcCost
+        }
+    }
+    return $allocations
+}
+
 function New-GaLoadout([hashtable]$Rng, [int]$Budget, [array]$Candidates, [string]$Knife) {
     $choice = Select-GaBand $Rng $Candidates $Budget
-    return [pscustomobject]@{Encoded="$($choice.Weapon),$($choice.Ammo),$($choice.AmmoBoxes),$($choice.Outfit),$Knife,bandage,$($choice.Cost)";Cost=[int]$choice.Cost;Kind=$choice.Kind}
+    return [pscustomobject]@{Weapon=$choice.Weapon;Ammo=$choice.Ammo;AmmoBoxes=$choice.AmmoBoxes;Outfit=$choice.Outfit;Knife=$Knife;GearCost=[int]$choice.Cost-$bandageCost;Kind=$choice.Kind}
 }
 function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscustomobject]$Difficulty, [string]$Knife) {
     $pairs = @()
@@ -195,7 +273,10 @@ function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscust
     $bonusSection=$weapon.Ammo
     if($requestedCategory-eq'standard'){ $bonusSection=(Select-GaPick (New-GaStream $Request $FightIndex 'actor_bonus_ammo_section') @($weapon.Ammo)) }
     $bonus="bonus:${bonusSection}:${requestedCategory}:standard:1"
-    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$ammoBoxes,$($outfit.Section),$Knife,bandage,$cost,$bonus";Cost=[int]$cost;Kind=$weapon.Kind}
+    $gearCost = [int]$cost - $bandageCost
+    $medical = New-GaActorMedical $Request $FightIndex $Difficulty
+    $totalCost = $gearCost + $medical.Cost
+    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$ammoBoxes,$($outfit.Section),$Knife,medical:$($medical.Sections -join '+'),$gearCost,$($medical.Cost),$totalCost,$bonus";Cost=$totalCost;GearCost=$gearCost;MedicalCost=$medical.Cost;Kind=$weapon.Kind}
 }
 
 $resolvedSlots = @()
@@ -241,7 +322,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
     $actor=New-GaPlayerLoadout $request $FightIndex $difficulty $actorKnife
     $primaryCount=[math]::Ceiling($count*$difficulty.PrimaryShare/100)
     $base=[math]::Floor($difficulty.EnemyBudget/$count);$remainder=$difficulty.EnemyBudget%$count
-    $opponents=@()
+    $records=@()
     for($zero=0;$zero -lt $count;$zero++){
         $index=$zero+1;$role=$(if($index-eq 1){'leader'}elseif($index-le $primaryCount){'primary'}else{'secondary'})
         $weaponRole=$(if($role-eq'secondary'){'secondary'}else{'primary'})
@@ -253,11 +334,18 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $profile=Select-GaBand (New-GaStream $request $FightIndex "enemy_profile:$index") $eligibleProfiles $profileMaximum
         $knife=Select-GaPick (New-GaStream $request $FightIndex "enemy_knife:$index") $knives
         $gear=New-GaLoadout (New-GaStream $request $FightIndex "enemy_loadout:$index") ($slotBudget-$profile.Cost) $roleCombinations $knife
-        $physical=$slots[$zero]
-        $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
-        $opponents += "${index}:$index,$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($assigned[$zero]),$role,$($profile.Section),$($profile.Cost),$($gear.Encoded),$($profile.Cost+$gear.Cost)"
+        $records += [pscustomobject]@{Index=$index;Role=$role;Profile=$profile;Gear=$gear;Physical=$slots[$zero];Route=$assigned[$zero]}
     }
-    $fields=@('schema_version=4','generator_version=6','catalog_revision=6','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g6-c6-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV4 skirmish $DifficultyId #$FightIndex"
+    $medicalAllocations = New-GaEnemyMedical $request $FightIndex $records
+    $opponents=@()
+    for ($zero=0; $zero -lt $records.Count; $zero++) {
+        $record=$records[$zero]; $medical=$medicalAllocations[$zero]; $physical=$record.Physical
+        $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
+        $loadout="$($record.Gear.Weapon),$($record.Gear.Ammo),$($record.Gear.AmmoBoxes),$($record.Gear.Outfit),$($record.Gear.Knife),medical:$($medical.Sections -join '+'),$($record.Gear.GearCost),$($medical.Cost),$($record.Gear.GearCost+$medical.Cost)"
+        $total=$record.Profile.Cost+$record.Gear.GearCost+$medical.Cost
+        $opponents += "$($record.Index):$($record.Index),$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($record.Route),$($record.Role),$($record.Profile.Section),$($record.Profile.Cost),$loadout,$total"
+    }
+    $fields=@('schema_version=5','generator_version=6','catalog_revision=6','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g6-c6-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV5 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 
@@ -278,8 +366,8 @@ $requests=@(
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
 if((New-GaEncodedFight 0 veteran 7)-cne(New-GaEncodedFight 1 veteran 7)){throw 'Normalized seed aliases must match'}
 if($Verify){
-    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v4 fixture is missing'}
+    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v5 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
-    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v4 reference oracle.'}
+    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v5 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
 }else{$expected}
