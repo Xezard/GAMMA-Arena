@@ -8142,7 +8142,7 @@ local function universal_items()
 end
 
 local function universal_catalog()
-    return { items = {
+    return { max_physical_items_per_participant = 256, items = {
         outfit = { category = "outfit", ltx_slot = 6 }, helmet = { category = "helmet", ltx_slot = 12 },
         knife = { category = "knife", ltx_slot = 0 },
         pistol = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_b" } },
@@ -8151,6 +8151,38 @@ local function universal_catalog()
         ammo_a = { category = "ammo", box_size = 30 }, ammo_b = { category = "ammo", box_size = 20 },
         medkit = { category = "medicine", healing = true }
     } }
+end
+
+local function runtime_universal_items_preflight_enforces_physical_item_cap()
+    local catalog = universal_catalog()
+    local accepted = gamma_arena_item_materializer.descriptors({
+        { section = "medkit", quantity = 256 }
+    }, catalog)
+    gamma_arena_test_assert.is_true(accepted.ok, "exactly 256 physical items pass pure preflight")
+    gamma_arena_test_assert.equals(#accepted.value, 256, "exactly 256 descriptors expand in the bounded fixture")
+
+    local large_box_catalog = universal_catalog()
+    large_box_catalog.items.ammo_a.box_size = 4294967296
+    local large_box = gamma_arena_item_materializer.descriptors({
+        { section = "ammo_a", quantity = 1 }
+    }, large_box_catalog)
+    gamma_arena_test_assert.is_true(large_box.ok, "box_size keeps the Task 2 positive-integer contract")
+    gamma_arena_test_assert.equals(large_box.value[1].box_size, 4294967296, "entity cap is not a rounds-per-box cap")
+
+    for _, quantity in ipairs({ 257, 4294967296 }) do
+        local env, port = universal_item_fixture()
+        local called, result = pcall(function()
+            return port:apply({ runtime_id = 1 }, { { section = "medkit", quantity = quantity } }, universal_catalog())
+        end)
+        gamma_arena_test_assert.is_true(called, "over-cap quantity returns safely: " .. tostring(quantity))
+        gamma_arena_test_assert.is_false(result.ok, "over-cap quantity is rejected: " .. tostring(quantity))
+        gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_MATERIALIZE_LIMIT", "over-cap quantity uses participant cap error")
+        gamma_arena_test_assert.equals(#env.events, 0, "over-cap quantity has no mutation events")
+        gamma_arena_test_assert.equals(#env.created, 0, "over-cap quantity creates nothing")
+        gamma_arena_test_assert.equals(env.stage_counts.register, nil, "over-cap quantity registers nothing")
+        gamma_arena_test_assert.equals(env.stage_counts.move_to_slot, nil, "over-cap quantity equips nothing")
+        gamma_arena_test_assert.equals(#env.rollback_attempts, 0, "over-cap quantity needs no rollback")
+    end
 end
 
 local function runtime_universal_items_materialize_exact_entities_and_slot_order()
@@ -8226,7 +8258,7 @@ local function runtime_universal_items_preflight_rejects_malformed_nested_inputs
         { name = "sparse items", items = { [1] = base_items[1], [3] = base_items[2] } },
         { name = "non-array item key", mutate_items = function(items) items.future = items[1] end },
         { name = "empty section", mutate_items = function(items) items[1].section = "" end },
-        { name = "unbounded quantity", mutate_items = function(items) items[1].quantity = 4294967296 end },
+        { name = "unsafe quantity", mutate_items = function(items) items[1].quantity = 9007199254740992 end },
         { name = "unknown slot", mutate_items = function(items) items[1].equipped_slot = "belt" end },
         { name = "slot category mismatch", mutate_items = function(items) items[9].equipped_slot = "weapon_1" end },
         { name = "weapon slot metadata mismatch", mutate_items = function(items) items[4].equipped_slot = "weapon_2" end },
@@ -8323,6 +8355,7 @@ end
 
 local cases = {
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
+    { name = "runtime_universal_items_preflight_enforces_physical_item_cap", fn = runtime_universal_items_preflight_enforces_physical_item_cap },
     { name = "runtime_universal_items_rollback_every_failure_in_reverse", fn = runtime_universal_items_rollback_every_failure_in_reverse },
     { name = "runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation", fn = runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation },
     { name = "runtime_universal_items_rollback_failure_aggregates_original_cause", fn = runtime_universal_items_rollback_failure_aggregates_original_cause },

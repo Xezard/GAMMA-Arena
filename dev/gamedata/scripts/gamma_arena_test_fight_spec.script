@@ -12,6 +12,7 @@ end
 local function catalog()
     return {
         fingerprint = "ga-catalog-v8-1234abcd",
+        max_physical_items_per_participant = 256,
         items = {
             stalker_outfit = { category = "outfit", helmet_allowed = true },
             sealed_outfit = { category = "outfit", helmet_allowed = false },
@@ -87,6 +88,19 @@ local function item_draft()
     return value
 end
 
+local function set_participant_physical_total(participant, total)
+    local retained, retained_total = {}, 0
+    for _, entry in ipairs(participant.items) do
+        if entry.section ~= "ammo_545" then
+            retained[#retained + 1] = entry
+            retained_total = retained_total + entry.quantity
+        end
+    end
+    retained[#retained + 1] = { section = "ammo_545", quantity = total - retained_total }
+    participant.loadout = nil
+    participant.items = retained
+end
+
 local function canonicalizes_legacy_and_item_loadouts_equivalently()
     local first = gamma_arena_fight_spec.canonicalize(legacy_draft(), identity(), catalog(), layout())
     local second = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
@@ -97,6 +111,53 @@ local function canonicalizes_legacy_and_item_loadouts_equivalently()
     gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first.value), gamma_arena_fight_spec.stable_encode(second.value), "legacy and item drafts encode identically")
     gamma_arena_test_assert.equals(first.value.actor.items[1].equipped_slot, "outfit", "equipped item sorting")
     gamma_arena_test_assert.equals(item_by_section(first.value.actor.items, "ammo_545").quantity, 3, "physical ammo boxes aggregate")
+end
+
+local function fight_spec_enforces_per_participant_physical_item_cap()
+    for _, target in ipairs({ "actor", "opponent" }) do
+        local accepted = item_draft()
+        local accepted_participant = target == "actor" and accepted.actor or accepted.opponents[1]
+        set_participant_physical_total(accepted_participant, 256)
+        local result = gamma_arena_fight_spec.canonicalize(accepted, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_true(result.ok, target .. " total 256 canonicalizes")
+
+        local rejected = item_draft()
+        local rejected_participant = target == "actor" and rejected.actor or rejected.opponents[1]
+        set_participant_physical_total(rejected_participant, 257)
+        result = gamma_arena_fight_spec.canonicalize(rejected, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, target .. " total 257 is rejected")
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ITEM_LIMIT", target .. " cap error code")
+    end
+
+    local legacy_actor = legacy_draft()
+    legacy_actor.actor.loadout.ammo_boxes = 250
+    gamma_arena_test_assert.is_true(
+        gamma_arena_fight_spec.canonicalize(legacy_actor, identity(), catalog(), layout()).ok,
+        "legacy actor total 256 canonicalizes")
+    legacy_actor.actor.loadout.ammo_boxes = 251
+    gamma_arena_test_assert.equals(
+        gamma_arena_fight_spec.canonicalize(legacy_actor, identity(), catalog(), layout()).error.code,
+        "GA_FIGHT_SPEC_ITEM_LIMIT",
+        "legacy actor total 257 uses the shared cap")
+
+    local legacy_opponent = legacy_draft()
+    legacy_opponent.opponents[1].loadout.ammo_boxes = 252
+    gamma_arena_test_assert.is_true(
+        gamma_arena_fight_spec.canonicalize(legacy_opponent, identity(), catalog(), layout()).ok,
+        "legacy opponent total 256 canonicalizes")
+    legacy_opponent.opponents[1].loadout.ammo_boxes = 253
+    gamma_arena_test_assert.equals(
+        gamma_arena_fight_spec.canonicalize(legacy_opponent, identity(), catalog(), layout()).error.code,
+        "GA_FIGHT_SPEC_ITEM_LIMIT",
+        "legacy opponent total 257 uses the shared cap")
+
+    local huge = item_draft()
+    huge.actor.items = { { section = "bandage", quantity = 4294967296 } }
+    local called, result = pcall(function()
+        return gamma_arena_fight_spec.canonicalize(huge, identity(), catalog(), layout())
+    end)
+    gamma_arena_test_assert.is_true(called, "large safe integer quantity returns without allocation")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ITEM_LIMIT", "large safe integer fails by participant cap")
 end
 
 local function rejects_invalid_item_entries_and_positions()
@@ -299,6 +360,39 @@ local function validator_accepts_valid_v6_and_returns_immutable_copy()
         "optional runtime rejects a mismatched effective profile community")
 end
 
+local function validator_enforces_per_participant_physical_item_cap()
+    for _, target in ipairs({ "actor", "opponent" }) do
+        local draft = item_draft()
+        local participant = target == "actor" and draft.actor or draft.opponents[1]
+        set_participant_physical_total(participant, 256)
+        local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_true(canonical.ok, target .. " boundary fixture canonicalizes")
+        gamma_arena_test_assert.is_true(
+            gamma_arena_fight_validator_v6.validate(canonical.value, catalog(), layout()).ok,
+            target .. " total 256 validates")
+
+        local forged = clone(canonical.value)
+        local forged_ammo = item_by_section(target == "actor" and forged.actor.items or forged.opponents[1].items, "ammo_545")
+        forged_ammo.quantity = forged_ammo.quantity + 1
+        local result = gamma_arena_fight_validator_v6.validate(forged, catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, target .. " total 257 is rejected independently")
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", target .. " strict cap error code")
+    end
+
+    local huge = valid_spec()
+    item_by_section(huge.actor.items, "ammo_545").quantity = 4294967296
+    local called, result = pcall(function()
+        return gamma_arena_fight_validator_v6.validate(huge, catalog(), layout())
+    end)
+    gamma_arena_test_assert.is_true(called, "strict validator handles large safe integer without reconstruction")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", "strict large integer fails by participant cap")
+
+    local wrong_cap = catalog()
+    wrong_cap.max_physical_items_per_participant = 255
+    result = gamma_arena_fight_validator_v6.validate(valid_spec(), wrong_cap, layout())
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_CATALOG_INVALID", "strict validator requires authoritative cap")
+end
+
 local function validator_rejects_unknown_keys_at_every_schema_level()
     local locations = {
         function(value) value.unknown_root = true end,
@@ -485,6 +579,7 @@ function run(run_case_fn)
     local all_passed = true
     for _, case in ipairs({
         { name = "fight_spec_canonicalizes_legacy_and_item_loadouts_equivalently", fn = canonicalizes_legacy_and_item_loadouts_equivalently },
+        { name = "fight_spec_enforces_per_participant_physical_item_cap", fn = fight_spec_enforces_per_participant_physical_item_cap },
         { name = "fight_spec_rejects_invalid_item_entries_and_positions", fn = rejects_invalid_item_entries_and_positions },
         { name = "fight_spec_rejects_forbidden_keys_at_every_depth_and_invalid_identity", fn = rejects_forbidden_keys_at_every_depth_and_invalid_identity },
         { name = "fight_spec_binds_identity_layout_and_dense_arrays", fn = fight_spec_binds_identity_layout_and_dense_arrays },
@@ -492,6 +587,7 @@ function run(run_case_fn)
         { name = "fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo", fn = fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo },
         { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable },
         { name = "fight_validator_v6_accepts_valid_and_returns_immutable_copy", fn = validator_accepts_valid_v6_and_returns_immutable_copy },
+        { name = "fight_validator_v6_enforces_per_participant_physical_item_cap", fn = validator_enforces_per_participant_physical_item_cap },
         { name = "fight_validator_v6_rejects_unknown_keys_at_every_schema_level", fn = validator_rejects_unknown_keys_at_every_schema_level },
         { name = "fight_validator_v6_rejects_generation_provenance_recursively", fn = validator_rejects_generation_provenance_recursively },
         { name = "fight_validator_v6_rejects_mutation_matrix", fn = validator_rejects_mutation_matrix },

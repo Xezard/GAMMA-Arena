@@ -24,6 +24,14 @@ local function unsigned_integer(value, minimum)
     return finite_number(value) and value == math.floor(value) and value >= (minimum or 0) and value <= MAX_SAFE_INTEGER
 end
 
+local function physical_item_cap(catalog)
+    local cap = type(catalog) == "table" and catalog.max_physical_items_per_participant or nil
+    if not unsigned_integer(cap, 1) or cap ~= 256 then
+        return nil, failure("GA_FIGHT_SPEC_CATALOG", "FightSpec catalog physical item cap is not authoritative")
+    end
+    return cap, nil
+end
+
 local function dense_array(value, path)
     if type(value) ~= "table" then return nil, failure("GA_FIGHT_SPEC_ARRAY", "FightSpec array must be a table", { path = path }) end
     local maximum, count = 0, 0
@@ -181,14 +189,28 @@ local function legacy_items(loadout, catalog)
     return gamma_arena_result.ok(values)
 end
 
-local function resolve_items(value, catalog)
-    if type(value) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must be a table") end
-    if value.items ~= nil and value.loadout ~= nil then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must use one item shape") end
-    if value.items ~= nil then return normalized_items(value.items, catalog) end
-    return legacy_items(value.loadout, catalog)
+local function enforce_physical_item_cap(result, cap, path)
+    if not result.ok then return result end
+    local total = 0
+    for _, entry in ipairs(result.value) do
+        if entry.quantity > cap - total then
+            return failure("GA_FIGHT_SPEC_ITEM_LIMIT", "Participant physical item total exceeds the catalog cap", {
+                path = path, cap = cap
+            })
+        end
+        total = total + entry.quantity
+    end
+    return result
 end
 
-local function canonical_opponent(value, catalog, routes)
+local function resolve_items(value, catalog, cap, path)
+    if type(value) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must be a table") end
+    if value.items ~= nil and value.loadout ~= nil then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must use one item shape") end
+    local result = value.items ~= nil and normalized_items(value.items, catalog) or legacy_items(value.loadout, catalog)
+    return enforce_physical_item_cap(result, cap, path)
+end
+
+local function canonical_opponent(value, catalog, routes, cap, path)
     if type(value) ~= "table" or not unsigned_integer(value.slot, 1) or not text(value.faction) or type(value.rank) ~= "table"
         or not text(value.rank.id) or not unsigned_integer(value.rank.value) or not text(value.profile) or not text(value.role)
         or not text(value.spawn_slot_id) or type(value.spawn) ~= "table" or type(value.spawn.position) ~= "table" or not text(value.tactical_route) then
@@ -198,7 +220,7 @@ local function canonical_opponent(value, catalog, routes)
     local position = value.spawn.position
     if not finite_number(position.x) or not finite_number(position.y) or not finite_number(position.z)
         or not unsigned_integer(value.spawn.level_vertex_id) or not unsigned_integer(value.spawn.game_vertex_id) then return failure("GA_FIGHT_SPEC_POSITION", "Opponent spawn data is invalid") end
-    local items = resolve_items(value, catalog)
+    local items = resolve_items(value, catalog, cap, path .. ".items")
     if not items.ok then return items end
     return gamma_arena_result.ok({ slot = value.slot, faction = value.faction, rank = { id = value.rank.id, value = value.rank.value }, profile = value.profile, role = value.role, spawn_slot_id = value.spawn_slot_id, spawn = { position = { x = position.x, y = position.y, z = position.z }, level_vertex_id = value.spawn.level_vertex_id, game_vertex_id = value.spawn.game_vertex_id }, tactical_route = value.tactical_route, items = items.value })
 end
@@ -273,6 +295,8 @@ end
 function canonicalize(draft, identity, catalog, layout)
     local forbidden = no_forbidden(draft, "draft")
     if forbidden then return forbidden end
+    local cap, cap_error = physical_item_cap(catalog)
+    if cap == nil then return cap_error end
     local invalid_identity = exact_identity(identity, catalog, layout)
     if invalid_identity then return invalid_identity end
     if type(draft) ~= "table" or type(draft.arena) ~= "table" or type(draft.actor) ~= "table" then return failure("GA_FIGHT_SPEC_DRAFT", "Fight draft is incomplete") end
@@ -300,11 +324,11 @@ function canonicalize(draft, identity, catalog, layout)
     end
     local opponent_count, opponents_invalid = dense_array(draft.opponents, "opponents")
     if opponents_invalid then return opponents_invalid end
-    local actor_items = resolve_items(draft.actor, catalog)
+    local actor_items = resolve_items(draft.actor, catalog, cap, "draft.actor.items")
     if not actor_items.ok then return actor_items end
     local opponents, slots = {}, {}
     for index = 1, opponent_count do
-        local opponent = canonical_opponent(draft.opponents[index], catalog, routes)
+        local opponent = canonical_opponent(draft.opponents[index], catalog, routes, cap, "draft.opponents." .. tostring(index))
         if not opponent.ok then return opponent end
         if slots[opponent.value.slot] then return failure("GA_FIGHT_SPEC_OPPONENT", "Opponent slots must be unique", { slot = opponent.value.slot }) end
         slots[opponent.value.slot] = true; opponents[#opponents + 1] = opponent.value

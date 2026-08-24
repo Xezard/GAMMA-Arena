@@ -4,7 +4,7 @@ Materializer.__index = Materializer
 local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
 local CATEGORIES = { outfit = true, helmet = true, knife = true, weapon = true, ammo = true, medicine = true }
 local CATEGORY_LTX_SLOTS = { outfit = 6, helmet = 12, knife = 0 }
-local UINT32_MOD = 4294967296
+local MAX_SAFE_INTEGER = 9007199254740991
 
 local function failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
@@ -21,7 +21,11 @@ end
 
 local function finite_positive_integer(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
-        and value == math.floor(value) and value >= 1 and value < UINT32_MOD
+        and value == math.floor(value) and value >= 1
+end
+
+local function safe_positive_integer(value)
+    return finite_positive_integer(value) and value <= MAX_SAFE_INTEGER
 end
 
 local function dense_array_length(value, path, allow_empty)
@@ -101,15 +105,26 @@ local function preflight_items(items, catalog)
     if type(items) ~= "table" or type(catalog) ~= "table" or type(catalog.items) ~= "table" then
         return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated universal items and catalog are required")
     end
+    local cap = catalog.max_physical_items_per_participant
+    if not safe_positive_integer(cap) or cap ~= 256 then
+        return failure("GA_ITEM_MATERIALIZE_LIMIT", "Validated catalog physical item cap is not authoritative")
+    end
     local item_count, array_error = dense_array_length(items, "items", true)
     if item_count == nil then return array_error end
     local normalized_items, selected, occupied_slots = {}, {}, {}
+    local physical_total = 0
     for index = 1, item_count do
         local item = items[index]
         if type(item) ~= "table" or type(item.section) ~= "string" or item.section == ""
-            or not finite_positive_integer(item.quantity) then
+            or not safe_positive_integer(item.quantity) then
             return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated item entry is malformed", { index = index })
         end
+        if item.quantity > cap - physical_total then
+            return failure("GA_ITEM_MATERIALIZE_LIMIT", "Participant physical item total exceeds the catalog cap", {
+                cap = cap, index = index
+            })
+        end
+        physical_total = physical_total + item.quantity
         local definition = catalog.items[item.section]
         if type(definition) ~= "table" then
             return gamma_arena_result.err(
