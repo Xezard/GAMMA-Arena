@@ -1610,6 +1610,14 @@ Assert-True ($Task12EntityContent -match 'function\s+EntityAdapter:terminal_summ
 Assert-True ($Task12BootstrapContent.Contains('critically_wounded') -and $Task12BootstrapContent.Contains('log_info')) 'Bootstrap must bind wound evidence and terminal transition diagnostics'
 Assert-True ($Task12CompatContent.Contains('game_object.critically_wounded')) 'Preflight must require the critical-wound query used by victory reconciliation'
 Assert-True ($Task12OrchestratorContent -match 'show_victory[\s\S]{0,900}terminal_summary') 'Victory logging must include authoritative terminal counts'
+$TransitionStart = $Task12EntityContent.IndexOf('function EntityAdapter:transition_opponent')
+$TransitionEnd = $Task12EntityContent.IndexOf('function EntityAdapter:accept_registered_death', $TransitionStart)
+Assert-True ($TransitionStart -ge 0 -and $TransitionEnd -gt $TransitionStart) 'Opponent transition logger must remain structurally testable'
+$TransitionContent = $Task12EntityContent.Substring($TransitionStart, $TransitionEnd - $TransitionStart)
+Assert-True ($TransitionContent -notmatch 'fight_key\s*=\s*self\.fight_key') 'Routine opponent transitions must not repeat the complete FightSpec in every native log call'
+foreach ($CompactTransitionMarker in @('session_id = self.session_id','slot = record.slot','id = record.id','previous = previous','state = next_state','evidence = evidence')) {
+    Assert-True ($TransitionContent.Contains($CompactTransitionMarker)) "Compact opponent transition lost identity marker: $CompactTransitionMarker"
+}
 
 foreach ($IntegrityMarker in @('VERTICAL_ESCAPE_GRACE_MS', 'EARLY_SELF_DEATH_WINDOW_MS', 'GA_FIGHT_INTEGRITY_FAILED', 'integrity_status', 'vertical_escape', 'early_self_death')) {
     Assert-True ($Task12EntityContent.Contains($IntegrityMarker)) "Arena integrity evidence is missing marker: $IntegrityMarker"
