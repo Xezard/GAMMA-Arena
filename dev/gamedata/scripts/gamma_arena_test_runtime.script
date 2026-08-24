@@ -594,6 +594,37 @@ local function fake_store(intent_state)
 end
 
 local function fake_orchestrator_deps(store)
+    local save_guard = { installed = true, armed = false, install_calls = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0 }
+    function save_guard:install() self.install_calls = self.install_calls + 1; return gamma_arena_result.ok(false) end
+    function save_guard:is_armed() return self.armed end
+    function save_guard:arm(context)
+        if self.armed then return gamma_arena_result.ok(false) end
+        self.armed = true
+        self.arm_calls = self.arm_calls + 1
+        self.context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    function save_guard:maintain()
+        self.maintain_calls = self.maintain_calls + 1
+        return gamma_arena_result.ok(self.armed)
+    end
+    function save_guard:disarm(context)
+        if not self.armed then return gamma_arena_result.ok(false) end
+        self.armed = false
+        self.disarm_calls = self.disarm_calls + 1
+        self.disarm_context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    function save_guard:breach(context)
+        self.breach_calls = self.breach_calls + 1
+        self.breach_context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    local diagnostics = { checkpoints = {} }
+    function diagnostics:checkpoint(code, context)
+        self.checkpoints[#self.checkpoints + 1] = { code = code, context = clone(context) }
+        return gamma_arena_result.ok(true)
+    end
     local actor_adapter = {
         begin_update = function() return gamma_arena_result.ok(true) end,
         normalize_for_arena = function() return gamma_arena_result.ok(true) end,
@@ -647,6 +678,10 @@ local function fake_orchestrator_deps(store)
             return checkpoint_adapter:update()
         end,
         actor = actor_adapter,
+        save_guard = save_guard,
+        diagnostics = diagnostics,
+        _save_guard = save_guard,
+        _diagnostics = diagnostics,
         checkpoint = checkpoint_adapter,
         layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end
     }
@@ -694,6 +729,9 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     gamma_arena_test_assert.equals(store.mark_deferred_count, 1, "fake_start persists one cross-VM phase proof")
     gamma_arena_test_assert.is_false(fake_start_vm.activation_attempted, "fake_start cannot latch activation")
     gamma_arena_test_assert.is_true(fake_start_vm.awaiting_activation, "fake_start retains activation ownership")
+    gamma_arena_test_assert.is_true(fake_start_deps._save_guard.armed, "fake_start owns save suppression before GAMMA autosave fires")
+    gamma_arena_test_assert.equals(fake_start_deps._save_guard.arm_calls, 1, "deferred launch arms its VM exactly once")
+    gamma_arena_test_assert.is_true(fake_start_deps._save_guard.maintain_calls >= 1, "deferred launch immediately maintains timer cancellation")
 
     local rostok_deps = fake_orchestrator_deps(store)
     rostok_deps.current_level = function() return gamma_arena_result.ok("l05_bar") end
@@ -704,6 +742,7 @@ local function launch_defers_on_fake_start_then_activates_on_rostok()
     gamma_arena_test_assert.equals(store.validate_launch_activation_count, 1, "target VM validates persisted fake_start phase proof")
     gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
     gamma_arena_test_assert.is_true(rostok_vm:is_active(), "target level owns Arena session")
+    gamma_arena_test_assert.is_true(rostok_deps._save_guard.armed, "target Arena VM keeps save suppression armed")
 end
 
 local function launch_transition_diagnostics_are_event_based()
@@ -735,13 +774,15 @@ end
 
 local function ordinary_no_intent_activation_latches_once()
     local store = fake_store({ launch_pending = false, resume_pending = false })
-    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "ordinary game first update is inert")
     gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "ordinary game later update is inert")
     gamma_arena_test_assert.equals(store.inspect_count, 1, "ordinary game inspects intents once")
     gamma_arena_test_assert.is_true(orchestrator.activation_attempted, "ordinary game latches completed activation probe")
     gamma_arena_test_assert.is_false(orchestrator.awaiting_activation, "ordinary game clears activation wait")
+    gamma_arena_test_assert.equals(deps._save_guard.arm_calls, 0, "ordinary campaign VM never arms Arena save suppression")
 end
 
 local function bootstrap_default_store_exposes_complete_launch_contract()
@@ -975,17 +1016,16 @@ end
 
 local function save_payload_is_plain_deep_copy()
     local store = fake_store({ launch_pending = true, resume_pending = false })
-    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
     local mdata = {}
     local saved = orchestrator:save_state(mdata)
-    gamma_arena_test_assert.is_true(saved.ok, "active ArenaSession must serialize")
-    gamma_arena_test_assert.is_true(type(mdata.gamma_arena_session) == "table", "save payload must be a table")
-    gamma_arena_test_assert.is_true(mdata.gamma_arena_session ~= orchestrator:session_snapshot(), "save payload must not alias orchestrator state")
-    mdata.gamma_arena_session.fight_index = 99
-    gamma_arena_test_assert.equals(orchestrator:session_snapshot().fight_index, 0, "saved payload mutation must not affect runtime")
-    gamma_arena_test_assert.equals(mdata.gamma_arena_session.fight_spec, nil, "FightSpec must never be serialized")
+    gamma_arena_test_assert.is_true(saved.ok and saved.value == false, "armed Arena save callback is observed without serialization")
+    gamma_arena_test_assert.equals(mdata.gamma_arena_session, nil, "Arena session is never written into game-save metadata")
+    gamma_arena_test_assert.equals(deps._save_guard.breach_calls, 1, "native save callback emits one guard breach")
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot().fight_index, 0, "breach observation does not mutate runtime")
 end
 
 local function load_rejects_unknown_session_keys_and_userdata()
@@ -1247,13 +1287,13 @@ local function inactive_callback_results_remain_benign()
     local calls, routes = 0, 0
     local inactive = {
         is_active = function() return false end,
-        save_state = function() calls = calls + 1; return gamma_arena_result.err("GA_MUST_NOT_RUN", "inactive") end,
+        save_state = function() calls = calls + 1; return gamma_arena_result.ok(false) end,
         on_callback_error = function() routes = routes + 1 end,
         on_callback_result_error = function() routes = routes + 1 end
     }
     local result = gamma_arena_bootstrap.make_callbacks(inactive).save_state({})
-    gamma_arena_test_assert.equals(result, nil, "inactive effect callback must remain a nil no-op")
-    gamma_arena_test_assert.equals(calls, 0, "inactive callback must not delegate")
+    gamma_arena_test_assert.is_true(result.ok and result.value == false, "inactive save callback remains a benign campaign no-op")
+    gamma_arena_test_assert.equals(calls, 1, "save callback reaches guard-aware campaign boundary")
     gamma_arena_test_assert.equals(routes, 0, "inactive no-op must not enter error routing")
 end
 
@@ -1265,12 +1305,11 @@ local function active_save_failure_enters_fatal_once()
     local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
-    orchestrator.session.future_field = true
     local result = gamma_arena_bootstrap.make_callbacks(orchestrator).save_state({})
-    gamma_arena_test_assert.is_false(result.ok, "invalid active ArenaSession save must remain observable")
-    gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "invalid checkpoint payload must poison runtime state")
-    gamma_arena_test_assert.is_false(orchestrator:is_active(), "invalid checkpoint payload cannot remain active")
-    gamma_arena_test_assert.equals(fatal_count, 1, "active save failure must enter fatal routing exactly once")
+    gamma_arena_test_assert.is_true(result.ok and result.value == false, "active Arena save is suppressed without serialization")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "save breach diagnostics do not terminate combat")
+    gamma_arena_test_assert.equals(deps._save_guard.breach_calls, 1, "active save callback records one breach")
+    gamma_arena_test_assert.equals(fatal_count, 0, "save breach observation is diagnostic rather than fatal")
 end
 
 local function fatal_ui_helper_propagates_callback_results()
@@ -7779,7 +7818,127 @@ local function runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_c
     gamma_arena_test_assert.equals(#cancelled.consumed, 0, "stopped controller cannot consume or pulse")
 end
 
+local function runtime_save_guard_suppresses_only_owned_save_commands()
+    local env = { calls = {}, checkpoints = {}, removed = {}, now = 100 }
+    local function original(command, ...)
+        env.calls[#env.calls + 1] = { command = command, args = { ... } }
+        return "delegated", select("#", ...)
+    end
+    env.execute = original
+    local guard = gamma_arena_save_guard.new({
+        get_execute = function() return env.execute end,
+        set_execute = function(value) env.execute = value; return true end,
+        remove_time_event = function(kind, name) env.removed[#env.removed + 1] = { kind = kind, name = name }; return true end,
+        clock = function() return env.now end,
+        checkpoint = function(code, context) env.checkpoints[#env.checkpoints + 1] = { code = code, context = context }; return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(guard:install().ok, "save guard installs")
+    gamma_arena_test_assert.is_true(guard:install().ok, "save guard installation is idempotent")
+    gamma_arena_test_assert.is_true(guard:arm({ level = "fake_start", launch = "owned" }).ok, "Arena launch arms guard")
+    local blocked = { env.execute("  SaVe player - autosave", "sentinel") }
+    gamma_arena_test_assert.equals(#env.calls, 0, "armed Arena save never reaches original console executor")
+    gamma_arena_test_assert.equals(#blocked, 0, "suppressed save has no fabricated engine result")
+    local first, second = env.execute("cfg_save", "one", "two")
+    gamma_arena_test_assert.equals(first, "delegated", "non-save command preserves first result")
+    gamma_arena_test_assert.equals(second, 2, "non-save command preserves exact varargs")
+    gamma_arena_test_assert.equals(env.calls[1].command, "cfg_save", "cfg_save is not misclassified as a game save")
+    gamma_arena_test_assert.is_true(guard:maintain().ok, "known GAMMA timer cancellation succeeds")
+    gamma_arena_test_assert.equals(env.removed[1].kind, 0, "known GAMMA timer uses event type zero")
+    gamma_arena_test_assert.equals(env.removed[1].name, "delay_new_game_autosave", "known GAMMA autosave event is cancelled")
+    gamma_arena_test_assert.is_true(guard:disarm({ reason = "test" }).ok, "guard disarms")
+    env.execute("save campaign")
+    gamma_arena_test_assert.equals(env.calls[2].command, "save campaign", "disarmed campaign save delegates unchanged")
+    gamma_arena_test_assert.equals(env.checkpoints[2].code, "GA_SAVE_COMMAND_SUPPRESSED", "blocked save emits compact evidence")
+end
+
+local function runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed()
+    local env = { writes = {}, flushes = 0, closes = 0 }
+    local handle = {}
+    function handle:write(value) env.writes[#env.writes + 1] = value; return true end
+    function handle:flush() env.flushes = env.flushes + 1; return true end
+    function handle:close() env.closes = env.closes + 1; return true end
+    local journal = gamma_arena_diagnostics.new({
+        path = "gamma_arena_diagnostics.log",
+        open = function(path, mode)
+            gamma_arena_test_assert.equals(path, "gamma_arena_diagnostics.log", "journal uses injected path")
+            gamma_arena_test_assert.equals(mode, "a", "journal is append-only")
+            return handle
+        end,
+        clock = function() return 123 end,
+        level = function() return "l05_bar" end,
+        fallback_log = function() end
+    })
+    local written = journal:checkpoint("GA_TEST_CHECKPOINT", { scalar = string.rep("x", 1500), nested = { forbidden = true } })
+    gamma_arena_test_assert.is_true(written.ok, "checkpoint succeeds")
+    gamma_arena_test_assert.is_true(#env.writes[1] <= 1024, "checkpoint line stays within native-safe bound")
+    gamma_arena_test_assert.equals(env.flushes, 1, "checkpoint flushes immediately")
+    gamma_arena_test_assert.equals(env.closes, 1, "checkpoint closes immediately")
+    gamma_arena_test_assert.is_true(not env.writes[1]:find("forbidden", 1, true), "nested fields are excluded")
+end
+
+local function runtime_entity_forensics_are_bounded_non_mutating_and_classified()
+    local env = { now = 1000, tags = { [7] = "ga_forensic_session" } }
+    local npc = {
+        health = 1,
+        bleeding = 0,
+        id = function() return 7 end,
+        alive = function() return true end,
+        critically_wounded = function() return false end
+    }
+    local source = { id = function() return 7 end }
+    local adapter = gamma_arena_entity_adapter.new({
+        clock = function() return env.now end,
+        load_tag = function(id) return env.tags[id] end,
+        object_health = function(object) return object.health end,
+        object_bleeding = function(object) return object.bleeding end,
+        object_position = function() return { x = 0, y = 0, z = 0 } end,
+        last_hitter_name = function() return nil end,
+        last_hitter_section = function() return nil end,
+        entity_section = function(object) return object == source and "self_source" or "arena_victim" end,
+        is_critically_wounded = function(object) return object:critically_wounded() end
+    })
+    adapter.state_value = "ACTIVE"
+    adapter.session_id = "ga_forensic_session"
+    adapter.active_started_at = 1000
+    local record = {
+        kind = "npc", id = 7, slot = 1, tagged = true, released = false,
+        terminal_state = "ALIVE", spawn_position = { x = 0, y = 0, z = 0 },
+        forensic_hits = {}, forensic_samples = {}
+    }
+    adapter.npc_by_id[7] = record
+    adapter.registry.npcs = { record }
+    local hit = { draftsman = source, power = 0.75, impulse = 2, type = 3, weapon_id = 9 }
+    local flags = { ret = false }
+    gamma_arena_test_assert.is_true(adapter:on_npc_before_hit(npc, hit, 4, flags).ok, "owned before-hit evidence is captured")
+    gamma_arena_test_assert.equals(hit.power, 0.75, "forensics never mutates hit power")
+    gamma_arena_test_assert.equals(hit.impulse, 2, "forensics never mutates hit impulse")
+    gamma_arena_test_assert.is_false(flags.ret, "forensics never mutates callback flags")
+    gamma_arena_test_assert.equals(record.forensic_hits[1].source_id, 7, "before-hit source identity is copied")
+    for index = 1, 20 do
+        env.now = env.now + 10
+        adapter:on_npc_hit(npc, index / 100, { x = 1, y = 0, z = 0 }, source, 4)
+    end
+    gamma_arena_test_assert.equals(#record.forensic_hits, 12, "hit ring retains only the newest twelve entries")
+    for index = 1, 20 do adapter:sample_forensics(record, npc, 1000 + index * 250) end
+    gamma_arena_test_assert.equals(#record.forensic_samples, 12, "state ring retains only the newest twelve entries")
+    gamma_arena_test_assert.is_false(adapter:sample_forensics(record, npc, 22000), "periodic sampling stops after twenty seconds")
+    gamma_arena_test_assert.equals(adapter:classify_forensics(record), "self_hit_observed", "proved self hit has diagnostic priority")
+
+    local function classified(hits, baseline, samples)
+        local candidate = { id = 7, forensic_hits = hits or {}, forensic_baseline = baseline, forensic_samples = samples or {} }
+        return adapter:classify_forensics(candidate)
+    end
+    gamma_arena_test_assert.equals(classified({ { source_id = 8 } }), "external_hit_observed", "different hit source is external")
+    gamma_arena_test_assert.equals(classified({}, { health = 1, bleeding = 0 }, { { health = 0.8, bleeding = 0, displacement = 0 } }), "health_decay_without_hit", "health decay without hit is distinguished")
+    gamma_arena_test_assert.equals(classified({}, { health = 1, bleeding = 0 }, { { health = 0.8, bleeding = 0, displacement = 3 } }), "position_or_collision_candidate", "movement plus health loss is a collision candidate")
+    gamma_arena_test_assert.equals(classified({}, nil, {}), "unresolved", "missing evidence remains unresolved")
+    gamma_arena_test_assert.is_true(adapter:on_npc_before_hit({ id = function() return 99 end }, hit, 4, flags).value == false, "foreign NPCs are ignored")
+end
+
 local cases = {
+    { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },
+    { name = "runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed", fn = runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed },
+    { name = "runtime_entity_forensics_are_bounded_non_mutating_and_classified", fn = runtime_entity_forensics_are_bounded_non_mutating_and_classified },
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_accepts_natural_death_without_invulnerability", fn = preflight_accepts_natural_death_without_invulnerability },
     { name = "runtime_preflight_accepts_callable_engine_objects", fn = preflight_accepts_callable_engine_objects },

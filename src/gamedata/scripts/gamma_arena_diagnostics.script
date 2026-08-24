@@ -1,0 +1,106 @@
+local Diagnostics = {}
+Diagnostics.__index = Diagnostics
+
+local MAX_LINE_BYTES = 1024
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function clean_text(value)
+    local called, text = pcall(tostring, value)
+    if not called then return "unavailable" end
+    text = text:gsub("[%c]", " "):gsub("%s+", " ")
+    return text
+end
+
+local function scalar_value(value)
+    local kind = type(value)
+    if kind == "string" then return clean_text(value) end
+    if kind == "boolean" then return value and "true" or "false" end
+    if kind == "number" and value == value and value ~= math.huge and value ~= -math.huge then
+        return string.format("%.17g", value)
+    end
+    return nil
+end
+
+function Diagnostics:fallback(code, message, context)
+    if type(self.deps.fallback_log) == "function" then
+        pcall(self.deps.fallback_log, code, message, context or {})
+    end
+end
+
+function Diagnostics:clock()
+    if type(self.deps.clock) ~= "function" then return nil end
+    local called, value = pcall(self.deps.clock)
+    if not called then return nil end
+    if type(value) == "table" and value.ok == true then value = value.value end
+    return scalar_value(value)
+end
+
+function Diagnostics:level()
+    if type(self.deps.level) ~= "function" then return nil end
+    local called, value = pcall(self.deps.level)
+    return called and scalar_value(value) or nil
+end
+
+function Diagnostics:line(code, fields)
+    self.sequence = self.sequence + 1
+    local entries = {
+        "seq=" .. tostring(self.sequence),
+        "event=" .. clean_text(code)
+    }
+    local clock = self:clock()
+    if clock ~= nil then entries[#entries + 1] = "clock=" .. clock end
+    local level = self:level()
+    if level ~= nil then entries[#entries + 1] = "level=" .. level end
+    local keys = {}
+    if type(fields) == "table" then
+        for key, value in pairs(fields) do
+            if type(key) == "string" and scalar_value(value) ~= nil then keys[#keys + 1] = key end
+        end
+    end
+    table.sort(keys)
+    for _, key in ipairs(keys) do
+        entries[#entries + 1] = clean_text(key) .. "=" .. scalar_value(fields[key])
+    end
+    local line = table.concat(entries, " ")
+    if #line > MAX_LINE_BYTES - 1 then line = line:sub(1, MAX_LINE_BYTES - 1) end
+    return line .. "\n"
+end
+
+function Diagnostics:checkpoint(code, fields)
+    if type(code) ~= "string" or code == "" then
+        return fail("GA_DIAGNOSTICS_EVENT_INVALID", "Checkpoint event code must be a non-empty string")
+    end
+    if type(self.deps.open) ~= "function" or type(self.path) ~= "string" or self.path == "" then
+        self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal is unavailable", { event = code })
+        return fail("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal is unavailable", { event = code })
+    end
+    local line = self:line(code, fields)
+    local opened, handle, open_error = pcall(self.deps.open, self.path, "a")
+    if not opened or handle == nil then
+        self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal could not be opened", {
+            event = code,
+            reason = opened and tostring(open_error) or tostring(handle)
+        })
+        return fail("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal could not be opened", { event = code })
+    end
+    local wrote, write_result = pcall(function() return handle:write(line) end)
+    local flushed, flush_result = pcall(function() return handle:flush() end)
+    local closed, close_result = pcall(function() return handle:close() end)
+    if not wrote or write_result == false or not flushed or flush_result == false or not closed or close_result == false then
+        self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal write was incomplete", { event = code })
+        return fail("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal write was incomplete", { event = code })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function new(deps)
+    deps = deps or {}
+    return setmetatable({
+        deps = deps,
+        path = deps.path,
+        sequence = 0
+    }, Diagnostics)
+end

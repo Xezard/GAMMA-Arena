@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Suppressed every Lua `save` command and the known GAMMA new-game autosave event for Arena-owned launches while leaving campaign saves unchanged; added flushed crash checkpoints and passive bounded hit/state evidence for unexplained early NPC deaths.
 - Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
 - Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
 - Added deterministic budgeted medical loadouts for the actor and opponents, with a curated 16-item combat pool and separate gear/medical costs in FightSpec v5.

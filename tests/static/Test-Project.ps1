@@ -1980,6 +1980,67 @@ foreach ($Name in @('runtime_entity_cleanup_adopts_unloaded_weapon_child','runti
     Assert-True (([regex]::Matches($RuntimeChildTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }
 
+$ArenaSaveGuardPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_save_guard.script'
+$ArenaDiagnosticsPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_diagnostics.script'
+$ArenaBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+$ArenaOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
+$ArenaEntityPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+$ArenaRuntimeTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
+Assert-True (Test-Path -LiteralPath $ArenaSaveGuardPath) 'Arena save guard module is missing.'
+Assert-True (Test-Path -LiteralPath $ArenaDiagnosticsPath) 'Arena checkpoint journal module is missing.'
+if ((Test-Path -LiteralPath $ArenaSaveGuardPath) -and (Test-Path -LiteralPath $ArenaDiagnosticsPath)) {
+    $ArenaSaveGuardContent = Get-Content -LiteralPath $ArenaSaveGuardPath -Raw
+    $ArenaDiagnosticsContent = Get-Content -LiteralPath $ArenaDiagnosticsPath -Raw
+    foreach ($Marker in @('function SaveGuard:install','function SaveGuard:arm','function SaveGuard:maintain','function SaveGuard:disarm','delay_new_game_autosave','GA_SAVE_COMMAND_SUPPRESSED','GA_SAVE_GUARD_BREACH','token:lower() == "save"')) {
+        Assert-True ($ArenaSaveGuardContent -match [regex]::Escape($Marker)) "Arena save guard contract is missing: $Marker"
+    }
+    foreach ($Marker in @('MAX_LINE_BYTES = 1024','function Diagnostics:checkpoint','handle:flush()','handle:close()')) {
+        Assert-True ($ArenaDiagnosticsContent -match [regex]::Escape($Marker)) "Arena diagnostics journal contract is missing: $Marker"
+    }
+}
+$ArenaBootstrapContent = Get-Content -LiteralPath $ArenaBootstrapPath -Raw
+$ArenaOrchestratorContent = Get-Content -LiteralPath $ArenaOrchestratorPath -Raw
+$ArenaEntityContent = Get-Content -LiteralPath $ArenaEntityPath -Raw
+$ArenaRuntimeTestContent = Get-Content -LiteralPath $ArenaRuntimeTestPath -Raw
+foreach ($Callback in @('"npc_on_before_hit"','"npc_on_hit_callback"')) {
+    Assert-True ($ArenaBootstrapContent -match [regex]::Escape($Callback)) "Arena NPC forensic callback is not registered: $Callback"
+}
+foreach ($Marker in @('FORENSIC_RING_SIZE = 12','FORENSIC_WINDOW_MS = 20000','function EntityAdapter:on_npc_before_hit','function EntityAdapter:on_npc_hit','self_hit_observed','external_hit_observed','health_decay_without_hit','position_or_collision_candidate','unresolved')) {
+    Assert-True ($ArenaEntityContent -match [regex]::Escape($Marker)) "Arena NPC forensic contract is missing: $Marker"
+}
+foreach ($UnsafeMutation in @('hit.power\s*=','hit.impulse\s*=','flags\.[A-Za-z_][A-Za-z0-9_]*\s*=')) {
+    Assert-True ($ArenaEntityContent -notmatch $UnsafeMutation) "Arena NPC forensics must not mutate engine hit data: $UnsafeMutation"
+}
+Assert-True ($ArenaOrchestratorContent -match 'GA_SAVE_GUARD_BREACH') 'Arena save_state must expose native-save breach evidence.'
+$ArenaGuardedStart = $ArenaBootstrapContent.IndexOf('local guarded_callbacks = {')
+$ArenaGuardedEnd = if ($ArenaGuardedStart -ge 0) { $ArenaBootstrapContent.IndexOf('}', $ArenaGuardedStart) } else { -1 }
+Assert-True ($ArenaGuardedStart -ge 0 -and $ArenaGuardedEnd -gt $ArenaGuardedStart) 'Arena guarded callback table must remain structurally testable.'
+if ($ArenaGuardedStart -ge 0 -and $ArenaGuardedEnd -gt $ArenaGuardedStart) {
+    $ArenaGuardedBlock = $ArenaBootstrapContent.Substring($ArenaGuardedStart, $ArenaGuardedEnd - $ArenaGuardedStart)
+    Assert-True ($ArenaGuardedBlock -notmatch '\bsave_state\s*=') 'save_state must reach the guard-aware orchestrator before ACTIVE to diagnose native saves.'
+}
+$ArenaSaveStateStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:save_state')
+$ArenaSaveStateEnd = if ($ArenaSaveStateStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:create_session', $ArenaSaveStateStart) } else { -1 }
+Assert-True ($ArenaSaveStateStart -ge 0 -and $ArenaSaveStateEnd -gt $ArenaSaveStateStart) 'Arena save_state boundary must remain structurally testable.'
+if ($ArenaSaveStateStart -ge 0 -and $ArenaSaveStateEnd -gt $ArenaSaveStateStart) {
+    $ArenaSaveStateBlock = $ArenaOrchestratorContent.Substring($ArenaSaveStateStart, $ArenaSaveStateEnd - $ArenaSaveStateStart)
+    Assert-True ($ArenaSaveStateBlock -match 'GA_SAVE_GUARD_BREACH') 'Arena save_state must record a guard breach.'
+    Assert-True ($ArenaSaveStateBlock -notmatch 'mdata\s*\.\s*gamma_arena_session\s*=') 'Arena save_state must never serialize session data.'
+}
+$ArenaActivateStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:activate_once')
+$ArenaActivateEnd = if ($ArenaActivateStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:layout_snapshot', $ArenaActivateStart) } else { -1 }
+Assert-True ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) 'Arena activation boundary must remain structurally testable.'
+if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
+    $ArenaActivateBlock = $ArenaOrchestratorContent.Substring($ArenaActivateStart, $ArenaActivateEnd - $ArenaActivateStart)
+    $ArenaArmIndex = $ArenaActivateBlock.IndexOf('self:arm_save_guard')
+    $ArenaDeferIndex = $ArenaActivateBlock.IndexOf('mark_launch_deferred')
+    Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
+}
+foreach ($Name in @('runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
+}
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"

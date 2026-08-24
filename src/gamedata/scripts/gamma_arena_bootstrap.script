@@ -1,6 +1,7 @@
 local runtime_orchestrator = nil
 local runtime_callbacks = nil
 local runtime_registrar = nil
+local runtime_save_guard = nil
 local identity_counter = 0
 local unpack_values = unpack
 local UINT32_MOD = 4294967296
@@ -12,6 +13,8 @@ local callback_names = {
     "actor_on_update",
     "actor_on_before_death",
     "actor_on_death",
+    "npc_on_before_hit",
+    "npc_on_hit_callback",
     "npc_on_death_callback",
     "save_state",
     "load_state",
@@ -24,8 +27,9 @@ local callback_names = {
 local guarded_callbacks = {
     actor_on_before_death = true,
     actor_on_death = true,
+    npc_on_before_hit = true,
+    npc_on_hit_callback = true,
     npc_on_death_callback = true,
-    save_state = true,
     on_before_save_input = true,
     on_before_load_input = true,
     actor_on_net_destroy = true,
@@ -1420,7 +1424,7 @@ local function clear_npc_hidden_charge(id, object)
     return gamma_arena_result.ok(true)
 end
 
-local function default_entity_adapter(actor_adapter, active_instance)
+local function default_entity_adapter(actor_adapter, active_instance, diagnostics)
     local tactical = default_tactical_adapter()
     return gamma_arena_entity_adapter.new({
         actor = actor_adapter,
@@ -1476,6 +1480,28 @@ local function default_entity_adapter(actor_adapter, active_instance)
             end
             return gamma_arena_result.ok(copied)
         end,
+        object_health = function(object)
+            local read, value = pcall(function() return object and object.health end)
+            if not read or type(value) ~= "number" then error("Opponent health is unavailable") end
+            return value
+        end,
+        object_bleeding = function(object)
+            local read, value = pcall(function() return object and object.bleeding end)
+            if not read or type(value) ~= "number" then error("Opponent bleeding is unavailable") end
+            return value
+        end,
+        last_hitter_name = function(object)
+            local read, method = pcall(function() return object and object.who_hit_name end)
+            if not read or type(method) ~= "function" then return nil end
+            local called, value = pcall(method, object)
+            return called and value or nil
+        end,
+        last_hitter_section = function(object)
+            local read, method = pcall(function() return object and object.who_hit_section_name end)
+            if not read or type(method) ~= "function" then return nil end
+            local called, value = pcall(method, object)
+            return called and value or nil
+        end,
         is_critically_wounded = function(object)
             local lookup_ok, method = pcall(function() return object and object.critically_wounded end)
             if not lookup_ok or type(method) ~= "function" then
@@ -1516,6 +1542,10 @@ local function default_entity_adapter(actor_adapter, active_instance)
         set_actor_hostile = function(npc, actor, goodwill)
             if game_object == nil or game_object.enemy == nil then return gamma_arena_result.err("GA_ENTITY_HOSTILE_RELATION_FAILED", "game_object.enemy is unavailable") end
             return apply_actor_hostility(npc, actor, goodwill, game_object.enemy)
+        end,
+        checkpoint = function(code, context)
+            if diagnostics == nil or type(diagnostics.checkpoint) ~= "function" then return gamma_arena_result.ok(false) end
+            return diagnostics:checkpoint(code, context)
         end,
         release_timeout_ms = 10000,
         online_timeout_ms = 10000
@@ -1582,15 +1612,64 @@ local function default_npc_medical_controller(entity_adapter)
     })
 end
 
+local function default_diagnostics()
+    local path = nil
+    local resolved, value = pcall(function()
+        local root = getFS():update_path("$logs$", "")
+        if type(root) ~= "string" or root == "" then return nil end
+        local suffix = root:sub(-1)
+        if suffix ~= "\\" and suffix ~= "/" then root = root .. "\\" end
+        return root .. "gamma_arena_diagnostics.log"
+    end)
+    if resolved then path = value end
+    return gamma_arena_diagnostics.new({
+        path = path,
+        open = function(file_path, mode) return io.open(file_path, mode) end,
+        clock = function() return time_global() end,
+        level = function()
+            if level == nil or type(level.name) ~= "function" then return "unavailable" end
+            local called, current = pcall(level.name)
+            return called and current or "unavailable"
+        end,
+        fallback_log = function(code, message, context) gamma_arena_log.warn(code, message, context) end
+    })
+end
+
+local function default_save_guard(diagnostics)
+    if runtime_save_guard ~= nil then return runtime_save_guard end
+    runtime_save_guard = gamma_arena_save_guard.new({
+        get_execute = function() return _G and _G.exec_console_cmd or exec_console_cmd end,
+        set_execute = function(value)
+            if type(_G) ~= "table" then return false end
+            _G.exec_console_cmd = value
+            return true
+        end,
+        remove_time_event = function(kind, name)
+            if type(RemoveTimeEvent) ~= "function" then return false end
+            RemoveTimeEvent(kind, name)
+            return true
+        end,
+        clock = function() return time_global() end,
+        checkpoint = function(code, context) return diagnostics:checkpoint(code, context) end
+    })
+    return runtime_save_guard
+end
+
 function compose(overrides)
     overrides = overrides or {}
     local instance = nil
     local function active_instance() return instance end
     local store = overrides.store or gamma_arena_session_store.new_store()
     local config = overrides.config or current_config()
+    local diagnostics = overrides.diagnostics or default_diagnostics()
     local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
-    local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance)
+    local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance, diagnostics)
     local npc_medical = overrides.npc_medical or default_npc_medical_controller(entity_adapter)
+    local save_guard = overrides.save_guard or default_save_guard(diagnostics)
+    local guard_install = save_guard:install()
+    if not guard_install.ok then
+        pcall(gamma_arena_log.warn, guard_install.error.code, guard_install.error.message, guard_install.error.context)
+    end
     local catalogs_port = overrides.catalogs or function() return gamma_arena_catalog.load() end
     local layout_adapter = overrides.layout_adapter or default_runtime_layout_adapter()
     local layout_port = overrides.layout or function(layout_id)
@@ -1678,6 +1757,8 @@ function compose(overrides)
         actor = actor_adapter,
         entities = entity_adapter,
         npc_medical = npc_medical,
+        diagnostics = diagnostics,
+        save_guard = save_guard,
         layout = layout_port,
         mode_policy = overrides.mode_policy or gamma_arena_mode_skirmish,
         catalogs = catalogs_port,
@@ -1692,6 +1773,16 @@ function compose(overrides)
         log = overrides.log or gamma_arena_log
     }
     instance = gamma_arena_orchestrator.new(deps)
+    local boot_level = "unavailable"
+    local level_called, level_result = pcall(deps.current_level)
+    if level_called and type(level_result) == "table" and level_result.ok == true
+        and type(level_result.value) == "string" then boot_level = level_result.value end
+    pcall(function()
+        diagnostics:checkpoint("GA_VM_BOOTSTRAP_READY", {
+            save_guard_installed = guard_install.ok,
+            level = boot_level
+        })
+    end)
     return instance
 end
 

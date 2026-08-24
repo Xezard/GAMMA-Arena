@@ -1167,6 +1167,32 @@ end
             Assert-True ($RuntimeChildResult.ExitCode -ne 0 -and $RuntimeChildResult.Output -match [regex]::Escape($RuntimeChildDiagnostic)) 'Static policy must reject removing just-in-time runtime-child adoption from cleanup.'
         }
     }
+
+    $SaveGuardFixture = New-Task7Fixture 'arena-save-guard-predicate-removed'
+    $SaveGuardPath = Join-Path $SaveGuardFixture 'src\gamedata\scripts\gamma_arena_save_guard.script'
+    $SaveGuardContent = Get-Content -LiteralPath $SaveGuardPath -Raw
+    $SavePredicate = 'token:lower() == "save"'
+    Assert-True (([regex]::Matches($SaveGuardContent, [regex]::Escape($SavePredicate))).Count -eq 1) 'Save-guard negative fixture must find exactly one exact save predicate.'
+    $SaveGuardContent = $SaveGuardContent.Replace($SavePredicate, 'token:lower() == "cfg_save"')
+    Write-FixtureFile $SaveGuardFixture 'src\gamedata\scripts\gamma_arena_save_guard.script' $SaveGuardContent
+    $SaveGuardResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $SaveGuardFixture) -CaptureOutput
+    Assert-True ($SaveGuardResult.ExitCode -ne 0 -and $SaveGuardResult.Output -match 'Arena save guard contract is missing') 'Static policy must reject removal of exact Arena save suppression.'
+
+    $ForensicRingFixture = New-Task7Fixture 'arena-forensic-ring-unbounded'
+    $ForensicRingPath = Join-Path $ForensicRingFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+    $ForensicRingContent = Get-Content -LiteralPath $ForensicRingPath -Raw
+    $ForensicRingContent = $ForensicRingContent.Replace('FORENSIC_RING_SIZE = 12', 'FORENSIC_RING_SIZE = 13')
+    Write-FixtureFile $ForensicRingFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $ForensicRingContent
+    $ForensicRingResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $ForensicRingFixture) -CaptureOutput
+    Assert-True ($ForensicRingResult.ExitCode -ne 0 -and $ForensicRingResult.Output -match 'Arena NPC forensic contract is missing: FORENSIC_RING_SIZE = 12') 'Static policy must reject an expanded forensic ring.'
+
+    $ForensicCallbackFixture = New-Task7Fixture 'arena-forensic-callback-removed'
+    $ForensicCallbackPath = Join-Path $ForensicCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+    $ForensicCallbackContent = Get-Content -LiteralPath $ForensicCallbackPath -Raw
+    $ForensicCallbackContent = $ForensicCallbackContent.Replace('"npc_on_before_hit",', '')
+    Write-FixtureFile $ForensicCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $ForensicCallbackContent
+    $ForensicCallbackResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $ForensicCallbackFixture) -CaptureOutput
+    Assert-True ($ForensicCallbackResult.ExitCode -ne 0 -and $ForensicCallbackResult.Output -match 'Arena NPC forensic callback is not registered') 'Static policy must reject removal of an Arena forensic callback.'
     }
 
     if ($StaticFixturesOnly) {

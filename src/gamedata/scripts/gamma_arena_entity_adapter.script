@@ -11,6 +11,10 @@ local TERMINAL_GRACE_MS = 1500
 local VERTICAL_ESCAPE_GRACE_MS = 1500
 local VERTICAL_ESCAPE_DELTA_METERS = 2.5
 local EARLY_SELF_DEATH_WINDOW_MS = 20000
+local FORENSIC_WINDOW_MS = 20000
+local FORENSIC_SAMPLE_INTERVAL_MS = 250
+local FORENSIC_RING_SIZE = 12
+local FORENSIC_MOVEMENT_METERS = 2.5
 local EXPECTED_HUMAN_CLASS = "AI_STL_S"
 local EXPECTED_COMMUNITY = "bandit"
 local ACTOR_GOODWILL = -5000
@@ -163,6 +167,42 @@ local function read_entity_id(entity)
     local field_ok, value = pcall(function() return entity.runtime_id end)
     if field_ok and valid_id(value) then return value end
     return nil
+end
+
+local function push_forensic_ring(ring, value)
+    ring[#ring + 1] = value
+    while #ring > FORENSIC_RING_SIZE do table.remove(ring, 1) end
+end
+
+local function protected_field(value, key)
+    local called, field = pcall(function() return value and value[key] end)
+    return called and field or nil
+end
+
+local function diagnostic_scalar(value)
+    local kind = type(value)
+    if kind == "number" then return finite_number(value) and value or nil end
+    if kind == "string" or kind == "boolean" then return value end
+    return nil
+end
+
+local function forensic_status(result)
+    if result.status == "ok" then return nil end
+    local code = type(result.error) == "table" and result.error.code or nil
+    return code or result.status or "unavailable"
+end
+
+local function scalar_probe(fn)
+    local result = diagnostic_query(fn)
+    if result.status ~= "ok" then return nil, forensic_status(result) end
+    local kind = type(result.value)
+    if kind == "number" then
+        if not finite_number(result.value) then return nil, "not_finite" end
+        return result.value, nil
+    end
+    if kind == "string" or kind == "boolean" then return result.value, nil end
+    if result.value == nil then return nil, "unavailable" end
+    return nil, "not_scalar"
 end
 
 local function read_parent_id(entity)
@@ -503,7 +543,11 @@ function EntityAdapter:register_record(kind, id, values)
         death_dropped = false,
         hidden_charge_cleared = false,
         released = false,
-        protected = false
+        protected = false,
+        forensic_hits = {},
+        forensic_samples = {},
+        forensic_baseline = nil,
+        last_forensic_sample_at = nil
     }
     self.record_by_id[id] = record
     self.creation_stack[#self.creation_stack + 1] = record
@@ -514,6 +558,175 @@ function EntityAdapter:register_record(kind, id, values)
         self.registry.items[#self.registry.items + 1] = record
     end
     return gamma_arena_result.ok(record)
+end
+
+function EntityAdapter:owned_forensic_record(npc)
+    if self.state_value ~= "ACTIVE" then return nil end
+    local identified, id = pcall(read_entity_id, npc)
+    if not identified or id == nil then return nil end
+    local record = self.npc_by_id[id]
+    if record == nil or record.tagged ~= true or record.released or DEFEATED_STATES[record.terminal_state] == true then return nil end
+    local owner = diagnostic_query(function() return self:load_owner_tag(id) end)
+    if owner.status ~= "ok" or owner.value ~= self.session_id then return nil end
+    return record
+end
+
+function EntityAdapter:forensic_state(record, object, phase, now)
+    local sample = { phase = phase, opponent_id = record.id, slot = record.slot }
+    if finite_integer(now) then
+        sample.clock = now
+        if self.active_started_at ~= nil then sample.elapsed_ms = elapsed_ms(self.active_started_at, now) end
+    end
+    local health, health_status = scalar_probe(function()
+        if type(self.deps.object_health) ~= "function" then error("object_health unavailable") end
+        return self.deps.object_health(object)
+    end)
+    sample.health = health
+    sample.health_status = health_status
+    local bleeding, bleeding_status = scalar_probe(function()
+        if type(self.deps.object_bleeding) ~= "function" then error("object_bleeding unavailable") end
+        return self.deps.object_bleeding(object)
+    end)
+    sample.bleeding = bleeding
+    sample.bleeding_status = bleeding_status
+    local alive, alive_status = scalar_probe(function() return self:is_alive(object) end)
+    sample.alive = alive
+    sample.alive_status = alive_status
+    local critical, critical_status = scalar_probe(function() return self:is_critically_wounded(object) end)
+    sample.critical = critical
+    sample.critical_status = critical_status
+    local position = diagnostic_query(function()
+        if type(self.deps.object_position) ~= "function" then error("object_position unavailable") end
+        return self.deps.object_position(object)
+    end)
+    if position.status == "ok" then sample.position = copied_finite_position(position.value) end
+    if sample.position == nil then sample.position_status = forensic_status(position) or "not_finite" end
+    local spawn = record.spawn_position
+    if sample.position ~= nil and type(spawn) == "table"
+        and finite_number(spawn.x) and finite_number(spawn.y) and finite_number(spawn.z) then
+        local dx = sample.position.x - spawn.x
+        local dy = sample.position.y - spawn.y
+        local dz = sample.position.z - spawn.z
+        sample.displacement = finite_displacement(dx, dy, dz)
+        sample.delta_y = finite_number(dy) and dy or nil
+    end
+    local hitter_name, hitter_name_status = scalar_probe(function()
+        if type(self.deps.last_hitter_name) ~= "function" then error("last_hitter_name unavailable") end
+        return self.deps.last_hitter_name(object)
+    end)
+    sample.last_hitter_name = hitter_name
+    sample.last_hitter_name_status = hitter_name_status
+    local hitter_section, hitter_section_status = scalar_probe(function()
+        if type(self.deps.last_hitter_section) ~= "function" then error("last_hitter_section unavailable") end
+        return self.deps.last_hitter_section(object)
+    end)
+    sample.last_hitter_section = hitter_section
+    sample.last_hitter_section_status = hitter_section_status
+    if record.forensic_baseline == nil then record.forensic_baseline = copy_plain(sample) end
+    return sample
+end
+
+function EntityAdapter:forensic_source(value)
+    local source_id = nil
+    local identified, id = pcall(read_entity_id, value)
+    if identified then source_id = id end
+    local source_section = nil
+    if value ~= nil and type(self.deps.entity_section) == "function" then
+        source_section = select(1, scalar_probe(function() return self.deps.entity_section(value) end))
+    end
+    return source_id, source_section
+end
+
+function EntityAdapter:on_npc_before_hit(npc, hit, bone_id, flags)
+    local record = self:owned_forensic_record(npc)
+    if record == nil then return gamma_arena_result.ok(false) end
+    local now_result = self:clock()
+    local now = now_result.ok and now_result.value or nil
+    local source = protected_field(hit, "draftsman") or protected_field(hit, "who")
+    local source_id, source_section = self:forensic_source(source)
+    local entry = {
+        phase = "before_hit",
+        clock = now,
+        elapsed_ms = now and self.active_started_at and elapsed_ms(self.active_started_at, now) or nil,
+        victim_id = record.id,
+        source_id = source_id,
+        source_section = source_section,
+        power = diagnostic_scalar(protected_field(hit, "power")),
+        impulse = diagnostic_scalar(protected_field(hit, "impulse")),
+        hit_type = diagnostic_scalar(protected_field(hit, "type")),
+        weapon_id = diagnostic_scalar(protected_field(hit, "weapon_id")),
+        bone_id = diagnostic_scalar(bone_id or protected_field(hit, "bone_id")),
+        flags_present = flags ~= nil,
+        victim = self:forensic_state(record, npc, "before_hit_state", now)
+    }
+    push_forensic_ring(record.forensic_hits, entry)
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:on_npc_hit(npc, amount, direction, who, bone_id)
+    local record = self:owned_forensic_record(npc)
+    if record == nil then return gamma_arena_result.ok(false) end
+    local now_result = self:clock()
+    local now = now_result.ok and now_result.value or nil
+    local source_id, source_section = self:forensic_source(who)
+    local entry = {
+        phase = "after_hit",
+        clock = now,
+        elapsed_ms = now and self.active_started_at and elapsed_ms(self.active_started_at, now) or nil,
+        victim_id = record.id,
+        source_id = source_id,
+        source_section = source_section,
+        amount = finite_number(amount) and amount or nil,
+        direction = copied_finite_position(direction),
+        bone_id = diagnostic_scalar(bone_id),
+        victim = self:forensic_state(record, npc, "after_hit_state", now)
+    }
+    push_forensic_ring(record.forensic_hits, entry)
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:sample_forensics(record, object, now)
+    if self.active_started_at == nil or elapsed_ms(self.active_started_at, now) > FORENSIC_WINDOW_MS then
+        return false
+    end
+    if record.last_forensic_sample_at ~= nil
+        and elapsed_ms(record.last_forensic_sample_at, now) < FORENSIC_SAMPLE_INTERVAL_MS then return false end
+    record.last_forensic_sample_at = now
+    push_forensic_ring(record.forensic_samples, self:forensic_state(record, object, "periodic", now))
+    return true
+end
+
+function EntityAdapter:classify_forensics(record)
+    for _, entry in ipairs(record.forensic_hits or {}) do
+        if valid_id(entry.source_id) and entry.source_id == record.id then return "self_hit_observed" end
+    end
+    for _, entry in ipairs(record.forensic_hits or {}) do
+        if valid_id(entry.source_id) and entry.source_id ~= record.id then return "external_hit_observed" end
+    end
+    local states = {}
+    if type(record.forensic_baseline) == "table" then states[#states + 1] = record.forensic_baseline end
+    for _, entry in ipairs(record.forensic_samples or {}) do states[#states + 1] = entry end
+    for _, hit in ipairs(record.forensic_hits or {}) do
+        if type(hit.victim) == "table" then states[#states + 1] = hit.victim end
+    end
+    local first_health, last_health, first_bleeding, last_bleeding = nil, nil, nil, nil
+    local maximum_displacement = 0
+    for _, state in ipairs(states) do
+        if finite_number(state.health) then
+            if first_health == nil then first_health = state.health end
+            last_health = state.health
+        end
+        if finite_number(state.bleeding) then
+            if first_bleeding == nil then first_bleeding = state.bleeding end
+            last_bleeding = state.bleeding
+        end
+        if finite_number(state.displacement) then maximum_displacement = math.max(maximum_displacement, state.displacement) end
+    end
+    local health_loss = first_health ~= nil and last_health ~= nil and last_health < first_health - 0.000001
+    local bleeding_rise = first_bleeding ~= nil and last_bleeding ~= nil and last_bleeding > first_bleeding + 0.000001
+    if health_loss and maximum_displacement >= FORENSIC_MOVEMENT_METERS then return "position_or_collision_candidate" end
+    if health_loss or bleeding_rise then return "health_decay_without_hit" end
+    return "unresolved"
 end
 
 function EntityAdapter:persist_death_dropped(record)
@@ -1454,7 +1667,10 @@ function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, a
             knife = opponent.loadout and opponent.loadout.knife or nil
         },
         spawn_position = copy_plain(record.spawn_position),
-        queries = {}
+        queries = {},
+        classification = self:classify_forensics(record),
+        hit_timeline = copy_plain(record.forensic_hits or {}),
+        state_timeline = copy_plain(record.forensic_samples or {})
     }
     local server = diagnostic_query(function() return self.deps.server_entity(record.id) end)
     diagnostic.queries.server_object = diagnostic_query_context(server)
@@ -1672,6 +1888,7 @@ function EntityAdapter:reconcile_active_deaths()
             if not object.ok then return object end
             if object.value ~= nil then
                 record.proved_online = true
+                self:sample_forensics(record, object.value, now.value)
                 local alive = self:is_alive(object.value)
                 if not alive.ok then return alive end
                 if not alive.value then
@@ -1763,6 +1980,16 @@ function EntityAdapter:on_npc_death(victim_or_id, killer_or_id)
         end)
         if not built then diagnostic = { status = "error", reason = tostring(diagnostic) } end
         pcall(self.deps.log_warn, "GA_EARLY_SELF_DEATH_DIAGNOSTIC", "Arena opponent self-death requires physical diagnostic evidence", diagnostic)
+        if type(self.deps.checkpoint) == "function" then
+            pcall(self.deps.checkpoint, "GA_EARLY_OPPONENT_DEATH", {
+                session_id = self.session_id,
+                fight_id = self.current_fight_id,
+                opponent_id = record.id,
+                slot = record.slot,
+                elapsed_ms = self_death_elapsed,
+                classification = diagnostic.classification or "unresolved"
+            })
+        end
         local integrity = self:declare_integrity_fault(record, "early_self_death", {
             elapsed_ms = self_death_elapsed,
             window_ms = EARLY_SELF_DEATH_WINDOW_MS,

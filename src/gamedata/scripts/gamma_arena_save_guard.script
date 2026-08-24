@@ -1,0 +1,161 @@
+local SaveGuard = {}
+SaveGuard.__index = SaveGuard
+
+local UINT32_MOD = 4294967296
+local TIMER_MAINTENANCE_MS = 15000
+local AUTOSAVE_EVENT_TYPE = 0
+local AUTOSAVE_EVENT_NAME = "delay_new_game_autosave"
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function scalar_context(value)
+    local copy = {}
+    if type(value) ~= "table" then return copy end
+    for key, item in pairs(value) do
+        local kind = type(item)
+        if type(key) == "string" and (kind == "string" or kind == "number" or kind == "boolean") then
+            copy[key] = item
+        end
+    end
+    return copy
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function normalized_token(command)
+    if type(command) ~= "string" then return nil end
+    local token = command:match("^%s*([^%s]+)")
+    if type(token) ~= "string" or token == "" then return nil end
+    return token
+end
+
+function SaveGuard:checkpoint(code, context)
+    if type(self.deps.checkpoint) ~= "function" then return false end
+    local called, result = pcall(self.deps.checkpoint, code, scalar_context(context))
+    return called and result ~= false and not (type(result) == "table" and result.ok == false)
+end
+
+function SaveGuard:clock()
+    if type(self.deps.clock) ~= "function" then return nil end
+    local called, value = pcall(self.deps.clock)
+    if not called then return nil end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return nil end
+        value = value.value
+    end
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 0 or value >= UINT32_MOD then return nil end
+    return value
+end
+
+function SaveGuard:execute(command, ...)
+    local token = normalized_token(command)
+    if self.armed == true and token ~= nil and token:lower() == "save" then
+        local context = scalar_context(self.context)
+        context.command = "save"
+        self:checkpoint("GA_SAVE_COMMAND_SUPPRESSED", context)
+        return
+    end
+    return self.original_execute(command, ...)
+end
+
+function SaveGuard:install()
+    if self.installed == true then return gamma_arena_result.ok(false) end
+    if type(self.deps.get_execute) ~= "function" or type(self.deps.set_execute) ~= "function" then
+        return fail("GA_SAVE_GUARD_INSTALL_FAILED", "Console command boundary dependencies are unavailable")
+    end
+    local read, original = pcall(self.deps.get_execute)
+    if not read or type(original) ~= "function" then
+        return fail("GA_SAVE_GUARD_INSTALL_FAILED", "Original console command executor is unavailable", {
+            reason = read and nil or tostring(original)
+        })
+    end
+    self.original_execute = original
+    local proxy = function(command, ...) return self:execute(command, ...) end
+    local written, result = pcall(self.deps.set_execute, proxy)
+    if not written or result == false or (type(result) == "table" and result.ok == false) then
+        self.original_execute = nil
+        return fail("GA_SAVE_GUARD_INSTALL_FAILED", "Console command proxy could not be installed", {
+            reason = written and "explicit failure" or tostring(result)
+        })
+    end
+    self.proxy_execute = proxy
+    self.installed = true
+    return gamma_arena_result.ok(true)
+end
+
+function SaveGuard:arm(context)
+    if self.installed ~= true or type(self.original_execute) ~= "function" then
+        return fail("GA_SAVE_GUARD_NOT_INSTALLED", "Arena save guard must be installed before launch ownership is accepted")
+    end
+    if self.armed == true then return gamma_arena_result.ok(false) end
+    local now = self:clock()
+    if now == nil then return fail("GA_SAVE_GUARD_CLOCK_FAILED", "Arena save guard clock is unavailable") end
+    self.context = scalar_context(context)
+    self.armed_at = now
+    self.armed = true
+    self:checkpoint("GA_SAVE_GUARD_ARMED", self.context)
+    return gamma_arena_result.ok(true)
+end
+
+function SaveGuard:maintain()
+    if self.armed ~= true then return gamma_arena_result.ok(false) end
+    local now = self:clock()
+    if now == nil then
+        self:checkpoint("GA_SAVE_TIMER_CANCEL_FAILED", { reason = "clock_unavailable" })
+        return gamma_arena_result.ok(false)
+    end
+    if self.armed_at == nil or elapsed_ms(self.armed_at, now) > TIMER_MAINTENANCE_MS then
+        return gamma_arena_result.ok(false)
+    end
+    if type(self.deps.remove_time_event) ~= "function" then
+        self:checkpoint("GA_SAVE_TIMER_CANCEL_FAILED", { reason = "remove_unavailable" })
+        return gamma_arena_result.ok(false)
+    end
+    local called, result = pcall(self.deps.remove_time_event, AUTOSAVE_EVENT_TYPE, AUTOSAVE_EVENT_NAME)
+    if not called or result == false or (type(result) == "table" and result.ok == false) then
+        self:checkpoint("GA_SAVE_TIMER_CANCEL_FAILED", { reason = called and "explicit_failure" or tostring(result) })
+        return gamma_arena_result.ok(false)
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function SaveGuard:disarm(context)
+    if self.armed ~= true then return gamma_arena_result.ok(false) end
+    local fields = scalar_context(self.context)
+    local extra = scalar_context(context)
+    for key, value in pairs(extra) do fields[key] = value end
+    self.armed = false
+    self.armed_at = nil
+    self.context = {}
+    self:checkpoint("GA_SAVE_GUARD_DISARMED", fields)
+    return gamma_arena_result.ok(true)
+end
+
+function SaveGuard:is_armed()
+    return self.armed == true
+end
+
+function SaveGuard:breach(context)
+    local fields = scalar_context(self.context)
+    local extra = scalar_context(context)
+    for key, value in pairs(extra) do fields[key] = value end
+    self:checkpoint("GA_SAVE_GUARD_BREACH", fields)
+    return gamma_arena_result.ok(true)
+end
+
+function new(deps)
+    return setmetatable({
+        deps = deps or {},
+        installed = false,
+        armed = false,
+        armed_at = nil,
+        context = {},
+        original_execute = nil,
+        proxy_execute = nil
+    }, SaveGuard)
+end
