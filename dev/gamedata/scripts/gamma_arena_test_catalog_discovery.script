@@ -1,4 +1,4 @@
-local function source(sections, order, throw_enumeration, telemetry)
+local function source(sections, order, throw_enumeration, telemetry, read_failures)
     return {
         enumerate_sections = function()
             if throw_enumeration then error("fixture enumeration failure") end
@@ -11,6 +11,7 @@ local function source(sections, order, throw_enumeration, telemetry)
             return values
         end,
         read_string = function(section, key)
+            if type(read_failures) == "table" and read_failures[section .. ":" .. key] then error("fixture string read failure") end
             if telemetry ~= nil then telemetry.string_reads = (telemetry.string_reads or 0) + 1 end
             local values = sections[section]
             return values and values[key] or nil
@@ -25,6 +26,13 @@ end
 local function outfit_by_section(values, section)
     for _, outfit in ipairs(values) do
         if outfit.section == section then return outfit end
+    end
+    return nil
+end
+
+local function record_by_section(values, section)
+    for _, record in ipairs(values) do
+        if record.section == section then return record end
     end
     return nil
 end
@@ -107,6 +115,80 @@ local function discovers_semantic_installed_gear()
     gamma_arena_test_assert.equals(#result.value.knives, 1, "usable knife family is discovered")
     gamma_arena_test_assert.equals(result.value.knives[1].section, "wpn_knife_addon", "knife section is exact")
     gamma_arena_test_assert.is_true(result.value.skipped >= 3, "unsafe firearm-shaped sections are skipped individually")
+end
+
+local function catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility()
+    local function firearm(kind, slot, parent, scopes)
+        return {
+            kind = kind,
+            slot = tostring(slot),
+            ammo_mag_size = "30",
+            ammo_class = "ammo_variant_fixture",
+            parent_section = parent,
+            scopes = scopes
+        }
+    end
+    local sections = {
+        ammo_variant_fixture = { kind = "w_ammo", box_size = "30" },
+        ammo_rejected_fixture = { kind = "w_ammo", box_size = "30" },
+        wpn_family_alpha = firearm("w_rifle", 2, "wpn_family_alpha", "optic_shared, optic_alpha"),
+        wpn_family_alpha_optic_shared = firearm("w_rifle", 2, "wpn_family_alpha"),
+        wpn_family_alpha_optic_orphan = firearm("w_rifle", 2, "wpn_family_alpha"),
+        wpn_family_alpha_alias = firearm("w_rifle", 2, "wpn_family_alpha"),
+        wpn_family_beta = firearm("w_smg", 1, "wpn_family_beta", "optic_beta"),
+        wpn_family_beta_optic_beta = firearm("w_smg", 1, "wpn_family_beta"),
+        wpn_family_beta_optic_shared = firearm("w_smg", 1, "wpn_family_beta"),
+        wpn_unknown_optic_shared = firearm("w_rifle", 2, "wpn_missing"),
+        wpn_legacy_standalone = firearm("w_shotgun", 2)
+    }
+    sections.wpn_unknown_optic_shared.ammo_class = "ammo_rejected_fixture"
+    local result = gamma_arena_catalog_discovery.discover(source(sections))
+    gamma_arena_test_assert.is_true(result.ok, "weapon compatibility discovery succeeds")
+    gamma_arena_test_assert.equals(#result.value.weapons, 5, "only standalone and compatible weapon variants survive")
+    for _, section in ipairs({
+        "wpn_family_alpha", "wpn_family_alpha_optic_shared",
+        "wpn_family_beta", "wpn_family_beta_optic_beta", "wpn_legacy_standalone"
+    }) do
+        gamma_arena_test_assert.is_true(record_by_section(result.value.weapons, section) ~= nil, section .. " remains eligible")
+    end
+    for _, section in ipairs({
+        "wpn_family_alpha_optic_orphan", "wpn_family_alpha_alias",
+        "wpn_family_beta_optic_shared", "wpn_unknown_optic_shared"
+    }) do
+        gamma_arena_test_assert.equals(record_by_section(result.value.weapons, section), nil, section .. " is rejected")
+        gamma_arena_test_assert.equals(string.find(table.concat(result.value.fingerprint_parts, "|"), section, 1, true), nil, section .. " is absent from fingerprint")
+    end
+    gamma_arena_test_assert.equals(record_by_section(result.value.ammo, "ammo_rejected_fixture"), nil, "rejected child contributes no ammunition")
+    gamma_arena_test_assert.equals(string.find(table.concat(result.value.fingerprint_parts, "|"), "ammo_rejected_fixture", 1, true), nil, "rejected child ammunition is absent from fingerprint")
+    gamma_arena_test_assert.equals(result.value.skipped, 4, "every incompatible child is counted as skipped")
+end
+
+local function catalog_discovery_parent_metadata_failures_are_fail_closed()
+    local sections = {
+        ammo_guard_fixture = { kind = "w_ammo", box_size = "30" },
+        wpn_guard_parent = {
+            kind = "w_rifle", slot = "2", ammo_mag_size = "30", ammo_class = "ammo_guard_fixture",
+            parent_section = "wpn_guard_parent", scopes = "optic_guard"
+        },
+        wpn_guard_parent_optic_guard = {
+            kind = "w_rifle", slot = "2", ammo_mag_size = "30", ammo_class = "ammo_guard_fixture",
+            parent_section = "wpn_guard_parent"
+        }
+    }
+    local child_failure = gamma_arena_catalog_discovery.discover(source(sections, nil, false, nil, {
+        ["wpn_guard_parent_optic_guard:parent_section"] = true
+    }))
+    gamma_arena_test_assert.is_true(child_failure.ok, "child parent metadata failure remains controlled")
+    gamma_arena_test_assert.is_true(record_by_section(child_failure.value.weapons, "wpn_guard_parent") ~= nil, "readable standalone parent remains eligible")
+    gamma_arena_test_assert.equals(record_by_section(child_failure.value.weapons, "wpn_guard_parent_optic_guard"), nil, "unreadable child parent metadata fails closed")
+    gamma_arena_test_assert.equals(child_failure.value.skipped, 1, "unreadable child is counted as skipped")
+
+    local parent_failure = gamma_arena_catalog_discovery.discover(source(sections, { "wpn_guard_parent_optic_guard" }, false, nil, {
+        ["wpn_guard_parent:parent_section"] = true
+    }))
+    gamma_arena_test_assert.is_true(parent_failure.ok, "parent ancestry metadata failure remains controlled")
+    gamma_arena_test_assert.equals(#parent_failure.value.weapons, 0, "unreadable parent ancestry rejects its child")
+    gamma_arena_test_assert.equals(parent_failure.value.skipped, 1, "child of unreadable parent is counted as skipped")
 end
 
 local function catalog_discovery_retains_clean_compatible_ammo_variants()
@@ -193,6 +275,8 @@ local cases = {
     { name = "catalog_discovery_accepts_semantic_installed_gear", fn = discovers_semantic_installed_gear },
     { name = "catalog_discovery_powered_exo_is_separate_from_heavy", fn = discovers_powered_exo_separately_from_heavy },
     { name = "catalog_discovery_prefilters_irrelevant_system_sections", fn = discovery_prefilters_irrelevant_system_sections },
+    { name = "catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility", fn = catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility },
+    { name = "catalog_discovery_parent_metadata_failures_are_fail_closed", fn = catalog_discovery_parent_metadata_failures_are_fail_closed },
     { name = "catalog_discovery_is_order_stable", fn = discovery_order_is_stable },
     { name = "catalog_discovery_enumeration_failure_falls_back", fn = enumeration_failure_falls_back },
     { name = "catalog_discovery_retains_clean_compatible_ammo_variants", fn = catalog_discovery_retains_clean_compatible_ammo_variants },

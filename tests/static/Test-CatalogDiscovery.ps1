@@ -25,7 +25,11 @@ foreach ($Marker in @(
     'candidate_section',
     'enumerate_sections',
     'read_string',
+    'read_string_result',
     'read_u32',
+    'compatible_weapon_variant',
+    'parent_section',
+    'scopes',
     'ammo_variants',
     'armor_piercing',
     'dynamic_catalog_v6',
@@ -66,6 +70,8 @@ foreach ($CaseName in @(
     'catalog_discovery_accepts_semantic_installed_gear',
     'catalog_discovery_powered_exo_is_separate_from_heavy',
     'catalog_discovery_prefilters_irrelevant_system_sections',
+    'catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility',
+    'catalog_discovery_parent_metadata_failures_are_fail_closed',
     'catalog_discovery_is_order_stable',
     'catalog_discovery_enumeration_failure_falls_back',
     'catalog_discovery_retains_clean_compatible_ammo_variants',
@@ -76,6 +82,10 @@ foreach ($CaseName in @(
     if (-not $Tests.Contains($CaseName)) {
         throw "Dynamic catalog discovery test is missing: $CaseName"
     }
+}
+
+if ($Tests -notmatch '(?m)\{\s*name\s*=\s*"catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility"\s*,\s*fn\s*=\s*catalog_discovery_filters_weapon_variants_by_parent_attachment_compatibility\s*\}') {
+    throw 'Dynamic catalog compatibility regression must remain registered'
 }
 
 Write-Host 'PASS: dynamic catalog discovery static contract passed'
