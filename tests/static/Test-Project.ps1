@@ -2019,6 +2019,7 @@ if ($ArenaGuardedStart -ge 0 -and $ArenaGuardedEnd -gt $ArenaGuardedStart) {
     $ArenaGuardedBlock = $ArenaBootstrapContent.Substring($ArenaGuardedStart, $ArenaGuardedEnd - $ArenaGuardedStart)
     Assert-True ($ArenaGuardedBlock -notmatch '\bsave_state\s*=') 'save_state must reach the guard-aware orchestrator before ACTIVE to diagnose native saves.'
 }
+Assert-True ($ArenaBootstrapContent -match 'elseif\s+name\s*==\s*"save_state"[\s\S]{0,900}if\s+not\s+armed\s+then\s+return\s+end') 'Campaign save_state callback must preserve its historical nil return while still reaching guard-aware breach detection.'
 $ArenaSaveStateStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:save_state')
 $ArenaSaveStateEnd = if ($ArenaSaveStateStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:create_session', $ArenaSaveStateStart) } else { -1 }
 Assert-True ($ArenaSaveStateStart -ge 0 -and $ArenaSaveStateEnd -gt $ArenaSaveStateStart) 'Arena save_state boundary must remain structurally testable.'
