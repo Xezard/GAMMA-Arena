@@ -565,7 +565,28 @@ local function valid_random_catalog(catalog, difficulty_id)
     return true
 end
 
-local function build_draft_internal(session, fight_index, catalog, layout)
+local function exact_keys(value, allowed, expected_count)
+    if type(value) ~= "table" then return false end
+    local count = 0
+    for key in pairs(value) do
+        if not allowed[key] then return false end
+        count = count + 1
+    end
+    return count == expected_count
+end
+
+local function valid_build_result(result)
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then return false end
+    if result.ok then
+        return exact_keys(result, { ok = true, value = true }, 2) and type(result.value) == "table"
+    end
+    local failure = result.error
+    return exact_keys(result, { ok = true, error = true }, 2)
+        and exact_keys(failure, { code = true, message = true, context = true }, 3)
+        and nonempty_text(failure.code) and type(failure.message) == "string" and type(failure.context) == "table"
+end
+
+local function generate_draft_internal(session, fight_index, catalog, layout)
     if type(session) ~= "table" or type(catalog) ~= "table" then return gamma_arena_result.err("GA_GENERATE_ARGUMENT_INVALID", "Fight generation requires session and catalog", {}) end
     if not valid_random_catalog(catalog, session.difficulty_id) then return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {}) end
     local validated = gamma_arena_mode_skirmish.validate_session(session); if not validated.ok then return validated end
@@ -650,8 +671,14 @@ local function build_draft_internal(session, fight_index, catalog, layout)
     return gamma_arena_result.ok(draft)
 end
 
+local function build_draft_internal(session, fight_index, catalog, layout)
+    local result = generate_draft_internal(session, fight_index, catalog, layout)
+    if valid_build_result(result) then return result end
+    return nil
+end
+
 function build_draft(session, fight_index, catalog, layout)
     local completed, result = pcall(build_draft_internal, session, fight_index, catalog, layout)
-    if completed and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    if completed and result ~= nil then return result end
     return gamma_arena_result.err("GA_RANDOM_GENERATION_FAILED", "Random fight generation failed", { phase = "build_draft" })
 end
