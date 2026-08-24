@@ -1251,7 +1251,9 @@ $FightSpecV5Path = Join-Path $RepoRoot 'schemas\fight-spec-v5.md'
 if (Test-Path -LiteralPath $FightSpecV5Path) {
     $FightSpecV5Content = Get-Content -LiteralPath $FightSpecV5Path -Raw
     Assert-True ($FightSpecV5Content -match '(?m)^\| schema_version \| exactly 5 \|\s*$') 'FightSpecV5 root schema must be version 5.'
-    Assert-True ($FightSpecV5Content -match '(?m)^\| generator_version \| exactly 7 \|\s*$' -and $FightSpecV5Content -match '(?m)^\| catalog_revision \| exactly 7 \|\s*$') 'FightSpecV5 must declare generator/catalog identity 7/7.'
+    Assert-True ($FightSpecV5Content -match '(?m)^\| generator_version \| exactly 7 \|\s*$') 'FightSpecV5 must declare generator identity 7.'
+    Assert-True ($FightSpecV5Content -match '(?m)^\| catalog_revision \| equals the normalized effective catalog revision \|\s*$') 'FightSpecV5 must admit the deterministic effective-catalog revision.'
+    Assert-True ($FightSpecV5Content.Contains('`ga-<seed>-<index>-g7-c<catalog>-l<layout>`')) 'FightSpecV5 must document the effective catalog/layout Fight ID.'
     foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','enemy medical team budget','core/equipment RNG epoch 6','medical RNG epoch 1')) {
         Assert-True ($FightSpecV5Content -match [regex]::Escape($Marker)) "FightSpecV5 must document $Marker"
     }
