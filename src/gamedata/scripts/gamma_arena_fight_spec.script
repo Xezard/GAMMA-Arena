@@ -1,22 +1,41 @@
 local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
 local CATEGORY_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon = 4, ammo = 5, consumable = 6 }
-local FORBIDDEN = { mode_id = true, difficulty_id = true, budget = true, player_budget = true, price = true, weight = true, weight_total = true, points = true, threat = true }
+local MAX_SAFE_INTEGER = 9007199254740991
+local FORBIDDEN = {
+    mode_id = true, difficulty_id = true, budget = true, player_budget = true,
+    price = true, weight = true, weight_total = true, points = true, threat = true,
+    custom_config = true, generation_recipe = true, generation_provenance = true,
+    generation_rules = true
+}
 
-local function finite_integer(value, minimum)
-    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
-        and value == math.floor(value) and value >= minimum
-end
-
-local function finite_number(value)
-    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
 end
 
 local function text(value)
     return type(value) == "string" and value ~= ""
 end
 
-local function failure(code, message, context)
-    return gamma_arena_result.err(code, message, context or {})
+local function finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function unsigned_integer(value, minimum)
+    return finite_number(value) and value == math.floor(value) and value >= (minimum or 0) and value <= MAX_SAFE_INTEGER
+end
+
+local function dense_array(value, path)
+    if type(value) ~= "table" then return nil, failure("GA_FIGHT_SPEC_ARRAY", "FightSpec array must be a table", { path = path }) end
+    local maximum, count = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then
+            return nil, failure("GA_FIGHT_SPEC_ARRAY", "FightSpec arrays require integer keys", { path = path, key = key })
+        end
+        if key > maximum then maximum = key end
+        count = count + 1
+    end
+    if maximum ~= count then return nil, failure("GA_FIGHT_SPEC_ARRAY", "FightSpec arrays must be dense", { path = path }) end
+    return maximum, nil
 end
 
 local function no_forbidden(value, path)
@@ -31,7 +50,7 @@ local function no_forbidden(value, path)
     return nil
 end
 
-local function exact_identity(value)
+local function exact_identity(value, catalog, layout)
     if type(value) ~= "table" then return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity must be a table") end
     local required = { "session_seed", "fight_index", "generator_version", "catalog_fingerprint", "layout_version" }
     for _, key in ipairs(required) do if value[key] == nil then return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity is incomplete", { key = key }) end end
@@ -40,24 +59,28 @@ local function exact_identity(value)
             return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity contains an unknown field", { key = key })
         end
     end
-    if not finite_integer(value.session_seed, 0) or not finite_integer(value.fight_index, 0) or not finite_integer(value.generator_version, 1)
-        or not text(value.catalog_fingerprint) or not finite_integer(value.layout_version, 1) then
+    if not unsigned_integer(value.session_seed) or value.session_seed ~= gamma_arena_rng.normalize_uint32(value.session_seed)
+        or not unsigned_integer(value.fight_index) or value.generator_version ~= 8
+        or not text(value.catalog_fingerprint) or not unsigned_integer(value.layout_version, 1) then
         return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity has invalid values")
+    end
+    if type(catalog) ~= "table" or value.catalog_fingerprint ~= catalog.fingerprint then
+        return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec catalog fingerprint does not match", {})
+    end
+    if type(layout) ~= "table" or value.layout_version ~= layout.version then
+        return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec layout version does not match", {})
     end
     return nil
 end
 
 local function item_catalog(catalog, section)
-    local items = type(catalog) == "table" and catalog.items or nil
-    local item = type(items) == "table" and items[section] or nil
+    local item = type(catalog) == "table" and type(catalog.items) == "table" and catalog.items[section] or nil
     if type(item) ~= "table" or not text(item.category) then return nil end
     return item
 end
 
 local function equipped_slot_for(item)
-    if item.category == "outfit" then return "outfit" end
-    if item.category == "helmet" then return "helmet" end
-    if item.category == "knife" then return "knife" end
+    if item.category == "outfit" or item.category == "helmet" or item.category == "knife" then return item.category end
     if item.category == "weapon" then
         local slot = tonumber(item.ltx_slot)
         if slot == 1 or slot == 2 then return "weapon_" .. tostring(slot) end
@@ -65,56 +88,69 @@ local function equipped_slot_for(item)
     return nil
 end
 
-local function add_item(items, section, quantity, equipped_slot, catalog)
-    if not text(section) or not finite_integer(quantity, 1) then return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Item quantity must be a positive integer", { section = section, quantity = quantity }) end
+local function add_item(items, owners, section, quantity, equipped_slot, catalog)
+    if not text(section) or not unsigned_integer(quantity, 1) then return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Item quantity must be a bounded positive integer", { section = section, quantity = quantity }) end
     local item = item_catalog(catalog, section)
     if item == nil then return failure("GA_FIGHT_SPEC_ITEM_UNKNOWN", "Item section is not in the catalog", { section = section }) end
     if equipped_slot ~= nil and SLOT_ORDER[equipped_slot] == nil then return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Item uses an unknown equipped slot", { section = section, equipped_slot = equipped_slot }) end
-    local expected = equipped_slot_for(item)
-    if equipped_slot ~= nil and expected ~= equipped_slot then return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Item does not match its equipped slot", { section = section, equipped_slot = equipped_slot }) end
+    if equipped_slot ~= nil and equipped_slot_for(item) ~= equipped_slot then return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Item does not match its equipped slot", { section = section, equipped_slot = equipped_slot }) end
     local current = items[section]
     if current == nil then
-        items[section] = { section = section, quantity = quantity, equipped_slot = equipped_slot, category = item.category }
-        return nil
+        current = { section = section, quantity = quantity, equipped_slot = equipped_slot, category = item.category }
+        items[section] = current
+    else
+        if current.equipped_slot ~= nil and equipped_slot ~= nil and current.equipped_slot ~= equipped_slot then
+            return failure("GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT", "Duplicate item sections have conflicting equipped slots", { section = section })
+        end
+        if current.quantity > MAX_SAFE_INTEGER - quantity then return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Item quantity exceeds the supported range", { section = section }) end
+        current.quantity = current.quantity + quantity
+        if current.equipped_slot == nil then current.equipped_slot = equipped_slot end
     end
-    if current.equipped_slot ~= equipped_slot and equipped_slot ~= nil then return failure("GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT", "Duplicate item sections have conflicting equipped slots", { section = section }) end
-    current.quantity = current.quantity + quantity
+    if current.equipped_slot ~= nil then
+        local owner = owners[current.equipped_slot]
+        if owner ~= nil and owner ~= section then return failure("GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT", "Different items cannot own the same equipped slot", { equipped_slot = current.equipped_slot }) end
+        owners[current.equipped_slot] = section
+    end
     return nil
 end
 
-local function normalized_items(items, catalog)
-    local aggregate = {}
-    if type(items) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Item entries must be an array") end
-    for index = 1, #items do
-        local entry = items[index]
-        if type(entry) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Item entry must be a table", { index = index }) end
-        local result = add_item(aggregate, entry.section, entry.quantity, entry.equipped_slot, catalog)
-        if result then return result end
-    end
-    local values = {}
-    for _, entry in pairs(aggregate) do values[#values + 1] = entry end
+local function sort_items(values)
     table.sort(values, function(left, right)
         local left_slot, right_slot = SLOT_ORDER[left.equipped_slot], SLOT_ORDER[right.equipped_slot]
         if left_slot ~= nil or right_slot ~= nil then
             if left_slot == nil then return false end
             if right_slot == nil then return true end
-            return left_slot < right_slot
+            if left_slot ~= right_slot then return left_slot < right_slot end
         end
-        local left_category = CATEGORY_ORDER[left.category] or 99
-        local right_category = CATEGORY_ORDER[right.category] or 99
+        local left_category, right_category = CATEGORY_ORDER[left.category] or 99, CATEGORY_ORDER[right.category] or 99
         if left_category ~= right_category then return left_category < right_category end
         return left.section < right.section
     end)
     for index = 1, #values do values[index].category = nil end
+end
+
+local function normalized_items(items, catalog)
+    local count, invalid = dense_array(items, "items")
+    if invalid then return invalid end
+    local aggregate, owners = {}, {}
+    for index = 1, count do
+        local entry = items[index]
+        if type(entry) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Item entry must be a table", { index = index }) end
+        local result = add_item(aggregate, owners, entry.section, entry.quantity, entry.equipped_slot, catalog)
+        if result then return result end
+    end
+    local values = {}
+    for _, entry in pairs(aggregate) do values[#values + 1] = entry end
+    sort_items(values)
     return gamma_arena_result.ok(values)
 end
 
 local function legacy_items(loadout, catalog)
     if type(loadout) ~= "table" then return failure("GA_FIGHT_SPEC_LOADOUT", "Legacy loadout must be a table") end
-    local aggregate = {}
+    local aggregate, owners = {}, {}
     local function add(section, quantity, slot)
         if section == nil then return nil end
-        return add_item(aggregate, section, quantity or 1, slot, catalog)
+        return add_item(aggregate, owners, section, quantity or 1, slot, catalog)
     end
     local result = add(loadout.outfit, 1, "outfit") or add(loadout.knife, 1, "knife")
     if result then return result end
@@ -125,28 +161,23 @@ local function legacy_items(loadout, catalog)
     end
     result = add(loadout.ammo, loadout.ammo_boxes)
     if result then return result end
-    if type(loadout.bonus_ammo) == "table" then
-        result = add(loadout.bonus_ammo.section, loadout.bonus_ammo.quantity or 1)
+    if loadout.bonus_ammo ~= nil then
+        local bonus = loadout.bonus_ammo
+        if type(bonus) ~= "table" or not text(bonus.section) or not unsigned_integer(bonus.boxes, 1) then
+            return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Legacy bonus ammunition requires bounded boxes", {})
+        end
+        result = add(bonus.section, bonus.boxes)
         if result then return result end
     end
-    for index = 1, #(loadout.consumables or {}) do
+    local consumable_count, invalid = dense_array(loadout.consumables or {}, "legacy_consumables")
+    if invalid then return invalid end
+    for index = 1, consumable_count do
         result = add(loadout.consumables[index], 1)
         if result then return result end
     end
     local values = {}
     for _, entry in pairs(aggregate) do values[#values + 1] = entry end
-    table.sort(values, function(left, right)
-        local left_slot, right_slot = SLOT_ORDER[left.equipped_slot], SLOT_ORDER[right.equipped_slot]
-        if left_slot ~= nil or right_slot ~= nil then
-            if left_slot == nil then return false end
-            if right_slot == nil then return true end
-            return left_slot < right_slot
-        end
-        local left_category, right_category = CATEGORY_ORDER[left.category] or 99, CATEGORY_ORDER[right.category] or 99
-        if left_category ~= right_category then return left_category < right_category end
-        return left.section < right.section
-    end)
-    for index = 1, #values do values[index].category = nil end
+    sort_items(values)
     return gamma_arena_result.ok(values)
 end
 
@@ -157,23 +188,28 @@ local function resolve_items(value, catalog)
     return legacy_items(value.loadout, catalog)
 end
 
-local function canonical_opponent(value, catalog)
-    if type(value) ~= "table" or not finite_integer(value.slot, 1) or not text(value.faction) or type(value.rank) ~= "table"
-        or not text(value.rank.id) or not finite_integer(value.rank.value, 0) or not text(value.profile) or not text(value.role)
+local function canonical_opponent(value, catalog, routes)
+    if type(value) ~= "table" or not unsigned_integer(value.slot, 1) or not text(value.faction) or type(value.rank) ~= "table"
+        or not text(value.rank.id) or not unsigned_integer(value.rank.value) or not text(value.profile) or not text(value.role)
         or not text(value.spawn_slot_id) or type(value.spawn) ~= "table" or type(value.spawn.position) ~= "table" or not text(value.tactical_route) then
         return failure("GA_FIGHT_SPEC_OPPONENT", "Opponent draft is invalid")
     end
+    if not routes[value.tactical_route] then return failure("GA_FIGHT_SPEC_DRAFT", "Opponent route is not in the layout", { tactical_route = value.tactical_route }) end
     local position = value.spawn.position
     if not finite_number(position.x) or not finite_number(position.y) or not finite_number(position.z)
-        or not finite_integer(value.spawn.level_vertex_id, 0) or not finite_integer(value.spawn.game_vertex_id, 0) then return failure("GA_FIGHT_SPEC_POSITION", "Opponent spawn data is invalid") end
+        or not unsigned_integer(value.spawn.level_vertex_id) or not unsigned_integer(value.spawn.game_vertex_id) then return failure("GA_FIGHT_SPEC_POSITION", "Opponent spawn data is invalid") end
     local items = resolve_items(value, catalog)
     if not items.ok then return items end
-    return gamma_arena_result.ok({ slot = value.slot, faction = value.faction, rank = { id = value.rank.id, value = value.rank.value }, profile = value.profile,
-        role = value.role, spawn_slot_id = value.spawn_slot_id, spawn = { position = { x = position.x, y = position.y, z = position.z }, level_vertex_id = value.spawn.level_vertex_id, game_vertex_id = value.spawn.game_vertex_id }, tactical_route = value.tactical_route, items = items.value })
+    return gamma_arena_result.ok({ slot = value.slot, faction = value.faction, rank = { id = value.rank.id, value = value.rank.value }, profile = value.profile, role = value.role, spawn_slot_id = value.spawn_slot_id, spawn = { position = { x = position.x, y = position.y, z = position.z }, level_vertex_id = value.spawn.level_vertex_id, game_vertex_id = value.spawn.game_vertex_id }, tactical_route = value.tactical_route, items = items.value })
+end
+
+local function int_text(value)
+    if not unsigned_integer(value) then error("FightSpec integer outside supported range") end
+    return string.format("%.0f", value)
 end
 
 local function scalar(key, value)
-    local value_text = tostring(value)
+    local value_text = type(value) == "number" and int_text(value) or tostring(value)
     return key .. "=" .. tostring(#value_text) .. ":" .. value_text
 end
 
@@ -237,25 +273,42 @@ end
 function canonicalize(draft, identity, catalog, layout)
     local forbidden = no_forbidden(draft, "draft")
     if forbidden then return forbidden end
-    local invalid_identity = exact_identity(identity)
+    local invalid_identity = exact_identity(identity, catalog, layout)
     if invalid_identity then return invalid_identity end
-    if type(draft) ~= "table" or type(draft.arena) ~= "table" or type(draft.actor) ~= "table" or type(draft.opponents) ~= "table" then return failure("GA_FIGHT_SPEC_DRAFT", "Fight draft is incomplete") end
-    if not text(draft.arena.layout_id) or not text(draft.arena.level) or type(draft.arena.tactical_routes) ~= "table" or not text(draft.actor.spawn_path) or not text(draft.actor.look_path) then return failure("GA_FIGHT_SPEC_DRAFT", "Fight draft arena or actor is invalid") end
+    if type(draft) ~= "table" or type(draft.arena) ~= "table" or type(draft.actor) ~= "table" then return failure("GA_FIGHT_SPEC_DRAFT", "Fight draft is incomplete") end
+    if draft.arena.layout_id ~= layout.layout_id or draft.arena.level ~= layout.level or draft.actor.spawn_path ~= layout.actor_spawn_path or draft.actor.look_path ~= layout.actor_look_path then
+        return failure("GA_FIGHT_SPEC_DRAFT", "Fight draft arena or actor does not match the layout", {})
+    end
+    local layout_count, layout_invalid = dense_array(layout.tactical_routes, "layout_routes")
+    if layout_invalid then return layout_invalid end
+    local draft_route_count, draft_route_invalid = dense_array(draft.arena.tactical_routes, "draft_routes")
+    if draft_route_invalid then return draft_route_invalid end
+    if draft_route_count ~= layout_count then return failure("GA_FIGHT_SPEC_DRAFT", "Draft routes must match the layout", {}) end
+    local routes, selected = {}, {}
+    for index = 1, layout_count do
+        local route = layout.tactical_routes[index]
+        if not text(route) or routes[route] then return failure("GA_FIGHT_SPEC_DRAFT", "Layout route is invalid", { index = index }) end
+        routes[route] = true
+    end
+    for index = 1, draft_route_count do
+        local route = draft.arena.tactical_routes[index]
+        if not text(route) or not routes[route] or selected[route] then return failure("GA_FIGHT_SPEC_DRAFT", "Draft route is invalid", { index = index }) end
+        selected[route] = true
+    end
+    local opponent_count, opponents_invalid = dense_array(draft.opponents, "opponents")
+    if opponents_invalid then return opponents_invalid end
     local actor_items = resolve_items(draft.actor, catalog)
     if not actor_items.ok then return actor_items end
     local opponents, slots = {}, {}
-    for index = 1, #draft.opponents do
-        local opponent = canonical_opponent(draft.opponents[index], catalog)
+    for index = 1, opponent_count do
+        local opponent = canonical_opponent(draft.opponents[index], catalog, routes)
         if not opponent.ok then return opponent end
         if slots[opponent.value.slot] then return failure("GA_FIGHT_SPEC_OPPONENT", "Opponent slots must be unique", { slot = opponent.value.slot }) end
         slots[opponent.value.slot] = true; opponents[#opponents + 1] = opponent.value
     end
     table.sort(opponents, function(left, right) return left.slot < right.slot end)
-    local result = { schema_version = 6, identity = { session_seed = identity.session_seed, fight_index = identity.fight_index, generator_version = identity.generator_version, catalog_fingerprint = identity.catalog_fingerprint, layout_version = identity.layout_version }, arena = { layout_id = draft.arena.layout_id, level = draft.arena.level, tactical_routes = {} }, actor = { spawn_path = draft.actor.spawn_path, look_path = draft.actor.look_path, items = actor_items.value }, opponents = opponents }
-    for index = 1, #draft.arena.tactical_routes do
-        if not text(draft.arena.tactical_routes[index]) then return failure("GA_FIGHT_SPEC_DRAFT", "Tactical route is invalid", { index = index }) end
-        result.arena.tactical_routes[index] = draft.arena.tactical_routes[index]
-    end
+    local result = { schema_version = 6, identity = { session_seed = identity.session_seed, fight_index = identity.fight_index, generator_version = identity.generator_version, catalog_fingerprint = identity.catalog_fingerprint, layout_version = identity.layout_version }, arena = { layout_id = layout.layout_id, level = layout.level, tactical_routes = {} }, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, items = actor_items.value }, opponents = opponents }
+    for index = 1, layout_count do result.arena.tactical_routes[index] = layout.tactical_routes[index] end
     local payload = encode_spec(result, false)
     result.identity.content_hash = content_hash(payload)
     result.identity.fight_id = "ga6-" .. result.identity.content_hash
