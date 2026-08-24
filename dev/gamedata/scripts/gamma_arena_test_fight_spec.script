@@ -14,14 +14,21 @@ local function catalog()
         fingerprint = "ga-catalog-v8-1234abcd",
         items = {
             stalker_outfit = { category = "outfit" }, wpn_knife = { category = "knife" },
-            wpn_ak74 = { category = "weapon", ltx_slot = 2 }, wpn_ak74_alt = { category = "weapon", ltx_slot = 2 }, ammo_545 = { category = "ammo" },
+            wpn_ak74 = { category = "weapon", ltx_slot = 2 }, wpn_ak74_alt = { category = "weapon", ltx_slot = 2 }, ammo_545 = { category = "ammo" }, ammo_762 = { category = "ammo" },
             bandage = { category = "consumable" }, medkit = { category = "consumable" }
         }
     }
 end
 
 local function layout()
-    return { layout_id = "rostok_arena_v1", version = 2, level = "l05_bar", tactical_routes = { "route_1", "route_2" }, actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }
+    return { id = "rostok_arena_v1", version = 2, level = "l05_bar", tactical_routes = { "route_1", "route_2" }, actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }
+end
+
+local function item_by_section(items, section)
+    for index = 1, #items do
+        if items[index].section == section then return items[index] end
+    end
+    return nil
 end
 
 local function legacy_draft()
@@ -55,17 +62,17 @@ local function canonicalizes_legacy_and_item_loadouts_equivalently()
     gamma_arena_test_assert.is_true(first.ok and second.ok, "v6 canonicalization")
     gamma_arena_test_assert.equals(first.value.schema_version, 6, "single schema")
     gamma_arena_test_assert.equals(first.value.identity.fight_id, "ga6-" .. first.value.identity.content_hash, "content-derived id")
+    gamma_arena_test_assert.equals(first.value.arena.layout_id, "rostok_arena_v1", "FightSpec copies the resolved layout id")
     gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first.value), gamma_arena_fight_spec.stable_encode(second.value), "legacy and item drafts encode identically")
     gamma_arena_test_assert.equals(first.value.actor.items[1].equipped_slot, "outfit", "equipped item sorting")
-    gamma_arena_test_assert.equals(first.value.actor.items[4].section, "ammo_545", "unequipped category sorting")
-    gamma_arena_test_assert.equals(first.value.actor.items[4].quantity, 3, "physical ammo boxes aggregate")
+    gamma_arena_test_assert.equals(item_by_section(first.value.actor.items, "ammo_545").quantity, 3, "physical ammo boxes aggregate")
 end
 
 local function rejects_invalid_item_entries_and_positions()
     local cases = {
         { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 0 } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_QUANTITY" },
         { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1, equipped_slot = "belt" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT" },
-        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1 }, { section = "bandage", quantity = 1, equipped_slot = "knife" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT" },
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1 }, { section = "bandage", quantity = 1, equipped_slot = "knife" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT" },
         { mutate = function(value) value.opponents[1].spawn.position.x = 0 / 0 end, code = "GA_FIGHT_SPEC_POSITION" }
     }
     for _, case in ipairs(cases) do
@@ -89,7 +96,7 @@ local function rejects_forbidden_keys_at_every_depth_and_invalid_identity()
     gamma_arena_test_assert.is_false(result.ok, "identity must be exact")
     gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_IDENTITY", "identity rejects unknown provenance")
 
-    for _, forbidden in ipairs({ "custom_config", "generation_recipe", "generation_rules" }) do
+    for _, forbidden in ipairs({ "custom_config", "generation_recipe", "generation_rules", "provenance" }) do
         local root = item_draft(); root[forbidden] = { valid_configuration = true }
         local nested = item_draft(); nested.actor.items[1][forbidden] = true
         for _, draft in ipairs({ root, nested }) do
@@ -132,7 +139,7 @@ local function fight_spec_binds_identity_layout_and_dense_arrays()
     gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ARRAY", "sparse layout route code")
 end
 
-local function fight_spec_aggregates_slots_boxes_and_large_integers()
+local function fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo()
     local same = item_draft(); same.actor.items = { { section = "wpn_ak74", quantity = 1 }, { section = "wpn_ak74", quantity = 1, equipped_slot = "weapon_2" } }
     local merged = gamma_arena_fight_spec.canonicalize(same, identity(), catalog(), layout())
     gamma_arena_test_assert.is_true(merged.ok, "nil and equipped duplicate merge regardless of order")
@@ -145,7 +152,12 @@ local function fight_spec_aggregates_slots_boxes_and_large_integers()
     local boxes = legacy_draft(); boxes.actor.loadout.bonus_ammo = { section = "ammo_545", boxes = 3 }
     local result = gamma_arena_fight_spec.canonicalize(boxes, identity(), catalog(), layout())
     gamma_arena_test_assert.is_true(result.ok, "legacy bonus boxes canonicalize")
-    gamma_arena_test_assert.equals(result.value.actor.items[4].quantity, 5, "base and bonus physical boxes aggregate")
+    gamma_arena_test_assert.equals(item_by_section(result.value.actor.items, "ammo_545").quantity, 5, "same-section base and bonus physical boxes aggregate")
+    boxes = legacy_draft(); boxes.actor.loadout.bonus_ammo = { section = "ammo_762", boxes = 3 }
+    result = gamma_arena_fight_spec.canonicalize(boxes, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "distinct legacy bonus boxes canonicalize")
+    gamma_arena_test_assert.equals(item_by_section(result.value.actor.items, "ammo_545").quantity, 2, "base ammo boxes retain their section quantity")
+    gamma_arena_test_assert.equals(item_by_section(result.value.actor.items, "ammo_762").quantity, 3, "bonus ammo boxes retain their separate section quantity")
     boxes.actor.loadout.bonus_ammo = { section = "ammo_545", quantity = 3 }
     rejected = gamma_arena_fight_spec.canonicalize(boxes, identity(), catalog(), layout())
     gamma_arena_test_assert.is_false(rejected.ok, "legacy bonus ammunition requires boxes")
@@ -177,7 +189,7 @@ function run(run_case_fn)
         { name = "fight_spec_rejects_invalid_item_entries_and_positions", fn = rejects_invalid_item_entries_and_positions },
         { name = "fight_spec_rejects_forbidden_keys_at_every_depth_and_invalid_identity", fn = rejects_forbidden_keys_at_every_depth_and_invalid_identity },
         { name = "fight_spec_binds_identity_layout_and_dense_arrays", fn = fight_spec_binds_identity_layout_and_dense_arrays },
-        { name = "fight_spec_aggregates_slots_boxes_and_large_integers", fn = fight_spec_aggregates_slots_boxes_and_large_integers },
+        { name = "fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo", fn = fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo },
         { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable }
     }) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed
