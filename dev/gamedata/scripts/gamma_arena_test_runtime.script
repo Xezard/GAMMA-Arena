@@ -1654,6 +1654,7 @@ local function fake_actor_adapter_env()
         inventory_callback_count = 0,
         actor_id_sequence = nil,
         actor_id_reads = 0,
+        equality_calls = 0,
         now = 0,
         input_acquires = 0,
         input_releases = 0,
@@ -1700,6 +1701,21 @@ local function fake_actor_adapter_env()
     function actor:set_invulnerable(value) self.invulnerable_value = value end
     function actor:position() return self.position_value or fake_vector(0, 0, 0) end
     env.actor = actor
+    local function poison_game_object_equality()
+        env.equality_calls = env.equality_calls + 1
+        error("native game_object equality invoked")
+    end
+    setmetatable(actor, { __eq = poison_game_object_equality })
+    function env:actor_alias()
+        return setmetatable({
+            actor_id = actor.actor_id,
+            items = actor.items,
+            money_value = actor.money_value
+        }, {
+            __index = actor,
+            __eq = poison_game_object_equality
+        })
+    end
     function env:add_item(id, options)
         options = options or {}
         local item = { item_id = id, options = options, parent_calls = 0, id_calls = 0 }
@@ -1911,7 +1927,7 @@ end
 local function runtime_actor_inventory_drain_rejects_unowned_public_actor()
     local env, adapter = fake_actor_adapter_env()
     local foreign = {
-        id = function() return env.actor.actor_id end,
+        id = function() return env.actor.actor_id + 1 end,
         iterate_inventory = function() error("foreign actor must not be inspected") end
     }
     adapter:begin_update()
@@ -1919,6 +1935,18 @@ local function runtime_actor_inventory_drain_rejects_unowned_public_actor()
     gamma_arena_test_assert.is_false(result.ok, "public purge argument must be the currently owned Arena actor")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_NOT_OWNED", "public foreign actor uses ownership guard")
     gamma_arena_test_assert.equals(env.release_submission_count, 0, "public foreign actor submits no releases")
+end
+
+local function runtime_actor_inventory_native_identity_uses_ids()
+    local env, adapter = fake_actor_adapter_env()
+    local alias = env:actor_alias()
+    env:add_item(12, { parent = alias })
+    adapter:begin_update()
+    local called, result = pcall(function() return adapter:purge_inventory(alias) end)
+    gamma_arena_test_assert.is_true(called, "native game_object identity must not invoke __eq")
+    gamma_arena_test_assert.is_true(result.ok, "equal numeric actor IDs must authorize cleanup")
+    gamma_arena_test_assert.equals(env.equality_calls, 0, "native equality is never evaluated")
+    gamma_arena_test_assert.equals(env.released[1], 12, "owned item is released after ID proof")
 end
 
 local function runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values()
@@ -7501,6 +7529,7 @@ local cases = {
     ,{ name = "runtime_actor_inventory_drain_times_out_with_sorted_evidence", fn = runtime_actor_inventory_drain_times_out_with_sorted_evidence }
     ,{ name = "runtime_actor_inventory_drain_timeout_is_wrap_safe", fn = runtime_actor_inventory_drain_timeout_is_wrap_safe }
     ,{ name = "runtime_actor_inventory_drain_rejects_unowned_public_actor", fn = runtime_actor_inventory_drain_rejects_unowned_public_actor }
+    ,{ name = "runtime_actor_inventory_native_identity_uses_ids", fn = runtime_actor_inventory_native_identity_uses_ids }
     ,{ name = "runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values", fn = runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values }
     ,{ name = "runtime_actor_inventory_drain_submits_sorted_deduplicated_ids", fn = runtime_actor_inventory_drain_submits_sorted_deduplicated_ids }
     ,{ name = "runtime_actor_inventory_drain_cleanup_clears_transaction", fn = runtime_actor_inventory_drain_cleanup_clears_transaction }
