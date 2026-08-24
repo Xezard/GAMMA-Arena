@@ -1834,15 +1834,32 @@ foreach ($Marker in @('inventory_drain','last_progress_at','submitted_ids','rema
 foreach ($Marker in @('clock = function() return time_global() end','inventory_drain_timeout_ms = 10000','item_section = function(item) return item:section() end')) {
     Assert-True ($InventoryDrainBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap inventory drain composition must cover $Marker"
 }
-foreach ($Name in @('runtime_actor_inventory_drain_waits_for_looted_items','runtime_actor_inventory_drain_releases_newly_surfaced_item_once','runtime_actor_inventory_drain_times_out_with_sorted_evidence','runtime_actor_inventory_drain_timeout_is_wrap_safe','runtime_actor_inventory_drain_rejects_unowned_public_actor','runtime_actor_inventory_native_identity_uses_ids','runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values','runtime_actor_inventory_drain_submits_sorted_deduplicated_ids','runtime_actor_inventory_drain_cleanup_clears_transaction','runtime_wait_inventory_blocks_fight_generation_and_loadout')) {
+foreach ($Name in @('runtime_actor_inventory_drain_waits_for_looted_items','runtime_actor_inventory_drain_releases_newly_surfaced_item_once','runtime_actor_inventory_drain_times_out_with_sorted_evidence','runtime_actor_inventory_drain_timeout_is_wrap_safe','runtime_actor_inventory_drain_rejects_unowned_public_actor','runtime_actor_inventory_native_identity_uses_ids','runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed','runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values','runtime_actor_inventory_drain_submits_sorted_deduplicated_ids','runtime_actor_inventory_drain_cleanup_clears_transaction','runtime_wait_inventory_blocks_fight_generation_and_loadout')) {
     Assert-True ($InventoryDrainRuntimeContent -match [regex]::Escape($Name)) "Actor inventory drain runtime regression must cover $Name"
 }
-foreach ($UnsafeEquality in @('parent ~= actor','parent == actor','owned.value ~= actor')) {
-    Assert-True ($InventoryDrainActorContent -notmatch [regex]::Escape($UnsafeEquality)) "Actor inventory ownership must not compare native game_object values: $UnsafeEquality"
+foreach ($UnsafeEquality in @(
+    '\bparent\s*(?:==|~=)\s*actor\b',
+    '\bactor\s*(?:==|~=)\s*parent\b',
+    'owned\.value\s*(?:==|~=)\s*actor\b',
+    '\bactor\s*(?:==|~=)\s*owned\.value'
+)) {
+    Assert-True ($InventoryDrainActorContent -notmatch $UnsafeEquality) "Actor inventory ownership must not compare native game_object values: $UnsafeEquality"
 }
-Assert-True ($InventoryDrainBootstrapContent -notmatch 'candidate\s*==\s*db\.actor') 'Bootstrap actor ownership must not compare native game_object values.'
+foreach ($UnsafeEquality in @(
+    '\bcandidate\s*(?:==|~=)\s*(?:\(\s*)?db\.actor',
+    'db\.actor\s*(?:==|~=)\s*candidate\b',
+    '\bcandidate\s*(?:==|~=)\s*current_actor\b',
+    '\bcurrent_actor\s*(?:==|~=)\s*candidate\b'
+)) {
+    Assert-True ($InventoryDrainBootstrapContent -notmatch $UnsafeEquality) "Bootstrap actor ownership must not compare native game_object values: $UnsafeEquality"
+}
+foreach ($Marker in @('function actor_ownership_matches','runtime_game_object_id','type(method) ~= "function"','id ~= math.huge','id ~= -math.huge','return actor_ownership_matches')) {
+    Assert-True ($InventoryDrainBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap actor ownership must use strict protected game_object IDs: $Marker"
+}
 $NativeIdentityRegistration = '\{\s*name\s*=\s*"runtime_actor_inventory_native_identity_uses_ids"\s*,\s*fn\s*=\s*runtime_actor_inventory_native_identity_uses_ids\s*\}'
-Assert-True ($InventoryDrainRuntimeContent -match $NativeIdentityRegistration) 'Regression case must be registered exactly: runtime_actor_inventory_native_identity_uses_ids -> runtime_actor_inventory_native_identity_uses_ids.'
+Assert-True (([regex]::Matches($InventoryDrainRuntimeContent, $NativeIdentityRegistration)).Count -eq 1) 'Regression case must be registered exactly: runtime_actor_inventory_native_identity_uses_ids -> runtime_actor_inventory_native_identity_uses_ids.'
+$BootstrapIdentityRegistration = '\{\s*name\s*=\s*"runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed"\s*,\s*fn\s*=\s*runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed\s*\}'
+Assert-True (([regex]::Matches($InventoryDrainRuntimeContent, $BootstrapIdentityRegistration)).Count -eq 1) 'Regression case must be registered exactly: runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed -> runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed.'
 
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {

@@ -1949,6 +1949,50 @@ local function runtime_actor_inventory_native_identity_uses_ids()
     gamma_arena_test_assert.equals(env.released[1], 12, "owned item is released after ID proof")
 end
 
+local function runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed()
+    local equality_calls = 0
+    local function poison_game_object_equality()
+        equality_calls = equality_calls + 1
+        error("bootstrap native game_object equality invoked")
+    end
+    local function proxy(mode, value)
+        local object = {}
+        if mode == "method" then
+            function object:id() return value end
+        elseif mode == "throw" then
+            function object:id() error("injected bootstrap actor id failure") end
+        elseif mode == "field" then
+            object.id = value
+        end
+        return setmetatable(object, { __eq = poison_game_object_equality })
+    end
+
+    local actor = proxy("method", 700)
+    local alias = proxy("method", 700)
+    gamma_arena_test_assert.is_true(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, true, "l05_bar"), "equal finite numeric ids prove Arena actor ownership")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, false, "l05_bar"), "inactive Arena session fails actor ownership closed")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, true, "jupiter"), "wrong level fails actor ownership closed")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(proxy("method", 701), actor, true, "l05_bar"), "mismatched actor id fails ownership closed")
+
+    local invalid_objects = {
+        { label = "missing object", value = nil },
+        { label = "missing id method", value = proxy("missing") },
+        { label = "numeric id field", value = proxy("field", 700) },
+        { label = "throwing id method", value = proxy("throw") },
+        { label = "nil id", value = proxy("method", nil) },
+        { label = "infinite id", value = proxy("method", math.huge) },
+        { label = "negative infinite id", value = proxy("method", -math.huge) },
+        { label = "NaN id", value = proxy("method", math.huge - math.huge) },
+        { label = "negative id", value = proxy("method", -1) },
+        { label = "fractional id", value = proxy("method", 1.5) }
+    }
+    for _, case in ipairs(invalid_objects) do
+        gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(case.value, actor, true, "l05_bar"), case.label .. " candidate fails ownership closed")
+        gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, case.value, true, "l05_bar"), case.label .. " current actor fails ownership closed")
+    end
+    gamma_arena_test_assert.equals(equality_calls, 0, "bootstrap actor ownership never evaluates native equality")
+end
+
 local function runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values()
     local actor_id_cases = { { value = nil }, { value = -1 }, { value = 1.5 } }
     for _, case in ipairs(actor_id_cases) do
@@ -7529,6 +7573,7 @@ local cases = {
     ,{ name = "runtime_actor_inventory_drain_timeout_is_wrap_safe", fn = runtime_actor_inventory_drain_timeout_is_wrap_safe }
     ,{ name = "runtime_actor_inventory_drain_rejects_unowned_public_actor", fn = runtime_actor_inventory_drain_rejects_unowned_public_actor }
     ,{ name = "runtime_actor_inventory_native_identity_uses_ids", fn = runtime_actor_inventory_native_identity_uses_ids }
+    ,{ name = "runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed", fn = runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed }
     ,{ name = "runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values", fn = runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values }
     ,{ name = "runtime_actor_inventory_drain_submits_sorted_deduplicated_ids", fn = runtime_actor_inventory_drain_submits_sorted_deduplicated_ids }
     ,{ name = "runtime_actor_inventory_drain_cleanup_clears_transaction", fn = runtime_actor_inventory_drain_cleanup_clears_transaction }
