@@ -1,0 +1,115 @@
+local function clone(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, entry in pairs(value) do result[key] = clone(entry) end
+    return result
+end
+
+local function identity()
+    return { session_seed = 12345, fight_index = 2, generator_version = 8, catalog_fingerprint = "ga-catalog-v8-1234abcd", layout_version = 2 }
+end
+
+local function catalog()
+    return {
+        items = {
+            stalker_outfit = { category = "outfit" }, wpn_knife = { category = "knife" },
+            wpn_ak74 = { category = "weapon", ltx_slot = 2 }, ammo_545 = { category = "ammo" },
+            bandage = { category = "consumable" }, medkit = { category = "consumable" }
+        }
+    }
+end
+
+local function layout()
+    return { layout_id = "rostok_arena_v1", level = "l05_bar", tactical_routes = { "route_1", "route_2" }, actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }
+end
+
+local function legacy_draft()
+    return {
+        arena = { layout_id = "rostok_arena_v1", level = "l05_bar", tactical_routes = { "route_1", "route_2" } },
+        actor = { spawn_path = "actor_spawn", look_path = "actor_look", loadout = { outfit = "stalker_outfit", knife = "wpn_knife", weapon = "wpn_ak74", ammo = "ammo_545", ammo_boxes = 2, bonus_ammo = { section = "ammo_545", quantity = 1 }, consumables = { "medkit", "bandage" } } },
+        opponents = { { slot = 1, faction = "stalker", rank = { id = "master", value = 42731 }, profile = "gamma_arena_stalker_master", role = "leader", spawn_slot_id = "virtual_01", spawn = { position = { x = 1, y = 0, z = 2 }, level_vertex_id = 123, game_vertex_id = 456 }, tactical_route = "route_1", loadout = { weapon = "wpn_ak74", ammo = "ammo_545", ammo_boxes = 2, outfit = "stalker_outfit", knife = "wpn_knife", consumables = { "bandage" } } } }
+    }
+end
+
+local function item_draft()
+    local value = legacy_draft()
+    value.actor.loadout = nil
+    value.actor.items = {
+        { section = "bandage", quantity = 1 }, { section = "ammo_545", quantity = 1 },
+        { section = "wpn_ak74", quantity = 1, equipped_slot = "weapon_2" }, { section = "medkit", quantity = 1 },
+        { section = "stalker_outfit", quantity = 1, equipped_slot = "outfit" }, { section = "ammo_545", quantity = 2 },
+        { section = "wpn_knife", quantity = 1, equipped_slot = "knife" }
+    }
+    value.opponents[1].loadout = nil
+    value.opponents[1].items = {
+        { section = "ammo_545", quantity = 2 }, { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+        { section = "stalker_outfit", quantity = 1, equipped_slot = "outfit" }, { section = "wpn_ak74", quantity = 1, equipped_slot = "weapon_2" }, { section = "bandage", quantity = 1 }
+    }
+    return value
+end
+
+local function canonicalizes_legacy_and_item_loadouts_equivalently()
+    local first = gamma_arena_fight_spec.canonicalize(legacy_draft(), identity(), catalog(), layout())
+    local second = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "v6 canonicalization")
+    gamma_arena_test_assert.equals(first.value.schema_version, 6, "single schema")
+    gamma_arena_test_assert.equals(first.value.identity.fight_id, "ga6-" .. first.value.identity.content_hash, "content-derived id")
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first.value), gamma_arena_fight_spec.stable_encode(second.value), "legacy and item drafts encode identically")
+    gamma_arena_test_assert.equals(first.value.actor.items[1].equipped_slot, "outfit", "equipped item sorting")
+    gamma_arena_test_assert.equals(first.value.actor.items[4].section, "ammo_545", "unequipped category sorting")
+    gamma_arena_test_assert.equals(first.value.actor.items[4].quantity, 3, "physical ammo boxes aggregate")
+end
+
+local function rejects_invalid_item_entries_and_positions()
+    local cases = {
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 0 } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_QUANTITY" },
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1, equipped_slot = "belt" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT" },
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1 }, { section = "bandage", quantity = 1, equipped_slot = "knife" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT" },
+        { mutate = function(value) value.opponents[1].spawn.position.x = 0 / 0 end, code = "GA_FIGHT_SPEC_POSITION" }
+    }
+    for _, case in ipairs(cases) do
+        local value = item_draft(); case.mutate(value)
+        local result = gamma_arena_fight_spec.canonicalize(value, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, "malformed draft must fail")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "malformed draft error code")
+    end
+end
+
+local function rejects_forbidden_keys_at_every_depth_and_invalid_identity()
+    for _, location in ipairs({ "root", "arena", "actor", "opponent", "item", "rank", "spawn" }) do
+        local value = item_draft()
+        if location == "root" then value.mode_id = "custom" elseif location == "arena" then value.arena.difficulty_id = "master" elseif location == "actor" then value.actor.budget = 1 elseif location == "opponent" then value.opponents[1].mode_id = "custom" elseif location == "item" then value.actor.items[1].price = 1 elseif location == "rank" then value.opponents[1].rank.difficulty_id = "master" else value.opponents[1].spawn.budget = 1 end
+        local result = gamma_arena_fight_spec.canonicalize(value, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, "forbidden key must fail at " .. location)
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_FORBIDDEN_FIELD", "forbidden field code")
+    end
+    local bad = identity(); bad.mode_id = "custom"
+    local result = gamma_arena_fight_spec.canonicalize(item_draft(), bad, catalog(), layout())
+    gamma_arena_test_assert.is_false(result.ok, "identity must be exact")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_IDENTITY", "identity rejects unknown provenance")
+end
+
+local function hash_encoding_and_copy_are_sensitive_and_stable()
+    local first = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout()).value
+    local reordered = item_draft(); reordered.actor.items[1], reordered.actor.items[7] = reordered.actor.items[7], reordered.actor.items[1]
+    local second = gamma_arena_fight_spec.canonicalize(reordered, identity(), catalog(), layout()).value
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first), gamma_arena_fight_spec.stable_encode(second), "shuffled inputs encode stably")
+    local changed = item_draft(); changed.opponents[1].spawn.position.z = 3
+    local third = gamma_arena_fight_spec.canonicalize(changed, identity(), catalog(), layout()).value
+    gamma_arena_test_assert.is_true(first.identity.content_hash ~= third.identity.content_hash, "hash is sensitive to fight content")
+    gamma_arena_test_assert.is_true(first.identity.fight_id ~= third.identity.fight_id, "fight id is sensitive to fight content")
+    local copied = gamma_arena_fight_spec.copy(first); copied.actor.items[1].section = "medkit"
+    gamma_arena_test_assert.equals(first.actor.items[1].section, "stalker_outfit", "copy isolation")
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.content_hash("abc"), gamma_arena_fight_spec.content_hash("abc"), "hash uses stable domain-separated encoding")
+end
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs({
+        { name = "fight_spec_canonicalizes_legacy_and_item_loadouts_equivalently", fn = canonicalizes_legacy_and_item_loadouts_equivalently },
+        { name = "fight_spec_rejects_invalid_item_entries_and_positions", fn = rejects_invalid_item_entries_and_positions },
+        { name = "fight_spec_rejects_forbidden_keys_at_every_depth_and_invalid_identity", fn = rejects_forbidden_keys_at_every_depth_and_invalid_identity },
+        { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable }
+    }) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end
