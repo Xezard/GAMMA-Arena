@@ -211,6 +211,36 @@ $Task2ItemScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors') }
 )
 
+$Task6RandomDraftContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'enemy_numeric_rank:', 'kind\s*=\s*"legacy"', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
+    [PSCustomObject]@{ Path = 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'; Required = @('golden-random-selections-v7\.txt', 'golden-fights-v5\.txt', 'Read-GaLtx', 'Independent LTX semantics differ from the reviewed v5 projection') },
+    [PSCustomObject]@{ Path = 'tests\fixtures\golden-random-selections-v7.txt'; Required = @('seed=0,difficulty=rookie,fight=0', 'seed=1,difficulty=stalker,fight=0', 'seed=3735928559,difficulty=veteran,fight=7', 'seed=4294967295,difficulty=master,fight=31') }
+)
+$Task6ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1')
+if ($Task6ArtifactsPresent) {
+    foreach ($Contract in $Task6RandomDraftContracts) {
+        $ContractPath = Join-Path $RepoRoot $Contract.Path
+        Assert-True (Test-Path -LiteralPath $ContractPath) "Task 6 random draft contract is missing: $($Contract.Path)"
+        if (Test-Path -LiteralPath $ContractPath) {
+            $ContractContent = Get-Content -LiteralPath $ContractPath -Raw
+            foreach ($Pattern in $Contract.Required) {
+                Assert-True ($ContractContent -match $Pattern) "Task 6 random draft marker is missing from $($Contract.Path): $Pattern"
+            }
+        }
+    }
+    $Task6ReferenceContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1') -Raw
+    Assert-True ($Task6ReferenceContent -notmatch 'gamma_arena_(?:random_)?generator\.script') 'Task 6 semantic reference must not read Lua generator source.'
+    $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v7.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
+    Assert-True ($Task6SnapshotLines.Count -eq 4) 'Task 6 semantic snapshot must contain exactly four reviewed random scenarios.'
+    $Task6GeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
+    foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated')) {
+        Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
+    }
+    $ActiveV5Generator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script') -Raw
+    Assert-True ($ActiveV5Generator -match '(?m)^function\s+generate\s*\(' -and $ActiveV5Generator -match 'schema_version\s*=\s*5') 'Task 6 must leave the production v5 generator active.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v5.txt')) 'Task 6 must retain the active v5 golden fixture.'
+}
+
 $Task5UniversalRuntimeContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_LIMIT', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_actor_adapter.script'; Required = @('function\s+ActorAdapter:apply_items', 'function\s+ActorAdapter:update_items') },
