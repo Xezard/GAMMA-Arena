@@ -316,10 +316,24 @@ local function finite_position(position)
 end
 
 local function valid_resolved_layout(layout, expected)
-    if type(layout) ~= "table" or layout.id ~= expected.id or layout.level ~= expected.level or layout.version ~= expected.version
+    if type(expected) ~= "table" or type(layout) ~= "table" or layout.id ~= expected.id or layout.level ~= expected.level or layout.version ~= expected.version
         or type(layout.opponent_spawn_slots) ~= "table" or type(layout.tactical_routes) ~= "table" then return false end
+    local route_count, routes = 0, {}
+    for key, route in pairs(layout.tactical_routes) do
+        if not gamma_arena_number.is_positive_integer(key) or type(route) ~= "string" or route == "" or routes[route] then return false end
+        route_count = route_count + 1
+        routes[route] = true
+    end
+    if route_count == 0 or route_count ~= #layout.tactical_routes then return false end
+    local slot_count = 0
+    for key in pairs(layout.opponent_spawn_slots) do
+        if not gamma_arena_number.is_positive_integer(key) then return false end
+        slot_count = slot_count + 1
+    end
+    if slot_count == 0 or slot_count ~= #layout.opponent_spawn_slots then return false end
     for _, slot in ipairs(layout.opponent_spawn_slots) do
         if type(slot) ~= "table" or type(slot.id) ~= "string" or slot.id == "" or type(slot.base_route) ~= "string" or slot.base_route == ""
+            or not routes[slot.base_route]
             or not finite_position(slot.position) or not gamma_arena_number.is_integer(slot.level_vertex_id) or slot.level_vertex_id < 0
             or not gamma_arena_number.is_integer(slot.game_vertex_id) or slot.game_vertex_id < 0 then return false end
     end
@@ -442,8 +456,21 @@ local function bind_profile_pool(catalog, source)
     return gamma_arena_result.ok(profiles)
 end
 
+local function valid_random_catalog(catalog)
+    if type(catalog) ~= "table" or type(catalog.layouts) ~= "table" or type(catalog.difficulties) ~= "table"
+        or type(catalog.profile_list) ~= "table" or type(catalog.weapon_list) ~= "table"
+        or type(catalog.primary_weapon_list) ~= "table" or type(catalog.secondary_weapon_list) ~= "table"
+        or type(catalog.outfit_list) ~= "table" or type(catalog.knife_list) ~= "table"
+        or type(catalog.ammo) ~= "table" or type(catalog.consumables) ~= "table"
+        or type(catalog.medical_item_list) ~= "table" or type(catalog.factions) ~= "table"
+        or (catalog.selection_mode ~= "combinations" and catalog.selection_mode ~= "staged") then return false end
+    if catalog.selection_mode == "staged" and (type(catalog.faction_ids) ~= "table" or type(catalog.profiles_by_faction) ~= "table") then return false end
+    return true
+end
+
 function build_draft(session, fight_index, catalog, layout)
     if type(session) ~= "table" or type(catalog) ~= "table" then return gamma_arena_result.err("GA_GENERATE_ARGUMENT_INVALID", "Fight generation requires session and catalog", {}) end
+    if not valid_random_catalog(catalog) then return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {}) end
     local validated = gamma_arena_mode_skirmish.validate_session(session); if not validated.ok then return validated end
     if not gamma_arena_number.is_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > 4294967295 then return gamma_arena_result.err("GA_SESSION_SEED_INVALID", "Session seed must be a finite uint32 integer", { session_seed = session.session_seed }) end
     if not gamma_arena_number.is_integer(fight_index) or fight_index < 0 then return gamma_arena_result.err("GA_FIGHT_INDEX_INVALID", "Fight index must be a finite non-negative integer", { fight_index = fight_index }) end

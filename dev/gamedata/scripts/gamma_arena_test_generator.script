@@ -749,6 +749,23 @@ local function random_draft_catalogs()
             threat = 1
         }
     end
+    snapshot.fingerprint = "ga-catalog-v8-random-pipeline"
+    snapshot.max_physical_items_per_participant = 256
+    snapshot.items, snapshot.item_ids = {}, {}
+    local function add_item(section_name, value)
+        if snapshot.items[section_name] == nil then snapshot.item_ids[#snapshot.item_ids + 1] = section_name end
+        snapshot.items[section_name] = value
+    end
+    for _, weapon in ipairs(snapshot.weapon_list) do
+        add_item(weapon.section, { category = "weapon", ltx_slot = weapon.slot, ammo_sections = { weapon.ammo } })
+    end
+    for _, ammo in pairs(snapshot.ammo) do add_item(ammo.section, { category = "ammo", box_size = 30 }) end
+    for _, outfit in ipairs(snapshot.outfit_list) do add_item(outfit.section, { category = "outfit", helmet_allowed = true }) end
+    for _, knife in ipairs(snapshot.knife_list) do add_item(knife.section, { category = "knife" }) end
+    for _, medical in ipairs(snapshot.medical_item_list) do
+        add_item(medical.section, { category = "medicine", healing = medical.category == "health" or medical.category == "rare" })
+    end
+    table.sort(snapshot.item_ids)
     return snapshot
 end
 
@@ -756,7 +773,7 @@ local function random_draft_semantics(seed, difficulty, fight_index, draft)
     local actor = draft.actor.loadout.value
     local parts = {
         "seed=" .. seed .. ",difficulty=" .. difficulty .. ",fight=" .. fight_index,
-        "actor=" .. actor.weapon .. "," .. actor.ammo .. "," .. actor.ammo_boxes .. "," .. actor.outfit .. "," .. actor.knife .. ",medical:" .. table.concat(actor.consumables, "+"),
+        "actor=" .. actor.weapon .. "," .. actor.ammo .. "," .. actor.ammo_boxes .. "," .. actor.outfit .. "," .. actor.knife .. ",medical:" .. table.concat(actor.consumables, "+") .. ",bonus:" .. actor.bonus_ammo.section .. ":" .. actor.bonus_ammo.requested_category .. ":" .. actor.bonus_ammo.resolved_category .. ":" .. actor.bonus_ammo.boxes,
         "opponents="
     }
     for index, opponent in ipairs(draft.opponents) do
@@ -766,13 +783,60 @@ local function random_draft_semantics(seed, difficulty, fight_index, draft)
     return table.concat(parts, "|")
 end
 
+local function random_draft_pipeline_canonicalizes_and_strictly_validates()
+    local snapshot = random_draft_catalogs()
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local session, fight_index = request(3735928559, "veteran"), 7
+    local generated = gamma_arena_random_generator.build_draft(session, fight_index, snapshot, layout)
+    gamma_arena_test_assert.is_true(generated.ok, "real random draft pipeline generates")
+    local canonical = gamma_arena_fight_spec.canonicalize(generated.value, {
+        session_seed = gamma_arena_rng.normalize_uint32(session.session_seed),
+        fight_index = fight_index,
+        generator_version = 8,
+        catalog_fingerprint = snapshot.fingerprint,
+        layout_version = layout.version
+    }, snapshot, layout)
+    gamma_arena_test_assert.is_true(canonical.ok, "tagged random draft canonicalizes")
+    gamma_arena_test_assert.is_true(#canonical.value.actor.items > 0 and #canonical.value.opponents[1].items > 0, "random pipeline retains nonempty physical items")
+    gamma_arena_test_assert.equals(canonical.value.opponents[1].profile, generated.value.opponents[1].profile, "canonical profile preserves authoritative alias")
+    local strict = gamma_arena_fight_validator_v6.validate(canonical.value, snapshot, layout)
+    gamma_arena_test_assert.is_true(strict.ok, "canonical random draft passes strict v6 validation")
+end
+
+local function random_draft_malformed_inputs_are_total_results()
+    local function malformed_route()
+        local snapshot = random_draft_catalogs()
+        local layout = fixture_resolved_layout(snapshot)
+        layout.tactical_routes[1] = { invalid = true }
+        return snapshot, layout
+    end
+    local route_catalog, route_layout = malformed_route()
+    local valid_catalog = random_draft_catalogs()
+    local malformed_profiles = random_draft_catalogs(); malformed_profiles.profile_list = "invalid"
+    local cases = {
+        { catalog = {}, layout = {}, code = "GA_RANDOM_CATALOG_INVALID" },
+        { catalog = valid_catalog, layout = {}, code = "GA_RESOLVED_LAYOUT_INVALID" },
+        { catalog = route_catalog, layout = route_layout, code = "GA_RESOLVED_LAYOUT_INVALID" },
+        { catalog = malformed_profiles, layout = fixture_resolved_layout(malformed_profiles), code = "GA_RANDOM_CATALOG_INVALID" }
+    }
+    for _, case in ipairs(cases) do
+        local called, result = pcall(function()
+            return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, case.catalog, case.layout)
+        end)
+        gamma_arena_test_assert.is_true(called, "malformed random draft input never throws")
+        gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "malformed random draft input returns failed Result")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "malformed random draft Result code")
+    end
+end
+
 local function random_draft_matches_frozen_semantic_snapshot()
     local snapshot = random_draft_catalogs()
     local reviewed = {
-        { seed = 0, difficulty = "rookie", fight = 0, expected = "seed=0,difficulty=rookie,fight=0|actor=wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:bandage+stimpack+bandage|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_wincheaster1300,ammo_12x70_buck,1,novice_outfit,wpn_knife,medical:medkit,native:bar_arena_walk_3_2,bar_arena_walk_3_2|2:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,2,stalker_outfit,wpn_knife5,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1" },
-        { seed = 1, difficulty = "stalker", fight = 0, expected = "seed=1,difficulty=stalker,fight=0|actor=wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife9,medical:bandage+stimpack_army+bandage|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife5,medical:bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,banditmerc_outfit,wpn_knife9,medical:medkit,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|4:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,wpn_knife8,medical:,native:bar_arena_walk_6_6,bar_arena_walk_6_6" },
-        { seed = 3735928559, difficulty = "veteran", fight = 7, expected = "seed=3735928559,difficulty=veteran,fight=7|actor=wpn_mp5,ammo_9x19_fmj,1,stalker_outfit,wpn_knife9,medical:bandage+stimpack_scientic+bandage|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife2,medical:,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife9,medical:medkit+bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|7:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife4,medical:,virtual:3,bar_arena_walk_3_1" },
-        { seed = 4294967295, difficulty = "master", fight = 31, expected = "seed=4294967295,difficulty=master,fight=31|actor=wpn_wincheaster1300,ammo_12x70_buck,1,stalker_outfit,wpn_knife4,medical:bandage+stimpack_army+medkit+bandage|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_6_1,bar_arena_walk_6_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife8,medical:,native:bar_arena_walk_3_2,bar_arena_walk_3_2|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife3,medical:bandage,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife2,medical:medkit,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|7:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife,medical:bandage,virtual:4,bar_arena_walk_3_1|8:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,virtual:3,bar_arena_walk_3_1|9:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,2,novice_outfit,wpn_knife9,medical:,virtual:1,bar_arena_walk_3_1" }
+        { seed = 0, difficulty = "rookie", fight = 0, expected = "seed=0,difficulty=rookie,fight=0|actor=wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:bandage+stimpack+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_wincheaster1300,ammo_12x70_buck,1,novice_outfit,wpn_knife,medical:medkit,native:bar_arena_walk_3_2,bar_arena_walk_3_2|2:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,2,stalker_outfit,wpn_knife5,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1" },
+        { seed = 1, difficulty = "stalker", fight = 0, expected = "seed=1,difficulty=stalker,fight=0|actor=wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife9,medical:bandage+stimpack_army+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife5,medical:bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,banditmerc_outfit,wpn_knife9,medical:medkit,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|4:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,wpn_knife8,medical:,native:bar_arena_walk_6_6,bar_arena_walk_6_6" },
+        { seed = 3735928559, difficulty = "veteran", fight = 7, expected = "seed=3735928559,difficulty=veteran,fight=7|actor=wpn_mp5,ammo_9x19_fmj,1,stalker_outfit,wpn_knife9,medical:bandage+stimpack_scientic+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife2,medical:,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife9,medical:medkit+bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|7:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife4,medical:,virtual:3,bar_arena_walk_3_1" },
+        { seed = 4294967295, difficulty = "master", fight = 31, expected = "seed=4294967295,difficulty=master,fight=31|actor=wpn_wincheaster1300,ammo_12x70_buck,1,stalker_outfit,wpn_knife4,medical:bandage+stimpack_army+medkit+bandage,bonus:ammo_12x70_buck:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_6_1,bar_arena_walk_6_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife8,medical:,native:bar_arena_walk_3_2,bar_arena_walk_3_2|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife3,medical:bandage,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife2,medical:medkit,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|7:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife,medical:bandage,virtual:4,bar_arena_walk_3_1|8:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,virtual:3,bar_arena_walk_3_1|9:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,2,novice_outfit,wpn_knife9,medical:,virtual:1,bar_arena_walk_3_1" }
     }
     for _, expected in ipairs(reviewed) do
         local generated = gamma_arena_random_generator.build_draft(request(expected.seed, expected.difficulty), expected.fight, snapshot, fixture_resolved_layout(snapshot))
@@ -973,6 +1037,8 @@ end
 
 function run(run_case_fn)
     local all_passed = true
+    if not run_case_fn("random_draft_pipeline_canonicalizes_and_strictly_validates", random_draft_pipeline_canonicalizes_and_strictly_validates) then all_passed = false end
+    if not run_case_fn("random_draft_malformed_inputs_are_total_results", random_draft_malformed_inputs_are_total_results) then all_passed = false end
     for _, case in ipairs({{name="catalog_enforces_max_count_viability",fn=catalog_enforces_max_count_viability},{name="catalog_exposes_approved_player_weight_rows",fn=catalog_exposes_approved_player_weight_rows},{name="catalog_exposes_medical_pool_and_budgets",fn=catalog_exposes_medical_pool_and_budgets},{name="catalog_skips_optional_missing_medicine",fn=catalog_skips_optional_missing_medicine},{name="actor_medical_generation_enforces_budget_and_healer",fn=actor_medical_generation_enforces_budget_and_healer},{name="actor_medical_generation_reaches_master_rare",fn=actor_medical_generation_reaches_master_rare},{name="enemy_medical_generation_spends_team_budget",fn=enemy_medical_generation_spends_team_budget},{name="medical_generation_100000_fights",fn=medical_generation_100000_fights},{name="fight_spec_v5_separates_gear_and_medical_costs",fn=fight_spec_v5_separates_gear_and_medical_costs},{name="medical_tuning_does_not_reroll_core_fight",fn=medical_tuning_does_not_reroll_core_fight},{name="catalog_augments_effective_system_without_cartesian_product",fn=catalog_augments_from_effective_system_without_cartesian_product},{name="catalog_rejects_malformed_data",fn=catalog_rejects_malformed_data},{name="validator_never_throws_for_malformed_specs",fn=validator_never_throws_for_malformed_specs},{name="validator_rejects_unknown_spawn_path",fn=validator_rejects_unknown_spawn_path},{name="validator_rejects_duplicate_spawn_path",fn=validator_rejects_duplicate_spawn_path},{name="validator_rejects_redistributed_slot_budget",fn=validator_rejects_redistributed_slot_budget},{name="weighted_player_class_pair_selection",fn=weighted_player_class_pair_selection},{name="player_class_pair_ignores_concrete_cardinality",fn=player_class_pair_ignores_concrete_cardinality},{name="generator_10000_seeds",fn=generator_10000_seeds},{name="master_player_class_diversity",fn=master_player_class_diversity},{name="master_powered_exo_rate_is_rare",fn=master_powered_exo_rate_is_rare},{name="generator_role_first_balance",fn=generator_role_first_balance},{name="generator_primary_pool_affordability_falls_back",fn=generator_primary_pool_affordability_falls_back},{name="stable_encode_v5",fn=stable_and_fight_index},{name="bonus_ammo_category_boundaries_and_fallback",fn=bonus_ammo_category_boundaries_and_fallback},{name="actor_bonus_ammo_is_deterministic_and_outside_budget",fn=actor_bonus_ammo_is_deterministic_and_outside_budget},{name="bonus_ammo_seed_sweep_and_stream_isolation",fn=bonus_ammo_seed_sweep_and_stream_isolation},{name="validator_rejects_invalid_bonus_ammo",fn=validator_rejects_invalid_bonus_ammo},{name="finite_integer_guards",fn=finite_integer_guards},{name="golden_fights_v5",fn=golden_fights_v5},{name="random_draft_matches_frozen_semantic_snapshot",fn=random_draft_matches_frozen_semantic_snapshot},{name="random_numeric_rank_stream_is_isolated",fn=random_numeric_rank_stream_is_isolated}}) do if not run_case_fn(case.name,case.fn) then all_passed=false end end
     return all_passed
 end
