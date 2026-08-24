@@ -2,6 +2,9 @@ local Materializer = {}
 Materializer.__index = Materializer
 
 local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
+local CATEGORIES = { outfit = true, helmet = true, knife = true, weapon = true, ammo = true, medicine = true }
+local CATEGORY_LTX_SLOTS = { outfit = 6, helmet = 12, knife = 0 }
+local UINT32_MOD = 4294967296
 
 local function failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
@@ -18,34 +21,157 @@ end
 
 local function finite_positive_integer(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
-        and value == math.floor(value) and value >= 1
+        and value == math.floor(value) and value >= 1 and value < UINT32_MOD
 end
 
-function descriptors(items, catalog)
-    local result = {}
+local function dense_array_length(value, path, allow_empty)
+    if type(value) ~= "table" then
+        return nil, failure("GA_ITEM_MATERIALIZE_ARRAY_INVALID", "Validated materializer array is not a table", { path = path })
+    end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then
+            return nil, failure("GA_ITEM_MATERIALIZE_ARRAY_INVALID", "Validated materializer array has a non-array key", { path = path })
+        end
+        count = count + 1
+        if key > maximum then maximum = key end
+    end
+    if maximum ~= count or (allow_empty ~= true and count == 0) then
+        return nil, failure("GA_ITEM_MATERIALIZE_ARRAY_INVALID", "Validated materializer array is sparse or empty", { path = path })
+    end
+    return count, nil
+end
+
+local function compatible_slot(category, ltx_slot, equipped_slot)
+    if equipped_slot == nil then return true end
+    if equipped_slot == "outfit" then return category == "outfit" end
+    if equipped_slot == "helmet" then return category == "helmet" end
+    if equipped_slot == "knife" then return category == "knife" end
+    if equipped_slot == "weapon_1" then return category == "weapon" and ltx_slot == 1 end
+    if equipped_slot == "weapon_2" then return category == "weapon" and ltx_slot == 2 end
+    return false
+end
+
+local function normalized_definition(section, definition, catalog_items)
+    if type(definition) ~= "table" or CATEGORIES[definition.category] ~= true then
+        return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated item definition category is unavailable", { section = section })
+    end
+    local normalized = {
+        category = definition.category,
+        box_size = definition.box_size,
+        ltx_slot = definition.ltx_slot,
+        ammo_sections = {}
+    }
+    local category_slot = CATEGORY_LTX_SLOTS[definition.category]
+    if category_slot ~= nil and definition.ltx_slot ~= category_slot then
+        return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated item LTX slot is unavailable", {
+            section = section,
+            category = definition.category
+        })
+    end
+    if definition.category == "ammo" then
+        if not finite_positive_integer(definition.box_size) then
+            return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated ammunition box_size is unavailable", { section = section })
+        end
+    elseif definition.category == "weapon" then
+        if definition.ltx_slot ~= 1 and definition.ltx_slot ~= 2 then
+            return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated weapon LTX slot is unavailable", { section = section })
+        end
+        local count, array_error = dense_array_length(definition.ammo_sections, "catalog.items." .. section .. ".ammo_sections", false)
+        if count == nil then return nil, array_error end
+        local seen = {}
+        for index = 1, count do
+            local ammo_section = definition.ammo_sections[index]
+            if type(ammo_section) ~= "string" or ammo_section == "" or seen[ammo_section] then
+                return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated weapon ammunition is empty or duplicated", { section = section, index = index })
+            end
+            local ammo_definition = catalog_items[ammo_section]
+            if type(ammo_definition) ~= "table" or ammo_definition.category ~= "ammo"
+                or not finite_positive_integer(ammo_definition.box_size) then
+                return nil, failure("GA_ITEM_MATERIALIZE_DEFINITION_INVALID", "Validated weapon ammunition reference is unavailable", { section = section, ammo = ammo_section })
+            end
+            seen[ammo_section] = true
+            normalized.ammo_sections[index] = ammo_section
+        end
+    end
+    return normalized, nil
+end
+
+local function preflight_items(items, catalog)
     if type(items) ~= "table" or type(catalog) ~= "table" or type(catalog.items) ~= "table" then
         return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated universal items and catalog are required")
     end
-    for _, item in ipairs(items) do
+    local item_count, array_error = dense_array_length(items, "items", true)
+    if item_count == nil then return array_error end
+    local normalized_items, selected, occupied_slots = {}, {}, {}
+    for index = 1, item_count do
+        local item = items[index]
+        if type(item) ~= "table" or type(item.section) ~= "string" or item.section == ""
+            or not finite_positive_integer(item.quantity) then
+            return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated item entry is malformed", { index = index })
+        end
         local definition = catalog.items[item.section]
         if type(definition) ~= "table" then
             return gamma_arena_result.err(
                 "GA_ITEM_MATERIALIZE_UNKNOWN",
                 "Validated item definition is unavailable")
         end
-        if not finite_positive_integer(item.quantity) then
-            return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated item quantity is unavailable", { section = item.section })
+        local normalized, definition_error = normalized_definition(item.section, definition, catalog.items)
+        if normalized == nil then return definition_error end
+        if item.equipped_slot ~= nil and (SLOT_ORDER[item.equipped_slot] == nil
+            or not compatible_slot(normalized.category, normalized.ltx_slot, item.equipped_slot)
+            or occupied_slots[item.equipped_slot]) then
+            return failure("GA_ITEM_MATERIALIZE_SLOT_INVALID", "Validated equipped slot is incompatible or duplicated", {
+                section = item.section,
+                slot = item.equipped_slot
+            })
+        end
+        if item.equipped_slot ~= nil then occupied_slots[item.equipped_slot] = true end
+        selected[item.section] = true
+        normalized_items[index] = {
+            section = item.section,
+            quantity = item.quantity,
+            equipped_slot = item.equipped_slot,
+            definition = normalized
+        }
+    end
+
+    local result = {}
+    for _, item in ipairs(normalized_items) do
+        local selected_ammo = nil
+        if item.definition.category == "weapon" and item.equipped_slot ~= nil then
+            for _, ammo_section in ipairs(item.definition.ammo_sections) do
+                if selected[ammo_section] then selected_ammo = ammo_section break end
+            end
+            if selected_ammo == nil then
+                return failure("GA_ITEM_MATERIALIZE_AMMO_MISSING", "Equipped firearm has no selected compatible ammunition", { section = item.section })
+            end
         end
         for copy_index = 1, item.quantity do
             result[#result + 1] = {
                 section = item.section,
-                category = definition.category,
-                box_size = definition.box_size,
-                equipped_slot = copy_index == 1 and item.equipped_slot or nil
+                category = item.definition.category,
+                box_size = item.definition.box_size,
+                ltx_slot = item.definition.ltx_slot,
+                ammo_sections = item.definition.ammo_sections,
+                selected_ammo = selected_ammo,
+                equipped_slot = copy_index == 1 and item.equipped_slot or nil,
+                definition = item.definition
             }
         end
     end
     return gamma_arena_result.ok(result)
+end
+
+function descriptors(items, catalog)
+    local called, result = pcall(preflight_items, items, catalog)
+    if not called then
+        return failure("GA_ITEM_MATERIALIZE_INVALID", "Universal item preflight failed safely", { reason = tostring(result) })
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return failure("GA_ITEM_MATERIALIZE_INVALID", "Universal item preflight returned an invalid Result")
+    end
+    return result
 end
 
 local function entity_id(port, entity)
@@ -70,17 +196,6 @@ function Materializer:rollback(created, cause)
         })
     end
     return cause
-end
-
-local function selected_ammunition(items, definition)
-    local selected = {}
-    for _, item in ipairs(items) do
-        if finite_positive_integer(item.quantity) then selected[item.section] = true end
-    end
-    for _, section in ipairs(definition.ammo_sections or {}) do
-        if selected[section] then return section end
-    end
-    return nil
 end
 
 function Materializer:apply(owner, items, catalog)
@@ -134,7 +249,7 @@ function Materializer:apply(owner, items, catalog)
             return self:rollback(created, item)
         end
         entry.object = item.value
-        local moved = call("GA_ITEM_MATERIALIZE_EQUIP_FAILED", self.ports.move_to_slot, owner, item.value, slot, catalog.items[entry.descriptor.section])
+        local moved = call("GA_ITEM_MATERIALIZE_EQUIP_FAILED", self.ports.move_to_slot, owner, item.value, slot, entry.descriptor.definition)
         if not moved.ok then return self:rollback(created, moved) end
         local current = call("GA_ITEM_MATERIALIZE_EQUIP_VERIFY_FAILED", self.ports.item_in_slot, owner, slot)
         if not current.ok or current.value == nil then
@@ -147,12 +262,8 @@ function Materializer:apply(owner, items, catalog)
             return self:rollback(created, mismatch)
         end
         if entry.descriptor.category == "weapon" then
-            local definition = catalog.items[entry.descriptor.section]
-            local ammunition = selected_ammunition(items, definition)
-            if ammunition == nil then
-                return self:rollback(created, failure("GA_ITEM_MATERIALIZE_AMMO_MISSING", "Equipped firearm has no selected compatible ammunition", { section = entry.descriptor.section }))
-            end
-            local filled = call("GA_ITEM_MATERIALIZE_MAGAZINE_FAILED", self.ports.fill_magazine, item.value, ammunition, definition)
+            local ammunition = entry.descriptor.selected_ammo
+            local filled = call("GA_ITEM_MATERIALIZE_MAGAZINE_FAILED", self.ports.fill_magazine, item.value, ammunition, entry.descriptor.definition)
             if not filled.ok then return self:rollback(created, filled) end
             local verified = call("GA_ITEM_MATERIALIZE_MAGAZINE_VERIFY_FAILED", self.ports.magazine_ammo, item.value)
             if not verified.ok or verified.value ~= ammunition then

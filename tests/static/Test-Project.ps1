@@ -212,7 +212,7 @@ $Task2ItemScriptContracts = @(
 )
 
 $Task5UniversalRuntimeContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_actor_adapter.script'; Required = @('function\s+ActorAdapter:apply_items', 'function\s+ActorAdapter:update_items') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_entity_adapter.script'; Required = @('function\s+EntityAdapter:materialize_items', 'function\s+EntityAdapter:stage_exact_rank', 'GA_ENTITY_RANK_MISMATCH', 'set_character_rank', 'character_rank') }
 )
@@ -231,6 +231,9 @@ $Task5UniversalRuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev
 foreach ($Marker in @(
     'runtime_universal_items_materialize_exact_entities_and_slot_order',
     'runtime_universal_items_rollback_every_failure_in_reverse',
+    'runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation',
+    'runtime_universal_items_rollback_failure_aggregates_original_cause',
+    'runtime_universal_items_weapon1_activation_fallback',
     'runtime_entity_exact_rank_precedes_friend_tactical_and_hostility',
     'runtime_entity_adjacent_rank_readback_blocks_hostility'
 )) {

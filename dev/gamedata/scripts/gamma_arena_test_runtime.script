@@ -8045,54 +8045,81 @@ local function runtime_entity_forensics_are_bounded_non_mutating_and_classified(
     gamma_arena_test_assert.is_true(adapter:on_npc_before_hit({ id = function() return 99 end }, hit, 4, flags).value == false, "foreign NPCs are ignored")
 end
 
-local function universal_item_fixture(fail_at)
-    local env = { events = {}, created = {}, released = {}, step = 0, slots = {}, active = nil, magazine = {} }
-    local function step(name)
-        env.step = env.step + 1
-        env.events[#env.events + 1] = name
-        if fail_at == env.step then return gamma_arena_result.err("GA_TEST_MATERIALIZE", "injected materialization failure") end
+local function universal_item_fixture(options)
+    options = options or {}
+    local env = {
+        events = {}, created = {}, released = {}, rollback_attempts = {}, stage_counts = {},
+        slots = {}, active = nil, magazine = {}, failed_at = nil
+    }
+    local function step(stage, event)
+        env.events[#env.events + 1] = event
+        env.stage_counts[stage] = (env.stage_counts[stage] or 0) + 1
+        if options.fail_stage == stage and env.stage_counts[stage] == (options.fail_occurrence or 1) then
+            env.failed_at = #env.events
+            return gamma_arena_result.err("GA_TEST_MATERIALIZE", "injected " .. stage .. " failure", { stage = stage })
+        end
         return gamma_arena_result.ok(true)
     end
     local next_id = 900
     local port = gamma_arena_item_materializer.new({
         create_item = function(section, owner, options)
-            local accepted = step("create:" .. section)
+            local accepted = step("create_item", "create:" .. section)
             if not accepted.ok then return accepted end
             local entity = { runtime_id = next_id, section = section, parent = owner.runtime_id, options = clone(options) }
             next_id = next_id + 1
             env.created[#env.created + 1] = entity
             return gamma_arena_result.ok(entity)
         end,
-        entity_id = function(entity) return entity.runtime_id end,
+        entity_id = function(entity)
+            local accepted = step("entity_id", "entity_id:" .. tostring(entity and entity.runtime_id))
+            if not accepted.ok then return accepted end
+            return entity.runtime_id
+        end,
         register = function(entity, descriptor)
-            local accepted = step("register:" .. descriptor.section)
+            local accepted = step("register", "register:" .. descriptor.section)
             if not accepted.ok then return accepted end
             return gamma_arena_result.ok({ id = entity.runtime_id, section = descriptor.section })
         end,
-        verify_ownership = function(entity) return step("ownership:" .. entity.section) end,
-        resolve_item = function(entity) return entity end,
+        verify_ownership = function(entity) return step("verify_ownership", "ownership:" .. entity.section) end,
+        resolve_item = function(entity)
+            local accepted = step("resolve_item", "resolve:" .. entity.section)
+            if not accepted.ok then return accepted end
+            return entity
+        end,
         move_to_slot = function(owner, entity, slot)
-            local accepted = step("equip:" .. slot .. ":" .. entity.section)
+            local accepted = step("move_to_slot", "equip:" .. slot .. ":" .. entity.section)
             if not accepted.ok then return accepted end
             env.slots[slot] = entity
             return gamma_arena_result.ok(true)
         end,
-        item_in_slot = function(owner, slot) return env.slots[slot] end,
+        item_in_slot = function(owner, slot)
+            local accepted = step("item_in_slot", "slot_proof:" .. slot)
+            if not accepted.ok then return accepted end
+            return env.slots[slot]
+        end,
         fill_magazine = function(weapon, ammo_section)
-            local accepted = step("fill:" .. weapon.section .. ":" .. ammo_section)
+            local accepted = step("fill_magazine", "fill:" .. weapon.section .. ":" .. ammo_section)
             if not accepted.ok then return accepted end
             env.magazine[weapon.runtime_id] = ammo_section
             return gamma_arena_result.ok(true)
         end,
-        magazine_ammo = function(weapon) return env.magazine[weapon.runtime_id] end,
+        magazine_ammo = function(weapon)
+            local accepted = step("magazine_ammo", "magazine_proof:" .. weapon.section)
+            if not accepted.ok then return accepted end
+            return env.magazine[weapon.runtime_id]
+        end,
         activate_slot = function(owner, slot)
-            local accepted = step("activate:" .. slot)
+            local accepted = step("activate_slot", "activate:" .. slot)
             if not accepted.ok then return accepted end
             env.active = slot
             return gamma_arena_result.ok(true)
         end,
         rollback = function(entity)
             env.events[#env.events + 1] = "rollback:" .. tostring(entity.runtime_id)
+            env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
+            if options.rollback_fails == true then
+                return gamma_arena_result.err("GA_TEST_ROLLBACK", "injected rollback failure", { id = entity.runtime_id })
+            end
             env.released[#env.released + 1] = entity.runtime_id
             return gamma_arena_result.ok(true)
         end
@@ -8116,7 +8143,7 @@ end
 
 local function universal_catalog()
     return { items = {
-        outfit = { category = "outfit", ltx_slot = 6 }, helmet = { category = "helmet", ltx_slot = 11 },
+        outfit = { category = "outfit", ltx_slot = 6 }, helmet = { category = "helmet", ltx_slot = 12 },
         knife = { category = "knife", ltx_slot = 0 },
         pistol = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_b" } },
         rifle = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_a", "ammo_b" } },
@@ -8140,6 +8167,15 @@ local function runtime_universal_items_materialize_exact_entities_and_slot_order
     end
     gamma_arena_test_assert.equals(ammo_entities, 3, "two selected ammo calibers remain physical boxes")
     gamma_arena_test_assert.equals(medicines, 3, "medicine quantity remains physical entities")
+    local mutation_order = {}
+    for _, event in ipairs(env.events) do
+        if string.find(event, "^create:") or string.find(event, "^register:") then mutation_order[#mutation_order + 1] = event end
+    end
+    for index = 1, #mutation_order, 2 do
+        gamma_arena_test_assert.is_true(string.find(mutation_order[index], "^create:") ~= nil, "physical mutation pair starts with create")
+        gamma_arena_test_assert.is_true(string.find(mutation_order[index + 1], "^register:") ~= nil, "every create registers before the next create")
+        gamma_arena_test_assert.equals(string.match(mutation_order[index], "^create:(.+)$"), string.match(mutation_order[index + 1], "^register:(.+)$"), "create/register section pair")
+    end
     local first_equip, last_ownership = nil, nil
     for index, event in ipairs(env.events) do
         if string.find(event, "^ownership:") then last_ownership = index end
@@ -8154,16 +8190,81 @@ local function runtime_universal_items_materialize_exact_entities_and_slot_order
 end
 
 local function runtime_universal_items_rollback_every_failure_in_reverse()
-    local successful_env, successful = universal_item_fixture()
-    gamma_arena_test_assert.is_true(successful:apply({ runtime_id = 1 }, universal_items(), universal_catalog()).ok, "control materialization succeeds")
-    for failed_step = 1, successful_env.step do
-        local env, port = universal_item_fixture(failed_step)
+    for _, stage in ipairs({
+        "create_item", "entity_id", "register", "verify_ownership", "resolve_item",
+        "move_to_slot", "item_in_slot", "fill_magazine", "magazine_ammo", "activate_slot"
+    }) do
+        local env, port = universal_item_fixture({ fail_stage = stage })
         local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
-        gamma_arena_test_assert.is_false(result.ok, "every injected mutation/proof failure is surfaced")
-        for index = 2, #env.released do
-            gamma_arena_test_assert.is_true(env.released[index - 1] > env.released[index], "rollback is reverse creation order")
+        gamma_arena_test_assert.is_false(result.ok, "dependency failure is surfaced: " .. stage)
+        gamma_arena_test_assert.equals(result.error.code, "GA_TEST_MATERIALIZE", "original dependency failure is retained: " .. stage)
+        gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "every created entity is rolled back: " .. stage)
+        for index, id in ipairs(env.rollback_attempts) do
+            gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "rollback is reverse creation order: " .. stage)
+        end
+        for index = (env.failed_at or #env.events) + 1, #env.events do
+            gamma_arena_test_assert.is_true(string.find(env.events[index], "^rollback:") ~= nil, "no unsafe stage follows failure: " .. stage)
         end
     end
+end
+
+local function runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation()
+    local base_items, base_catalog = universal_items(), universal_catalog()
+    local cases = {
+        { name = "non-table item", items = { "bad" } },
+        { name = "sparse items", items = { [1] = base_items[1], [3] = base_items[2] } },
+        { name = "non-array item key", mutate_items = function(items) items.future = items[1] end },
+        { name = "empty section", mutate_items = function(items) items[1].section = "" end },
+        { name = "unbounded quantity", mutate_items = function(items) items[1].quantity = 4294967296 end },
+        { name = "unknown slot", mutate_items = function(items) items[1].equipped_slot = "belt" end },
+        { name = "slot category mismatch", mutate_items = function(items) items[9].equipped_slot = "weapon_1" end },
+        { name = "weapon slot metadata mismatch", mutate_items = function(items) items[4].equipped_slot = "weapon_2" end },
+        { name = "outfit slot metadata mismatch", mutate_catalog = function(catalog) catalog.items.outfit.ltx_slot = 5 end },
+        { name = "invalid ammo box", mutate_catalog = function(catalog) catalog.items.ammo_a.box_size = 0 end },
+        { name = "non-table weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = "ammo_a" end },
+        { name = "sparse weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { [1] = "ammo_a", [3] = "ammo_b" } end },
+        { name = "duplicate weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { "ammo_a", "ammo_a" } end },
+        { name = "empty weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = {} end },
+        { name = "invalid weapon ammo reference", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { "medkit" } end },
+        { name = "non-table weapon ammo reference", mutate_catalog = function(catalog) catalog.items.ammo_a = false end }
+    }
+    for _, case in ipairs(cases) do
+        local items = case.items or clone(base_items)
+        local catalog = clone(base_catalog)
+        if case.mutate_items then case.mutate_items(items) end
+        if case.mutate_catalog then case.mutate_catalog(catalog) end
+        local env, port = universal_item_fixture()
+        local called, result = pcall(function() return port:apply({ runtime_id = 1 }, items, catalog) end)
+        gamma_arena_test_assert.is_true(called, "malformed preflight never throws: " .. case.name)
+        gamma_arena_test_assert.is_true(called and result.ok == false, "malformed preflight returns Result failure: " .. case.name)
+        gamma_arena_test_assert.equals(#env.created, 0, "malformed preflight creates nothing: " .. case.name)
+        gamma_arena_test_assert.equals(env.stage_counts.register, nil, "malformed preflight registers nothing: " .. case.name)
+        gamma_arena_test_assert.equals(env.stage_counts.move_to_slot, nil, "malformed preflight equips nothing: " .. case.name)
+        gamma_arena_test_assert.equals(#env.rollback_attempts, 0, "malformed preflight needs no rollback: " .. case.name)
+    end
+end
+
+local function runtime_universal_items_rollback_failure_aggregates_original_cause()
+    local env, port = universal_item_fixture({ fail_stage = "activate_slot", rollback_fails = true })
+    local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_false(result.ok, "rollback failure is surfaced")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_MATERIALIZE_ROLLBACK_FAILED", "rollback aggregation code")
+    gamma_arena_test_assert.equals(result.error.context.cause.code, "GA_TEST_MATERIALIZE", "rollback aggregation retains original cause")
+    gamma_arena_test_assert.equals(#result.error.context.rollback, #env.created, "every rollback failure is aggregated")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "rollback continues after each rollback failure")
+    for index, id in ipairs(env.rollback_attempts) do
+        gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "failed rollback attempts remain reverse ordered")
+    end
+end
+
+local function runtime_universal_items_weapon1_activation_fallback()
+    local items = universal_items()
+    table.remove(items, 5)
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, items, universal_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "weapon_1-only materialization succeeds")
+    gamma_arena_test_assert.equals(result.value.active_slot, "weapon_1", "result reports weapon_1 fallback")
+    gamma_arena_test_assert.equals(env.active, "weapon_1", "weapon_1 activates when weapon_2 is absent")
 end
 
 local function exact_rank_spec()
@@ -8212,6 +8313,9 @@ end
 local cases = {
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
     { name = "runtime_universal_items_rollback_every_failure_in_reverse", fn = runtime_universal_items_rollback_every_failure_in_reverse },
+    { name = "runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation", fn = runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation },
+    { name = "runtime_universal_items_rollback_failure_aggregates_original_cause", fn = runtime_universal_items_rollback_failure_aggregates_original_cause },
+    { name = "runtime_universal_items_weapon1_activation_fallback", fn = runtime_universal_items_weapon1_activation_fallback },
     { name = "runtime_entity_exact_rank_precedes_friend_tactical_and_hostility", fn = runtime_entity_exact_rank_precedes_friend_tactical_and_hostility },
     { name = "runtime_entity_adjacent_rank_readback_blocks_hostility", fn = runtime_entity_adjacent_rank_readback_blocks_hostility },
     { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },
