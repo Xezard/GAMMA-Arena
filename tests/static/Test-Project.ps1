@@ -2027,6 +2027,7 @@ Assert-True ($ArenaComposeStart -ge 0 -and $ArenaComposeEnd -gt $ArenaComposeSta
 if ($ArenaComposeStart -ge 0 -and $ArenaComposeEnd -gt $ArenaComposeStart) {
     $ArenaComposeBlock = $ArenaBootstrapContent.Substring($ArenaComposeStart, $ArenaComposeEnd - $ArenaComposeStart)
     Assert-True ($ArenaComposeBlock -notmatch 'save_guard\s*:\s*install') 'Arena bootstrap must not install the global save guard before MCM starts the new game.'
+    Assert-True ($ArenaComposeBlock -notmatch 'deps\.current_level') 'Arena bootstrap composition must not query level engine state while the main menu owns the VM.'
 }
 $ArenaArmGuardStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:arm_save_guard')
 $ArenaArmGuardEnd = if ($ArenaArmGuardStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:maintain_save_guard', $ArenaArmGuardStart) } else { -1 }

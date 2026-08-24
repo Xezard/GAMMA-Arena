@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Restored the main-menu Arena Start callback by removing a diagnostic level-state query that is invalid before the new-game engine context exists.
 - Restored the Arena Start handoff by deferring the global save-command guard until the new-game runtime accepts Arena launch ownership, while still arming suppression before any Arena activation or `fake_start` deferral.
 - Suppressed every Lua `save` command and the known GAMMA new-game autosave event for Arena-owned launches while leaving campaign saves unchanged; added flushed crash checkpoints and passive bounded hit/state evidence for unexplained early NPC deaths.
 - Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
