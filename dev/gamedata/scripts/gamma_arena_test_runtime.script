@@ -3522,6 +3522,7 @@ local function fake_entity_environment(options)
             function object:id() return self.runtime_id end
             function object:alive() return self.alive_value end
             function object:position() return self.position_value end
+            object.rank_value = nil
             env.online_candidates[npc:id()] = object
             env.online[npc:id()] = object
             return npc
@@ -3624,6 +3625,7 @@ local function fake_entity_environment(options)
         entity_section = function(entity) return entity.section_name end,
         online_object = function(id)
             if options.fail_phase == "online" then return nil end
+            if options.exact_rank and env.online[id] ~= nil then env.events[#env.events + 1] = "online_proof:" .. tostring(id) end
             return env.online[id]
         end,
         object_position = function(object) return object:position() end,
@@ -3671,6 +3673,32 @@ local function fake_entity_environment(options)
         release_timeout_ms = options.release_timeout_ms or 20,
         online_timeout_ms = options.online_timeout_ms or 20
     }
+    if options.exact_rank then
+        deps.is_alive = function(object)
+            env.events[#env.events + 1] = "alive_proof:" .. tostring(object:id())
+            return object:alive()
+        end
+        deps.rank_catalog = {
+            rank_ids = { "novice", "trainee" },
+            ranks = {
+                novice = { id = "novice", minimum = 0, maximum = 99 },
+                trainee = { id = "trainee", minimum = 100, maximum = 199 }
+            },
+            factions = { stalker = { ranks = {
+                novice = { id = "novice", minimum = 10, maximum = 99 },
+                trainee = { id = "trainee", minimum = 100, maximum = 180 }
+            } } }
+        }
+        deps.set_character_rank = function(npc, value)
+            env.events[#env.events + 1] = "set_rank:" .. tostring(npc:id())
+            npc.rank_value = value
+            return gamma_arena_result.ok(true)
+        end
+        deps.character_rank = function(npc)
+            env.events[#env.events + 1] = "read_rank:" .. tostring(npc:id())
+            return gamma_arena_result.ok(options.rank_readback or npc.rank_value)
+        end
+    end
     return env, deps
 end
 
@@ -8017,7 +8045,175 @@ local function runtime_entity_forensics_are_bounded_non_mutating_and_classified(
     gamma_arena_test_assert.is_true(adapter:on_npc_before_hit({ id = function() return 99 end }, hit, 4, flags).value == false, "foreign NPCs are ignored")
 end
 
+local function universal_item_fixture(fail_at)
+    local env = { events = {}, created = {}, released = {}, step = 0, slots = {}, active = nil, magazine = {} }
+    local function step(name)
+        env.step = env.step + 1
+        env.events[#env.events + 1] = name
+        if fail_at == env.step then return gamma_arena_result.err("GA_TEST_MATERIALIZE", "injected materialization failure") end
+        return gamma_arena_result.ok(true)
+    end
+    local next_id = 900
+    local port = gamma_arena_item_materializer.new({
+        create_item = function(section, owner, options)
+            local accepted = step("create:" .. section)
+            if not accepted.ok then return accepted end
+            local entity = { runtime_id = next_id, section = section, parent = owner.runtime_id, options = clone(options) }
+            next_id = next_id + 1
+            env.created[#env.created + 1] = entity
+            return gamma_arena_result.ok(entity)
+        end,
+        entity_id = function(entity) return entity.runtime_id end,
+        register = function(entity, descriptor)
+            local accepted = step("register:" .. descriptor.section)
+            if not accepted.ok then return accepted end
+            return gamma_arena_result.ok({ id = entity.runtime_id, section = descriptor.section })
+        end,
+        verify_ownership = function(entity) return step("ownership:" .. entity.section) end,
+        resolve_item = function(entity) return entity end,
+        move_to_slot = function(owner, entity, slot)
+            local accepted = step("equip:" .. slot .. ":" .. entity.section)
+            if not accepted.ok then return accepted end
+            env.slots[slot] = entity
+            return gamma_arena_result.ok(true)
+        end,
+        item_in_slot = function(owner, slot) return env.slots[slot] end,
+        fill_magazine = function(weapon, ammo_section)
+            local accepted = step("fill:" .. weapon.section .. ":" .. ammo_section)
+            if not accepted.ok then return accepted end
+            env.magazine[weapon.runtime_id] = ammo_section
+            return gamma_arena_result.ok(true)
+        end,
+        magazine_ammo = function(weapon) return env.magazine[weapon.runtime_id] end,
+        activate_slot = function(owner, slot)
+            local accepted = step("activate:" .. slot)
+            if not accepted.ok then return accepted end
+            env.active = slot
+            return gamma_arena_result.ok(true)
+        end,
+        rollback = function(entity)
+            env.events[#env.events + 1] = "rollback:" .. tostring(entity.runtime_id)
+            env.released[#env.released + 1] = entity.runtime_id
+            return gamma_arena_result.ok(true)
+        end
+    })
+    return env, port
+end
+
+local function universal_items()
+    return {
+        { section = "outfit", quantity = 1, equipped_slot = "outfit" },
+        { section = "helmet", quantity = 1, equipped_slot = "helmet" },
+        { section = "knife", quantity = 1, equipped_slot = "knife" },
+        { section = "pistol", quantity = 1, equipped_slot = "weapon_1" },
+        { section = "rifle", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "carried", quantity = 1 },
+        { section = "ammo_a", quantity = 2 },
+        { section = "ammo_b", quantity = 1 },
+        { section = "medkit", quantity = 3 }
+    }
+end
+
+local function universal_catalog()
+    return { items = {
+        outfit = { category = "outfit", ltx_slot = 6 }, helmet = { category = "helmet", ltx_slot = 11 },
+        knife = { category = "knife", ltx_slot = 0 },
+        pistol = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_b" } },
+        rifle = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_a", "ammo_b" } },
+        carried = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_a" } },
+        ammo_a = { category = "ammo", box_size = 30 }, ammo_b = { category = "ammo", box_size = 20 },
+        medkit = { category = "medicine", healing = true }
+    } }
+end
+
+local function runtime_universal_items_materialize_exact_entities_and_slot_order()
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "universal items materialize")
+    gamma_arena_test_assert.equals(#env.created, 12, "quantity is physical entity count")
+    local ammo_entities, medicines = 0, 0
+    for _, entity in ipairs(env.created) do
+        if entity.section == "ammo_a" or entity.section == "ammo_b" then
+            ammo_entities = ammo_entities + 1
+            gamma_arena_test_assert.equals(entity.options.ammo, entity.section == "ammo_a" and 30 or 20, "one full server ammo box")
+        elseif entity.section == "medkit" then medicines = medicines + 1 end
+    end
+    gamma_arena_test_assert.equals(ammo_entities, 3, "two selected ammo calibers remain physical boxes")
+    gamma_arena_test_assert.equals(medicines, 3, "medicine quantity remains physical entities")
+    local first_equip, last_ownership = nil, nil
+    for index, event in ipairs(env.events) do
+        if string.find(event, "^ownership:") then last_ownership = index end
+        if first_equip == nil and string.find(event, "^equip:") then first_equip = index end
+    end
+    gamma_arena_test_assert.is_true(last_ownership < first_equip, "all ownership proofs precede equip")
+    local equipped = {}
+    for _, event in ipairs(env.events) do if string.find(event, "^equip:") then equipped[#equipped + 1] = event end end
+    gamma_arena_test_assert.equals(table.concat(equipped, "|"), "equip:outfit:outfit|equip:helmet:helmet|equip:knife:knife|equip:weapon_1:pistol|equip:weapon_2:rifle", "logical slot order")
+    gamma_arena_test_assert.equals(env.magazine[904], "ammo_a", "weapon_2 uses first selected compatible ammo in catalog order")
+    gamma_arena_test_assert.equals(env.active, "weapon_2", "weapon_2 activates when selected")
+end
+
+local function runtime_universal_items_rollback_every_failure_in_reverse()
+    local successful_env, successful = universal_item_fixture()
+    gamma_arena_test_assert.is_true(successful:apply({ runtime_id = 1 }, universal_items(), universal_catalog()).ok, "control materialization succeeds")
+    for failed_step = 1, successful_env.step do
+        local env, port = universal_item_fixture(failed_step)
+        local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+        gamma_arena_test_assert.is_false(result.ok, "every injected mutation/proof failure is surfaced")
+        for index = 2, #env.released do
+            gamma_arena_test_assert.is_true(env.released[index - 1] > env.released[index], "rollback is reverse creation order")
+        end
+    end
+end
+
+local function exact_rank_spec()
+    local spec = entity_spec(2)
+    local opponents = spec.opponents()
+    opponents[1].faction = "stalker"
+    opponents[1].rank = { id = "trainee", value = 120 }
+    opponents[2].faction = "stalker"
+    opponents[2].rank = { id = "novice", value = 50 }
+    return spec
+end
+
+local function first_event(events, pattern)
+    for index, event in ipairs(events) do if string.find(event, pattern) then return index end end
+    return nil
+end
+
+local function runtime_entity_exact_rank_precedes_friend_tactical_and_hostility()
+    local env, deps = fake_entity_environment({ exact_rank = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, exact_rank_spec(), "session-exact-rank")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "exact rank transaction activates")
+    local previous = 0
+    for index, pattern in ipairs({
+        "^online_proof:", "^alive_proof:", "^hidden_charge:", "^hold_friendly:",
+        "^set_rank:", "^read_rank:", "^friend:", "^tactical_begin$", "^hostile:"
+    }) do
+        local position = first_event(env.events, pattern)
+        gamma_arena_test_assert.is_true(position ~= nil and position > previous, "exact NPC activation stage order " .. tostring(index))
+        previous = position or previous
+    end
+end
+
+local function runtime_entity_adjacent_rank_readback_blocks_hostility()
+    local env, deps = fake_entity_environment({ exact_rank = true, rank_readback = 99 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, exact_rank_spec(), "session-rank-mismatch")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_false(result.ok, "adjacent rank readback fails")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ENTITY_RANK_MISMATCH", "adjacent rank mismatch code")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "rank mismatch completes rollback")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "rank mismatch never activates hostility")
+end
+
 local cases = {
+    { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
+    { name = "runtime_universal_items_rollback_every_failure_in_reverse", fn = runtime_universal_items_rollback_every_failure_in_reverse },
+    { name = "runtime_entity_exact_rank_precedes_friend_tactical_and_hostility", fn = runtime_entity_exact_rank_precedes_friend_tactical_and_hostility },
+    { name = "runtime_entity_adjacent_rank_readback_blocks_hostility", fn = runtime_entity_adjacent_rank_readback_blocks_hostility },
     { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },
     { name = "runtime_save_guard_failures_block_launch_mutation", fn = runtime_save_guard_failures_block_launch_mutation },
     { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },

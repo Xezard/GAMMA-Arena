@@ -1,0 +1,181 @@
+local Materializer = {}
+Materializer.__index = Materializer
+
+local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function call(code, fn, ...)
+    if type(fn) ~= "function" then return failure(code, "Universal item materializer dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return failure(code, "Universal item materializer dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return failure(code, "Universal item materializer dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
+local function finite_positive_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= 1
+end
+
+function descriptors(items, catalog)
+    local result = {}
+    if type(items) ~= "table" or type(catalog) ~= "table" or type(catalog.items) ~= "table" then
+        return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated universal items and catalog are required")
+    end
+    for _, item in ipairs(items) do
+        local definition = catalog.items[item.section]
+        if type(definition) ~= "table" then
+            return gamma_arena_result.err(
+                "GA_ITEM_MATERIALIZE_UNKNOWN",
+                "Validated item definition is unavailable")
+        end
+        if not finite_positive_integer(item.quantity) then
+            return failure("GA_ITEM_MATERIALIZE_INVALID", "Validated item quantity is unavailable", { section = item.section })
+        end
+        for copy_index = 1, item.quantity do
+            result[#result + 1] = {
+                section = item.section,
+                category = definition.category,
+                box_size = definition.box_size,
+                equipped_slot = copy_index == 1 and item.equipped_slot or nil
+            }
+        end
+    end
+    return gamma_arena_result.ok(result)
+end
+
+local function entity_id(port, entity)
+    local result = call("GA_ITEM_MATERIALIZE_ENTITY_INVALID", port.entity_id, entity)
+    if not result.ok then return result end
+    if type(result.value) ~= "number" or result.value ~= math.floor(result.value) or result.value < 0 then
+        return failure("GA_ITEM_MATERIALIZE_ENTITY_INVALID", "Created item entity has no valid numeric id")
+    end
+    return result
+end
+
+function Materializer:rollback(created, cause)
+    local errors = {}
+    for index = #created, 1, -1 do
+        local released = call("GA_ITEM_MATERIALIZE_ROLLBACK_FAILED", self.ports.rollback, created[index].entity, created[index].record)
+        if not released.ok then errors[#errors + 1] = released.error end
+    end
+    if #errors > 0 then
+        return failure("GA_ITEM_MATERIALIZE_ROLLBACK_FAILED", "Universal item materialization and rollback both failed", {
+            cause = cause.error,
+            rollback = errors
+        })
+    end
+    return cause
+end
+
+local function selected_ammunition(items, definition)
+    local selected = {}
+    for _, item in ipairs(items) do
+        if finite_positive_integer(item.quantity) then selected[item.section] = true end
+    end
+    for _, section in ipairs(definition.ammo_sections or {}) do
+        if selected[section] then return section end
+    end
+    return nil
+end
+
+function Materializer:apply(owner, items, catalog)
+    local expanded = descriptors(items, catalog)
+    if not expanded.ok then return expanded end
+    local created = {}
+    local equipped = {}
+
+    for index, descriptor in ipairs(expanded.value) do
+        local options = nil
+        if descriptor.category == "ammo" then
+            if not finite_positive_integer(descriptor.box_size) then
+                return self:rollback(created, failure("GA_ITEM_MATERIALIZE_AMMO_INVALID", "Validated ammunition box_size is unavailable", { section = descriptor.section }))
+            end
+            options = { ammo = descriptor.box_size }
+        end
+        local made = call("GA_ITEM_MATERIALIZE_CREATE_FAILED", self.ports.create_item, descriptor.section, owner, options)
+        if not made.ok then return self:rollback(created, made) end
+        local id = entity_id(self.ports, made.value)
+        if not id.ok then
+            created[#created + 1] = { entity = made.value, descriptor = descriptor }
+            return self:rollback(created, id)
+        end
+        local entry = { entity = made.value, descriptor = descriptor, id = id.value }
+        created[#created + 1] = entry
+        local registered = call("GA_ITEM_MATERIALIZE_REGISTER_FAILED", self.ports.register, made.value, descriptor, index)
+        if not registered.ok then return self:rollback(created, registered) end
+        entry.record = registered.value
+    end
+
+    for _, entry in ipairs(created) do
+        local owned = call("GA_ITEM_MATERIALIZE_OWNERSHIP_FAILED", self.ports.verify_ownership, entry.entity, entry.record, owner)
+        if not owned.ok or owned.value ~= true then
+            if owned.ok then owned = failure("GA_ITEM_MATERIALIZE_OWNERSHIP_FAILED", "Created item ownership proof was not exact", { id = entry.id }) end
+            return self:rollback(created, owned)
+        end
+        if entry.descriptor.equipped_slot ~= nil then equipped[#equipped + 1] = entry end
+    end
+
+    table.sort(equipped, function(left, right)
+        return (SLOT_ORDER[left.descriptor.equipped_slot] or 999) < (SLOT_ORDER[right.descriptor.equipped_slot] or 999)
+    end)
+    for _, entry in ipairs(equipped) do
+        local slot = entry.descriptor.equipped_slot
+        if SLOT_ORDER[slot] == nil then
+            return self:rollback(created, failure("GA_ITEM_MATERIALIZE_SLOT_INVALID", "Validated equipped slot is unavailable", { slot = slot }))
+        end
+        local item = call("GA_ITEM_MATERIALIZE_RESOLVE_FAILED", self.ports.resolve_item, entry.entity, entry.record)
+        if not item.ok or item.value == nil then
+            if item.ok then item = failure("GA_ITEM_MATERIALIZE_RESOLVE_FAILED", "Created item did not resolve for equipment", { id = entry.id }) end
+            return self:rollback(created, item)
+        end
+        entry.object = item.value
+        local moved = call("GA_ITEM_MATERIALIZE_EQUIP_FAILED", self.ports.move_to_slot, owner, item.value, slot, catalog.items[entry.descriptor.section])
+        if not moved.ok then return self:rollback(created, moved) end
+        local current = call("GA_ITEM_MATERIALIZE_EQUIP_VERIFY_FAILED", self.ports.item_in_slot, owner, slot)
+        if not current.ok or current.value == nil then
+            if current.ok then current = failure("GA_ITEM_MATERIALIZE_EQUIP_VERIFY_FAILED", "Equipped slot is empty", { slot = slot }) end
+            return self:rollback(created, current)
+        end
+        local current_id = entity_id(self.ports, current.value)
+        if not current_id.ok or current_id.value ~= entry.id then
+            local mismatch = current_id.ok and failure("GA_ITEM_MATERIALIZE_EQUIP_VERIFY_FAILED", "Equipped slot contains a different entity", { slot = slot, expected = entry.id, actual = current_id.value }) or current_id
+            return self:rollback(created, mismatch)
+        end
+        if entry.descriptor.category == "weapon" then
+            local definition = catalog.items[entry.descriptor.section]
+            local ammunition = selected_ammunition(items, definition)
+            if ammunition == nil then
+                return self:rollback(created, failure("GA_ITEM_MATERIALIZE_AMMO_MISSING", "Equipped firearm has no selected compatible ammunition", { section = entry.descriptor.section }))
+            end
+            local filled = call("GA_ITEM_MATERIALIZE_MAGAZINE_FAILED", self.ports.fill_magazine, item.value, ammunition, definition)
+            if not filled.ok then return self:rollback(created, filled) end
+            local verified = call("GA_ITEM_MATERIALIZE_MAGAZINE_VERIFY_FAILED", self.ports.magazine_ammo, item.value)
+            if not verified.ok or verified.value ~= ammunition then
+                local mismatch = verified.ok and failure("GA_ITEM_MATERIALIZE_MAGAZINE_VERIFY_FAILED", "Equipped firearm magazine did not verify", { section = entry.descriptor.section, ammo = ammunition }) or verified
+                return self:rollback(created, mismatch)
+            end
+        end
+    end
+
+    local active_slot = nil
+    for _, entry in ipairs(equipped) do
+        local slot = entry.descriptor.equipped_slot
+        if slot == "weapon_2" then active_slot = slot break end
+        if slot == "weapon_1" then active_slot = slot end
+    end
+    if active_slot ~= nil then
+        local activated = call("GA_ITEM_MATERIALIZE_ACTIVATE_FAILED", self.ports.activate_slot, owner, active_slot)
+        if not activated.ok then return self:rollback(created, activated) end
+    end
+    return gamma_arena_result.ok({ records = created, active_slot = active_slot })
+end
+
+function new(ports)
+    if type(ports) ~= "table" then return nil end
+    return setmetatable({ ports = ports }, Materializer)
+end

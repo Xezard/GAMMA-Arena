@@ -211,6 +211,36 @@ $Task2ItemScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors') }
 )
 
+$Task5UniversalRuntimeContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_actor_adapter.script'; Required = @('function\s+ActorAdapter:apply_items', 'function\s+ActorAdapter:update_items') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_entity_adapter.script'; Required = @('function\s+EntityAdapter:materialize_items', 'function\s+EntityAdapter:stage_exact_rank', 'GA_ENTITY_RANK_MISMATCH', 'set_character_rank', 'character_rank') }
+)
+foreach ($Contract in $Task5UniversalRuntimeContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 5 universal runtime contract is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        foreach ($Pattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $Pattern) "Task 5 universal runtime marker is missing from $($Contract.Path): $Pattern"
+        }
+    }
+}
+
+$Task5UniversalRuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Marker in @(
+    'runtime_universal_items_materialize_exact_entities_and_slot_order',
+    'runtime_universal_items_rollback_every_failure_in_reverse',
+    'runtime_entity_exact_rank_precedes_friend_tactical_and_hostility',
+    'runtime_entity_adjacent_rank_readback_blocks_hostility'
+)) {
+    Assert-True ($Task5UniversalRuntimeTests -match [regex]::Escape($Marker)) "Task 5 runtime tests must cover $Marker"
+}
+$Task5UniversalBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+foreach ($Marker in @('function set_character_rank', 'function character_rank', 'npc:set_character_rank(value)', 'npc:character_rank()')) {
+    Assert-True ($Task5UniversalBootstrapContent -match [regex]::Escape($Marker)) "Task 5 bootstrap rank port is missing: $Marker"
+}
+
 $Task4ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_config_tx.script'; Namespace = 'gamma_arena_config_tx'; Required = @('(?m)^function\s+run\s*\(', '(?m)^function\s+snapshot\s*\(', '(?m)^function\s+recover\s*\(', '(?m)^function\s+is_quarantined\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_migrations.script'; Namespace = 'gamma_arena_migrations'; Required = @('(?m)^function\s+migrate\s*\(', '(?m)^function\s+read_settings\s*\(') },

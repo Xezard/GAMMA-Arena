@@ -287,6 +287,13 @@ local function copy_participant(participant, expected_slot)
         community = participant.community,
         loadout = loadout
     }
+    if participant.rank ~= nil or participant.faction ~= nil then
+        if type(participant.rank) ~= "table" or type(participant.rank.id) ~= "string" or participant.rank.id == ""
+            or not finite_integer(participant.rank.value) or participant.rank.value < 0
+            or type(participant.faction) ~= "string" or participant.faction == "" then return nil end
+        copy.rank = { id = participant.rank.id, value = participant.rank.value }
+        copy.faction = participant.faction
+    end
     if expected_slot ~= 0 then
         local position = type(participant.spawn) == "table" and participant.spawn.position or nil
         if type(participant.spawn_slot_id) ~= "string" or participant.spawn_slot_id == ""
@@ -1204,6 +1211,63 @@ function EntityAdapter:is_alive(object)
     return boolean_query("GA_ENTITY_ALIVE_CHECK_FAILED", method, object)
 end
 
+function EntityAdapter:materialize_items(owner, items, catalog)
+    return method_result("GA_ENTITY_ITEMS_UNAVAILABLE", self.deps.items, "apply", owner, items, catalog)
+end
+
+local function rank_contains(record, value)
+    return type(record) == "table" and finite_integer(record.minimum)
+        and (record.maximum == nil or finite_integer(record.maximum))
+        and value >= record.minimum and (record.maximum == nil or value <= record.maximum)
+end
+
+local function rank_id_for_value(catalog, faction_id, value)
+    local faction = type(catalog) == "table" and type(catalog.factions) == "table" and catalog.factions[faction_id] or nil
+    if type(faction) ~= "table" or type(faction.ranks) ~= "table" or type(catalog.ranks) ~= "table"
+        or type(catalog.rank_ids) ~= "table" then return nil end
+    for _, rank_id in ipairs(catalog.rank_ids) do
+        if rank_contains(catalog.ranks[rank_id], value) and rank_contains(faction.ranks[rank_id], value) then return rank_id end
+    end
+    return nil
+end
+
+function EntityAdapter:stage_exact_rank(npc, opponent)
+    if type(opponent) ~= "table" or type(opponent.rank) ~= "table" or type(opponent.rank.id) ~= "string"
+        or not finite_integer(opponent.rank.value) or opponent.rank.value < 0 or type(opponent.faction) ~= "string" then
+        return fail("GA_ENTITY_RANK_INVALID", "Validated opponent exact rank is unavailable")
+    end
+    local catalog = self.deps.rank_catalog
+    if type(catalog) == "function" then
+        local loaded = result_call("GA_ENTITY_RANK_CATALOG_FAILED", catalog)
+        if not loaded.ok then return loaded end
+        catalog = loaded.value
+    end
+    if rank_id_for_value(catalog, opponent.faction, opponent.rank.value) ~= opponent.rank.id then
+        return fail("GA_ENTITY_RANK_INVALID", "Selected exact rank is outside its authoritative RankCatalog intersection", {
+            faction = opponent.faction,
+            rank = opponent.rank.id,
+            value = opponent.rank.value
+        })
+    end
+    local assigned = result_call("GA_ENTITY_RANK_SET_FAILED", self.deps.set_character_rank, npc, opponent.rank.value)
+    if not assigned.ok then return assigned end
+    local readback = result_call("GA_ENTITY_RANK_READ_FAILED", self.deps.character_rank, npc)
+    if not readback.ok then return readback end
+    if not finite_integer(readback.value) or readback.value < 0 then
+        return fail("GA_ENTITY_RANK_READ_FAILED", "NPC character rank readback is not a non-negative integer")
+    end
+    local readback_id = rank_id_for_value(catalog, opponent.faction, readback.value)
+    if readback.value ~= opponent.rank.value or readback_id ~= opponent.rank.id then
+        return fail("GA_ENTITY_RANK_MISMATCH", "NPC exact rank did not round-trip through the engine", {
+            expected_value = opponent.rank.value,
+            actual_value = readback.value,
+            expected_rank = opponent.rank.id,
+            actual_rank = readback_id
+        })
+    end
+    return gamma_arena_result.ok({ value = readback.value, rank_id = readback_id })
+end
+
 function EntityAdapter:drive_online()
     if self.online_started == nil then
         local clock = self:clock()
@@ -1247,6 +1311,12 @@ function EntityAdapter:drive_online()
                 local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
                 if not held.ok then return held end
                 record.staged_friendly = true
+            end
+            local opponent = self.opponents[record.slot]
+            if opponent ~= nil and opponent.rank ~= nil and not record.rank_verified then
+                local ranked = self:stage_exact_rank(object.value, opponent)
+                if not ranked.ok then return ranked end
+                record.rank_verified = true
             end
         end
     end
