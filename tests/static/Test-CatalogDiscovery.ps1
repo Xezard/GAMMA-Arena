@@ -244,7 +244,7 @@ foreach ($Marker in @(
     'enumerate_system_sections', 'open_loadouts', 'price_overrides',
     'weight_mg', 'ltx_slot', 'ammo_sections', 'box_size', 'helmet_allowed',
     'carry_bonus_mg', 'healing', 'base_carry_weight', '$spawn', 'spawn_path', 'fingerprint',
-    'ga-catalog-v8-', 'table.sort'
+    'ga-catalog-v8-', 'table.sort', 'story_id'
 )) {
     if (-not $UniversalCatalog.Contains($Marker)) {
         throw "Universal combat item catalog contract is missing marker: $Marker"
@@ -254,6 +254,7 @@ foreach ($CaseName in @(
     'item_catalog_prices_and_classifies_installed_items',
     'item_catalog_exposes_physical_metadata_and_legacy_fields',
     'item_catalog_rejects_invalid_and_zero_price_candidates',
+    'item_catalog_excludes_story_items',
     'item_catalog_fingerprint_changes_for_semantic_mutations',
     'item_catalog_fingerprint_is_canonical_and_excludes_localized_names',
     'item_catalog_rejects_unavailable_median_anchors'
