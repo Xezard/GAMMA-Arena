@@ -125,12 +125,19 @@ function ActorAdapter:inventory_clock()
     return gamma_arena_result.ok(clock.value)
 end
 
-function ActorAdapter:snapshot_inventory(actor)
-    local actor_id_result = call_actor(actor, "id")
-    if not actor_id_result.ok or not valid_id(actor_id_result.value) then
+function ActorAdapter:snapshot_inventory(actor, expected_actor_id)
+    local actor_id = expected_actor_id
+    if actor_id == nil then
+        local actor_id_result = call_actor(actor, "id")
+        if not actor_id_result.ok or not valid_id(actor_id_result.value) then
+            return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id", {
+                cause = actor_id_result.error
+            })
+        end
+        actor_id = actor_id_result.value
+    elseif not valid_id(actor_id) then
         return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id")
     end
-    local actor_id = actor_id_result.value
     local records, seen, inspection_error = {}, {}, nil
     local function collect(_, item)
         if inspection_error ~= nil then return end
@@ -147,10 +154,13 @@ function ActorAdapter:snapshot_inventory(actor)
         end
         local parent = parent_result.value
         local parent_id_result = call_actor(parent, "id")
-        if parent ~= actor or not parent_id_result.ok or not valid_id(parent_id_result.value) or parent_id_result.value ~= actor_id then
+        local parent_id = parent_id_result.ok and parent_id_result.value or nil
+        local parent_id_matches_actor = valid_id(parent_id) and parent_id == actor_id
+        if not parent_id_matches_actor then
             inspection_error = fail("GA_ACTOR_INVENTORY_OWNER_INVALID", "Refusing to inspect or release an item not owned by the Arena actor", {
-                parent_is_actor = parent == actor,
-                parent_id = parent_id_result.ok and parent_id_result.value or nil,
+                parent_id_matches_actor = parent_id_matches_actor,
+                parent_id = parent_id,
+                actor_id = actor_id,
                 cause = parent_id_result.error
             })
             return
@@ -182,10 +192,27 @@ end
 function ActorAdapter:purge_inventory(actor)
     local owned = self:owned_actor()
     if not owned.ok then return owned end
-    if owned.value ~= actor then
-        return fail("GA_ACTOR_NOT_OWNED", "Inventory purge requires the currently owned Arena actor")
+    local requested_actor_id_result = call_actor(actor, "id")
+    if not requested_actor_id_result.ok or not valid_id(requested_actor_id_result.value) then
+        return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id", {
+            cause = requested_actor_id_result.error
+        })
     end
-    local snapshot = self:snapshot_inventory(actor)
+    local owned_actor_id_result = call_actor(owned.value, "id")
+    if not owned_actor_id_result.ok or not valid_id(owned_actor_id_result.value) then
+        return fail("GA_ACTOR_NOT_OWNED", "Inventory purge requires a readable currently owned Arena actor", {
+            cause = owned_actor_id_result.error
+        })
+    end
+    local requested_actor_id = requested_actor_id_result.value
+    local owned_actor_id = owned_actor_id_result.value
+    if owned_actor_id ~= requested_actor_id then
+        return fail("GA_ACTOR_NOT_OWNED", "Inventory purge requires the currently owned Arena actor", {
+            owned_actor_id = owned_actor_id,
+            requested_actor_id = requested_actor_id
+        })
+    end
+    local snapshot = self:snapshot_inventory(actor, requested_actor_id)
     if not snapshot.ok then return snapshot end
     local clock = self:inventory_clock()
     if not clock.ok then return clock end
