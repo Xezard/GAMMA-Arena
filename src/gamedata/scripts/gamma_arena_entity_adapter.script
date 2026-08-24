@@ -355,6 +355,7 @@ function EntityAdapter:__init(deps)
     self.pairs_staged = false
     self.terminal_error = nil
     self.fight_key = nil
+    self.current_fight_id = nil
     self.tactical_started = false
     self.tactical_disabled = false
     self.tactical_warning_logged = false
@@ -500,6 +501,7 @@ function EntityAdapter:register_record(kind, id, values)
         online_requested = false,
         staged_friendly = false,
         death_dropped = false,
+        hidden_charge_cleared = false,
         released = false,
         protected = false
     }
@@ -537,11 +539,15 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     local opponents_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.opponents)
     local tactical_routes_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.tactical_routes)
     local fight_key_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.stable_encode)
+    local fight_id_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.fight_id)
     if not actor_result.ok then return actor_result end
     if not opponents_result.ok then return opponents_result end
     if not tactical_routes_result.ok then return tactical_routes_result end
     if not fight_key_result.ok or type(fight_key_result.value) ~= "string" or fight_key_result.value == "" then
         return fight_key_result.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec stable encoding is invalid") or fight_key_result
+    end
+    if not fight_id_result.ok or type(fight_id_result.value) ~= "string" or fight_id_result.value == "" then
+        return fight_id_result.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec fight identity is invalid") or fight_id_result
     end
     local actor_spec = copy_participant(actor_result.value, 0)
     if actor_spec == nil or type(opponents_result.value) ~= "table" or #opponents_result.value < 1 then
@@ -581,6 +587,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     self:__init(self.deps)
     self.session_id = session_id
     self.fight_key = fight_key_result.value
+    self.current_fight_id = fight_id_result.value
     self.actor_spec = actor_spec
     self.opponents = opponents
     self.tactical_routes = tactical_routes
@@ -1017,6 +1024,11 @@ function EntityAdapter:drive_online()
             if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "Arena opponent is not alive before activation", { id = record.id }) end
             record.proved_online = true
             objects[index] = object.value
+            if not record.hidden_charge_cleared then
+                local cleared = result_call("GA_NPC_MEDICAL_CHARGE_CLEAR_FAILED", self.deps.clear_hidden_charge, record.id, object.value)
+                if not cleared.ok then return cleared end
+                record.hidden_charge_cleared = true
+            end
             if not record.staged_friendly then
                 local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
                 if not held.ok then return held end
@@ -1504,6 +1516,80 @@ end
 
 function EntityAdapter:is_critically_wounded(object)
     return boolean_query("GA_ENTITY_WOUND_CHECK_FAILED", self.deps.is_critically_wounded, object)
+end
+
+function EntityAdapter:consume_medical_item(fight_id, npc_id, section)
+    if type(fight_id) ~= "string" or fight_id == "" or not valid_id(npc_id)
+        or (section ~= "medkit" and section ~= "bandage") then
+        return fail("GA_ENTITY_MEDICAL_REQUEST_INVALID", "Physical medicine consumption requires a fight, opponent, and supported section")
+    end
+    if self.state_value ~= "ACTIVE" or self.current_fight_id ~= fight_id then
+        return fail("GA_ENTITY_MEDICAL_FIGHT_STALE", "Physical medicine consumption does not belong to the active fight", {
+            requested_fight_id = fight_id,
+            current_fight_id = self.current_fight_id,
+            state = self.state_value
+        })
+    end
+
+    local npc_record = self.npc_by_id[npc_id]
+    if npc_record == nil or npc_record.released or npc_record.terminal_state ~= OPPONENT_STATES.ALIVE then
+        return gamma_arena_result.ok(false)
+    end
+    local npc_owner = self:load_owner_tag(npc_id)
+    if not npc_owner.ok then return npc_owner end
+    if npc_owner.value ~= self.session_id or npc_record.tagged ~= true then return gamma_arena_result.ok(false) end
+    local npc = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, npc_id)
+    if not npc.ok then return npc end
+    if npc.value == nil then return gamma_arena_result.ok(false) end
+    local alive = self:is_alive(npc.value)
+    if not alive.ok then return alive end
+    if not alive.value then return gamma_arena_result.ok(false) end
+    local wounded = self:is_critically_wounded(npc.value)
+    if not wounded.ok then return wounded end
+    if wounded.value then return gamma_arena_result.ok(false) end
+
+    local record = nil
+    for _, candidate in ipairs(self.registry.items) do
+        if candidate.kind == "item" and candidate.source == "assigned" and candidate.role == "consumable"
+            and candidate.parent_id == npc_id and candidate.section == section and not candidate.released then
+            record = candidate
+            break
+        end
+    end
+    if record == nil then return gamma_arena_result.ok(false) end
+
+    local item = result_call("GA_ENTITY_SERVER_LOOKUP_FAILED", self.deps.server_entity, record.id)
+    if not item.ok then return item end
+    if item.value == nil then
+        record.released = true
+        record.release_reason = "medical_absent"
+        return gamma_arena_result.ok(false)
+    end
+    local item_id = read_entity_id(item.value)
+    local parent_id = read_parent_id(item.value)
+    if item_id ~= record.id or parent_id == nil then
+        return fail("GA_ENTITY_MEDICAL_OWNERSHIP_UNPROVEN", "Registered medicine identity or parent cannot be proved", { item_id = record.id, npc_id = npc_id })
+    end
+    if parent_id ~= npc_id then
+        record.released = true
+        record.release_reason = "medical_transferred"
+        return gamma_arena_result.ok(false)
+    end
+    local actual_section = self:entity_section(item.value)
+    if not actual_section.ok then return actual_section end
+    if actual_section.value ~= section then
+        return fail("GA_ENTITY_MEDICAL_OWNERSHIP_UNPROVEN", "Registered medicine section changed before consumption", { item_id = record.id, expected = section, actual = actual_section.value })
+    end
+    local item_owner = self:load_owner_tag(record.id)
+    if not item_owner.ok then return item_owner end
+    if item_owner.value ~= self.session_id or record.tagged ~= true then return gamma_arena_result.ok(false) end
+
+    local released = result_call("GA_ENTITY_SAFE_RELEASE_FAILED", self.deps.release, { id = record.id })
+    if not released.ok then return released end
+    record.released = true
+    record.consumed = true
+    record.release_reason = "consumed"
+    return gamma_arena_result.ok({ npc = npc.value, item_id = record.id, section = section })
 end
 
 function EntityAdapter:warn_wound_query_once(record, result)

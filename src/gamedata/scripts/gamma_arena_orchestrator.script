@@ -154,6 +154,31 @@ function Orchestrator:is_opponent_activation_allowed()
     return self:is_active() and self.runtime_stage == "SPAWNING"
 end
 
+function Orchestrator:start_npc_medical()
+    if self.deps.npc_medical == nil then return gamma_arena_result.ok(false) end
+    local id_ok, fight_id = pcall(function() return self.fight_spec and self.fight_spec.fight_id and self.fight_spec.fight_id() end)
+    if not id_ok or type(fight_id) ~= "string" or fight_id == "" then
+        return fail("GA_NPC_MEDICAL_FIGHT_INVALID", "NPC medical controller cannot resolve the active fight identity")
+    end
+    return call_method("GA_NPC_MEDICAL_START_FAILED", self.deps.npc_medical, "start", {
+        fight_id = fight_id,
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil
+    })
+end
+
+function Orchestrator:update_npc_medical()
+    if self.deps.npc_medical == nil or not self:is_active() or self.runtime_stage ~= "ACTIVE" then
+        return gamma_arena_result.ok(false)
+    end
+    return call_method("GA_NPC_MEDICAL_UPDATE_FAILED", self.deps.npc_medical, "update")
+end
+
+function Orchestrator:stop_npc_medical(reason)
+    if self.deps.npc_medical == nil then return gamma_arena_result.ok(false) end
+    return call_method("GA_NPC_MEDICAL_STOP_FAILED", self.deps.npc_medical, "stop", reason)
+end
+
 function Orchestrator:clock_now()
     if type(self.deps.clock) ~= "function" then return fail("GA_RUNTIME_CLOCK_FAILED", "Arena clock dependency is unavailable") end
     local called, value = pcall(self.deps.clock)
@@ -243,6 +268,8 @@ end
 
 function Orchestrator:teardown_once(reason, preserve_session)
     if self.teardown_done then return gamma_arena_result.ok(false) end
+    local medical = self:stop_npc_medical(reason or "teardown")
+    if not medical.ok then return medical end
     if type(self.deps.teardown) ~= "function" then
         self.teardown_done = true
         return gamma_arena_result.ok(true)
@@ -344,6 +371,8 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         result = fail("GA_RUNTIME_INTERNAL", "Arena runtime entered fatal routing without a structured error")
     end
     local errors = error_results(result)
+    local medical = self:stop_npc_medical("fatal")
+    if not medical.ok then append_unique_error(errors, medical) end
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then append_unique_error(errors, ui_cleanup) end
     if not intent_finalized then
@@ -726,6 +755,8 @@ function Orchestrator:observe_entity_activation()
     self.death_latched = false
     self.defeat_token = nil
     self.result_action_locked = false
+    local medical = self:start_npc_medical()
+    if not medical.ok then return medical end
     local opponents_ok, opponents = pcall(function() return self.fight_spec and self.fight_spec.opponents and self.fight_spec.opponents() end)
     local expected = opponents_ok and type(opponents) == "table" and #opponents or nil
     self:diagnostic("GA_OPPONENTS_ACTIVATED", "expected=" .. tostring(expected) .. " active=" .. tostring(#(snapshot.npcs or {})), {
@@ -744,6 +775,8 @@ function Orchestrator:show_victory()
     local now = self:clock_now()
     if not now.ok then return now end
     local duration = clock_elapsed(self.active_started, now.value)
+    local medical = self:stop_npc_medical("victory")
+    if not medical.ok then return medical end
     local terminal_summary = {}
     local summary_ok, summary_method = pcall(function() return self.deps.entities and self.deps.entities.terminal_summary end)
     if summary_ok and type(summary_method) == "function" then
@@ -830,6 +863,8 @@ function Orchestrator:queue_integrity_retry(fault)
         })
     end
     local attempt = self.integrity_retry_count + 1
+    local medical = self:stop_npc_medical("integrity_retry")
+    if not medical.ok then return medical end
     local logged = self:emit_log("GA_FIGHT_INTEGRITY_RETRY", "attempt=" .. tostring(attempt)
         .. " cause=" .. tostring(fault and fault.cause), {
             attempt = attempt,
@@ -1050,6 +1085,8 @@ function Orchestrator:update_runtime()
         local updated = call_method("GA_ENTITY_UPDATE_FAILED", entities, "update")
         if not updated.ok then return updated end
     end
+    local medical = self:update_npc_medical()
+    if not medical.ok then return medical end
     local integrity = self:reconcile_active_integrity()
     if not integrity.ok then return integrity end
     local reconciled = self:reconcile_active_victory()
@@ -1079,6 +1116,8 @@ function Orchestrator:actor_on_before_death(...)
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.death_latched then
         return gamma_arena_result.ok(false)
     end
+    local medical = self:stop_npc_medical("actor_before_death")
+    if not medical.ok then return medical end
     self.death_latched = true
     self.pending_victory = false
     local armed = call_method("GA_DEFEAT_ARM_FAILED", self.deps.store, "arm_defeat", self.deps.config, {
@@ -1099,6 +1138,8 @@ function Orchestrator:actor_on_death()
     end
 
     local errors = {}
+    local medical = self:stop_npc_medical("actor_death")
+    if not medical.ok then errors[#errors + 1] = medical.error end
     if type(self.defeat_token) == "string" and self.defeat_token ~= "" then
         local confirmed = call_method("GA_DEFEAT_CONFIRM_FAILED", self.deps.store, "confirm_defeat", self.deps.config, self.defeat_token)
         if not confirmed.ok then errors[#errors + 1] = confirmed.error end

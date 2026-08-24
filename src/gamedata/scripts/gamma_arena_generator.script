@@ -1,7 +1,56 @@
 local PRIMARY_BAND_PERCENT = 70
+local CORE_RNG_EPOCH = 6
+local MEDICAL_RNG_EPOCH = 1
 
-local function stream(request, fight_index, catalogs, tag)
-    return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ request.mode_id, request.difficulty_id, request.session_seed, fight_index, catalogs.generator_version, catalogs.revision, catalogs.layouts[request.layout_id].version, tag }))
+local function stream(request, fight_index, catalogs, epoch_or_tag, explicit_tag)
+    local epoch = explicit_tag ~= nil and epoch_or_tag or CORE_RNG_EPOCH
+    local tag = explicit_tag or epoch_or_tag
+    return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ request.mode_id, request.difficulty_id, request.session_seed, fight_index, epoch, catalogs.layouts[request.layout_id].version, tag }))
+end
+
+local function medical_stream(request, fight_index, catalogs, tag)
+    return stream(request, fight_index, catalogs, MEDICAL_RNG_EPOCH, tag)
+end
+
+local function actor_medical_streams(request, fight_index, catalogs)
+    local streams = {
+        required_category = medical_stream(request, fight_index, catalogs, "actor_medical_required_category"),
+        required_section = medical_stream(request, fight_index, catalogs, "actor_medical_required_section"),
+        optional_category = {}, optional_section = {}
+    }
+    for index = 1, 3 do
+        streams.optional_category[index] = medical_stream(request, fight_index, catalogs, "actor_medical_optional_category:" .. index)
+        streams.optional_section[index] = medical_stream(request, fight_index, catalogs, "actor_medical_optional_section:" .. index)
+    end
+    return streams
+end
+
+local function enemy_medical_streams(request, fight_index, catalogs, count)
+    local streams = { mix = medical_stream(request, fight_index, catalogs, "enemy_medical_mix"), recipients = { medkit = {}, bandage = {} } }
+    for _, section in ipairs({ "medkit", "bandage" }) do
+        for index = 1, count do
+            streams.recipients[section][index] = medical_stream(request, fight_index, catalogs, "enemy_medical_recipient:" .. section .. ":" .. index)
+        end
+    end
+    return streams
+end
+
+local function separate_legacy_bandage(loadout_value, catalogs)
+    local bandage = type(catalogs.consumables) == "table" and catalogs.consumables.bandage or nil
+    if type(loadout_value) ~= "table" or type(bandage) ~= "table" or not gamma_arena_number.is_positive_integer(loadout_value.cost)
+        or loadout_value.cost <= bandage.cost then return false end
+    loadout_value.gear_cost = loadout_value.cost - bandage.cost
+    loadout_value.medical_cost = 0
+    loadout_value.cost = loadout_value.gear_cost
+    loadout_value.consumables = {}
+    return true
+end
+
+local function apply_medical(loadout_value, medical)
+    loadout_value.consumables = {}
+    for index, section in ipairs(medical.sections) do loadout_value.consumables[index] = section end
+    loadout_value.medical_cost = medical.medical_cost
+    loadout_value.cost = loadout_value.gear_cost + loadout_value.medical_cost
 end
 
 local function pick_affordable_band(rng, values, maximum)
@@ -197,10 +246,11 @@ end
 function player_loadout(request, fight_index, catalogs, difficulty)
     local bandage = catalogs.consumables and catalogs.consumables.bandage
     if type(bandage) ~= "table" then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Dynamic catalog has no bandage") end
+    local equipment_budget = difficulty.player_gear_budget + bandage.cost
     local pairs = {}
     for _, weapon_class in ipairs(PLAYER_WEAPON_CLASSES) do
         for _, armor_class in ipairs(PLAYER_ARMOR_CLASSES) do
-            pairs[#pairs + 1] = { weapon_class = weapon_class, armor_class = armor_class, available = player_pair_has_completion(catalogs, difficulty.player_loadout_budget, weapon_class, armor_class) }
+            pairs[#pairs + 1] = { weapon_class = weapon_class, armor_class = armor_class, available = player_pair_has_completion(catalogs, equipment_budget, weapon_class, armor_class) }
         end
     end
     local selected_pair = select_player_class_pair(stream(request, fight_index, catalogs, "actor_class_pair"), difficulty, pairs)
@@ -213,7 +263,7 @@ function player_loadout(request, fight_index, catalogs, difficulty)
         if weapon.kind == pair.weapon_class and type(ammo) == "table" then
             for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
                 for _, outfit in ipairs(catalogs.outfit_list or {}) do
-                    if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then available = true; break end
+                    if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= equipment_budget then available = true; break end
                 end
                 if available then break end
             end
@@ -226,14 +276,14 @@ function player_loadout(request, fight_index, catalogs, difficulty)
     local boxes = {}
     for count = weapon.ammo_box_min, weapon.ammo_box_max do
         for _, outfit in ipairs(catalogs.outfit_list or {}) do
-            if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * count + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then boxes[#boxes + 1] = count; break end
+            if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * count + outfit.cost + bandage.cost <= equipment_budget then boxes[#boxes + 1] = count; break end
         end
     end
     if #boxes == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Selected player weapon has no affordable ammunition count") end
     local ammo_boxes = stream(request, fight_index, catalogs, "actor_ammo_boxes"):pick(boxes)
     local outfits = {}
     for _, outfit in ipairs(sorted_by_section(catalogs.outfit_list)) do
-        if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * ammo_boxes + outfit.cost + bandage.cost <= difficulty.player_loadout_budget then outfits[#outfits + 1] = outfit end
+        if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * ammo_boxes + outfit.cost + bandage.cost <= equipment_budget then outfits[#outfits + 1] = outfit end
     end
     if #outfits == 0 then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Selected player class pair has no affordable outfit") end
     local outfit = stream(request, fight_index, catalogs, "actor_outfit"):pick(outfits)
@@ -360,6 +410,9 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
     local spawn_slots = select_spawn_slots(stream(normalized_request, fight_index, catalogs, "spawn_slot"), resolved_layout, enemy_count)
     local assigned_routes = assign_routes(spawn_slots, resolved_layout.tactical_routes)
     local actor = player_loadout(normalized_request, fight_index, catalogs, difficulty); if not actor.ok then return actor end
+    if not separate_legacy_bandage(actor.value, catalogs) or actor.value.gear_cost > difficulty.player_gear_budget then return gamma_arena_result.err("GA_NO_VALID_PLAYER_LOADOUT", "Player gear does not fit the dedicated gear budget", { budget = difficulty.player_gear_budget }) end
+    local actor_medical = gamma_arena_medical_generator.generate_actor(catalogs, difficulty, actor_medical_streams(normalized_request, fight_index, catalogs)); if not actor_medical.ok then return actor_medical end
+    apply_medical(actor.value, actor_medical.value)
     local actor_knife = random_knife(stream(normalized_request, fight_index, catalogs, "actor_knife"), catalogs.knife_list); if not actor_knife.ok then return actor_knife end
     actor.value.knife = actor_knife.value
     local actor_weapon
@@ -367,7 +420,7 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
     local bonus = select_bonus_ammo(stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_category"), stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_section"), actor_weapon)
     if bonus == nil then return gamma_arena_result.err("GA_NO_VALID_PLAYER_BONUS_AMMO", "Selected player weapon has no valid bonus ammo", {}) end
     actor.value.bonus_ammo = bonus
-    local spec = { schema_version = 4, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV4 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local spec = { schema_version = 5, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV5 skirmish " .. difficulty.id .. " #" .. fight_index }
     local profile_pool = catalogs.profile_list
     if catalogs.selection_mode == "staged" and type(catalogs.faction_ids) == "table" and #catalogs.faction_ids > 0 then
         local enemy_faction = stream(normalized_request, fight_index, catalogs, "enemy_faction"):pick(catalogs.faction_ids)
@@ -384,6 +437,7 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
         if not selection then return gamma_arena_result.err(weapon_role == "primary" and "GA_NO_VALID_ENEMY_PRIMARY" or "GA_NO_VALID_ENEMY_PROFILE", "No human profile and mandatory role loadout fit enemy slot", { slot = index, budget = slot_budget, role = role }) end
         local profile, weapons = selection.profile, selection.weapons
         local gear = loadout(stream(normalized_request, fight_index, catalogs, "enemy_loadout:" .. index), catalogs, slot_budget - profile.cost, "GA_NO_VALID_ENEMY_LOADOUT", weapons); if not gear.ok then return gear end
+        if not separate_legacy_bandage(gear.value, catalogs) or profile.cost + gear.value.gear_cost > slot_budget - 1 then return gamma_arena_result.err("GA_NO_VALID_ENEMY_LOADOUT", "Enemy profile and gear do not fit the bandage-free slot budget", { slot = index, budget = slot_budget - 1 }) end
         local selected_weapon
         for _, weapon in ipairs(catalogs.weapon_list) do if weapon.section == gear.value.weapon then selected_weapon = weapon; break end end
         if selected_weapon and selected_weapon.kind == "w_sniper" then sniper_used = true end
@@ -404,13 +458,19 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
             total_cost = profile.cost + gear.value.cost
         }
     end
+    local enemy_medical = gamma_arena_medical_generator.allocate_enemies(catalogs, spec.opponents, enemy_medical_streams(normalized_request, fight_index, catalogs, enemy_count)); if not enemy_medical.ok then return enemy_medical end
+    for index, allocation in ipairs(enemy_medical.value.allocations) do
+        local opponent = spec.opponents[index]
+        apply_medical(opponent.loadout, allocation)
+        opponent.total_cost = opponent.profile_cost + opponent.loadout.cost
+    end
     return gamma_arena_result.ok(spec)
 end
 
 function stable_encode(spec)
     if type(spec) ~= "table" or type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return "invalid" end
     local function gear(value, actor)
-        local encoded = value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. "," .. table.concat(value.consumables, ",") .. "," .. value.cost
+        local encoded = value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. ",medical:" .. table.concat(value.consumables, "+") .. "," .. value.gear_cost .. "," .. value.medical_cost .. "," .. value.cost
         if actor and type(value.bonus_ammo) == "table" then
             local bonus = value.bonus_ammo
             encoded = encoded .. ",bonus:" .. bonus.section .. ":" .. bonus.requested_category .. ":" .. bonus.resolved_category .. ":" .. bonus.boxes

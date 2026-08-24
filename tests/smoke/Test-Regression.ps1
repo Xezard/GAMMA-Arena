@@ -978,10 +978,29 @@ end
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
     $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
-    $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, difficulty.player_loadout_budget)')
+    $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, equipment_budget)')
     Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script' $MaximumCostPlayer
     $MaximumCostPlayerResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MaximumCostPlayerFixture) -CaptureOutput
     Assert-True ($MaximumCostPlayerResult.ExitCode -ne 0 -and $MaximumCostPlayerResult.Output -match 'Player loadouts must use weighted class selection, not maximum-cost affordable-band selection') 'Static policy must reject maximum-cost player weapon selection through its intended policy failure.'
+
+    $MissingMandatoryHealerFixture = New-Task7Fixture 'missing-mandatory-medical-healer'
+    $MissingMandatoryHealerPath = Join-Path $MissingMandatoryHealerFixture 'src\gamedata\scripts\gamma_arena_medical_generator.script'
+    $MissingMandatoryHealerContent = Get-Content -LiteralPath $MissingMandatoryHealerPath -Raw
+    $MissingMandatoryHealer = $MissingMandatoryHealerContent.Replace('(not required or category_is_required)', '(not required or true)')
+    Assert-True ($MissingMandatoryHealer -ne $MissingMandatoryHealerContent) 'Mandatory-healer negative fixture must remove the health/rare gate exactly once.'
+    Write-FixtureFile $MissingMandatoryHealerFixture 'src\gamedata\scripts\gamma_arena_medical_generator.script' $MissingMandatoryHealer
+    $MissingMandatoryHealerResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingMandatoryHealerFixture) -CaptureOutput
+    Assert-True ($MissingMandatoryHealerResult.ExitCode -ne 0 -and $MissingMandatoryHealerResult.Output -match 'Actor medical generation must require a health/rare healer before optional picks') 'Static policy must reject removal of the mandatory actor healer rule.'
+
+    $MissingMedicalOwnershipFixture = New-Task7Fixture 'missing-physical-medical-ownership'
+    $MissingMedicalOwnershipPath = Join-Path $MissingMedicalOwnershipFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+    $MissingMedicalOwnershipContent = Get-Content -LiteralPath $MissingMedicalOwnershipPath -Raw
+    $MedicalOwnershipNeedle = 'if item_owner.value ~= self.session_id or record.tagged ~= true then return gamma_arena_result.ok(false) end'
+    $MissingMedicalOwnership = $MissingMedicalOwnershipContent.Replace($MedicalOwnershipNeedle, 'if false then return gamma_arena_result.ok(false) end')
+    Assert-True ($MissingMedicalOwnership -ne $MissingMedicalOwnershipContent) 'Physical-medical ownership negative fixture must remove the persisted-owner gate exactly once.'
+    Write-FixtureFile $MissingMedicalOwnershipFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $MissingMedicalOwnership
+    $MissingMedicalOwnershipResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingMedicalOwnershipFixture) -CaptureOutput
+    Assert-True ($MissingMedicalOwnershipResult.ExitCode -ne 0 -and $MissingMedicalOwnershipResult.Output -match 'Physical medicine consumption must prove registry, live parent/section, and persisted owner before release') 'Static policy must reject physical medicine release without persisted ownership proof.'
 
     $GenericHeavyExoFixture = New-Task7Fixture 'generic-heavy-powered-exo'
     $GenericHeavyExoPath = Join-Path $GenericHeavyExoFixture 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'

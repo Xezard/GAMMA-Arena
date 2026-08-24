@@ -30,6 +30,7 @@ local required_capabilities = {
     { name = "ini_file", present = function(p) return engine_callable_present(p.ini_file) end },
     { name = "system_ini", present = function(p) return type(p.system_ini) == "function" end },
     { name = "system_ini.r_u32", present = function(p) return system_method_present(p, "r_u32") end },
+    { name = "npc_medical_ini", present = function(p) return type(p.npc_medical_ini) == "function" end },
     { name = "alife", present = function(p) return type(p.alife) == "function" end },
     { name = "alife().get_children", present = function(p) return alife_method_present(p, "get_children") end },
     { name = "alife().object", present = function(p) return alife_method_present(p, "object") end },
@@ -71,6 +72,8 @@ local required_capabilities = {
     { name = "game_object.set_ammo_elapsed", present = function(p) return field_present(p.game_object, "set_ammo_elapsed") end },
     { name = "game_object.get_ammo_in_magazine", present = function(p) return field_present(p.game_object, "get_ammo_in_magazine") end },
     { name = "game_object.critically_wounded", present = function(p) return field_present(p.game_object, "critically_wounded") end },
+    { name = "game_object.name", present = function(p) return field_present(p.game_object, "name") end },
+    { name = "game_object.change_health", present = function(p) return field_present(p.game_object, "change_health") end },
     { name = "axr_main.config", present = function(p) return type(p.axr_main) == "table" and p.axr_main.config ~= nil end },
     { name = "safe_release_manager.release", present = function(p) return type(p.safe_release_manager) == "table" and type(p.safe_release_manager.release) == "function" end }
 }
@@ -190,6 +193,33 @@ local function validate_tactical_director(probes, layout, level_is_valid, errors
     end
 end
 
+local function validate_npc_medical_ai(probes, errors)
+    if type(probes.npc_medical_ini) ~= "function" then return end
+    local opened, config = safe_call(probes.npc_medical_ini)
+    if not opened or config == nil then
+        add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit config is unavailable")
+        return
+    end
+    if not method_present(config, "line_exist") or not method_present(config, "r_string_ex") then
+        add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit config lacks physical-item accessors")
+        return
+    end
+    for _, key in ipairs({ "medkits", "bandages" }) do
+        local line_ok, exists = safe_call(config.line_exist, config, "plugin", key)
+        if not line_ok then
+            add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit physical-item lookup failed", { key = key })
+        elseif exists == true then
+            local value_ok, value = safe_call(config.r_string_ex, config, "plugin", key)
+            local normalized = value_ok and type(value) == "string" and string.gsub(value, "^%s*(.-)%s*$", "%1") or nil
+            if not value_ok then
+                add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit physical-item list could not be read", { key = key })
+            elseif normalized ~= nil and normalized ~= "" then
+                add_error(errors, "GA_NPC_MEDICAL_AI_CONFLICT", "Stock NPC medical AI also consumes physical Arena medicine", { key = key, value = normalized })
+            end
+        end
+    end
+end
+
 local function resolve_path(probes, path, errors, resolved)
     local exists_ok, exists = safe_call(probes.level.patrol_path_exists, path)
     if not exists_ok or exists ~= true then
@@ -251,6 +281,10 @@ local function ordered_sections(catalogs)
     for _, item in pairs(catalogs.consumables or {}) do consumables[#consumables + 1] = item.section end
     table.sort(consumables)
     for _, section in ipairs(consumables) do append_unique(result, seen, section, "item") end
+    local medical = {}
+    for _, item in pairs(catalogs.medical_items or {}) do medical[#medical + 1] = item.section end
+    table.sort(medical)
+    for _, section in ipairs(medical) do append_unique(result, seen, section, "medical") end
     return result
 end
 
@@ -464,6 +498,7 @@ local function preflight_impl(probes)
     end
 
     validate_tactical_director(probes, layout, level_is_valid, errors)
+    validate_npc_medical_ai(probes, errors)
 
     if system ~= nil and type(catalogs) == "table" then validate_sections(system, catalogs, errors) end
     if #errors > 0 then

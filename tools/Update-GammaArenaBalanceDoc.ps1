@@ -146,6 +146,12 @@ function Get-RequiredLuaInt([string]$Path, [string]$Symbol) {
     return [int]::Parse($Match.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Get-RequiredLuaNumberText([string]$Path, [string]$Symbol) {
+    $Pattern = '(?m)^local\s+' + [regex]::Escape($Symbol) + '\s*=\s*(\d+(?:\.\d+)?)\s*$'
+    $Match = Get-RequiredLuaMatch $Path $Pattern $Symbol
+    return $Match.Groups[1].Value
+}
+
 function Get-RequiredLuaTable([string]$Path, [string]$Symbol, [string]$ValuePattern) {
     $TablePattern = 'local\s+' + [regex]::Escape($Symbol) + '\s*=\s*\{(?<body>.*?)\r?\n\}'
     $Table = Get-RequiredLuaMatch $Path $TablePattern $Symbol
@@ -294,6 +300,8 @@ $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_cat
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
+$MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
+$NpcMedicalScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
 $TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
 
 $Catalog = Read-GammaArenaLtx $CatalogPath
@@ -316,6 +324,12 @@ $ArmorWeightKeys = [ordered]@{
     heavy = 'armor_weight_heavy'
     powered_exo = 'armor_weight_powered_exo'
 }
+$MedicalWeightKeys = [ordered]@{
+    bleed = 'medical_weight_bleed'
+    health = 'medical_weight_health'
+    boost = 'medical_weight_boost'
+    rare = 'medical_weight_rare'
+}
 
 $DifficultyModel = New-Object System.Collections.Generic.List[object]
 foreach ($DifficultyId in $DifficultyIds) {
@@ -334,13 +348,23 @@ foreach ($DifficultyId in $DifficultyIds) {
     if ((($ArmorWeights.Values | Measure-Object -Sum).Sum) -ne 100) {
         throw "Armor weights must total 100: $Section"
     }
+    $MedicalWeights = [ordered]@{}
+    foreach ($Category in $MedicalWeightKeys.Keys) {
+        $MedicalWeights[$Category] = Get-RequiredLtxInt $Difficulties $Section $MedicalWeightKeys[$Category] $DifficultyPath
+    }
+    if ((($MedicalWeights.Values | Measure-Object -Sum).Sum) -ne 100) {
+        throw "Medical weights must total 100: $Section"
+    }
     $DifficultyModel.Add([pscustomobject]@{
         id = $DifficultyId
+        tier = Get-RequiredLtxInt $Difficulties $Section 'tier' $DifficultyPath
         enemy_min = Get-RequiredLtxInt $Difficulties $Section 'enemy_min' $DifficultyPath
         enemy_max = Get-RequiredLtxInt $Difficulties $Section 'enemy_max' $DifficultyPath
         enemy_total_budget = Get-RequiredLtxInt $Difficulties $Section 'enemy_total_budget' $DifficultyPath
-        player_loadout_budget = Get-RequiredLtxInt $Difficulties $Section 'player_loadout_budget' $DifficultyPath
+        player_gear_budget = Get-RequiredLtxInt $Difficulties $Section 'player_gear_budget' $DifficultyPath
+        player_medical_budget = Get-RequiredLtxInt $Difficulties $Section 'player_medical_budget' $DifficultyPath
         primary_share_percent = Get-RequiredLtxInt $Difficulties $Section 'primary_share_percent' $DifficultyPath
+        medical_weights = $MedicalWeights
         weapon_weights = $WeaponWeights
         armor_weights = $ArmorWeights
     }) | Out-Null
@@ -415,6 +439,20 @@ foreach ($Id in Get-LtxCsv $Catalog 'consumables' 'ids' $CatalogPath) {
 $Bandage = @($FallbackConsumables | Where-Object { $_.id -eq 'bandage' })
 if ($Bandage.Count -ne 1) { throw 'Fallback catalog must contain exactly one bandage' }
 $BandageCost = $Bandage[0].cost
+$MedicalItems = New-Object System.Collections.Generic.List[object]
+foreach ($Id in Get-LtxCsv $Catalog 'medical_items' 'ids' $CatalogPath) {
+    $Section = 'medical_' + $Id
+    $MedicalItems.Add([pscustomobject]@{
+        id = $Id
+        section = Get-RequiredLtxValue $Catalog $Section 'section' $CatalogPath
+        category = Get-RequiredLtxValue $Catalog $Section 'category' $CatalogPath
+        actor_cost = Get-RequiredLtxInt $Catalog $Section 'actor_cost' $CatalogPath
+        npc_cost = Get-RequiredLtxInt $Catalog $Section 'npc_cost' $CatalogPath
+        min_tier = Get-RequiredLtxInt $Catalog $Section 'min_tier' $CatalogPath
+        max_count = Get-RequiredLtxInt $Catalog $Section 'max_count' $CatalogPath
+    }) | Out-Null
+}
+if ($MedicalItems.Count -ne 16) { throw 'Curated medical catalog must contain exactly 16 items' }
 $KnifeIds = @(Get-LtxCsv $Catalog 'knives' 'ids' $CatalogPath)
 if ($KnifeIds.Count -ne 9) { throw 'Fallback knife catalog must contain exactly 9 ids' }
 $FallbackKnives = New-Object System.Collections.Generic.List[object]
@@ -457,6 +495,25 @@ $ProfileFactions = Get-RequiredLuaQuotedArray $CatalogScriptPath 'PROFILE_FACTIO
 $PoweredExoChargeAssignment = Get-RequiredLuaMatch $BootstrapScriptPath 'first\.value\.power\s*=\s*100' 'powered exo charge assignment'
 $PoweredExoChargeWrite = Get-RequiredLuaMatch $BootstrapScriptPath 'GA_ACTOR_EXO_WRITE_FAILED"\s*,\s*ports\.exo_set_data\s*,\s*outfit\.value\.record\.id\s*,\s*first\.value' 'powered exo charge write'
 $PoweredExoChargeVerification = Get-RequiredLuaMatch $BootstrapScriptPath 'verified\.value\.power\s*~=\s*100' 'powered exo charge verification'
+$CoreRngEpoch = Get-RequiredLuaInt $GeneratorScriptPath 'CORE_RNG_EPOCH'
+$MedicalRngEpoch = Get-RequiredLuaInt $GeneratorScriptPath 'MEDICAL_RNG_EPOCH'
+$ActorMedicalMaxItems = Get-RequiredLuaInt $MedicalGeneratorScriptPath 'ACTOR_MAX_ITEMS'
+$NpcMedicalEpoch = Get-RequiredLuaInt $NpcMedicalScriptPath 'MEDICAL_EPOCH'
+$ReconcileInterval = Get-RequiredLuaInt $NpcMedicalScriptPath 'RECONCILE_INTERVAL_MS'
+$HealthThreshold = Get-RequiredLuaNumberText $NpcMedicalScriptPath 'HEALTH_THRESHOLD'
+$BleedingThreshold = Get-RequiredLuaNumberText $NpcMedicalScriptPath 'BLEEDING_THRESHOLD'
+$MedkitPulses = Get-RequiredLuaInt $NpcMedicalScriptPath 'MEDKIT_PULSES'
+$MedkitHealthPerPulse = Get-RequiredLuaNumberText $NpcMedicalScriptPath 'MEDKIT_HEALTH_PER_PULSE'
+$MedkitBleedingCap = Get-RequiredLuaNumberText $NpcMedicalScriptPath 'MEDKIT_BLEEDING_CAP'
+$BandageBleedingCap = Get-RequiredLuaNumberText $NpcMedicalScriptPath 'BANDAGE_BLEEDING_CAP'
+$EnemyMedicalBudgetRule = Get-RequiredLuaMatch $MedicalGeneratorScriptPath 'medical_cost\s*=\s*count' 'enemy medical team budget'
+$DelayRanges = [ordered]@{}
+foreach ($Profile in @('veteran', 'experienced', 'trainee')) {
+    $Delay = Get-RequiredLuaMatch $NpcMedicalScriptPath ('string\.find\(profile,\s*"_' + $Profile + '".*?then\s+return\s+(\d+)\s*,\s*(\d+)\s+end') "$Profile medical delay"
+    $DelayRanges[$Profile] = @([int]$Delay.Groups[1].Value, [int]$Delay.Groups[2].Value)
+}
+$NoviceDelay = Get-RequiredLuaMatch $NpcMedicalScriptPath 'return\s+(\d+)\s*,\s*(\d+)\s*\r?\nend\s*\r?\n\s*local function available_items' 'novice medical delay'
+$DelayRanges['novice'] = @([int]$NoviceDelay.Groups[1].Value, [int]$NoviceDelay.Groups[2].Value)
 
 function Test-FallbackPairAffordable($Difficulty, [string]$WeaponClass, [string]$ArmorClass) {
     foreach ($Weapon in $FallbackWeapons) {
@@ -466,7 +523,7 @@ function Test-FallbackPairAffordable($Difficulty, [string]$WeaponClass, [string]
             if ($Outfit.armor_class -ne $ArmorClass) { continue }
             for ($Boxes = $Weapon.ammo_box_min; $Boxes -le $Weapon.ammo_box_max; $Boxes++) {
                 $Cost = $Weapon.cost + ($Ammo.cost * $Boxes) + $Outfit.cost + $BandageCost
-                if ($Cost -le $Difficulty.player_loadout_budget) { return $true }
+                if ($Cost -le ($Difficulty.player_gear_budget + $BandageCost)) { return $true }
             }
         }
     }
@@ -484,10 +541,10 @@ $Blocks['state-passport'] = @"
 "@
 
 $DifficultyLines = New-Object System.Collections.Generic.List[string]
-$DifficultyLines.Add('| difficulty | enemy_count | enemy_budget | actor_budget | primary_share |') | Out-Null
-$DifficultyLines.Add('|---|---:|---:|---:|---:|') | Out-Null
+$DifficultyLines.Add('| difficulty | enemy_count | enemy_budget | actor_gear_budget | actor_medical_budget | primary_share |') | Out-Null
+$DifficultyLines.Add('|---|---:|---:|---:|---:|---:|') | Out-Null
 foreach ($Difficulty in $DifficultyModel) {
-    $DifficultyLines.Add("| $($Difficulty.id) | $($Difficulty.enemy_min)-$($Difficulty.enemy_max) | $($Difficulty.enemy_total_budget) | $($Difficulty.player_loadout_budget) | $($Difficulty.primary_share_percent)% |") | Out-Null
+    $DifficultyLines.Add("| $($Difficulty.id) | $($Difficulty.enemy_min)-$($Difficulty.enemy_max) | $($Difficulty.enemy_total_budget) | $($Difficulty.player_gear_budget) | $($Difficulty.player_medical_budget) | $($Difficulty.primary_share_percent)% |") | Out-Null
 }
 $DifficultyLines.Add('') | Out-Null
 $DifficultyLines.Add('| weapon_class | rookie | stalker | veteran | master |') | Out-Null
@@ -511,8 +568,51 @@ foreach ($Class in $ArmorWeightKeys.Keys) {
 }
 $Blocks['difficulty-dashboard'] = Join-MarkdownLines $DifficultyLines
 
+$MedicalLines = New-Object System.Collections.Generic.List[string]
+$MedicalLines.Add('| difficulty | tier | medical_budget | bleed | health | boost | rare |') | Out-Null
+$MedicalLines.Add('|---|---:|---:|---:|---:|---:|---:|') | Out-Null
+foreach ($Difficulty in $DifficultyModel) {
+    $MedicalLines.Add("| $($Difficulty.id) | $($Difficulty.tier) | $($Difficulty.player_medical_budget) | $($Difficulty.medical_weights.bleed)% | $($Difficulty.medical_weights.health)% | $($Difficulty.medical_weights.boost)% | $($Difficulty.medical_weights.rare)% |") | Out-Null
+}
+$MedicalLines.Add('') | Out-Null
+$MedicalLines.Add('| difficulty | budget policy | mandatory items | optional slots | item cap |') | Out-Null
+$MedicalLines.Add('|---|---|---|---:|---:|') | Out-Null
+foreach ($Difficulty in $DifficultyModel) {
+    $MedicalLines.Add("| $($Difficulty.id) | independent $($Difficulty.player_medical_budget) points | bandage + health/rare healer | 3 | $ActorMedicalMaxItems |") | Out-Null
+}
+$MedicalLines.Add('') | Out-Null
+$MedicalLines.Add('| section | category | actor_cost | npc_cost | min_tier | max_count |') | Out-Null
+$MedicalLines.Add('|---|---|---:|---:|---:|---:|') | Out-Null
+foreach ($Item in $MedicalItems) {
+    $MedicalLines.Add("| $($Item.section) | $($Item.category) | $($Item.actor_cost) | $($Item.npc_cost) | $($Item.min_tier) | $($Item.max_count) |") | Out-Null
+}
+$Blocks['medical-loadouts'] = Join-MarkdownLines $MedicalLines
+
+$NpcMedicalLines = New-Object System.Collections.Generic.List[string]
+$NpcMedicalLines.Add('| runtime policy | value |') | Out-Null
+$NpcMedicalLines.Add('|---|---|') | Out-Null
+$NpcMedicalLines.Add("| reconciliation_period | $ReconcileInterval ms |") | Out-Null
+$NpcMedicalLines.Add("| core_rng_epoch | $CoreRngEpoch |") | Out-Null
+$NpcMedicalLines.Add("| loadout_medical_rng_epoch | $MedicalRngEpoch |") | Out-Null
+$NpcMedicalLines.Add("| npc_action_rng_epoch | $NpcMedicalEpoch |") | Out-Null
+$NpcMedicalLines.Add("| health_trigger | < $HealthThreshold |") | Out-Null
+$NpcMedicalLines.Add("| bleed_trigger | > $BleedingThreshold |") | Out-Null
+$NpcMedicalLines.Add("| medkit_pulses | $MedkitPulses |") | Out-Null
+$NpcMedicalLines.Add("| medkit_health_per_pulse | +$MedkitHealthPerPulse |") | Out-Null
+$NpcMedicalLines.Add("| medkit_bleeding_cap | $MedkitBleedingCap |") | Out-Null
+$NpcMedicalLines.Add("| bandage_bleeding_cap | $BandageBleedingCap |") | Out-Null
+$NpcMedicalLines.Add("| actor_item_cap | $ActorMedicalMaxItems |") | Out-Null
+$NpcMedicalLines.Add('| enemy_team_medical_budget | opponent_count points |') | Out-Null
+$NpcMedicalLines.Add('') | Out-Null
+$NpcMedicalLines.Add('| NPC rank | deterministic action delay |') | Out-Null
+$NpcMedicalLines.Add('|---|---:|') | Out-Null
+foreach ($Profile in @('novice', 'trainee', 'experienced', 'veteran')) {
+    $NpcMedicalLines.Add("| $Profile | $($DelayRanges[$Profile][0])-$($DelayRanges[$Profile][1]) ms |") | Out-Null
+}
+$Blocks['npc-medical-runtime'] = Join-MarkdownLines $NpcMedicalLines
+
 $ActorLines = New-Object System.Collections.Generic.List[string]
-$ActorLines.Add('`loadout_cost = weapon + ammo_cost * ammo_boxes + outfit + bandage`') | Out-Null
+$ActorLines.Add('`gear_cost = weapon + ammo_cost * ammo_boxes + outfit`; medicine uses its own budget') | Out-Null
 $ActorLines.Add('') | Out-Null
 $ActorLines.Add('| installed weapon kind | Arena cost |') | Out-Null
 $ActorLines.Add('|---|---:|') | Out-Null
@@ -582,7 +682,7 @@ $ActorLines.Add('') | Out-Null
 $ActorLines.Add('| extra item | Arena cost | selection |') | Out-Null
 $ActorLines.Add('|---|---:|---|') | Out-Null
 foreach ($Consumable in $FallbackConsumables) {
-    $Selection = if ($Consumable.id -eq 'bandage') { 'mandatory: one per loadout' } else { 'catalogued, not selected' }
+    $Selection = if ($Consumable.id -eq 'bandage') { 'medical pool: mandatory actor baseline; NPC-capable' } else { 'medical pool: NPC-capable' }
     $ActorLines.Add("| $($Consumable.section) | $($Consumable.cost) | $Selection |") | Out-Null
 }
 $ActorLines.Add("| knives | $($FallbackKnives.Count) | no budget cost; uniform section pick |") | Out-Null
@@ -627,7 +727,7 @@ $OpponentLines.Add("| selection_band_threshold | ceil(maximum * $PrimaryBandPerc
 $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
 $OpponentLines.Add("| supported_factions | $(@($ProfileFactions) -join ', ') |") | Out-Null
-$OpponentLines.Add('| opponent_total_cost | profile + weapon + ammo boxes + outfit + bandage |') | Out-Null
+$OpponentLines.Add('| opponent_total_cost | profile + gear + assigned medicine |') | Out-Null
 $Blocks['opponent-budgets'] = Join-MarkdownLines $OpponentLines
 
 $ArenaLines = New-Object System.Collections.Generic.List[string]
@@ -710,7 +810,7 @@ foreach ($Difficulty in $DifficultyModel) {
 for ($Index = 1; $Index -lt $DifficultyModel.Count; $Index++) {
     $Previous = $DifficultyModel[$Index - 1]
     $CurrentDifficulty = $DifficultyModel[$Index]
-    $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) envelope delta | enemy_budget +$($CurrentDifficulty.enemy_total_budget - $Previous.enemy_total_budget); actor_budget +$($CurrentDifficulty.player_loadout_budget - $Previous.player_loadout_budget); enemy_max +$($CurrentDifficulty.enemy_max - $Previous.enemy_max); primary_share +$($CurrentDifficulty.primary_share_percent - $Previous.primary_share_percent) pp |") | Out-Null
+    $DiagnosticLines.Add("| derived | $($Previous.id) -> $($CurrentDifficulty.id) envelope delta | enemy_budget +$($CurrentDifficulty.enemy_total_budget - $Previous.enemy_total_budget); actor_gear +$($CurrentDifficulty.player_gear_budget - $Previous.player_gear_budget); actor_medical +$($CurrentDifficulty.player_medical_budget - $Previous.player_medical_budget); enemy_max +$($CurrentDifficulty.enemy_max - $Previous.enemy_max); primary_share +$($CurrentDifficulty.primary_share_percent - $Previous.primary_share_percent) pp |") | Out-Null
 
     $LargestWeaponClass = $null
     $LargestWeaponDelta = 0
@@ -750,6 +850,8 @@ $SourceLines.Add('| player class weights and enemy envelopes | `gamma_arena_diff
 $SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | Out-Null
 $SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
 $SourceLines.Add('| actor/opponent selection and budget allocation | `gamma_arena_generator.script` |') | Out-Null
+$SourceLines.Add('| actor and enemy medical allocation | `gamma_arena_medical_generator.script` |') | Out-Null
+$SourceLines.Add('| physical NPC medicine use | `gamma_arena_npc_medical.script` |') | Out-Null
 $SourceLines.Add('| faction profiles and effective weapon pools | `gamma_arena_catalog.script` |') | Out-Null
 $SourceLines.Add('| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |') | Out-Null
 $SourceLines.Add('| spawn capacity and separation | `gamma_arena_layouts.ltx` |') | Out-Null

@@ -6,6 +6,9 @@ All notable changes to Gamma Arena are documented in this file.
 
 - Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
 - Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
+- Added deterministic budgeted medical loadouts for the actor and opponents, with a curated 16-item combat pool and separate gear/medical costs in FightSpec v5.
+- Added physical opponent use of assigned bandages and medkits with rank-based reaction delays, bounded healing, ownership-safe consumption, and stock-AI conflict detection.
+- Published catalog/difficulty identities 6/7/7 and 4/5, generated medical balance tables, and the independent FightSpec v5 golden oracle.
 - Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.

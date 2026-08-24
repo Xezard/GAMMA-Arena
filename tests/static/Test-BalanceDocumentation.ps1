@@ -40,6 +40,8 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_medical_generator.script',
+        'src\gamedata\scripts\gamma_arena_npc_medical.script',
         'src\gamedata\scripts\gamma_arena_tactical_director.script'
     )) {
         $Target = Join-Path $FixtureRoot $RelativePath
@@ -56,6 +58,12 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: difficulty-dashboard -->
 <!-- END GENERATED: difficulty-dashboard -->
+
+<!-- BEGIN GENERATED: medical-loadouts -->
+<!-- END GENERATED: medical-loadouts -->
+
+<!-- BEGIN GENERATED: npc-medical-runtime -->
+<!-- END GENERATED: npc-medical-runtime -->
 
 <!-- BEGIN GENERATED: actor-equipment -->
 <!-- END GENERATED: actor-equipment -->
@@ -129,11 +137,13 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $ExpectedTableRows = [ordered]@{
         'state-passport' = 6
         'difficulty-dashboard' = 20
+        'medical-loadouts' = 30
+        'npc-medical-runtime' = 20
         'actor-equipment' = 66
         'opponent-budgets' = 28
         'arena-tactics' = 33
         'balance-diagnostics' = 21
-        'source-map' = 11
+        'source-map' = 13
     }
     foreach ($BlockName in $ExpectedTableRows.Keys) {
         $Block = Get-TestGeneratedBlock $DocumentText $BlockName
@@ -144,7 +154,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     }
 
     $DifficultyBlock = Get-TestGeneratedBlock $DocumentText 'difficulty-dashboard'
-    $DifficultyRows = @([regex]::Matches($DifficultyBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+-\d+) \| (\d+) \| (\d+) \| (\d+)% \|$'))
+    $DifficultyRows = @([regex]::Matches($DifficultyBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+-\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+)% \|$'))
     if ($DifficultyRows.Count -ne $DifficultyIds.Count) { throw 'Difficulty summary must contain exactly four data rows' }
     $WeightRows = @([regex]::Matches($DifficultyBlock, '(?m)^\| (w_pistol|w_smg|w_shotgun|w_rifle|w_sniper|light|medium|scientific|heavy|powered_exo) \| ([^|]+) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$'))
     if ($WeightRows.Count -ne ($WeaponClasses.Count + $ArmorClasses.Count)) { throw 'Difficulty weight matrices have unexpected cardinality' }
@@ -156,7 +166,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     for ($DifficultyIndex = 0; $DifficultyIndex -lt $DifficultyIds.Count; $DifficultyIndex++) {
         $DifficultyId = $DifficultyIds[$DifficultyIndex]
         $Section = 'ga_difficulty_' + $DifficultyId
-        $ExpectedSummary = "| $DifficultyId | $(Get-TestLtxValue $DifficultyText $Section 'enemy_min')-$(Get-TestLtxValue $DifficultyText $Section 'enemy_max') | $(Get-TestLtxValue $DifficultyText $Section 'enemy_total_budget') | $(Get-TestLtxValue $DifficultyText $Section 'player_loadout_budget') | $(Get-TestLtxValue $DifficultyText $Section 'primary_share_percent')% |"
+        $ExpectedSummary = "| $DifficultyId | $(Get-TestLtxValue $DifficultyText $Section 'enemy_min')-$(Get-TestLtxValue $DifficultyText $Section 'enemy_max') | $(Get-TestLtxValue $DifficultyText $Section 'enemy_total_budget') | $(Get-TestLtxValue $DifficultyText $Section 'player_gear_budget') | $(Get-TestLtxValue $DifficultyText $Section 'player_medical_budget') | $(Get-TestLtxValue $DifficultyText $Section 'primary_share_percent')% |"
         if (@($DifficultyRows | Where-Object { $_.Value -ceq $ExpectedSummary }).Count -ne 1) {
             throw "Difficulty summary differs: $DifficultyId"
         }
@@ -247,7 +257,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $ActorCountRows = @([regex]::Matches($ActorBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+) / 25 \| (\d+) / 25 \|$'))
     if ($ActorCountRows.Count -ne $DifficultyIds.Count) { throw 'Fallback pair totals have unexpected cardinality' }
     foreach ($DifficultyId in $DifficultyIds) {
-        $ActorBudget = [int](Get-TestLtxValue $DifficultyText ('ga_difficulty_' + $DifficultyId) 'player_loadout_budget')
+        $ActorBudget = [int](Get-TestLtxValue $DifficultyText ('ga_difficulty_' + $DifficultyId) 'player_gear_budget') + $BandageCost
         $TotalAffordable = 0
         foreach ($WeaponClass in $WeaponClasses) {
             $Affordable = New-Object System.Collections.Generic.List[string]
@@ -326,12 +336,23 @@ try {
     }
     & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
-        '| Catalog | schema 5 / revision 6 / generator 6 |',
-        '| Difficulties | schema 3 / revision 4 |',
+        '| Catalog | schema 6 / revision 7 / generator 7 |',
+        '| Difficulties | schema 4 / revision 5 |',
         '| Layout | schema 2 / revision 2 |',
         '| Tactics | schema 1 / revision 1 |',
-        '| rookie | 2-3 | 25 | 8 | 50% |',
-        '| master | 7-10 | 100 | 16 | 80% |',
+        '| rookie | 2-3 | 25 | 7 | 4 | 50% |',
+        '| master | 7-10 | 100 | 15 | 8 | 80% |',
+        '| bandage | bleed | 1 | 1 | 1 | 2 |',
+        '| rebirth | rare | 7 | 0 | 4 | 1 |',
+        '| rookie | 1 | 4 | 35% | 50% | 15% | 0% |',
+        '| reconciliation_period | 250 ms |',
+        '| health_trigger | < 0.60 |',
+        '| bleed_trigger | > 0.15 |',
+        '| core_rng_epoch | 6 |',
+        '| loadout_medical_rng_epoch | 1 |',
+        '| npc_action_rng_epoch | 1 |',
+        '| novice | 2000-2500 ms |',
+        '| veteran | 500-1000 ms |',
         '| w_pistol | 50% #####..... | 25% ###....... | 10% #......... | 5% #......... |',
         '| powered_exo | 0% .......... | 1% .......... | 5% #......... | 5% #......... |',
         '| rookie | 4 / 25 | 21 / 25 |',
@@ -341,7 +362,7 @@ try {
         '| o_heavy | 5 | heavy; powered_exo when exo/proto |',
         '| ammo_5.45x39_fmj | 2 | fallback |',
         '| dynamic discovered ammo | 1 | runtime discovery |',
-        '| medkit | 2 | catalogued, not selected |',
+        '| medkit | 2 | medical pool: NPC-capable |',
         '| knives | 9 | no budget cost; uniform section pick |',
         '| knife sections | - | wpn_knife, wpn_knife2, wpn_knife3, wpn_knife4, wpn_knife5, wpn_knife6, wpn_knife7, wpn_knife8, wpn_knife9 |',
         '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
@@ -376,7 +397,7 @@ try {
 
     & $ToolPath -RepoRoot $Fixture -Verify
 
-    $Stale = $Second.Replace('Catalog | schema 5 /', 'Catalog | schema 999 /')
+    $Stale = $Second.Replace('Catalog | schema 6 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
     $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
     if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
@@ -401,6 +422,10 @@ try {
 <!-- BEGIN GENERATED: state-passport -->
 <!-- END GENERATED: state-passport -->
 <!-- END GENERATED: difficulty-dashboard -->
+<!-- BEGIN GENERATED: medical-loadouts -->
+<!-- END GENERATED: medical-loadouts -->
+<!-- BEGIN GENERATED: npc-medical-runtime -->
+<!-- END GENERATED: npc-medical-runtime -->
 <!-- BEGIN GENERATED: actor-equipment -->
 <!-- END GENERATED: actor-equipment -->
 <!-- BEGIN GENERATED: opponent-budgets -->

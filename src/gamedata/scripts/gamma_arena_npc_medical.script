@@ -1,0 +1,252 @@
+local NpcMedical = {}
+NpcMedical.__index = NpcMedical
+
+local UINT32_MOD = 4294967296
+local RECONCILE_INTERVAL_MS = 250
+local MEDICAL_EPOCH = 1
+local HEALTH_THRESHOLD = 0.60
+local BLEEDING_THRESHOLD = 0.15
+local MEDKIT_PULSES = 13
+local MEDKIT_HEALTH_PER_PULSE = 0.05
+local MEDKIT_BLEEDING_CAP = 0.01
+local BANDAGE_BLEEDING_CAP = 0.07
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value)
+end
+
+local function finite_unit(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value >= 0 and value <= 1
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required NPC medical dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "NPC medical dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+local function delay_range(profile)
+    if type(profile) == "string" and string.find(profile, "_veteran", 1, true) then return 500, 1000 end
+    if type(profile) == "string" and string.find(profile, "_experienced", 1, true) then return 1000, 1500 end
+    if type(profile) == "string" and string.find(profile, "_trainee", 1, true) then return 1500, 2000 end
+    return 2000, 2500
+end
+
+local function available_items(snapshot)
+    local values = {}
+    for _, item in ipairs(snapshot.items or {}) do
+        if item.released ~= true and item.source == "assigned" and item.role == "consumable"
+            and (item.section == "medkit" or item.section == "bandage") then
+            values[item.parent_id] = values[item.parent_id] or {}
+            values[item.parent_id][item.section] = true
+        end
+    end
+    return values
+end
+
+function NpcMedical:__init(deps)
+    self.deps = deps
+    self.active = false
+    self.fight_id = nil
+    self.last_reconcile_at = nil
+    self.state_by_slot = {}
+end
+
+function NpcMedical:clock()
+    local result = result_call("GA_NPC_MEDICAL_CLOCK_FAILED", self.deps.clock)
+    if not result.ok then return result end
+    if not finite_integer(result.value) or result.value < 0 or result.value >= UINT32_MOD then
+        return fail("GA_NPC_MEDICAL_CLOCK_FAILED", "NPC medical clock must return uint32 milliseconds")
+    end
+    return result
+end
+
+function NpcMedical:log(code, message, context)
+    if type(self.deps.log) ~= "function" then return end
+    pcall(self.deps.log, code, message, context or {})
+end
+
+function NpcMedical:cancel(state, reason, context)
+    if state.pending == nil and state.pulses == nil then return end
+    local kind = state.pending and state.pending.kind or "medkit"
+    state.pending = nil
+    state.pulses = nil
+    self:log("GA_NPC_MEDICAL_CANCELLED", "Arena NPC medical action cancelled", {
+        fight_id = self.fight_id, slot = state.slot, npc_id = state.npc_id, kind = kind,
+        reason = reason, context = context
+    })
+end
+
+function NpcMedical:start(fight)
+    if type(fight) ~= "table" or type(fight.fight_id) ~= "string" or fight.fight_id == "" then
+        return fail("GA_NPC_MEDICAL_FIGHT_INVALID", "NPC medical controller requires an active fight identity")
+    end
+    if self.active then self:stop("restarted") end
+    self.active = true
+    self.fight_id = fight.fight_id
+    self.last_reconcile_at = nil
+    self.state_by_slot = {}
+    return gamma_arena_result.ok(true)
+end
+
+function NpcMedical:stop(reason)
+    if not self.active then return gamma_arena_result.ok(false) end
+    for _, state in pairs(self.state_by_slot) do self:cancel(state, reason or "stopped") end
+    self.active = false
+    self.fight_id = nil
+    self.last_reconcile_at = nil
+    self.state_by_slot = {}
+    return gamma_arena_result.ok(true)
+end
+
+function NpcMedical:status(state)
+    local status = result_call("GA_NPC_MEDICAL_STATUS_FAILED", self.deps.status, state.npc_id)
+    if not status.ok then return status end
+    local value = status.value
+    if type(value) ~= "table" or value.npc == nil or type(value.alive) ~= "boolean"
+        or type(value.combat_capable) ~= "boolean" or not finite_unit(value.health) or not finite_unit(value.bleeding) then
+        return fail("GA_NPC_MEDICAL_STATUS_FAILED", "NPC medical status is malformed", { slot = state.slot, npc_id = state.npc_id })
+    end
+    return status
+end
+
+function NpcMedical:schedule(state, kind, profile, now)
+    state.action_ordinal = state.action_ordinal + 1
+    local minimum, maximum = delay_range(profile)
+    local rng = gamma_arena_rng.new(gamma_arena_rng.derive_seed({ self.fight_id, state.slot, state.action_ordinal, kind, MEDICAL_EPOCH }))
+    local delay = rng:next_int(minimum, maximum)
+    if type(delay) ~= "number" then return fail("GA_NPC_MEDICAL_DELAY_FAILED", "NPC medical delay generation failed", { slot = state.slot, kind = kind }) end
+    state.pending = { kind = kind, started_at = now, delay_ms = delay }
+    self:log("GA_NPC_MEDICAL_SCHEDULED", "Arena NPC medical action scheduled", {
+        fight_id = self.fight_id, slot = state.slot, npc_id = state.npc_id,
+        kind = kind, action_ordinal = state.action_ordinal, delay_ms = delay
+    })
+    return gamma_arena_result.ok(true)
+end
+
+function NpcMedical:apply_pulse(state, now)
+    local pulse = state.pulses
+    if pulse == nil or elapsed_ms(pulse.last_at, now) < RECONCILE_INTERVAL_MS then return gamma_arena_result.ok(false) end
+    local status = self:status(state)
+    if not status.ok or not status.value.alive or not status.value.combat_capable then
+        self:cancel(state, status.ok and "participant_incapable" or "status_failed", status.ok and nil or status.error)
+        return gamma_arena_result.ok(false)
+    end
+    local health_delta = math.min(MEDKIT_HEALTH_PER_PULSE, math.max(0, 1 - status.value.health))
+    local healed = result_call("GA_NPC_MEDICAL_EFFECT_FAILED", self.deps.change_health, status.value.npc, health_delta)
+    if not healed.ok then self:cancel(state, "health_effect_failed", healed.error); return gamma_arena_result.ok(false) end
+    local bled = result_call("GA_NPC_MEDICAL_EFFECT_FAILED", self.deps.cap_bleeding, status.value.npc, MEDKIT_BLEEDING_CAP)
+    if not bled.ok then self:cancel(state, "bleeding_effect_failed", bled.error); return gamma_arena_result.ok(false) end
+    pulse.remaining = pulse.remaining - 1
+    pulse.last_at = now
+    if pulse.remaining == 0 then
+        state.pulses = nil
+        self:log("GA_NPC_MEDICAL_COMPLETED", "Arena NPC medical action completed", {
+            fight_id = self.fight_id, slot = state.slot, npc_id = state.npc_id, kind = "medkit"
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function NpcMedical:execute_pending(state, now)
+    local pending = state.pending
+    if pending == nil or elapsed_ms(pending.started_at, now) < pending.delay_ms then return gamma_arena_result.ok(false) end
+    local status = self:status(state)
+    if not status.ok or not status.value.alive or not status.value.combat_capable then
+        self:cancel(state, status.ok and "participant_incapable" or "status_failed", status.ok and nil or status.error)
+        return gamma_arena_result.ok(false)
+    end
+    if (pending.kind == "medkit" and status.value.health >= HEALTH_THRESHOLD)
+        or (pending.kind == "bandage" and status.value.bleeding <= BLEEDING_THRESHOLD) then
+        self:cancel(state, "condition_recovered")
+        return gamma_arena_result.ok(false)
+    end
+    local consumed = result_call("GA_NPC_MEDICAL_CONSUME_FAILED", self.deps.consume_medical_item, self.fight_id, state.npc_id, pending.kind)
+    if not consumed.ok or consumed.value == false then
+        self:cancel(state, consumed.ok and "physical_item_unavailable" or "consumption_failed", consumed.ok and nil or consumed.error)
+        return gamma_arena_result.ok(false)
+    end
+    local kind = pending.kind
+    state.pending = nil
+    self:log("GA_NPC_MEDICAL_CONSUMED", "Arena NPC consumed registered physical medicine", {
+        fight_id = self.fight_id, slot = state.slot, npc_id = state.npc_id,
+        item_id = consumed.value.item_id, kind = kind
+    })
+    if kind == "bandage" then
+        local applied = result_call("GA_NPC_MEDICAL_EFFECT_FAILED", self.deps.cap_bleeding, consumed.value.npc, BANDAGE_BLEEDING_CAP)
+        if not applied.ok then self:cancel(state, "bandage_effect_failed", applied.error); return gamma_arena_result.ok(false) end
+        self:log("GA_NPC_MEDICAL_COMPLETED", "Arena NPC medical action completed", {
+            fight_id = self.fight_id, slot = state.slot, npc_id = state.npc_id, kind = kind
+        })
+        return gamma_arena_result.ok(true)
+    end
+    state.pulses = { remaining = MEDKIT_PULSES, last_at = (now - RECONCILE_INTERVAL_MS) % UINT32_MOD }
+    return self:apply_pulse(state, now)
+end
+
+function NpcMedical:update()
+    if not self.active then return gamma_arena_result.ok(false) end
+    local now = self:clock()
+    if not now.ok then return now end
+    if self.last_reconcile_at ~= nil and elapsed_ms(self.last_reconcile_at, now.value) < RECONCILE_INTERVAL_MS then
+        return gamma_arena_result.ok(false)
+    end
+    self.last_reconcile_at = now.value
+    local snapshot = result_call("GA_NPC_MEDICAL_REGISTRY_FAILED", self.deps.registry_snapshot)
+    if not snapshot.ok then return snapshot end
+    if type(snapshot.value) ~= "table" or snapshot.value.state ~= "ACTIVE" then
+        self:stop("registry_not_active")
+        return gamma_arena_result.ok(false)
+    end
+    local inventory = available_items(snapshot.value)
+    for _, npc in ipairs(snapshot.value.npcs or {}) do
+        if finite_integer(npc.slot) and finite_integer(npc.id) and not npc.released then
+            local state = self.state_by_slot[npc.slot]
+            if state == nil or state.npc_id ~= npc.id then
+                state = { slot = npc.slot, npc_id = npc.id, action_ordinal = 0, pending = nil, pulses = nil }
+                self.state_by_slot[npc.slot] = state
+            end
+            local cleared = result_call("GA_NPC_MEDICAL_CHARGE_CLEAR_FAILED", self.deps.clear_hidden_charge, npc.id)
+            if not cleared.ok then
+                self:cancel(state, "hidden_charge_clear_failed", cleared.error)
+            elseif npc.terminal_state ~= "ALIVE" then
+                self:cancel(state, "participant_terminal")
+            elseif state.pulses ~= nil then
+                self:apply_pulse(state, now.value)
+            elseif state.pending ~= nil then
+                self:execute_pending(state, now.value)
+            else
+                local status = self:status(state)
+                if status.ok and status.value.alive and status.value.combat_capable then
+                    local owned = inventory[npc.id] or {}
+                    if status.value.health < HEALTH_THRESHOLD and owned.medkit then
+                        self:schedule(state, "medkit", npc.section, now.value)
+                    elseif status.value.bleeding > BLEEDING_THRESHOLD and owned.bandage then
+                        self:schedule(state, "bandage", npc.section, now.value)
+                    end
+                end
+            end
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function new(deps)
+    if type(deps) ~= "table" then return nil end
+    local value = setmetatable({}, NpcMedical)
+    value:__init(deps)
+    return value
+end
