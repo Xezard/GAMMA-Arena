@@ -6545,31 +6545,45 @@ local function runtime_defeat_menu_rejects_invalid_or_expired_handoff()
 end
 
 local function runtime_defeat_menu_fresh_failures_are_bounded()
-    for _, stage in ipairs({ "seed", "promotion", "bridge", "handoff" }) do
+    for _, stage in ipairs({ "preflight", "seed", "promotion", "bridge", "handoff" }) do
         local menu = defeat_menu_test_owner()
         local model
         local clears = 0
         local fatal_calls = 0
         local recovered = false
+        local preflight_calls = 0
+        local seed_calls = 0
+        local promotion_calls = 0
+        local bridge_calls = 0
+        local handoff_calls = 0
         local ports = {
             config = {},
             peek_defeat = function() return gamma_arena_result.ok({ mode_id = "skirmish", difficulty_id = "master", token = "gad1:1000:" .. stage }) end,
             show_result = function(value) model = value; return gamma_arena_result.ok(true) end,
             clear_result = function() return gamma_arena_result.ok(true) end,
             clear_transient = function() clears = clears + 1; return gamma_arena_result.ok(true) end,
+            runtime_preflight = function()
+                preflight_calls = preflight_calls + 1
+                if stage == "preflight" then return gamma_arena_result.err("GA_TEST_PREFLIGHT", "preflight") end
+                return gamma_arena_result.ok(true)
+            end,
             random_session_seed = function()
+                seed_calls = seed_calls + 1
                 if stage == "seed" then return gamma_arena_result.err("GA_TEST_SEED", "seed") end
                 return gamma_arena_result.ok(987654321)
             end,
             issue_launch_from_defeat = function()
+                promotion_calls = promotion_calls + 1
                 if stage == "promotion" then return gamma_arena_result.err("GA_TEST_PROMOTION", "promotion") end
                 return gamma_arena_result.ok(true)
             end,
             write_character_creation = function()
+                bridge_calls = bridge_calls + 1
                 if stage == "bridge" then return gamma_arena_result.err("GA_TEST_BRIDGE", "bridge") end
                 return gamma_arena_result.ok(true)
             end,
             handoff_start_game = function()
+                handoff_calls = handoff_calls + 1
                 if stage == "handoff" then return gamma_arena_result.err("GA_TEST_HANDOFF", "handoff") end
                 return gamma_arena_result.ok(true)
             end,
@@ -6586,7 +6600,12 @@ local function runtime_defeat_menu_fresh_failures_are_bounded()
         gamma_arena_test_assert.is_true(gamma_arena_main_menu.show_confirmed_defeat(menu, ports).ok, stage .. " fixture displays")
         local failed = model.on_next()
         gamma_arena_test_assert.is_false(failed.ok, stage .. " failure stays structured")
-        gamma_arena_test_assert.equals(clears, 1, stage .. " failure clears conflicting transient state once")
+        gamma_arena_test_assert.equals(preflight_calls, 1, stage .. " runs runtime preflight exactly once")
+        gamma_arena_test_assert.equals(seed_calls, stage == "preflight" and 0 or 1, stage .. " failure has the expected seed calls")
+        gamma_arena_test_assert.equals(promotion_calls, (stage == "preflight" or stage == "seed") and 0 or 1, stage .. " failure has the expected promotion calls")
+        gamma_arena_test_assert.equals(bridge_calls, (stage == "preflight" or stage == "seed" or stage == "promotion") and 0 or 1, stage .. " failure has the expected bridge calls")
+        gamma_arena_test_assert.equals(handoff_calls, stage == "handoff" and 1 or 0, stage .. " failure has the expected handoff calls")
+        gamma_arena_test_assert.equals(clears, stage == "preflight" and 0 or 1, stage .. " failure clears transient state only after mutation")
         gamma_arena_test_assert.equals(fatal_calls, 1, stage .. " failure opens one fatal recovery dialog")
         gamma_arena_test_assert.is_true(recovered, stage .. " fatal offers a working main-menu-only recovery")
         gamma_arena_test_assert.equals(menu.show_dialog, 1, stage .. " recovery restores owner dialog")

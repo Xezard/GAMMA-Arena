@@ -659,6 +659,8 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+result\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Every ordinary deferred-display failure must fail open through complete recovery'
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+peeked\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Scheduling-time defeat read failures must fail open through complete recovery'
     Assert-True ($Task6MainMenuContent -match 'clear_result[\s\S]{0,400}clear_fatal[\s\S]{0,400}clear_defeat[\s\S]{0,400}restore_main_menu') 'Deferred recovery must dismiss every Arena modal, clear defeat state, and restore the stock menu'
+    Assert-True ($Task6MainMenuContent -match 'model\.on_next\s*=\s*function\(\)[\s\S]{0,500}local\s+runtime_preflight\s*=\s*port_or_default\(ports,\s*"runtime_preflight",\s*gamma_arena_ui_start\.preflight_runtime\)[\s\S]{0,500}if\s+not\s+runtime\.ok\s+then\s+return\s+recover_from_fresh_failure\(menu,\s*ports,\s*config,\s*runtime,\s*false\)\s+end[\s\S]{0,500}random_session_seed') 'Confirmed-defeat rematches must preflight before seed generation and preserve transient launch state on readiness failure'
+    Assert-True ($Task6MainMenuContent -match 'local\s+function\s+recover_from_fresh_failure\s*\([^\)]*clear_transient[^\)]*\)[\s\S]{0,500}if\s+clear_transient\s+then[\s\S]{0,500}end') 'Fresh-fight recovery must make transient clearing explicit for preflight failures'
     $Task6BindIndex = $Task6MainMenuContent.IndexOf('bind(menu)')
     $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('defer_confirmed_defeat(menu', $Task6BindIndex + 1)
     Assert-True ($Task6BindIndex -ge 0 -and $Task6DefeatIndex -gt $Task6BindIndex) 'Task 6 main-menu init must bind normally before deferring the confirmed defeat'
@@ -721,6 +723,9 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
     }
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
+    $RuntimeDefeatPreflightRegistration = [PSCustomObject]@{ Name = 'runtime_defeat_menu_fresh_failures_are_bounded'; Function = 'runtime_defeat_menu_fresh_failures_are_bounded' }
+    $RuntimeDefeatPreflightPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Function) + '\s*\}'
+    Assert-True ($Task5DevTestContent -match $RuntimeDefeatPreflightPattern) "Regression case must be registered exactly: $($RuntimeDefeatPreflightRegistration.Name) -> $($RuntimeDefeatPreflightRegistration.Function)."
     foreach ($Marker in @('runtime_defeat_menu_rejects_invalid_or_expired_handoff','runtime_defeat_menu_fresh_failures_are_bounded','runtime_defeat_menu_exit_retries_consumption_safely','runtime_defeat_menu_fatal_ui_failure_restores_owner','runtime_defeat_result_construction_failure_clears_intent_and_restores_owner','runtime_defeat_menu_post_consume_ui_failure_restores_owner','runtime_defeat_menu_post_consume_restore_failure_is_recoverable','runtime_defeat_recovery_dialog_waits_for_owner_restore','runtime_defeat_partial_clear_never_reconsumes_token','runtime_defeat_partial_owned_widget_clear_never_reconsumes_token','runtime_defeat_partial_hide_restores_or_retains_recovery','runtime_defeat_result_keyboard_and_lock_are_behavioral','runtime_result_primary_button_uses_native_text_control','runtime_start_launch_recovers_only_confirmed_defeat_conflict')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 6 runtime tests must cover $Marker"
     }
