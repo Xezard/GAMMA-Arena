@@ -679,9 +679,10 @@ Assert-True (Test-Path -LiteralPath $BattleUiScriptPath) 'Battle identity HUD ad
 Assert-True (Test-Path -LiteralPath $BattleUiXmlPath) 'Battle identity HUD XML is missing'
 if (Test-Path -LiteralPath $BattleUiScriptPath) {
     $BattleUiContent = Get-Content -LiteralPath $BattleUiScriptPath -Raw
-    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','sync_visibility','initialization_result','rollback_partial_add','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
+    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','sync_visibility','report_visibility_failure_once','initialization_result','registration_confirmed','cleanup_pending','rollback_partial_add','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
         Assert-True ($BattleUiContent -match [regex]::Escape($Marker)) "Battle identity HUD must cover $Marker"
     }
+    Assert-True ($BattleUiContent -notmatch 'initialization_result\s*=\s*sync_visibility') 'Battle identity visibility failure must not overwrite successful text initialization'
     Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
     Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
 }
@@ -705,7 +706,7 @@ foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
     }
 }
 $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
-foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured')) {
+foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
 $BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
@@ -718,6 +719,7 @@ foreach ($Marker in @('show_battle_identity','clear_battle_identity','GA_BATTLE_
 foreach ($Marker in @('gamma_arena_ui_battle.new','battle_ui')) {
     Assert-True ($BattleBootstrapContent -match [regex]::Escape($Marker)) "Battle identity bootstrap must cover $Marker"
 }
+Assert-True ($BattleBootstrapContent -match 'GA_BATTLE_UI_VISIBILITY_UPDATE_FAILED') 'Battle identity visibility failures must reach bounded runtime diagnostics'
 foreach ($Marker in @('runtime_battle_identity_lifecycle_is_active_only','runtime_battle_identity_failures_are_classified','runtime_battle_identity_mismatch_fails_before_active')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity lifecycle tests must cover $Marker"
 }

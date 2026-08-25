@@ -8635,13 +8635,13 @@ local function runtime_battle_identity_initialization_failure_prevents_registrat
 end
 
 local function runtime_battle_identity_partial_add_is_rolled_back_or_retryable()
-    local env = { adds = 0, removes = 0, fail_remove = true }
+    local env = { adds = 0, removes = 0, fail_add = true, fail_remove = true }
     local window = { SetIdentity = function() end }
     local hud = {
         AddDialogToRender = function(_, added)
             env.adds = env.adds + 1
             env.registered = added
-            error("after add")
+            if env.fail_add then error("after add") end
         end,
         RemoveDialogToRender = function(_, removed)
             env.removes = env.removes + 1
@@ -8660,9 +8660,14 @@ local function runtime_battle_identity_partial_add_is_rolled_back_or_retryable()
     gamma_arena_test_assert.equals(env.adds, 1, "partial add is attempted once")
     gamma_arena_test_assert.equals(env.removes, 1, "partial add triggers immediate rollback")
     gamma_arena_test_assert.equals(env.registered, window, "failed rollback retains pending ownership")
+    env.fail_add = false
     env.fail_remove = false
-    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "later clear retries failed rollback")
-    gamma_arena_test_assert.equals(env.removes, 2, "failed rollback is retried once")
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 1 }).ok, "later show cleans pending registration and retries add")
+    gamma_arena_test_assert.equals(env.adds, 2, "show retry performs a fresh native add")
+    gamma_arena_test_assert.equals(env.removes, 2, "show retry first resolves the failed rollback")
+    gamma_arena_test_assert.equals(env.registered, window, "show retry confirms the newly registered window")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "confirmed retry remains removable")
+    gamma_arena_test_assert.equals(env.removes, 3, "confirmed retry is removed once")
     gamma_arena_test_assert.equals(env.registered, nil, "retry removes the pending window")
 end
 
@@ -8680,15 +8685,27 @@ local function runtime_battle_identity_visibility_sync_is_structured()
             self.transitions = (self.transitions or 0) + 1
         end
     }
-    local hidden = gamma_arena_ui_battle.sync_visibility(root, function() return false end)
-    gamma_arena_test_assert.is_true(hidden.ok, "hidden HUD visibility sync succeeds")
-    gamma_arena_test_assert.is_false(root.visible, "hidden main HUD hides battle identity before registration")
     local visible = gamma_arena_ui_battle.sync_visibility(root, function() return true end)
     gamma_arena_test_assert.is_true(visible.ok, "visible HUD visibility sync succeeds")
     gamma_arena_test_assert.is_true(root.visible, "visible main HUD shows battle identity")
-    gamma_arena_test_assert.equals(root.transitions, 2, "visibility transitions are explicit")
-    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.sync_visibility(root, function() error("hud") end).ok, "visibility port error is structured")
+    local failed = gamma_arena_ui_battle.sync_visibility(root, function() error("hud") end)
+    gamma_arena_test_assert.is_false(failed.ok, "visibility port error is structured")
+    gamma_arena_test_assert.is_false(root.visible, "visibility port error hides an already visible identity")
+    gamma_arena_test_assert.equals(root.transitions, 2, "visibility failure performs an explicit fail-closed transition")
     gamma_arena_test_assert.is_false(gamma_arena_ui_battle.sync_visibility({}, function() return true end).ok, "missing root Show is structured")
+end
+
+local function runtime_battle_identity_visibility_failure_reporting_is_bounded()
+    local owner = {}
+    local reports = {}
+    local reporter = function(result) reports[#reports + 1] = result.error.code end
+    local failed = gamma_arena_result.err("GA_TEST_VISIBILITY", "injected visibility failure")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "first visibility error is reportable")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "duplicate visibility error is bounded")
+    gamma_arena_test_assert.equals(#reports, 1, "contiguous visibility error is reported once")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, gamma_arena_result.ok(false), reporter).ok, "visibility recovery resets the bound")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "post-recovery visibility error is reportable")
+    gamma_arena_test_assert.equals(#reports, 2, "post-recovery visibility error reports once again")
 end
 
 local cases = {
@@ -8950,6 +8967,7 @@ local cases = {
     ,{ name = "runtime_battle_identity_partial_add_is_rolled_back_or_retryable", fn = runtime_battle_identity_partial_add_is_rolled_back_or_retryable }
     ,{ name = "runtime_battle_identity_main_hud_visibility_is_safe", fn = runtime_battle_identity_main_hud_visibility_is_safe }
     ,{ name = "runtime_battle_identity_visibility_sync_is_structured", fn = runtime_battle_identity_visibility_sync_is_structured }
+    ,{ name = "runtime_battle_identity_visibility_failure_reporting_is_bounded", fn = runtime_battle_identity_visibility_failure_reporting_is_bounded }
 }
 
 function run(run_case_fn)

@@ -71,8 +71,6 @@ function main_hud_visible(port)
 end
 
 function sync_visibility(root, port)
-    local visible = read_main_hud_visibility(port)
-    if not visible.ok then return visible end
     local method_ok, method = pcall(function() return root and root.Show end)
     if not method_ok or type(method) ~= "function" then
         return gamma_arena_result.err(
@@ -80,7 +78,8 @@ function sync_visibility(root, port)
             "Battle identity root visibility method is unavailable"
         )
     end
-    local called, reason = pcall(method, root, visible.value)
+    local visible = read_main_hud_visibility(port)
+    local called, reason = pcall(method, root, visible.ok and visible.value or false)
     if not called then
         return gamma_arena_result.err(
             "GA_BATTLE_UI_VISIBILITY_FAILED",
@@ -88,23 +87,53 @@ function sync_visibility(root, port)
             { reason = tostring(reason) }
         )
     end
+    if not visible.ok then return visible end
     return gamma_arena_result.ok(visible.value)
+end
+
+function report_visibility_failure_once(owner, result, reporter)
+    if type(owner) ~= "table" or type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_REPORT_FAILED",
+            "Battle identity visibility report state is invalid"
+        )
+    end
+    if result.ok then
+        owner.last_visibility_error = nil
+        return gamma_arena_result.ok(false)
+    end
+    local code = result.error and result.error.code or "GA_BATTLE_UI_VISIBILITY_FAILED"
+    if owner.last_visibility_error == code then return gamma_arena_result.ok(false) end
+    owner.last_visibility_error = code
+    if type(reporter) ~= "function" then return gamma_arena_result.ok(false) end
+    local called, reason = pcall(reporter, result)
+    if not called then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_REPORT_FAILED",
+            "Battle identity visibility failure could not be reported",
+            { reason = tostring(reason), cause_code = code }
+        )
+    end
+    return gamma_arena_result.ok(true)
 end
 
 class "UIBattleIdentity" (CUIScriptWnd)
 
-function UIBattleIdentity:__init(text) super()
+function UIBattleIdentity:__init(text, visibility_error_reporter) super()
     self:SetWndRect(Frect():set(0, 0, 1024, 768))
     local xml = CScriptXmlInit()
     xml:ParseFile("gamma_arena_battle.xml")
     self.root = xml:InitStatic("gamma_arena_battle", self)
     self.panel = xml:InitStatic("gamma_arena_battle:panel", self.root)
     self.identity = xml:InitTextWnd("gamma_arena_battle:panel:identity", self.panel)
+    self.visibility_error_reporter = visibility_error_reporter
     self.initialization_result = self:SetIdentity(text)
-    if self.initialization_result.ok then
-        self.initialization_result = sync_visibility(self.root, main_hud_shown)
-    end
-    self.visibility_result = self.initialization_result
+    self.visibility_result = sync_visibility(self.root, main_hud_shown)
+    self.visibility_report_result = report_visibility_failure_once(
+        self,
+        self.visibility_result,
+        self.visibility_error_reporter
+    )
 end
 
 function UIBattleIdentity:__finalize()
@@ -125,6 +154,11 @@ end
 
 function UIBattleIdentity:Update()
     self.visibility_result = sync_visibility(self.root, main_hud_shown)
+    self.visibility_report_result = report_visibility_failure_once(
+        self,
+        self.visibility_result,
+        self.visibility_error_reporter
+    )
     CUIScriptWnd.Update(self)
 end
 
@@ -163,19 +197,34 @@ end
 
 function new(ports)
     ports = ports or {}
+    local visibility_error_reporter = ports.report_visibility_error
     local adapter = {
         translate = ports.translate or default_translate,
         hud = ports.hud or default_hud,
-        create_window = ports.create_window or function(text) return UIBattleIdentity(text) end,
+        create_window = ports.create_window or function(text)
+            return UIBattleIdentity(text, visibility_error_reporter)
+        end,
         owned_hud = nil,
         owned_window = nil,
-        owned_text = nil
+        owned_text = nil,
+        registration_confirmed = false,
+        cleanup_pending = false
     }
 
     function adapter:show_identity(model)
         local formatted = format_identity(model, self.translate)
         if not formatted.ok then return formatted end
+        if self.cleanup_pending then
+            local cleaned = self:rollback_partial_add()
+            if not cleaned.ok then return cleaned end
+        end
         if self.owned_window ~= nil then
+            if not self.registration_confirmed then
+                return gamma_arena_result.err(
+                    "GA_BATTLE_UI_REGISTRATION_UNKNOWN",
+                    "Battle identity registration state is unresolved"
+                )
+            end
             local updated = call_method("GA_BATTLE_UI_TEXT_FAILED", self.owned_window, "SetIdentity", formatted.value)
             if updated.ok then self.owned_text = formatted.value end
             return updated
@@ -201,6 +250,8 @@ function new(ports)
         self.owned_hud = hud.value
         self.owned_window = created.value
         self.owned_text = formatted.value
+        self.registration_confirmed = false
+        self.cleanup_pending = true
         local added = call_method("GA_BATTLE_UI_ADD_FAILED", hud.value, "AddDialogToRender", created.value)
         if not added.ok then
             local rollback = self:rollback_partial_add()
@@ -209,11 +260,19 @@ function new(ports)
             end
             return added
         end
+        self.registration_confirmed = true
+        self.cleanup_pending = false
         return gamma_arena_result.ok(true)
     end
 
     function adapter:rollback_partial_add()
-        if self.owned_window == nil then return gamma_arena_result.ok(false) end
+        if self.owned_window == nil then
+            self.registration_confirmed = false
+            self.cleanup_pending = false
+            return gamma_arena_result.ok(false)
+        end
+        self.registration_confirmed = false
+        self.cleanup_pending = true
         local removed = call_method(
             "GA_BATTLE_UI_REMOVE_FAILED",
             self.owned_hud,
@@ -224,6 +283,7 @@ function new(ports)
         self.owned_hud = nil
         self.owned_window = nil
         self.owned_text = nil
+        self.cleanup_pending = false
         return gamma_arena_result.ok(true)
     end
 
