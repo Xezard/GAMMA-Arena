@@ -671,6 +671,59 @@ if (Test-Path -LiteralPath $Task9UiXmlPath) {
     } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
 }
 
+$BattleUiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_battle.script'
+$BattleUiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_battle.xml'
+$BattleUiEngPath = Join-Path $RepoRoot 'src\gamedata\configs\text\eng\st_gamma_arena.xml'
+$BattleUiRusPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
+Assert-True (Test-Path -LiteralPath $BattleUiScriptPath) 'Battle identity HUD adapter is missing'
+Assert-True (Test-Path -LiteralPath $BattleUiXmlPath) 'Battle identity HUD XML is missing'
+if (Test-Path -LiteralPath $BattleUiScriptPath) {
+    $BattleUiContent = Get-Content -LiteralPath $BattleUiScriptPath -Raw
+    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','sync_visibility','report_visibility_failure_once','initialization_result','registration_confirmed','cleanup_pending','rollback_partial_add','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
+        Assert-True ($BattleUiContent -match [regex]::Escape($Marker)) "Battle identity HUD must cover $Marker"
+    }
+    Assert-True ($BattleUiContent -notmatch 'initialization_result\s*=\s*sync_visibility') 'Battle identity visibility failure must not overwrite successful text initialization'
+    Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
+    Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
+}
+if (Test-Path -LiteralPath $BattleUiXmlPath) {
+    try {
+        [xml]$BattleUiXml = Get-Content -LiteralPath $BattleUiXmlPath -Raw
+        foreach ($Id in @('gamma_arena_battle','panel','identity')) {
+            Assert-True ($null -ne $BattleUiXml.SelectSingleNode("//*[local-name()='$Id']")) "Battle identity HUD XML is missing control $Id"
+        }
+        $BattlePanel = $BattleUiXml.SelectSingleNode("//*[local-name()='panel']")
+        Assert-True ([int]$BattlePanel.x + [int]$BattlePanel.width -eq 994) 'Battle identity HUD must retain the approved right safe-area inset'
+    } catch { Assert-True $false "Battle identity HUD XML must parse: $($_.Exception.Message)" }
+}
+foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
+    Assert-True (Test-Path -LiteralPath $TextPath) "Battle identity localization file is missing: $TextPath"
+    if (Test-Path -LiteralPath $TextPath) {
+        $BattleText = Get-Content -LiteralPath $TextPath -Raw
+        foreach ($Id in @('st_gamma_arena_battle_seed','st_gamma_arena_battle_fight')) {
+            Assert-True ($BattleText -match [regex]::Escape($Id)) "Battle identity localization must define $Id in $TextPath"
+        }
+    }
+}
+$BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
+foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
+    Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
+}
+$BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
+$BattleBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+$BattleOrchestratorContent = Get-Content -LiteralPath $BattleOrchestratorPath -Raw
+$BattleBootstrapContent = Get-Content -LiteralPath $BattleBootstrapPath -Raw
+foreach ($Marker in @('show_battle_identity','clear_battle_identity','GA_BATTLE_IDENTITY_MISMATCH','GA_BATTLE_UI_SHOW_FAILED','GA_BATTLE_UI_CLEAR_FAILED')) {
+    Assert-True ($BattleOrchestratorContent -match [regex]::Escape($Marker)) "Battle identity lifecycle must cover $Marker"
+}
+foreach ($Marker in @('gamma_arena_ui_battle.new','battle_ui')) {
+    Assert-True ($BattleBootstrapContent -match [regex]::Escape($Marker)) "Battle identity bootstrap must cover $Marker"
+}
+Assert-True ($BattleBootstrapContent -match 'GA_BATTLE_UI_VISIBILITY_UPDATE_FAILED') 'Battle identity visibility failures must reach bounded runtime diagnostics'
+foreach ($Marker in @('runtime_battle_identity_lifecycle_is_active_only','runtime_battle_identity_failures_are_classified','runtime_battle_identity_mismatch_fails_before_active')) {
+    Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity lifecycle tests must cover $Marker"
+}
+
 $Task6MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
 $Task6UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
 $Task6TextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
@@ -877,6 +930,7 @@ if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
 
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,900}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
 Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
 foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
     Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
