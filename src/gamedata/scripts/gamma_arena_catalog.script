@@ -6,6 +6,8 @@ local human_profile_sections = { gamma_arena_bandit_novice = true, gamma_arena_b
 local weapon_ammo_sections = { wpn_pm = "ammo_9x18_fmj", wpn_mp5 = "ammo_9x19_fmj", wpn_ak74u = "ammo_5.45x39_fmj", wpn_ak74 = "ammo_5.45x39_fmj", wpn_wincheaster1300 = "ammo_12x70_buck" }
 local PROFILE_FACTIONS = { "army", "bandit", "csky", "dolg", "ecolog", "freedom", "killer", "monolith", "stalker" }
 local ARENA_RUNTIME_COMMUNITY = "arena_enemy"
+local ACTOR_WEAPON_QUARANTINE = { wpn_dtmdr = true }
+local ACTOR_WEAPON_QUARANTINE_POLICY = "actor_weapon_quarantine_v1"
 local PROFILE_RANKS = {
     { id = "novice", cost = 1 },
     { id = "trainee", cost = 2 },
@@ -406,6 +408,27 @@ local function index_global_weapon_roles(snapshot)
     end
 end
 
+local function index_actor_weapon_list(snapshot)
+    local quarantined = {}
+    for section, blocked in pairs(ACTOR_WEAPON_QUARANTINE) do
+        if blocked == true then quarantined[#quarantined + 1] = section end
+    end
+    table.sort(quarantined)
+    snapshot.actor_weapon_list = {}
+    for _, weapon in ipairs(snapshot.weapon_list) do
+        if ACTOR_WEAPON_QUARANTINE[weapon.section] ~= true then
+            snapshot.actor_weapon_list[#snapshot.actor_weapon_list + 1] = weapon
+        end
+    end
+    if snapshot.selection_mode == "staged" then
+        snapshot.revision = gamma_arena_rng.derive_seed({
+            ACTOR_WEAPON_QUARANTINE_POLICY,
+            snapshot.revision,
+            table.concat(quarantined, "|")
+        })
+    end
+end
+
 local function valid_ammo_variant(variant)
     return type(variant) == "table" and type(variant.section) == "string" and variant.section ~= ""
         and gamma_arena_number.is_positive_integer(variant.box_size) and variant.box_size < 4294967296
@@ -507,7 +530,7 @@ local function augment_from_effective_system(factory, snapshot)
     return gamma_arena_result.ok(snapshot)
 end
 
-local function calculate_minimum_loadout_cost(snapshot)
+local function calculate_minimum_loadout_cost(snapshot, weapons)
     local minimum_outfit
     for _, outfit in ipairs(snapshot.outfit_list) do
         minimum_outfit = minimum_outfit and math.min(minimum_outfit, outfit.cost) or outfit.cost
@@ -515,7 +538,7 @@ local function calculate_minimum_loadout_cost(snapshot)
     local bandage = snapshot.consumables.bandage
     if minimum_outfit == nil or type(bandage) ~= "table" then return nil end
     local minimum
-    for _, weapon in ipairs(snapshot.weapon_list) do
+    for _, weapon in ipairs(weapons or snapshot.weapon_list) do
         local ammo = snapshot.ammo[weapon.ammo]
         if type(ammo) == "table" then
             local cost = weapon.cost + ammo.cost * weapon.ammo_box_min + minimum_outfit + bandage.cost
@@ -533,7 +556,7 @@ local function load_impl(ini_factory)
     local catalogs, open_error = safe_open(factory, catalog_path); if not catalogs then return open_error end
     local difficulties; difficulties, open_error = safe_open(factory, difficulty_path); if not difficulties then return open_error end
     local layouts; layouts, open_error = safe_open(factory, layout_path); if not layouts then return open_error end
-    local snapshot = { schema_version = 7, revision = 8, generator_version = 8, profiles = {}, profile_list = {}, weapons = {}, weapon_list = {}, primary_weapon_list = {}, secondary_weapon_list = {}, weapon_pools_by_profile = {}, ammo = {}, outfits = {}, outfit_list = {}, knives = {}, knife_list = {}, consumables = {}, medical_items = {}, medical_item_list = {}, medical_skipped = {}, difficulties = {}, difficulty_ids = {}, layouts = {}, layout_ids = {} }
+    local snapshot = { schema_version = 7, revision = 8, generator_version = 8, profiles = {}, profile_list = {}, weapons = {}, weapon_list = {}, actor_weapon_list = {}, primary_weapon_list = {}, secondary_weapon_list = {}, weapon_pools_by_profile = {}, ammo = {}, outfits = {}, outfit_list = {}, knives = {}, knife_list = {}, consumables = {}, medical_items = {}, medical_item_list = {}, medical_skipped = {}, difficulties = {}, difficulty_ids = {}, layouts = {}, layout_ids = {} }
     local metadata, metadata_error = require_section(factory, catalogs, "meta", { schema_version = true, revision = true, generator_version = true })
     if not metadata then return metadata_error end
     for _, pair in ipairs({ { "schema_version", 7 }, { "revision", 8 }, { "generator_version", 8 } }) do
@@ -673,11 +696,16 @@ local function load_impl(ini_factory)
     if not magazine_sizes_ok.ok then return magazine_sizes_ok end
     local ammo_variants_ok = validate_ammo_variants(snapshot, factory)
     if not ammo_variants_ok.ok then return ammo_variants_ok end
+    index_actor_weapon_list(snapshot)
+    if #snapshot.actor_weapon_list == 0 then
+        return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog has no actor-eligible weapon after exact quarantine", {})
+    end
     index_global_weapon_roles(snapshot)
     if snapshot.selection_mode == "combinations" then add_loadout_combinations(snapshot) end
     local minimum_profile_cost = snapshot.profile_list[1].cost
     for _, profile in ipairs(snapshot.profile_list) do minimum_profile_cost = math.min(minimum_profile_cost, profile.cost) end
-    local minimum_loadout_cost = snapshot.selection_mode == "combinations" and snapshot.combinations[1].cost or calculate_minimum_loadout_cost(snapshot)
+    local minimum_loadout_cost = snapshot.selection_mode == "combinations" and snapshot.combinations[1].cost or calculate_minimum_loadout_cost(snapshot, snapshot.weapon_list)
+    local actor_minimum_loadout_cost = calculate_minimum_loadout_cost(snapshot, snapshot.actor_weapon_list)
     if not gamma_arena_number.is_positive_integer(minimum_loadout_cost) then
         return gamma_arena_result.err("GA_CATALOG_EMPTY", "Catalog has no viable loadout", {})
     end
@@ -689,8 +717,8 @@ local function load_impl(ini_factory)
             return gamma_arena_result.err("GA_DIFFICULTY_BUDGET_INFEASIBLE", "Difficulty budget cannot construct its maximum opponent count", { difficulty_id = difficulty_id, required = required_enemy_budget, budget = difficulty.enemy_total_budget })
         end
         local equipment_budget = difficulty.player_gear_budget + foundation_bandage.actor_cost
-        if equipment_budget < minimum_loadout_cost then
-            return gamma_arena_result.err("GA_PLAYER_BUDGET_INFEASIBLE", "Player gear budget cannot construct a valid loadout", { difficulty_id = difficulty_id, required = minimum_loadout_cost, budget = difficulty.player_gear_budget })
+        if not gamma_arena_number.is_positive_integer(actor_minimum_loadout_cost) or equipment_budget < actor_minimum_loadout_cost then
+            return gamma_arena_result.err("GA_PLAYER_BUDGET_INFEASIBLE", "Player gear budget cannot construct a valid actor-eligible loadout", { difficulty_id = difficulty_id, required = actor_minimum_loadout_cost, budget = difficulty.player_gear_budget })
         end
     end
     return gamma_arena_result.ok(snapshot)

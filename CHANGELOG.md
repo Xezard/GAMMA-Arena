@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Quarantined only the confirmed actor section `wpn_dtmdr` while preserving its attachment variants and NPC eligibility; added effective HUD metadata logs plus a flushed pre-activation breadcrumb before the native weapon-animation boundary.
 - Scaled the actor's ordinary ammunition for every firearm class with opponent count: one guaranteed box plus deterministic per-opponent chances (40% pistol, 25% SMG/shotgun, 20% rifle, 10% sniper), outside the gear budget and without a gameplay ceiling.
 - Isolated every Arena-owned human NPC behind the engine-native `arena_enemy` community while retaining its generated source faction for presentation and loadout selection; added ownership-bounded net-spawn enforcement and activation readback without overriding any foreign mod.
 - Restored the main-menu Arena Start callback by removing diagnostic level-state and file-I/O probes that are invalid before the new-game engine context exists.

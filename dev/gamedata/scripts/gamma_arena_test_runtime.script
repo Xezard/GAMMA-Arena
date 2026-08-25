@@ -3957,6 +3957,28 @@ local function runtime_entity_active_defers_input_release_to_task8()
     gamma_arena_test_assert.equals(env.actor_input_releases, 0, "DEFERRED_TO_TASK8: entity ACTIVE never mutates actor input ownership")
 end
 
+local function actor_weapon_diagnostic_fixture(phase, actor, item, record, ammo_section)
+    local function object_id(value)
+        local called, id = pcall(function() return value and value.id and value:id() end)
+        return called and id or "unavailable"
+    end
+    return gamma_arena_result.ok({
+        session_id = "ga-test-session",
+        fight_index = 0,
+        fight_id = "ga-test-fight",
+        phase = phase,
+        actor_id = object_id(actor),
+        item_id = object_id(item),
+        weapon_section = record and record.section or "unavailable",
+        ammo_section = ammo_section or "unavailable",
+        hud_section = "unavailable"
+    })
+end
+
+local function actor_weapon_checkpoint_fixture()
+    return gamma_arena_result.ok(true)
+end
+
 local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local next_id, calls, released, tags, magazine_capacity_calls = 500, {}, {}, {}, 0
     local function entity(section, parent_id, quantity)
@@ -3969,6 +3991,8 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-exact" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         reserve_magazines = 3,
         ammo_box_size = function(section)
             gamma_arena_test_assert.is_true(section == "ammo_9x18_fmj" or section == "ammo_9x18_ap", "actor adapter resolves only validated effective ammo sections")
@@ -4015,6 +4039,8 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
         local value = gamma_arena_bootstrap.new_actor_loadout_port({
             actor_id = function(target) return target:id() end,
             ownership_token = function() return "session-partial" end,
+            weapon_diagnostic = actor_weapon_diagnostic_fixture,
+            checkpoint = actor_weapon_checkpoint_fixture,
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count, is_ammo)
                 create_calls = create_calls + 1
@@ -4101,6 +4127,8 @@ local function runtime_actor_loadout_progress_survives_clock_stalls()
         timeout_ms = 100,
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "session-delayed-equipment" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function() return 20 end,
         create_item = function(section, target, count) return entity(section, target:id(), count) end,
         entity_id = function(item) return item:id() end,
@@ -4173,6 +4201,8 @@ local function runtime_actor_loadout_no_progress_timeout_has_context()
         timeout_ms = 100,
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "session-stalled-equipment" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function() return 20 end,
         create_item = function(section, target, count) return entity(section, target:id(), count) end,
         entity_id = function(item) return item:id() end,
@@ -4202,7 +4232,7 @@ end
 
 local function new_actor_loadout_test_fixture(options)
     options = options or {}
-    local fixture = { calls = { is_exo = 0, get = 0, init = 0, set = 0, release = 0 }, stored = options.stored }
+    local fixture = { calls = { is_exo = 0, get = 0, init = 0, set = 0, release = 0, checkpoint = 0, activate = 0, log = 0 }, events = {}, stored = options.stored }
     local next_id, present, tags, slots, magazine = 1600, {}, {}, {}, {}
     local active = nil
     local actor = { id = function() return 77 end }
@@ -4246,7 +4276,35 @@ local function new_actor_loadout_test_fixture(options)
         magazine_capacity = function() return 30 end,
         set_ammo_elapsed = function(weapon, count) magazine[weapon:id()] = count; return true end,
         get_ammo_in_magazine = function(weapon) return magazine[weapon:id()] or 0 end,
-        make_item_active = function(_, item) active = item; return true end,
+        weapon_diagnostic = function(phase, target, item, record)
+            return gamma_arena_result.ok({
+                session_id = "ga-loadout-session",
+                fight_index = 3,
+                fight_id = "ga-loadout-fight",
+                phase = phase,
+                actor_id = target:id(),
+                item_id = item:id(),
+                weapon_section = record.section,
+                hud_section = "wpn_test_hud"
+            })
+        end,
+        checkpoint = function(code, fields)
+            fixture.calls.checkpoint = fixture.calls.checkpoint + 1
+            fixture.events[#fixture.events + 1] = { kind = "checkpoint", code = code, fields = fields }
+            if options.checkpoint_failure then return gamma_arena_result.err("GA_DIAGNOSTICS_WRITE_FAILED", "injected durable checkpoint failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        log_info = function(code, message, fields)
+            fixture.calls.log = fixture.calls.log + 1
+            fixture.events[#fixture.events + 1] = { kind = "log", code = code, fields = fields }
+            return gamma_arena_result.ok(true)
+        end,
+        make_item_active = function(_, item)
+            fixture.calls.activate = fixture.calls.activate + 1
+            fixture.events[#fixture.events + 1] = { kind = "activate", item_id = item:id() }
+            active = item
+            return true
+        end,
         active_item = function() return active end,
         outfit_requires_power = options.outfit_requires_power,
         exo_is_object = options.exo_is_object,
@@ -4268,6 +4326,36 @@ local function new_actor_loadout_test_fixture(options)
         return result
     end
     return fixture
+end
+
+local function runtime_actor_weapon_checkpoint_precedes_native_activation()
+    local fixture = new_actor_loadout_test_fixture({ outfit_requires_power = function() return false end })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "checkpointed actor loadout reaches READY")
+    gamma_arena_test_assert.equals(fixture.calls.checkpoint, 1, "pre-activation checkpoint is written exactly once")
+    gamma_arena_test_assert.equals(fixture.calls.activate, 1, "native activation is submitted exactly once")
+    gamma_arena_test_assert.equals(fixture.events[1].kind, "checkpoint", "durable checkpoint is the first activation-boundary event")
+    gamma_arena_test_assert.equals(fixture.events[1].code, "GA_ACTOR_WEAPON_PRE_ACTIVATE", "pre-activation checkpoint code is stable")
+    gamma_arena_test_assert.equals(fixture.events[1].fields.weapon_section, "wpn_test", "checkpoint names the exact weapon section")
+    gamma_arena_test_assert.equals(fixture.events[1].fields.item_id, fixture.events[3].item_id, "checkpoint item identity matches native activation")
+    gamma_arena_test_assert.equals(fixture.events[2].kind, "log", "regular X-Ray breadcrumb follows durable evidence")
+    gamma_arena_test_assert.equals(fixture.events[3].kind, "activate", "native activation occurs only after both breadcrumbs")
+end
+
+local function runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back()
+    local fixture = new_actor_loadout_test_fixture({
+        outfit_requires_power = function() return false end,
+        checkpoint_failure = true
+    })
+    local result
+    for _ = 1, 20 do
+        result = fixture.port.update(fixture.actor)
+        if not result.ok then break end
+    end
+    gamma_arena_test_assert.is_false(result.ok, "durable checkpoint failure rejects actor equipment")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_WEAPON_CHECKPOINT_FAILED", "checkpoint failure uses a stable actor-loadout code")
+    gamma_arena_test_assert.equals(fixture.calls.activate, 0, "failed checkpoint never crosses make_item_active")
+    gamma_arena_test_assert.is_true(fixture.calls.release > 0, "failed checkpoint enters owned-item rollback")
 end
 
 local function runtime_actor_loadout_charges_powered_exo_before_ready()
@@ -4416,6 +4504,8 @@ local function runtime_actor_loadout_rollback_blocks_disconnect_until_absent()
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "session-blocking" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function() return 20 end,
         create_item = (function()
             local calls = 0
@@ -4485,6 +4575,8 @@ local function runtime_actor_loadout_malformed_existence_blocks_teardown_disconn
         local port = gamma_arena_bootstrap.new_actor_loadout_port({
             actor_id = function(target) return target:id() end,
             ownership_token = function() return "session-malformed" end,
+            weapon_diagnostic = actor_weapon_diagnostic_fixture,
+            checkpoint = actor_weapon_checkpoint_fixture,
             ammo_box_size = function() return 20 end,
             create_item = function(section, target, count) return entity(section, target:id(), count) end,
             entity_id = function(item) return item:id() end,
@@ -4572,6 +4664,8 @@ local function actor_loadout_ownership_fixture(options)
     local port = gamma_arena_bootstrap.new_actor_loadout_port({
         actor_id = function(target) return target:id() end,
         ownership_token = function() return "ga-session:nonce" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function() return 20 end,
         create_item = function(section, target, count)
             if options.fail_bonus_create and section == "ammo_9x18_ap" then return nil end
@@ -4969,6 +5063,8 @@ local function runtime_actor_loadout_derives_unreadable_server_ammo_quantity()
         clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-unreadable-ammo" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
         create_item = function(section, actor, count, is_ammo)
             if is_ammo then
@@ -5008,6 +5104,8 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         clock = function() return 100 end,
         actor_id = function(actor) return actor:id() end,
         ownership_token = function() return "session-bonus-ammo" end,
+        weapon_diagnostic = actor_weapon_diagnostic_fixture,
+        checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function(section) return section == "ammo_9x18_ap" and 7 or 20 end,
         create_item = function(section, actor, count, is_ammo)
             created[#created + 1] = { section = section, count = count, ammo = is_ammo == true }
@@ -6455,7 +6553,13 @@ local function task8_environment(options)
         checkpoint = checkpoint,
         layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end,
         mode_policy = gamma_arena_mode_skirmish,
-        catalogs = function() env.events[#env.events + 1] = "catalogs"; return gamma_arena_result.ok({ revision = 1 }) end,
+        catalogs = function()
+            env.events[#env.events + 1] = "catalogs"
+            return gamma_arena_result.ok({
+                revision = 1,
+                weapons = { wpn_test = { section="wpn_test", kind="w_rifle", slot=2, ammo="ammo_test" } }
+            })
+        end,
         generator = function(_, index)
             env.events[#env.events + 1] = "generate"
             env.generated = env.generated + 1
@@ -6468,11 +6572,35 @@ local function task8_environment(options)
             if options.validator_error then return gamma_arena_result.err("GA_TEST_VALIDATOR", "injected validator failure") end
             return gamma_arena_result.ok(task8_validated_spec(spec.fight_index))
         end,
+        weapon_diagnostics = function(context)
+            env.events[#env.events + 1] = "weapon_diagnostic"
+            return gamma_arena_result.ok({
+                session_id = context.session_id,
+                fight_index = context.fight_index,
+                fight_id = context.fight_id,
+                phase = context.phase,
+                actor_id = 77,
+                item_id = "unavailable",
+                weapon_section = context.weapon_section,
+                weapon_kind = "w_rifle",
+                weapon_slot = "2",
+                ammo_section = context.ammo_section,
+                ammo_class = "ammo_test",
+                parent_section = "unavailable",
+                world_visual = "dynamics\\weapons\\wpn_test\\wpn_test_world.ogf",
+                hud_section = "wpn_test_hud",
+                hud_item_visual = "dynamics\\weapons\\wpn_test\\wpn_test_hud.ogf",
+                hud_anm_show = "test_draw",
+                hud_anm_idle = "test_idle",
+                hud_anm_idle_empty = "test_idle_empty",
+                hud_anm_hide = "test_holster"
+            })
+        end,
         clock = function() return env.now end,
         result_ui = result_ui,
-        log = { info = function(code, message)
+        log = { info = function(code, message, context)
             env.events[#env.events + 1] = "log"
-            env.logs[#env.logs + 1] = { code = code, message = message }
+            env.logs[#env.logs + 1] = { code = code, message = message, context = context }
             return gamma_arena_result.ok(true)
         end }
     }
@@ -6555,9 +6683,26 @@ end
 local function runtime_task8_logs_one_immutable_spec_before_apply()
     local env = task8_environment()
     task8_pump_to_countdown(env)
-    gamma_arena_test_assert.equals(table.concat(env.events, ","), "catalogs,generate,validate,log,apply", "stable FightSpec log precedes apply")
-    gamma_arena_test_assert.equals(#env.logs, 1, "each prepared fight emits one FightSpec diagnostic")
+    gamma_arena_test_assert.equals(table.concat(env.events, ","), "catalogs,generate,validate,log,weapon_diagnostic,log,apply", "stable FightSpec and selected-weapon diagnostics precede apply")
+    gamma_arena_test_assert.equals(#env.logs, 2, "each prepared fight emits one FightSpec and one selected-weapon diagnostic")
     gamma_arena_test_assert.equals(env.logs[1].code, "GA_FIGHT_SPEC", "FightSpec diagnostic code is stable")
+end
+
+local function runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation()
+    local env = task8_environment()
+    task8_pump_to_countdown(env)
+    gamma_arena_test_assert.equals(env.logs[2].code, "GA_ACTOR_WEAPON_SELECTED", "selected actor weapon diagnostic code is stable")
+    gamma_arena_test_assert.equals(env.logs[2].context.session_id, "ga_task8_session", "selected diagnostic binds the session")
+    gamma_arena_test_assert.equals(env.logs[2].context.fight_index, 0, "selected diagnostic binds the fight index")
+    gamma_arena_test_assert.equals(env.logs[2].context.fight_id, "ga-task8-0", "selected diagnostic binds the FightSpec identity")
+    gamma_arena_test_assert.equals(env.logs[2].context.weapon_section, "wpn_test", "selected diagnostic names the exact weapon")
+    gamma_arena_test_assert.equals(env.logs[2].context.hud_section, "wpn_test_hud", "selected diagnostic carries effective HUD metadata")
+    local selected_index, apply_index
+    for index, event in ipairs(env.events) do
+        if event == "weapon_diagnostic" then selected_index = index end
+        if event == "apply" then apply_index = index end
+    end
+    gamma_arena_test_assert.is_true(selected_index < apply_index, "selected metadata is resolved before entity mutation")
 end
 
 local function runtime_task8_countdown_uses_global_time_not_frame_count()
@@ -8100,12 +8245,66 @@ local function runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed()
         level = function() return "l05_bar" end,
         fallback_log = function() end
     })
-    local written = journal:checkpoint("GA_TEST_CHECKPOINT", { scalar = string.rep("x", 1500), nested = { forbidden = true } })
+    local written = journal:checkpoint("GA_TEST_CHECKPOINT", { aaa_noise = string.rep("x", 1500), weapon_section = "wpn_exact_evidence", nested = { forbidden = true } })
     gamma_arena_test_assert.is_true(written.ok, "checkpoint succeeds")
     gamma_arena_test_assert.is_true(#env.writes[1] <= 1024, "checkpoint line stays within native-safe bound")
     gamma_arena_test_assert.equals(env.flushes, 1, "checkpoint flushes immediately")
     gamma_arena_test_assert.equals(env.closes, 1, "checkpoint closes immediately")
     gamma_arena_test_assert.is_true(not env.writes[1]:find("forbidden", 1, true), "nested fields are excluded")
+    gamma_arena_test_assert.is_true(env.writes[1]:find("weapon_section=wpn_exact_evidence", 1, true) ~= nil, "critical weapon identity survives bounded truncation")
+end
+
+local function runtime_weapon_diagnostics_reads_effective_hud_metadata()
+    local sections = {
+        wpn_test = {
+            kind="w_rifle", slot="2", ammo_class="ammo_test, ammo_test_ap", parent_section="wpn_test",
+            visual="dynamics\\weapons\\wpn_test\\wpn_test_world.ogf", hud="wpn_test_hud"
+        },
+        wpn_test_hud = {
+            item_visual="dynamics\\weapons\\wpn_test\\wpn_test_hud.ogf",
+            anm_show="test_draw", anm_idle="test_idle", anm_idle_empty="test_idle_empty", anm_hide="test_holster"
+        }
+    }
+    local result = gamma_arena_weapon_diagnostics.snapshot({
+        read_string = function(section, key)
+            local values = sections[section]
+            return values and values[key] or nil
+        end,
+        object_id = function(object) return object:id() end
+    }, {
+        session_id="ga-metadata-session", fight_index=7, fight_id="ga-metadata-fight", phase="pre_activate",
+        weapon_section="wpn_test", ammo_section="ammo_test", actor={ id=function() return 77 end }, item={ id=function() return 991 end }
+    })
+    gamma_arena_test_assert.is_true(result.ok, "effective weapon metadata snapshot succeeds")
+    local fields = result.value
+    gamma_arena_test_assert.equals(fields.actor_id, 77, "metadata includes actor identity")
+    gamma_arena_test_assert.equals(fields.item_id, 991, "metadata includes item identity")
+    gamma_arena_test_assert.equals(fields.weapon_kind, "w_rifle", "metadata includes effective weapon kind")
+    gamma_arena_test_assert.equals(fields.weapon_slot, "2", "metadata includes effective weapon slot")
+    gamma_arena_test_assert.equals(fields.ammo_section, "ammo_test", "metadata includes selected ammo section")
+    gamma_arena_test_assert.equals(fields.ammo_class, "ammo_test, ammo_test_ap", "metadata includes effective ammo class")
+    gamma_arena_test_assert.equals(fields.parent_section, "wpn_test", "metadata includes effective parent section")
+    gamma_arena_test_assert.equals(fields.world_visual, "dynamics\\weapons\\wpn_test\\wpn_test_world.ogf", "metadata includes world visual")
+    gamma_arena_test_assert.equals(fields.hud_section, "wpn_test_hud", "metadata includes effective HUD section")
+    gamma_arena_test_assert.equals(fields.hud_item_visual, "dynamics\\weapons\\wpn_test\\wpn_test_hud.ogf", "metadata includes HUD visual")
+    gamma_arena_test_assert.equals(fields.hud_anm_show, "test_draw", "metadata includes show animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_idle, "test_idle", "metadata includes idle animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_idle_empty, "test_idle_empty", "metadata includes empty-idle animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_hide, "test_holster", "metadata includes hide animation")
+end
+
+local function runtime_weapon_diagnostics_missing_reads_are_unavailable()
+    local result = gamma_arena_weapon_diagnostics.snapshot({
+        read_string = function() error("injected effective INI read failure") end,
+        object_id = function() error("injected object id failure") end
+    }, {
+        session_id="ga-metadata-session", fight_index=8, fight_id="ga-metadata-missing", phase="selected",
+        weapon_section="wpn_missing", ammo_section="ammo_missing", actor={}
+    })
+    gamma_arena_test_assert.is_true(result.ok, "metadata read failures never reject an otherwise valid weapon")
+    for _, key in ipairs({ "actor_id", "item_id", "weapon_kind", "weapon_slot", "ammo_class", "parent_section", "world_visual", "hud_section", "hud_item_visual", "hud_anm_show", "hud_anm_idle", "hud_anm_idle_empty", "hud_anm_hide" }) do
+        gamma_arena_test_assert.equals(result.value[key], "unavailable", "missing metadata is explicit: " .. key)
+    end
 end
 
 local function runtime_entity_forensics_are_bounded_non_mutating_and_classified()
@@ -8173,6 +8372,8 @@ local cases = {
     { name = "runtime_save_guard_failures_block_launch_mutation", fn = runtime_save_guard_failures_block_launch_mutation },
     { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },
     { name = "runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed", fn = runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed },
+    { name = "runtime_weapon_diagnostics_reads_effective_hud_metadata", fn = runtime_weapon_diagnostics_reads_effective_hud_metadata },
+    { name = "runtime_weapon_diagnostics_missing_reads_are_unavailable", fn = runtime_weapon_diagnostics_missing_reads_are_unavailable },
     { name = "runtime_entity_forensics_are_bounded_non_mutating_and_classified", fn = runtime_entity_forensics_are_bounded_non_mutating_and_classified },
     { name = "runtime_preflight_accepts_complete_environment", fn = preflight_accepts_complete_environment },
     { name = "runtime_preflight_accepts_natural_death_without_invulnerability", fn = preflight_accepts_natural_death_without_invulnerability },
@@ -8278,6 +8479,8 @@ local cases = {
     ,{ name = "runtime_actor_loadout_translates_ltx_slots_to_lua_slots", fn = runtime_actor_loadout_translates_ltx_slots_to_lua_slots }
     ,{ name = "runtime_actor_loadout_progress_survives_clock_stalls", fn = runtime_actor_loadout_progress_survives_clock_stalls }
     ,{ name = "runtime_actor_loadout_no_progress_timeout_has_context", fn = runtime_actor_loadout_no_progress_timeout_has_context }
+    ,{ name = "runtime_actor_weapon_checkpoint_precedes_native_activation", fn = runtime_actor_weapon_checkpoint_precedes_native_activation }
+    ,{ name = "runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back", fn = runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back }
     ,{ name = "runtime_actor_loadout_charges_powered_exo_before_ready", fn = runtime_actor_loadout_charges_powered_exo_before_ready }
     ,{ name = "runtime_actor_loadout_charges_proto_outfit_without_repair_type", fn = runtime_actor_loadout_charges_proto_outfit_without_repair_type }
     ,{ name = "runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge", fn = runtime_actor_loadout_ordinary_outfit_bypasses_exo_charge }
@@ -8365,6 +8568,7 @@ local cases = {
     ,{ name = "runtime_npc_medical_lifecycle_is_active_only", fn = runtime_npc_medical_lifecycle_is_active_only }
     ,{ name = "runtime_task8_generation_and_validation_fail_without_world_mutation", fn = runtime_task8_generation_and_validation_fail_without_world_mutation }
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
+    ,{ name = "runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation", fn = runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
     ,{ name = "runtime_active_poll_queues_victory_without_death_callback", fn = runtime_active_poll_queues_victory_without_death_callback }

@@ -387,6 +387,82 @@ local function catalog_augments_from_effective_system_without_cartesian_product(
     gamma_arena_test_assert.is_false(mismatch.ok, "runtime validator rejects an effective community mismatch")
     gamma_arena_test_assert.equals(mismatch.error.code, "GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "community mismatch preserves stable code")
 end
+
+local function actor_weapon_quarantine_is_exact_and_actor_only()
+    local system_sections = {
+        wpn_dtmdr = {
+            kind="w_rifle", slot="2", ammo_mag_size="20", ammo_class="ammo_dtmdr_fixture",
+            scopes="acog,eot", visual="dynamics\\weapons\\wpn_dtmdr\\wpn_dtmdr_world.ogf",
+            hud="wpn_dtmdr_hud"
+        },
+        wpn_dtmdr_acog = {
+            kind="w_rifle", slot="2", ammo_mag_size="20", ammo_class="ammo_dtmdr_fixture",
+            parent_section="wpn_dtmdr", hud="wpn_dtmdr_acog_hud"
+        },
+        wpn_dtmdr_eot = {
+            kind="w_rifle", slot="2", ammo_mag_size="20", ammo_class="ammo_dtmdr_fixture",
+            parent_section="wpn_dtmdr", hud="wpn_dtmdr_eot_hud"
+        },
+        ammo_dtmdr_fixture = { kind="w_ammo", box_size="20" }
+    }
+    local loadout_sections = {
+        stalker_novice = { primary="stalker_novice_primary" },
+        stalker_novice_primary = {
+            ["wpn_dtmdr:0:0:10"]="",
+            ["wpn_dtmdr_acog:0:0:10"]=""
+        }
+    }
+    local loaded = gamma_arena_catalog.load(fixture_factory({
+        system_sections=system_sections,
+        loadout_sections=loadout_sections,
+        read_loadout_string=function(_, section_name, key)
+            local values = loadout_sections[section_name]
+            return values and values[key] or nil
+        end,
+        enumerate_loadout_keys=function(_, section_name)
+            local values = {}
+            for key in pairs(loadout_sections[section_name] or {}) do values[#values + 1] = key end
+            return values
+        end
+    }))
+    gamma_arena_test_assert.is_true(loaded.ok, "exact actor quarantine fixture loads")
+    local snapshot = loaded.value
+    gamma_arena_test_assert.equals(snapshot.weapons.wpn_dtmdr.section, "wpn_dtmdr", "quarantined actor section remains in full catalog")
+    gamma_arena_test_assert.equals(snapshot.weapons.wpn_dtmdr_acog.section, "wpn_dtmdr_acog", "ACOG attachment variant remains cataloged")
+    gamma_arena_test_assert.equals(snapshot.weapons.wpn_dtmdr_eot.section, "wpn_dtmdr_eot", "EOT attachment variant remains cataloged")
+    local actor_sections = {}
+    for _, weapon in ipairs(snapshot.actor_weapon_list or {}) do actor_sections[weapon.section] = true end
+    gamma_arena_test_assert.is_false(actor_sections.wpn_dtmdr == true, "only exact base section is absent from actor candidates")
+    gamma_arena_test_assert.is_true(actor_sections.wpn_dtmdr_acog == true, "ACOG attachment variant remains actor eligible")
+    gamma_arena_test_assert.is_true(actor_sections.wpn_dtmdr_eot == true, "EOT attachment variant remains actor eligible")
+    local npc_pool = snapshot.weapon_pools_by_profile.gamma_arena_stalker_novice.primary
+    local npc_sections = {}
+    for _, weapon in ipairs(npc_pool) do npc_sections[weapon.section] = true end
+    gamma_arena_test_assert.is_true(npc_sections.wpn_dtmdr == true, "NPC pool retains the exact base section")
+
+    local saw_variant, variant_spec = false, nil
+    for seed = 0, 511 do
+        local generated = generate_fixture(request(seed, "master"), seed % 8, snapshot)
+        gamma_arena_test_assert.is_true(generated.ok, "quarantined catalog still generates actor loadouts")
+        gamma_arena_test_assert.is_true(generated.value.actor.loadout.weapon ~= "wpn_dtmdr", "actor generation never falls back to quarantined base")
+        if generated.value.actor.loadout.weapon == "wpn_dtmdr_acog" or generated.value.actor.loadout.weapon == "wpn_dtmdr_eot" then
+            saw_variant = true
+            variant_spec = generated.value
+        end
+    end
+    gamma_arena_test_assert.is_true(saw_variant, "attachment variants remain reachable by deterministic actor selection")
+    variant_spec.actor.loadout.weapon = "wpn_dtmdr"
+    local rejected = validate_fixture(variant_spec, snapshot)
+    gamma_arena_test_assert.is_false(rejected.ok, "validator rejects a forged quarantined actor section")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_WEAPON_QUARANTINED", "actor quarantine validation code is stable")
+
+    local no_actor_candidates = catalogs()
+    no_actor_candidates.actor_weapon_list = {}
+    local no_fallback = gamma_arena_generator.player_loadout(request(9, "rookie"), 0, no_actor_candidates, no_actor_candidates.difficulties.rookie)
+    gamma_arena_test_assert.is_false(no_fallback.ok, "empty actor candidate list cannot fall back to full weapon catalog")
+    gamma_arena_test_assert.equals(no_fallback.error.code, "GA_NO_VALID_PLAYER_LOADOUT", "empty actor candidate failure is structured")
+end
+
 local function validator_rejects_unknown_spawn_path()
     local snapshot = catalogs()
     local generated = generate_fixture(request(1, "rookie"), 0, snapshot)
@@ -1086,6 +1162,7 @@ function run(run_case_fn)
         { name="fight_spec_v6_separates_gear_and_medical_costs", fn=fight_spec_v6_separates_gear_and_medical_costs },
         { name="medical_tuning_does_not_reroll_core_fight", fn=medical_tuning_does_not_reroll_core_fight },
         { name="catalog_augments_effective_system_without_cartesian_product", fn=catalog_augments_from_effective_system_without_cartesian_product },
+        { name="actor_weapon_quarantine_is_exact_and_actor_only", fn=actor_weapon_quarantine_is_exact_and_actor_only },
         { name="catalog_rejects_malformed_data", fn=catalog_rejects_malformed_data },
         { name="validator_never_throws_for_malformed_specs", fn=validator_never_throws_for_malformed_specs },
         { name="validator_rejects_unknown_spawn_path", fn=validator_rejects_unknown_spawn_path },

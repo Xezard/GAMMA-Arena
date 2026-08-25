@@ -187,6 +187,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_number.script'; Namespace = 'gamma_arena_number'; Required = @('(?m)^function\s+is_finite\s*\(', '(?m)^function\s+is_integer\s*\(', '(?m)^function\s+is_positive_integer\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog.script'; Namespace = 'gamma_arena_catalog'; Required = @('(?m)^function\s+load\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'; Namespace = 'gamma_arena_catalog_discovery'; Required = @('(?m)^function\s+discover\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_weapon_diagnostics.script'; Namespace = 'gamma_arena_weapon_diagnostics'; Required = @('(?m)^function\s+snapshot\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_medical_generator.script'; Namespace = 'gamma_arena_medical_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+allocate_enemies\s*\(') },
@@ -1150,6 +1151,10 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     }
     Assert-True ($Task3CatalogScriptContent -match 'layout_manifest_v2') 'Catalog loader must bind exact ordered v2 layout semantics'
     Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
+    Assert-True ($Task3CatalogScriptContent -match 'ACTOR_WEAPON_QUARANTINE') 'Catalog must declare an explicit actor-only weapon quarantine.'
+    Assert-True ($Task3CatalogScriptContent -match 'wpn_dtmdr\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_dtmdr section.'
+    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_list') 'Catalog must expose a deterministic actor weapon list.'
+    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v1') 'Catalog revision identity must include the actor quarantine policy.'
 }
 $Task3ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
 if (Test-Path -LiteralPath $Task3ValidatorPath) {
@@ -1169,6 +1174,7 @@ if (Test-Path -LiteralPath $Task3ValidatorPath) {
     Assert-True ($Task3ValidatorContent -match 'math\.floor\s*\(\s*difficulty\.enemy_total_budget\s*/\s*opponent_count\s*\)') 'Validator must recompute the generator slot-budget base'
     Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
     Assert-True ($Task3ValidatorContent -match 'spec\.schema_version\s*~=\s*6') 'Validator must require FightSpec v6'
+    Assert-True ($Task3ValidatorContent -match 'GA_ACTOR_WEAPON_QUARANTINED') 'Validator must reject actor weapons outside actor_weapon_list.'
     foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','GA_MEDICAL_COST_INVALID','GA_ENEMY_MEDICAL_MIX_INVALID')) {
         Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v6 validator must contain $Marker"
     }
@@ -1212,10 +1218,12 @@ if (Test-Path -LiteralPath $Task3GeneratorPath) {
     Assert-True ($Task3GeneratorContent -match 'global_role_pool') 'Unaffordable faction role pools must fall back to the matching global role pool'
     Assert-True ($Task3GeneratorContent -match 'function\s+select_player_class_pair\s*\(') 'Generator must expose weighted player class-pair selection'
     Assert-True ($Task3GeneratorContent -match 'function\s+player_loadout\s*\(') 'Generator must stage player loadout selection by class pair'
+    Assert-True (([regex]::Matches($Task3GeneratorContent, 'catalogs\.actor_weapon_list')).Count -ge 2) 'Player feasibility and final selection must share actor_weapon_list.'
     foreach ($Marker in @('actor_class_pair','actor_weapon','actor_ammo_boxes','actor_outfit')) {
         Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Player selection must use the $Marker deterministic stream"
     }
     $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
+    Assert-True ($GeneratorTests -match 'actor_weapon_quarantine_is_exact_and_actor_only') 'Generator tests must cover exact actor-only weapon quarantine.'
     Assert-True ($GeneratorTests -match 'fight_spec_v6_separates_gear_and_medical_costs') 'Generator tests must cover FightSpec v6 cost separation'
     Assert-True ($GeneratorTests -match 'validator_rejects_forged_final_actor_ammo') 'Generator tests must cover forged final actor ammo'
     Assert-True ($GeneratorTests -match 'medical_tuning_does_not_reroll_core_fight') 'Generator tests must prove medical tuning cannot reroll core fight fields'
@@ -2048,21 +2056,30 @@ foreach ($Name in @('runtime_entity_cleanup_adopts_unloaded_weapon_child','runti
 
 $ArenaSaveGuardPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_save_guard.script'
 $ArenaDiagnosticsPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_diagnostics.script'
+$ArenaWeaponDiagnosticsPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_weapon_diagnostics.script'
 $ArenaBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $ArenaOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
 $ArenaEntityPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $ArenaRuntimeTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 Assert-True (Test-Path -LiteralPath $ArenaSaveGuardPath) 'Arena save guard module is missing.'
 Assert-True (Test-Path -LiteralPath $ArenaDiagnosticsPath) 'Arena checkpoint journal module is missing.'
+Assert-True (Test-Path -LiteralPath $ArenaWeaponDiagnosticsPath) 'Arena weapon metadata diagnostic module is missing.'
 if ((Test-Path -LiteralPath $ArenaSaveGuardPath) -and (Test-Path -LiteralPath $ArenaDiagnosticsPath)) {
     $ArenaSaveGuardContent = Get-Content -LiteralPath $ArenaSaveGuardPath -Raw
     $ArenaDiagnosticsContent = Get-Content -LiteralPath $ArenaDiagnosticsPath -Raw
     foreach ($Marker in @('function SaveGuard:install','function SaveGuard:arm','function SaveGuard:maintain','function SaveGuard:disarm','delay_new_game_autosave','GA_SAVE_COMMAND_SUPPRESSED','GA_SAVE_GUARD_BREACH','token:lower() == "save"')) {
         Assert-True ($ArenaSaveGuardContent -match [regex]::Escape($Marker)) "Arena save guard contract is missing: $Marker"
     }
-    foreach ($Marker in @('MAX_LINE_BYTES = 1024','function Diagnostics:checkpoint','handle:flush()','handle:close()')) {
+    foreach ($Marker in @('MAX_LINE_BYTES = 1024','CRITICAL_FIELD_ORDER','weapon_section','function Diagnostics:checkpoint','handle:flush()','handle:close()')) {
         Assert-True ($ArenaDiagnosticsContent -match [regex]::Escape($Marker)) "Arena diagnostics journal contract is missing: $Marker"
     }
+}
+if (Test-Path -LiteralPath $ArenaWeaponDiagnosticsPath) {
+    $ArenaWeaponDiagnosticsContent = Get-Content -LiteralPath $ArenaWeaponDiagnosticsPath -Raw
+    foreach ($Marker in @('function snapshot','unavailable','parent_section','item_visual','anm_show','anm_idle','anm_idle_empty','anm_hide')) {
+        Assert-True ($ArenaWeaponDiagnosticsContent -match [regex]::Escape($Marker)) "Arena weapon metadata contract is missing: $Marker"
+    }
+    Assert-True ($ArenaWeaponDiagnosticsContent -match 'pcall') 'Effective weapon metadata reads must be protected.'
 }
 $ArenaBootstrapContent = Get-Content -LiteralPath $ArenaBootstrapPath -Raw
 $ArenaOrchestratorContent = Get-Content -LiteralPath $ArenaOrchestratorPath -Raw
@@ -2077,6 +2094,25 @@ if ($ArenaDefaultDiagnosticsStart -ge 0 -and $ArenaDefaultDiagnosticsEnd -gt $Ar
     $ArenaLevelNameIndex = $ArenaDefaultDiagnosticsBlock.IndexOf('pcall(level.name)')
     Assert-True ($ArenaDefaultDiagnosticsBlock -match 'type\(level\.present\)\s*~=\s*"function"') 'Arena diagnostics must treat level.present as required engine context.'
     Assert-True ($ArenaLevelPresentIndex -ge 0 -and $ArenaLevelNameIndex -gt $ArenaLevelPresentIndex) 'Arena diagnostics must confirm an active level before querying level.name from the main-menu VM.'
+}
+$ArenaActorActivationStart = $ArenaBootstrapContent.IndexOf('if equipment.phase == "SUBMIT_ACTIVE" then')
+$ArenaActorActivationEnd = if ($ArenaActorActivationStart -ge 0) { $ArenaBootstrapContent.IndexOf('if equipment.phase ~= "WAIT_ACTIVE_VERIFY"', $ArenaActorActivationStart) } else { -1 }
+Assert-True ($ArenaActorActivationStart -ge 0 -and $ArenaActorActivationEnd -gt $ArenaActorActivationStart) 'Actor native activation boundary must remain structurally testable.'
+if ($ArenaActorActivationStart -ge 0 -and $ArenaActorActivationEnd -gt $ArenaActorActivationStart) {
+    $ArenaActorActivationBlock = $ArenaBootstrapContent.Substring($ArenaActorActivationStart, $ArenaActorActivationEnd - $ArenaActorActivationStart)
+    $ArenaWeaponCheckpointIndex = $ArenaActorActivationBlock.IndexOf('GA_ACTOR_WEAPON_PRE_ACTIVATE')
+    $ArenaMakeActiveIndex = $ArenaActorActivationBlock.IndexOf('ports.make_item_active')
+    Assert-True ($ArenaWeaponCheckpointIndex -ge 0 -and $ArenaMakeActiveIndex -gt $ArenaWeaponCheckpointIndex) 'Durable actor weapon evidence must be written before make_item_active.'
+    Assert-True ($ArenaActorActivationBlock -match 'GA_ACTOR_WEAPON_CHECKPOINT_FAILED') 'Actor activation must expose structured durable-checkpoint failure.'
+}
+$ArenaPrepareFightStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:prepare_fight')
+$ArenaPrepareFightEnd = if ($ArenaPrepareFightStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:begin_countdown_after_equipment', $ArenaPrepareFightStart) } else { -1 }
+Assert-True ($ArenaPrepareFightStart -ge 0 -and $ArenaPrepareFightEnd -gt $ArenaPrepareFightStart) 'Fight preparation boundary must remain structurally testable for weapon diagnostics.'
+if ($ArenaPrepareFightStart -ge 0 -and $ArenaPrepareFightEnd -gt $ArenaPrepareFightStart) {
+    $ArenaPrepareFightBlock = $ArenaOrchestratorContent.Substring($ArenaPrepareFightStart, $ArenaPrepareFightEnd - $ArenaPrepareFightStart)
+    $ArenaSelectedWeaponIndex = $ArenaPrepareFightBlock.IndexOf('GA_ACTOR_WEAPON_SELECTED')
+    $ArenaBeginApplyIndex = $ArenaPrepareFightBlock.IndexOf('"begin_apply"')
+    Assert-True ($ArenaSelectedWeaponIndex -ge 0 -and $ArenaBeginApplyIndex -gt $ArenaSelectedWeaponIndex) 'Selected actor weapon metadata must be logged before entity mutation.'
 }
 foreach ($Callback in @('"npc_on_before_hit"','"npc_on_hit_callback"')) {
     Assert-True ($ArenaBootstrapContent -match [regex]::Escape($Callback)) "Arena NPC forensic callback is not registered: $Callback"
@@ -2146,7 +2182,7 @@ if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
     Assert-True ($ArenaActivateBlock -notmatch 'enter_fatal\s*\(\s*ownership\s*,\s*true') 'Rejected non-mutating launch ownership must be cleared by common fatal routing.'
     Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
 }
-foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
+foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_weapon_diagnostics_reads_effective_hud_metadata','runtime_weapon_diagnostics_missing_reads_are_unavailable','runtime_actor_weapon_checkpoint_precedes_native_activation','runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back','runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }
