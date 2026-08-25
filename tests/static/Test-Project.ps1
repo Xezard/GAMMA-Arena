@@ -2245,6 +2245,30 @@ if (Test-Path -LiteralPath $McmPath) {
     Assert-True (([regex]::Matches($McmContent, 'def\s*=\s*true')).Count -eq 2) 'Arena MCM checks must both default to true.'
     Assert-True ($McmContent -notmatch '\bbar_arena_fight') 'Arena MCM must not mutate stock Arena fight info portions.'
 }
+$McmEnglishPath = Join-Path $SourceGamedata 'configs\text\eng\st_gamma_arena_mcm.xml'
+$McmRussianPath = Join-Path $SourceGamedata 'configs\text\rus\st_gamma_arena_mcm.xml'
+Assert-True (Test-Path -LiteralPath $McmEnglishPath) 'Arena MCM English localization must be packaged.'
+Assert-True (Test-Path -LiteralPath $McmRussianPath) 'Arena MCM Russian localization must be packaged.'
+if ((Test-Path -LiteralPath $McmEnglishPath) -and (Test-Path -LiteralPath $McmRussianPath)) {
+    $McmEnglishContent = Get-Content -LiteralPath $McmEnglishPath -Raw -Encoding UTF8
+    $McmRussianContent = Get-Content -LiteralPath $McmRussianPath -Raw -Encoding UTF8
+    foreach ($StringId in @(
+        'ui_mcm_gamma_arena_title',
+        'ui_mcm_gamma_arena_commentator',
+        'ui_mcm_gamma_arena_commentator_desc',
+        'ui_mcm_gamma_arena_crowd_reactions',
+        'ui_mcm_gamma_arena_crowd_reactions_desc'
+    )) {
+        Assert-True ($McmEnglishContent -match ('id="' + [regex]::Escape($StringId) + '"')) "Arena MCM English localization is missing: $StringId"
+        Assert-True ($McmRussianContent -match ('id="' + [regex]::Escape($StringId) + '"')) "Arena MCM Russian localization is missing: $StringId"
+    }
+    Assert-True ($McmEnglishContent -match '<text>Commentator</text>') 'Arena MCM English commentator label must be exact.'
+    Assert-True ($McmEnglishContent -match '<text>Crowd reactions</text>') 'Arena MCM English crowd label must be exact.'
+    $ExpectedRussianCommentator = -join @([char]0x041A,[char]0x043E,[char]0x043C,[char]0x043C,[char]0x0435,[char]0x043D,[char]0x0442,[char]0x0430,[char]0x0442,[char]0x043E,[char]0x0440)
+    $ExpectedRussianCrowd = -join @([char]0x0420,[char]0x0435,[char]0x0430,[char]0x043A,[char]0x0446,[char]0x0438,[char]0x0438,[char]0x0020,[char]0x0442,[char]0x043E,[char]0x043B,[char]0x043F,[char]0x044B)
+    Assert-True ($McmRussianContent.Contains("<text>$ExpectedRussianCommentator</text>")) 'Arena MCM Russian commentator label must be exact.'
+    Assert-True ($McmRussianContent.Contains("<text>$ExpectedRussianCrowd</text>")) 'Arena MCM Russian crowd label must be exact.'
+}
 if (Test-Path -LiteralPath $AudioTestPath) {
     $AudioTestContent = Get-Content -LiteralPath $AudioTestPath -Raw
     foreach ($CaseName in @(
