@@ -276,6 +276,7 @@ function Orchestrator:set_runtime_stage(stage)
 end
 
 function Orchestrator:clear_runtime_ui()
+    self:clear_battle_identity("runtime_cleanup")
     local ui = self.deps.result_ui
     if ui == nil then return gamma_arena_result.ok(false) end
     local errors = {}
@@ -289,6 +290,60 @@ function Orchestrator:clear_runtime_ui()
     self.countdown_value = nil
     if #errors > 0 then return fail("GA_RUNTIME_UI_CLEAR_FAILED", "Arena runtime UI could not be removed safely", { errors = errors }) end
     return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:battle_identity_model()
+    local spec = self.fight_spec
+    local session = self.session
+    local seed = safe_value_call("GA_BATTLE_IDENTITY_MISMATCH", spec and spec.session_seed)
+    if not seed.ok then return seed end
+    local index = safe_value_call("GA_BATTLE_IDENTITY_MISMATCH", spec and spec.fight_index)
+    if not index.ok then return index end
+    if type(session) ~= "table"
+        or type(seed.value) ~= "number" or seed.value ~= math.floor(seed.value)
+        or seed.value < 1 or seed.value >= 2147483647
+        or type(index.value) ~= "number" or index.value ~= math.floor(index.value)
+        or index.value < 0 or index.value >= UINT32_MOD
+        or seed.value ~= session.session_seed or index.value ~= session.fight_index then
+        return fail("GA_BATTLE_IDENTITY_MISMATCH", "Validated FightSpec identity does not match the active Arena session", {
+            spec_seed = seed.value,
+            spec_fight_index = index.value,
+            session_seed = session and session.session_seed or nil,
+            session_fight_index = session and session.fight_index or nil
+        })
+    end
+    return gamma_arena_result.ok({ session_seed = seed.value, fight_index = index.value })
+end
+
+function Orchestrator:record_battle_ui_failure(action, result, reason)
+    local code = action == "show" and "GA_BATTLE_UI_SHOW_FAILED" or "GA_BATTLE_UI_CLEAR_FAILED"
+    local cause = type(result) == "table" and result.error or nil
+    local context = {
+        action = action,
+        reason = reason,
+        cause = cause and cause.code or "unavailable",
+        stage = self.runtime_stage,
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil
+    }
+    self:diagnostic(code, "Battle identity HUD " .. tostring(action) .. " failed safely", context)
+    self:checkpoint(code, context)
+    return gamma_arena_result.ok(false)
+end
+
+function Orchestrator:show_battle_identity()
+    local model = self:battle_identity_model()
+    if not model.ok then return model end
+    local shown = call_method("GA_BATTLE_UI_SHOW_FAILED", self.deps.battle_ui, "show_identity", model.value)
+    if not shown.ok then return self:record_battle_ui_failure("show", shown, "active") end
+    return shown
+end
+
+function Orchestrator:clear_battle_identity(reason)
+    if self.deps.battle_ui == nil then return gamma_arena_result.ok(false) end
+    local cleared = call_method("GA_BATTLE_UI_CLEAR_FAILED", self.deps.battle_ui, "clear_identity")
+    if not cleared.ok then return self:record_battle_ui_failure("clear", cleared, reason or "cleanup") end
+    return cleared
 end
 
 function Orchestrator:living_opponent_count()
@@ -875,6 +930,8 @@ function Orchestrator:observe_entity_activation()
     local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
     if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity registry snapshot failed safely") end
     if snapshot.state ~= "ACTIVE" then return gamma_arena_result.ok({ stage = "SPAWNING", entity = snapshot.state }) end
+    local identity = self:battle_identity_model()
+    if not identity.ok then return identity end
     local released = call_method("GA_ACTOR_INPUT_ENABLE_FAILED", self.deps.actor, "release_input")
     if not released.ok then return released end
     local now = self:clock_now()
@@ -905,6 +962,8 @@ function Orchestrator:observe_entity_activation()
             registry_npcs = #(snapshot.npcs or {}), registry_items = #(snapshot.items or {})
         })
     if not logged.ok then return logged end
+    local shown = self:show_battle_identity()
+    if not shown.ok then return shown end
     return gamma_arena_result.ok({ stage = "ACTIVE" })
 end
 
@@ -927,6 +986,7 @@ function Orchestrator:show_victory()
     self.result_action_locked = false
     self.pending_next_fight_index = nil
     self:set_runtime_stage("RESULT")
+    self:clear_battle_identity("victory")
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration)
         .. " dead=" .. tostring(terminal_summary.defeated_dead or 0)
         .. " wounded=" .. tostring(terminal_summary.defeated_wounded or 0)
@@ -1002,6 +1062,7 @@ function Orchestrator:queue_integrity_retry(fault)
     local attempt = self.integrity_retry_count + 1
     local medical = self:stop_npc_medical("integrity_retry")
     if not medical.ok then return medical end
+    self:clear_battle_identity("integrity_retry")
     local logged = self:emit_log("GA_FIGHT_INTEGRITY_RETRY", "attempt=" .. tostring(attempt)
         .. " cause=" .. tostring(fault and fault.cause), {
             attempt = attempt,
@@ -1260,6 +1321,7 @@ function Orchestrator:actor_on_before_death(...)
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.death_latched then
         return gamma_arena_result.ok(false)
     end
+    self:clear_battle_identity("actor_before_death")
     local medical = self:stop_npc_medical("actor_before_death")
     if not medical.ok then return medical end
     self.death_latched = true

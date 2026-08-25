@@ -681,6 +681,19 @@ $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
 foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_main_hud_visibility_is_safe')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
+$BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
+$BattleBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+$BattleOrchestratorContent = Get-Content -LiteralPath $BattleOrchestratorPath -Raw
+$BattleBootstrapContent = Get-Content -LiteralPath $BattleBootstrapPath -Raw
+foreach ($Marker in @('show_battle_identity','clear_battle_identity','GA_BATTLE_IDENTITY_MISMATCH','GA_BATTLE_UI_SHOW_FAILED','GA_BATTLE_UI_CLEAR_FAILED')) {
+    Assert-True ($BattleOrchestratorContent -match [regex]::Escape($Marker)) "Battle identity lifecycle must cover $Marker"
+}
+foreach ($Marker in @('gamma_arena_ui_battle.new','battle_ui')) {
+    Assert-True ($BattleBootstrapContent -match [regex]::Escape($Marker)) "Battle identity bootstrap must cover $Marker"
+}
+foreach ($Marker in @('runtime_battle_identity_lifecycle_is_active_only','runtime_battle_identity_failures_are_classified','runtime_battle_identity_mismatch_fails_before_active')) {
+    Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity lifecycle tests must cover $Marker"
+}
 
 $Task6MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
 $Task6UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
