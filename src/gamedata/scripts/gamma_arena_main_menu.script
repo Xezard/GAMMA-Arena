@@ -26,6 +26,12 @@ local function on_arena_clicked(menu)
     open_arena(menu)
 end
 
+local function on_restart_clicked(menu)
+    local result = request_restart(menu)
+    log_result(result)
+    return result
+end
+
 local function port_or_default(ports, name, default)
     if type(ports) == "table" and ports[name] ~= nil then return ports[name] end
     return default
@@ -49,6 +55,45 @@ local function call_result_port(name, callback)
         })
     end
     return result
+end
+
+function request_restart(menu, ports)
+    ports = ports or {}
+    local restart = ports.request_restart
+    if restart == nil then
+        local lookup_ok, value = pcall(function()
+            return gamma_arena_bootstrap and gamma_arena_bootstrap.request_restart
+        end)
+        if lookup_ok then restart = value end
+    end
+    if type(restart) ~= "function" then
+        return gamma_arena_result.err("GA_ARENA_RESTART_UNAVAILABLE", "Arena restart runtime is unavailable")
+    end
+    local called, result = pcall(restart)
+    if not called then
+        return gamma_arena_result.err("GA_ARENA_RESTART_FAILED", "Arena restart runtime failed safely", {
+            reason = tostring(result)
+        })
+    end
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_ARENA_RESTART_RESULT_INVALID", "Arena restart runtime returned an invalid Result", {
+            result_type = type(result)
+        })
+    end
+    if not result.ok then return result end
+    if result.value ~= true then return gamma_arena_result.ok(false) end
+
+    local lookup_ok, close = pcall(function() return menu and menu.OnButton_return_game end)
+    if not lookup_ok or type(close) ~= "function" then
+        return gamma_arena_result.err("GA_ARENA_RESTART_MENU_CLOSE_FAILED", "Accepted Arena restart could not close the pause menu")
+    end
+    local close_ok, close_result = pcall(close, menu)
+    if not close_ok or close_result == false or (type(close_result) == "table" and close_result.ok == false) then
+        return gamma_arena_result.err("GA_ARENA_RESTART_MENU_CLOSE_FAILED", "Accepted Arena restart could not close the pause menu", {
+            reason = close_ok and nil or tostring(close_result)
+        })
+    end
+    return gamma_arena_result.ok(true)
 end
 
 local function restore_main_menu(menu, dialog)
@@ -191,6 +236,7 @@ function bind(menu)
         end
         local ok, detail = pcall(function()
             menu:AddCallback("btn_gamma_arena", ui_events.BUTTON_CLICKED, on_arena_clicked, menu)
+            menu:AddCallback("btn_gamma_arena_restart", ui_events.BUTTON_CLICKED, on_restart_clicked, menu)
         end)
         if not ok then
             return gamma_arena_result.err("GA_MAIN_MENU_BIND_FAILED", "Arena menu callback could not be registered", { detail = tostring(detail) })
