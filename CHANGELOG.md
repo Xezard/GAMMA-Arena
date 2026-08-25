@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Added independently configurable original Rostok Arena commentator and crowd reactions, with live MCM toggles, automatic compatibility with add-on 474's winning VFS resources, deterministic clip rotation, and fail-soft owned-channel cleanup.
 - Quarantined only the broken actor HUD section `wpn_eft_mts_255_uh2`, preserving the base MTS-255, sibling optic variants, and NPC catalog eligibility.
 - Quarantined only the confirmed actor section `wpn_dtmdr` while preserving its attachment variants and NPC eligibility; added effective HUD metadata logs plus a flushed pre-activation breadcrumb before the native weapon-animation boundary.
 - Scaled the actor's ordinary ammunition for every firearm class with opponent count: one guaranteed box plus deterministic per-opponent chances (40% pistol, 25% SMG/shotgun, 20% rifle, 10% sniper), outside the gear budget and without a gameplay ceiling.
