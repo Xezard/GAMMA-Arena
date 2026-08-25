@@ -359,13 +359,18 @@ if (Test-Path -LiteralPath $DxmlPath) {
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main btn\[name=btn_gamma_arena\]"\s*\)') 'DXML handler must query the exact duplicate guard selector'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main\s*>\s*btn\[name=btn_newgame\]"\s*\)') 'DXML handler must locate the direct New Game child'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single btn\[name=btn_gamma_arena_restart\]"\s*\)') 'DXML handler must query the exact in-game restart duplicate guard selector'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single"\s*\)') 'DXML handler must feature-probe the live single-player menu'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single\s*>\s*btn\[name=btn_ret\]"\s*\)') 'DXML handler must locate the direct Return to Game child'
     Assert-True ($DxmlContent -match 'getElementPosition') 'DXML handler must derive the insertion point from New Game'
     Assert-True ($DxmlContent -match 'new_game_position\s*\+\s*1') 'Arena must be inserted immediately after New Game'
+    Assert-True ($DxmlContent -match 'return_position\s*\+\s*1') 'Restart Arena must be inserted immediately after Return to Game'
     Assert-True ($DxmlContent -notmatch 'menu\[1\]\s*,\s*#menu\[1\]\.kids') 'Arena insertion must not use an end-relative menu position'
     foreach ($Code in @('GA_DXML_POSITION_API_UNAVAILABLE','GA_DXML_MENU_MISSING','GA_DXML_NEW_GAME_MISSING','GA_DXML_NEW_GAME_PARENT_MISMATCH','GA_DXML_NEW_GAME_POSITION_INVALID')) {
         Assert-True ($DxmlContent -match [regex]::Escape($Code)) "DXML placement must fail closed with $Code"
     }
     Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
+    Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena_restart" caption="st_gamma_arena_restart"\s*/>')).Count -eq 1) 'DXML module must contain exactly one in-game Arena restart insertion'
     Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
     Assert-True ($DxmlContent -match 'pcall\s*\(\s*(gamma_arena_log\.error|logger)\s*,\s*result\.error\.code\s*,\s*result\.error\.message\s*,\s*result\.error\.context') 'DXML callback must internally log structured failures because callback returns are ignored'
 }
@@ -374,7 +379,7 @@ $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_m
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
     Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_both_arena_menu_clicks','main_menu_restart_is_acceptance_gated','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('defeat_intent_is_transactional_and_cross_vm_safe','defeat_promotion_is_atomic_and_conflict_safe','gad1:1000:death_1','issue_launch_from_defeat')) {
@@ -390,7 +395,13 @@ if (Test-Path -LiteralPath $MainMenuPath) {
     Assert-True ($MainMenuContent -notmatch '(?m)^function\s+on_game_start\s*\(') 'Main-menu adapter must not register after the first cold-start init'
     Assert-True ($MainMenuContent -notmatch 'RegisterScriptCallback') 'Main-menu adapter registration must be owned by the early DXML bootstrap'
     Assert-True ($MainMenuContent -match 'type\s*\(\s*menu\.AddCallback\s*\)\s*==\s*"function"') 'Main-menu adapter must feature-probe AddCallback'
-    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind only btn_gamma_arena'
+    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind btn_gamma_arena'
+    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena_restart"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind the in-game Arena restart button'
+    Assert-True ($MainMenuContent -match '(?m)^function\s+request_restart\s*\(') 'Main-menu adapter must expose a testable restart seam'
+    Assert-True ($MainMenuContent -match 'request_restart[\s\S]{0,1800}OnButton_return_game') 'Accepted restart must close the pause menu through the stock return action'
+    foreach ($Code in @('GA_ARENA_RESTART_UNAVAILABLE','GA_ARENA_RESTART_FAILED','GA_ARENA_RESTART_RESULT_INVALID','GA_ARENA_RESTART_MENU_CLOSE_FAILED')) {
+        Assert-True ($MainMenuContent -match [regex]::Escape($Code)) "Main-menu restart adapter must fail closed with $Code"
+    }
     Assert-True ($MainMenuContent -notmatch 'ui_main_menu') 'Main-menu adapter must not monkey-patch ui_main_menu'
 }
 
@@ -433,7 +444,7 @@ foreach ($Locale in @('rus','eng')) {
         [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
         Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
-        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
+    foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
             Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
         }
     }
@@ -464,6 +475,22 @@ if (Test-Path -LiteralPath $RussianLocalePath) {
     foreach ($Text in $RussianExpected) {
         Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact Windows-1251 text: $Text"
     }
+}
+
+$EnglishRestartPath = Join-Path $RepoRoot 'src\gamedata\configs\text\eng\st_gamma_arena.xml'
+$RussianRestartPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena_restart.xml'
+if (Test-Path -LiteralPath $EnglishRestartPath) {
+    [xml]$EnglishRestartXml = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($EnglishRestartPath))
+    $EnglishRestart = $EnglishRestartXml.SelectSingleNode('//string[@id="st_gamma_arena_restart"]/text')
+    Assert-True ($null -ne $EnglishRestart -and $EnglishRestart.InnerText -ceq 'RESTART ARENA') 'English restart caption must be exact'
+}
+if (Test-Path -LiteralPath $RussianRestartPath) {
+    $RussianRestartBytes = [IO.File]::ReadAllBytes($RussianRestartPath)
+    Assert-True (($RussianRestartBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Russian restart localization source must remain ASCII-safe Windows-1251 XML'
+    [xml]$RussianRestartXml = [Text.Encoding]::GetEncoding(1251).GetString($RussianRestartBytes)
+    $RussianRestart = $RussianRestartXml.SelectSingleNode('//string[@id="st_gamma_arena_restart"]/text')
+    $RussianRestartExpected = ConvertFrom-Json '"\u041f\u0415\u0420\u0415\u0417\u0410\u041f\u0423\u0421\u0422\u0418\u0422\u042c \u0410\u0420\u0415\u041d\u0423"'
+    Assert-True ($null -ne $RussianRestart -and $RussianRestart.InnerText -ceq $RussianRestartExpected) 'Russian restart caption must be exact'
 }
 
 $GitAttributesPath = Join-Path $RepoRoot '.gitattributes'
@@ -843,7 +870,16 @@ $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena
 if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
     $CheckpointFreeStateContent = Get-Content -LiteralPath $CheckpointFreeStatePath -Raw
     Assert-True ($CheckpointFreeStateContent -match '\[event_values\.PREFLIGHT_SUCCEEDED\]\s*=\s*state_values\.PREPARING') 'Dedicated Arena preflight must advance directly to PREPARING'
+    Assert-True ($CheckpointFreeStateContent -match 'RESTART\s*=\s*"RESTART"') 'Arena state graph must expose the manual restart event'
+    Assert-True ($CheckpointFreeStateContent -match '\[event_values\.RESTART\]\s*=\s*state_values\.RESULT') 'Active manual restart must enter the existing result continuation boundary'
     Assert-True ($CheckpointFreeStateContent -notmatch 'state_values\.(CHECKPOINTING|RECOVERING)') 'Dedicated Arena state graph must not contain checkpoint or save-recovery states'
+}
+
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
+Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
+foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
+    Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
 }
 
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
@@ -2236,6 +2272,7 @@ if (Test-Path -LiteralPath $AudioPath) {
     }
     Assert-True ($AudioContent -notmatch '\bbar_arena_fight') 'Arena audio must not mutate stock Arena fight info portions.'
     Assert-True ($AudioContent -notmatch '\bmath\.random(seed)?\b') 'Arena audio must not consume non-deterministic or gameplay RNG.'
+    Assert-True ($AudioContent -match 'return\s+\(integer\s*%\s*3\)\s*\+\s*1') 'Arena audio clip rotation must map zero-based fight_index 0 to clip 1.'
 }
 if (Test-Path -LiteralPath $McmPath) {
     $McmContent = Get-Content -LiteralPath $McmPath -Raw
@@ -2251,7 +2288,11 @@ Assert-True (Test-Path -LiteralPath $McmEnglishPath) 'Arena MCM English localiza
 Assert-True (Test-Path -LiteralPath $McmRussianPath) 'Arena MCM Russian localization must be packaged.'
 if ((Test-Path -LiteralPath $McmEnglishPath) -and (Test-Path -LiteralPath $McmRussianPath)) {
     $McmEnglishContent = Get-Content -LiteralPath $McmEnglishPath -Raw -Encoding UTF8
-    $McmRussianContent = Get-Content -LiteralPath $McmRussianPath -Raw -Encoding UTF8
+    $McmRussianBytes = [IO.File]::ReadAllBytes($McmRussianPath)
+    Assert-True (($McmRussianBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Arena MCM Russian localization source must remain ASCII-safe Windows-1251 XML.'
+    $McmRussianContent = [Text.Encoding]::GetEncoding(1251).GetString($McmRussianBytes)
+    Assert-True ($McmRussianContent -match 'encoding="windows-1251"') 'Arena MCM Russian localization must declare the Anomaly/GAMMA Windows-1251 encoding.'
+    [xml]$McmRussianXml = $McmRussianContent
     foreach ($StringId in @(
         'ui_mcm_gamma_arena_title',
         'ui_mcm_gamma_arena_commentator',
@@ -2266,8 +2307,10 @@ if ((Test-Path -LiteralPath $McmEnglishPath) -and (Test-Path -LiteralPath $McmRu
     Assert-True ($McmEnglishContent -match '<text>Crowd reactions</text>') 'Arena MCM English crowd label must be exact.'
     $ExpectedRussianCommentator = -join @([char]0x041A,[char]0x043E,[char]0x043C,[char]0x043C,[char]0x0435,[char]0x043D,[char]0x0442,[char]0x0430,[char]0x0442,[char]0x043E,[char]0x0440)
     $ExpectedRussianCrowd = -join @([char]0x0420,[char]0x0435,[char]0x0430,[char]0x043A,[char]0x0446,[char]0x0438,[char]0x0438,[char]0x0020,[char]0x0442,[char]0x043E,[char]0x043B,[char]0x043F,[char]0x044B)
-    Assert-True ($McmRussianContent.Contains("<text>$ExpectedRussianCommentator</text>")) 'Arena MCM Russian commentator label must be exact.'
-    Assert-True ($McmRussianContent.Contains("<text>$ExpectedRussianCrowd</text>")) 'Arena MCM Russian crowd label must be exact.'
+    $RussianCommentatorNode = $McmRussianXml.SelectSingleNode('//string[@id="ui_mcm_gamma_arena_commentator"]/text')
+    $RussianCrowdNode = $McmRussianXml.SelectSingleNode('//string[@id="ui_mcm_gamma_arena_crowd_reactions"]/text')
+    Assert-True ($null -ne $RussianCommentatorNode -and $RussianCommentatorNode.InnerText -ceq $ExpectedRussianCommentator) 'Arena MCM Russian commentator label must be exact.'
+    Assert-True ($null -ne $RussianCrowdNode -and $RussianCrowdNode.InnerText -ceq $ExpectedRussianCrowd) 'Arena MCM Russian crowd label must be exact.'
 }
 if (Test-Path -LiteralPath $AudioTestPath) {
     $AudioTestContent = Get-Content -LiteralPath $AudioTestPath -Raw
@@ -2277,6 +2320,7 @@ if (Test-Path -LiteralPath $AudioTestPath) {
         'audio_accepted_deaths_rotate_reactions',
         'audio_ambience_advances_without_duplicate_update',
         'audio_live_settings_stop_and_resume_only_ambience',
+        'audio_live_disable_retries_one_shot_stop_failure',
         'audio_terminal_events_stop_crowd_and_announce',
         'audio_stop_all_is_idempotent_and_aggregates_failures',
         'audio_settings_failures_are_structured',
@@ -2293,12 +2337,37 @@ Assert-True ($PackagedSoundAssets.Count -eq 0) 'Gamma Arena must reuse effective
 foreach ($Marker in @('gamma_arena_audio.new','sound_object','sound_object.s3d','play_at_pos','overrides.audio','gamma_arena_mcm.snapshot')) {
     Assert-True ($ArenaBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap Arena audio port must cover: $Marker"
 }
+$AudioStopPortStart = $ArenaBootstrapContent.IndexOf('local function stop_channel(channel)')
+$AudioStopPortEnd = if ($AudioStopPortStart -ge 0) { $ArenaBootstrapContent.IndexOf('local function sound_for(path)', $AudioStopPortStart) } else { -1 }
+Assert-True ($AudioStopPortStart -ge 0 -and $AudioStopPortEnd -gt $AudioStopPortStart) 'Bootstrap Arena audio stop port must remain structurally testable.'
+if ($AudioStopPortStart -ge 0 -and $AudioStopPortEnd -gt $AudioStopPortStart) {
+    $AudioStopPortBlock = $ArenaBootstrapContent.Substring($AudioStopPortStart, $AudioStopPortEnd - $AudioStopPortStart)
+    $AudioStopCallIndex = $AudioStopPortBlock.IndexOf('handle:stop()')
+    $AudioStopClearIndex = $AudioStopPortBlock.IndexOf('active[channel] = nil')
+    Assert-True ($AudioStopCallIndex -ge 0 -and $AudioStopClearIndex -gt $AudioStopCallIndex) 'Arena audio stop failure must retain its owned handle for a later cleanup retry.'
+}
+$AudioPlayingPortStart = $ArenaBootstrapContent.IndexOf('playing = function(channel)')
+$AudioPlayingPortEnd = if ($AudioPlayingPortStart -ge 0) { $ArenaBootstrapContent.IndexOf('stop = stop_channel', $AudioPlayingPortStart) } else { -1 }
+Assert-True ($AudioPlayingPortStart -ge 0 -and $AudioPlayingPortEnd -gt $AudioPlayingPortStart) 'Bootstrap Arena audio playing port must remain structurally testable.'
+if ($AudioPlayingPortStart -ge 0 -and $AudioPlayingPortEnd -gt $AudioPlayingPortStart) {
+    $AudioPlayingPortBlock = $ArenaBootstrapContent.Substring($AudioPlayingPortStart, $AudioPlayingPortEnd - $AudioPlayingPortStart)
+    Assert-True ($AudioPlayingPortBlock -match 'if\s+not\s+called\s+then\s*return\s+gamma_arena_result\.err') 'Arena audio playing-state failure must retain its owned handle for teardown.'
+}
+$GitAttributesContent = Get-Content -LiteralPath (Join-Path $RepoRoot '.gitattributes') -Raw
+Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/st_gamma_arena_mcm\.xml\s+-text\s*$') 'Git must preserve Arena MCM Russian localization bytes without text conversion.'
 foreach ($Marker in @('function Orchestrator:audio_event','"begin_fight"','"update"','"opponent_defeated"','"victory"','"defeat"','"stop_all"','GA_AUDIO_EVENT_FAILED')) {
     Assert-True ($ArenaOrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator Arena audio lifecycle must cover: $Marker"
 }
-foreach ($Name in @('runtime_audio_events_follow_owned_lifecycle','runtime_audio_cleanup_covers_exit_boundaries','runtime_audio_failures_are_diagnostic_only','runtime_audio_defeat_failure_never_cancels_death')) {
+foreach ($Name in @('runtime_audio_events_follow_owned_lifecycle','runtime_audio_manual_restart_stops_channels','runtime_audio_cleanup_covers_exit_boundaries','runtime_audio_failures_are_diagnostic_only','runtime_audio_defeat_failure_never_cancels_death')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Arena audio runtime case must be registered exactly: $Name -> $Name"
+}
+$ArenaRestartStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:restart_arena_action')
+$ArenaRestartEnd = if ($ArenaRestartStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:request_main_menu_exit', $ArenaRestartStart) } else { -1 }
+Assert-True ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartStart) 'Arena manual restart boundary must remain structurally testable for audio cleanup.'
+if ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartStart) {
+    $ArenaRestartBlock = $ArenaOrchestratorContent.Substring($ArenaRestartStart, $ArenaRestartEnd - $ArenaRestartStart)
+    Assert-True ($ArenaRestartBlock -match 'audio_event\s*\(\s*"stop_all"') 'Arena manual restart must stop every owned audio channel before cleanup.'
 }
 
 if ($script:Failures.Count -gt 0) {
