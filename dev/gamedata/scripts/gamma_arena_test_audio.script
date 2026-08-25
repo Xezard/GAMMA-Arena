@@ -1,0 +1,238 @@
+local CROWD_PREFIX = "ambient\\arena\\crowd_"
+local REACTION_PREFIX = "ambient\\arena\\crowd_wave_"
+local COMMENTATOR_PREFIX = "characters_voice\\scenario\\bar\\arena_megafon\\"
+
+local function fixture(initial_settings, options)
+    local settings = initial_settings or {
+        commentator = true,
+        crowd_reactions = true
+    }
+    local config = options or {}
+    local calls = {}
+    local active = {}
+    local deps = {
+        settings = function()
+            if config.settings_error then
+                return gamma_arena_result.err("GA_TEST_SETTINGS", "settings failed")
+            end
+            return gamma_arena_result.ok(settings)
+        end,
+        play = function(channel, path, position)
+            calls[#calls + 1] = {
+                kind = "play",
+                channel = channel,
+                path = path,
+                position = position
+            }
+            if config.play_error == channel then
+                return gamma_arena_result.err("GA_TEST_PLAY", "play failed", { channel = channel })
+            end
+            active[channel] = true
+            return gamma_arena_result.ok(true)
+        end,
+        playing = function(channel)
+            if config.playing_error == channel then
+                return gamma_arena_result.err("GA_TEST_PLAYING", "playing failed", { channel = channel })
+            end
+            return gamma_arena_result.ok(active[channel] == true)
+        end,
+        stop = function(channel)
+            calls[#calls + 1] = { kind = "stop", channel = channel }
+            if config.stop_once == channel and not config.stop_once_consumed then
+                config.stop_once_consumed = true
+                return gamma_arena_result.err("GA_TEST_STOP_ONCE", "one-shot stop failed", { channel = channel })
+            end
+            if config.stop_error == channel then
+                return gamma_arena_result.err("GA_TEST_STOP", "stop failed", { channel = channel })
+            end
+            active[channel] = false
+            return gamma_arena_result.ok(true)
+        end
+    }
+    return gamma_arena_audio.new(deps), calls, active, settings
+end
+
+local function calls_of(calls, kind)
+    local selected = {}
+    for index = 1, #calls do
+        if calls[index].kind == kind then
+            selected[#selected + 1] = calls[index]
+        end
+    end
+    return selected
+end
+
+local function enabled_start_uses_owned_channels()
+    local controller, calls = fixture()
+    local anchor = { x = 1, y = 2, z = 3 }
+    local result = controller:begin_fight({ fight_index = 0, position = anchor })
+    gamma_arena_test_assert.is_true(result.ok, "enabled audio starts")
+    local plays = calls_of(calls, "play")
+    gamma_arena_test_assert.equals(#plays, 2, "fight start owns two playback calls")
+    gamma_arena_test_assert.equals(plays[1].channel, "crowd", "crowd ambience has its own channel")
+    gamma_arena_test_assert.equals(plays[1].path, CROWD_PREFIX .. "1", "zero-based first fight selects the first crowd clip")
+    gamma_arena_test_assert.equals(plays[1].position, anchor, "crowd uses the Arena anchor")
+    gamma_arena_test_assert.equals(plays[2].channel, "commentator", "announcer has its own channel")
+    gamma_arena_test_assert.equals(plays[2].path, COMMENTATOR_PREFIX .. "mega_arena_start", "fight start uses the stock announcer resource")
+end
+
+local function settings_disable_channel_families_independently()
+    local crowd_off, crowd_off_calls = fixture({ commentator = true, crowd_reactions = false })
+    gamma_arena_test_assert.is_true(crowd_off:begin_fight({ fight_index = 0 }).ok, "commentator-only start succeeds")
+    local crowd_off_plays = calls_of(crowd_off_calls, "play")
+    gamma_arena_test_assert.equals(#crowd_off_plays, 1, "disabled crowd suppresses ambience")
+    gamma_arena_test_assert.equals(crowd_off_plays[1].channel, "commentator", "commentator remains independent")
+    gamma_arena_test_assert.is_true(crowd_off:opponent_defeated({}).ok, "disabled reaction event is inert")
+    gamma_arena_test_assert.equals(#calls_of(crowd_off_calls, "play"), 1, "disabled crowd suppresses death reaction")
+
+    local commentator_off, commentator_off_calls = fixture({ commentator = false, crowd_reactions = true })
+    gamma_arena_test_assert.is_true(commentator_off:begin_fight({ fight_index = 0 }).ok, "crowd-only start succeeds")
+    local commentator_off_plays = calls_of(commentator_off_calls, "play")
+    gamma_arena_test_assert.equals(#commentator_off_plays, 1, "disabled commentator suppresses announcer")
+    gamma_arena_test_assert.equals(commentator_off_plays[1].channel, "crowd", "crowd remains independent")
+end
+
+local function accepted_deaths_rotate_reactions()
+    local controller, calls = fixture()
+    gamma_arena_test_assert.is_true(controller:begin_fight({ fight_index = 2 }).ok, "reaction fixture starts")
+    gamma_arena_test_assert.is_true(controller:opponent_defeated({ npc_id = 7 }).ok, "first accepted death reacts")
+    gamma_arena_test_assert.is_true(controller:opponent_defeated({ npc_id = 8 }).ok, "second accepted death reacts")
+    local plays = calls_of(calls, "play")
+    gamma_arena_test_assert.equals(plays[3].channel, "reaction", "death uses the reaction channel")
+    gamma_arena_test_assert.equals(plays[3].path, REACTION_PREFIX .. "2", "reaction starts from normalized fight index")
+    gamma_arena_test_assert.equals(plays[4].path, REACTION_PREFIX .. "3", "reaction order advances deterministically")
+end
+
+local function ambience_advances_without_duplicate_update()
+    local controller, calls, active = fixture()
+    gamma_arena_test_assert.is_true(controller:begin_fight({ fight_index = 2 }).ok, "ambient fixture starts")
+    gamma_arena_test_assert.is_true(controller:update({}).ok, "playing ambience update succeeds")
+    gamma_arena_test_assert.equals(#calls_of(calls, "play"), 2, "ordinary update never duplicates active ambience")
+    active.crowd = false
+    gamma_arena_test_assert.is_true(controller:update({}).ok, "finished ambience advances")
+    local plays = calls_of(calls, "play")
+    gamma_arena_test_assert.equals(#plays, 3, "finished ambience starts exactly one replacement")
+    gamma_arena_test_assert.equals(plays[3].path, CROWD_PREFIX .. "1", "ambient order wraps deterministically")
+end
+
+local function live_settings_stop_and_resume_only_ambience()
+    local controller, calls, active, settings = fixture()
+    gamma_arena_test_assert.is_true(controller:begin_fight({ fight_index = 0 }).ok, "live settings fixture starts")
+    active.reaction = true
+    settings.commentator = false
+    settings.crowd_reactions = false
+    gamma_arena_test_assert.is_true(controller:update({}).ok, "live disable succeeds")
+    local stops = calls_of(calls, "stop")
+    gamma_arena_test_assert.equals(#stops, 3, "live disable stops all affected owned channels")
+    gamma_arena_test_assert.equals(stops[1].channel, "crowd", "crowd stops first")
+    gamma_arena_test_assert.equals(stops[2].channel, "reaction", "reaction stops independently")
+    gamma_arena_test_assert.equals(stops[3].channel, "commentator", "commentator stops independently")
+
+    settings.commentator = true
+    settings.crowd_reactions = true
+    gamma_arena_test_assert.is_true(controller:update({}).ok, "live enable succeeds")
+    local plays = calls_of(calls, "play")
+    gamma_arena_test_assert.equals(#plays, 3, "live enable resumes only one ambience clip")
+    gamma_arena_test_assert.equals(plays[3].channel, "crowd", "commentator event is never replayed")
+    gamma_arena_test_assert.equals(plays[3].path, CROWD_PREFIX .. "2", "resumed ambience advances its deterministic sequence")
+end
+
+local function live_disable_retries_one_shot_stop_failure()
+    local controller, calls, active, settings = fixture(nil, { stop_once = "crowd" })
+    gamma_arena_test_assert.is_true(controller:begin_fight({ fight_index = 0 }).ok, "stop retry fixture starts")
+    settings.crowd_reactions = false
+    local first = controller:update({})
+    gamma_arena_test_assert.is_false(first.ok, "one-shot crowd stop failure remains diagnostic")
+    gamma_arena_test_assert.is_true(active.crowd, "failed stop retains the active crowd handle")
+    local second = controller:update({})
+    gamma_arena_test_assert.is_true(second.ok, "disabled crowd stop is retried on the next update")
+    gamma_arena_test_assert.is_false(active.crowd, "successful retry stops the crowd handle")
+    local crowd_stops = 0
+    for index = 1, #calls do
+        if calls[index].kind == "stop" and calls[index].channel == "crowd" then crowd_stops = crowd_stops + 1 end
+    end
+    gamma_arena_test_assert.equals(crowd_stops, 2, "one-shot crowd failure causes exactly one retry")
+    gamma_arena_test_assert.is_false(controller:snapshot().crowd_reactions, "disabled state commits only after successful cleanup")
+end
+
+local function terminal_events_stop_crowd_and_announce()
+    local victory, victory_calls = fixture()
+    gamma_arena_test_assert.is_true(victory:begin_fight({ fight_index = 0 }).ok, "victory fixture starts")
+    gamma_arena_test_assert.is_true(victory:victory({}).ok, "victory audio succeeds")
+    local victory_plays = calls_of(victory_calls, "play")
+    gamma_arena_test_assert.equals(victory_plays[#victory_plays].path, COMMENTATOR_PREFIX .. "mega_arena_win_1", "victory uses the stock announcer resource")
+
+    local defeat, defeat_calls = fixture()
+    gamma_arena_test_assert.is_true(defeat:begin_fight({ fight_index = 0 }).ok, "defeat fixture starts")
+    gamma_arena_test_assert.is_true(defeat:defeat({}).ok, "defeat audio succeeds")
+    local defeat_plays = calls_of(defeat_calls, "play")
+    gamma_arena_test_assert.equals(defeat_plays[#defeat_plays].path, COMMENTATOR_PREFIX .. "mega_arena_dead", "defeat uses the stock announcer resource")
+    gamma_arena_test_assert.is_true(defeat:update({}).ok, "terminal update is inert")
+    gamma_arena_test_assert.equals(#calls_of(defeat_calls, "play"), #defeat_plays, "terminal update cannot restart ambience")
+end
+
+local function stop_all_is_idempotent_and_aggregates_failures()
+    local controller, calls = fixture(nil, { stop_error = "reaction" })
+    local first = controller:stop_all({ reason = "test" })
+    gamma_arena_test_assert.is_false(first.ok, "one stop failure remains observable")
+    gamma_arena_test_assert.equals(first.error.code, "GA_AUDIO_STOP_FAILED", "stop aggregation has a stable boundary")
+    local stops = calls_of(calls, "stop")
+    gamma_arena_test_assert.equals(#stops, 3, "every channel is attempted after one stop failure")
+    gamma_arena_test_assert.equals(stops[3].channel, "commentator", "final channel is still attempted")
+    local second = controller:stop_all({ reason = "duplicate" })
+    gamma_arena_test_assert.is_false(second.ok, "repeat cleanup reports the injected port failure")
+    gamma_arena_test_assert.equals(#calls_of(calls, "stop"), 6, "repeat cleanup remains safe and exhaustive")
+end
+
+local function settings_failures_are_structured()
+    local controller = fixture(nil, { settings_error = true })
+    local result = controller:begin_fight({ fight_index = 0 })
+    gamma_arena_test_assert.is_false(result.ok, "settings failure is returned")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_SETTINGS", "settings cause is preserved for diagnostics")
+end
+
+local function mcm_defaults_and_boolean_values_are_safe()
+    gamma_arena_mcm.refresh(function() return nil end)
+    local missing = gamma_arena_mcm.snapshot(false)
+    gamma_arena_test_assert.is_true(missing.commentator, "missing MCM enables commentator")
+    gamma_arena_test_assert.is_true(missing.crowd_reactions, "missing MCM enables crowd")
+
+    gamma_arena_mcm.refresh(function(path)
+        if path == "gamma_arena/commentator" then
+            return false
+        end
+        return "invalid"
+    end)
+    local configured = gamma_arena_mcm.snapshot(false)
+    gamma_arena_test_assert.is_false(configured.commentator, "explicit false disables commentator")
+    gamma_arena_test_assert.is_true(configured.crowd_reactions, "malformed crowd setting falls back enabled")
+
+    gamma_arena_mcm.refresh(function() error("unavailable") end)
+    local failed = gamma_arena_mcm.snapshot(false)
+    gamma_arena_test_assert.is_true(failed.commentator, "throwing MCM read enables commentator")
+    gamma_arena_test_assert.is_true(failed.crowd_reactions, "throwing MCM read enables crowd")
+end
+
+local cases = {
+    { name = "audio_enabled_start_uses_owned_channels", fn = enabled_start_uses_owned_channels },
+    { name = "audio_settings_disable_channel_families_independently", fn = settings_disable_channel_families_independently },
+    { name = "audio_accepted_deaths_rotate_reactions", fn = accepted_deaths_rotate_reactions },
+    { name = "audio_ambience_advances_without_duplicate_update", fn = ambience_advances_without_duplicate_update },
+    { name = "audio_live_settings_stop_and_resume_only_ambience", fn = live_settings_stop_and_resume_only_ambience },
+    { name = "audio_live_disable_retries_one_shot_stop_failure", fn = live_disable_retries_one_shot_stop_failure },
+    { name = "audio_terminal_events_stop_crowd_and_announce", fn = terminal_events_stop_crowd_and_announce },
+    { name = "audio_stop_all_is_idempotent_and_aggregates_failures", fn = stop_all_is_idempotent_and_aggregates_failures },
+    { name = "audio_settings_failures_are_structured", fn = settings_failures_are_structured },
+    { name = "audio_mcm_defaults_and_boolean_values_are_safe", fn = mcm_defaults_and_boolean_values_are_safe }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        local case = cases[index]
+        if not run_case_fn(case.name, case.fn) then
+            all_passed = false
+        end
+    end
+    return all_passed
+end

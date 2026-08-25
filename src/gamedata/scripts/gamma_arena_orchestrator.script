@@ -223,6 +223,36 @@ function Orchestrator:diagnostic(code, message, context)
     return true
 end
 
+function Orchestrator:audio_context(extra)
+    local fight_id = nil
+    local called, value = pcall(function()
+        return self.fight_spec and self.fight_spec.fight_id and self.fight_spec.fight_id()
+    end)
+    if called and type(value) == "string" then fight_id = value end
+    local context = {
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil,
+        fight_id = fight_id,
+        stage = self.runtime_stage
+    }
+    if type(extra) == "table" then
+        for key, item in pairs(extra) do context[key] = item end
+    end
+    return context
+end
+
+function Orchestrator:audio_event(method_name, context)
+    local audio = self.deps.audio
+    if audio == nil or audio == false then return gamma_arena_result.ok(false) end
+    local result = call_method("GA_AUDIO_EVENT_FAILED", audio, method_name, context or self:audio_context())
+    if result.ok then return result end
+    self:diagnostic("GA_AUDIO_EVENT_FAILED", "method=" .. tostring(method_name), {
+        method = method_name,
+        code = result.error and result.error.code or "GA_AUDIO_EVENT_FAILED"
+    })
+    return gamma_arena_result.ok(false)
+end
+
 function Orchestrator:checkpoint(code, context)
     local diagnostics = self.deps.diagnostics
     local lookup_ok, writer = pcall(function() return diagnostics and diagnostics.checkpoint end)
@@ -323,6 +353,7 @@ function Orchestrator:teardown_once(reason, preserve_session)
         session_id = self.session and self.session.session_id or nil,
         fight_index = self.session and self.session.fight_index or nil
     })
+    self:audio_event("stop_all", self:audio_context({ reason = reason or "teardown" }))
     local medical = self:stop_npc_medical(reason or "teardown")
     if not medical.ok then return medical end
     if type(self.deps.teardown) ~= "function" then
@@ -528,6 +559,7 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
 end
 
 function Orchestrator:on_game_load()
+    self:audio_event("stop_all", self:audio_context({ reason = "game_load" }))
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
     self.game_load_seen = true
@@ -888,6 +920,7 @@ function Orchestrator:observe_entity_activation()
     self.result_action_locked = false
     local medical = self:start_npc_medical()
     if not medical.ok then return medical end
+    self:audio_event("begin_fight", self:audio_context())
     local opponents_ok, opponents = pcall(function() return self.fight_spec and self.fight_spec.opponents and self.fight_spec.opponents() end)
     local expected = opponents_ok and type(opponents) == "table" and #opponents or nil
     self:diagnostic("GA_OPPONENTS_ACTIVATED", "expected=" .. tostring(expected) .. " active=" .. tostring(#(snapshot.npcs or {})), {
@@ -927,6 +960,7 @@ function Orchestrator:show_victory()
     self.result_action_locked = false
     self.pending_next_fight_index = nil
     self:set_runtime_stage("RESULT")
+    self:audio_event("victory", self:audio_context({ duration_ms = duration }))
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration)
         .. " dead=" .. tostring(terminal_summary.defeated_dead or 0)
         .. " wounded=" .. tostring(terminal_summary.defeated_wounded or 0)
@@ -1000,6 +1034,7 @@ function Orchestrator:queue_integrity_retry(fault)
         })
     end
     local attempt = self.integrity_retry_count + 1
+    self:audio_event("stop_all", self:audio_context({ reason = "integrity_retry" }))
     local medical = self:stop_npc_medical("integrity_retry")
     if not medical.ok then return medical end
     local logged = self:emit_log("GA_FIGHT_INTEGRITY_RETRY", "attempt=" .. tostring(attempt)
@@ -1065,6 +1100,7 @@ function Orchestrator:victory_next_action()
     self.result_action_locked = true
     local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
     if not cleared.ok then self.result_action_locked = false; return cleared end
+    self:audio_event("stop_all", self:audio_context({ reason = "victory_next" }))
     self.next_cleanup_started = false
     self.pending_next_fight_index = next_index.value
     self.pending_continuation_kind = "victory_next"
@@ -1082,6 +1118,7 @@ function Orchestrator:restart_arena_action()
     if not medical.ok then return medical end
     local advanced = self:advance(gamma_arena_state_machine.events.RESTART)
     if not advanced.ok then return advanced end
+    self:audio_event("stop_all", self:audio_context({ reason = "manual_restart" }))
     self.result_action_locked = true
     self.pending_victory = false
     self.result_kind = nil
@@ -1255,6 +1292,9 @@ function Orchestrator:update_runtime()
     if not integrity.ok then return integrity end
     local reconciled = self:reconcile_active_victory()
     if not reconciled.ok then return reconciled end
+    if self:is_active() and self.runtime_stage == "ACTIVE" then
+        self:audio_event("update", self:audio_context())
+    end
     return runtime
 end
 
@@ -1284,6 +1324,7 @@ function Orchestrator:actor_on_before_death(...)
     if not medical.ok then return medical end
     self.death_latched = true
     self.pending_victory = false
+    self:audio_event("defeat", self:audio_context())
     local armed = call_method("GA_DEFEAT_ARM_FAILED", self.deps.store, "arm_defeat", self.deps.config, {
         schema_version = 1,
         session_id = self.session.session_id,
@@ -1374,6 +1415,11 @@ function Orchestrator:npc_on_death_callback(victim, killer)
     if entities == nil or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
     local accepted = call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim, killer)
     if not accepted.ok or accepted.value ~= true then return accepted end
+    local victim_id = nil
+    pcall(function()
+        if type(victim) == "table" and type(victim.id) == "function" then victim_id = victim:id() end
+    end)
+    self:audio_event("opponent_defeated", self:audio_context({ npc_id = victim_id }))
     local integrity = self:active_integrity_fault()
     if not integrity.ok then return integrity end
     if integrity.value ~= false then return gamma_arena_result.ok(true) end
