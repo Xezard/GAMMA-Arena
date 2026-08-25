@@ -3348,7 +3348,7 @@ local function entity_spec(opponent_count)
         loadout = {
             weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2,
             bonus_ammo = { section = "ammo_9x18_ap", requested_category = "armor_piercing", resolved_category = "armor_piercing", boxes = 1 },
-            outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, cost = 6
+            outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, grenades = {}, cost = 6
         }
     }
     local opponents = {}
@@ -3373,6 +3373,7 @@ local function entity_spec(opponent_count)
                 outfit = index == 1 and "novice_outfit" or "stalker_outfit",
                 knife = "wpn_knife",
                 consumables = index == 1 and { "bandage", "medkit" } or { "bandage" },
+                grenades = {},
                 cost = 10
             }
         }
@@ -4249,7 +4250,8 @@ local function new_actor_loadout_test_fixture(options)
         bonus_ammo = loadout.bonus_ammo,
         outfit = options.outfit or loadout.outfit,
         knife = loadout.knife,
-        consumables = loadout.consumables
+        consumables = loadout.consumables,
+        grenades = loadout.grenades
     }
     local function entity(section, parent_id, quantity)
         local value = { runtime_id = next_id, section_name = section, parent_id = parent_id, quantity = quantity or 1 }
@@ -4673,6 +4675,7 @@ local function actor_loadout_ownership_fixture(options)
         checkpoint = actor_weapon_checkpoint_fixture,
         ammo_box_size = function() return 20 end,
         create_item = function(section, target, count)
+            if options.fail_section == section then return nil end
             if options.fail_bonus_create and section == "ammo_9x18_ap" then return nil end
             if options.bonus_multi_return and section == "ammo_9x18_ap" then
                 local valid = entity(section, target:id(), count)
@@ -4722,13 +4725,41 @@ local function actor_loadout_ownership_fixture(options)
     })
     env.port = port
     env.actor = actor
-    env.applied = port.apply(actor, entity_spec(1).actor().loadout)
+    env.applied = port.apply(actor, options.loadout or entity_spec(1).actor().loadout)
     env.phase = "cleanup"
     return env
 end
 
 local function actor_loadout_keep_only(env, id)
     for current_id in pairs(env.current) do if current_id ~= id then env.current[current_id] = nil end end
+end
+
+local function runtime_actor_loadout_creates_physical_grenades_and_rolls_back()
+    local loadout = entity_spec(1).actor().loadout
+    loadout.grenades = { "grenade_f1", "grenade_gd-05" }
+    local env = actor_loadout_ownership_fixture({ loadout = loadout })
+    gamma_arena_test_assert.is_true(env.applied.ok, "actor physical grenade descriptors apply transactionally")
+    local grenade_records = {}
+    for _, record in ipairs(env.port.records_snapshot()) do
+        if record.role == "grenade" then grenade_records[#grenade_records + 1] = record end
+    end
+    gamma_arena_test_assert.equals(#grenade_records, 2, "actor owns exactly both FightSpec grenades")
+    gamma_arena_test_assert.equals(grenade_records[1].section, "grenade_f1", "first actor grenade is physical")
+    gamma_arena_test_assert.equals(grenade_records[2].section, "grenade_gd-05", "second actor grenade is physical")
+    gamma_arena_test_assert.equals(grenade_records[1].parent_id, 77, "actor grenade parent is the actor")
+    gamma_arena_test_assert.is_true(env.port.cleanup().ok, "actor grenade cleanup uses the shared ownership transaction")
+    for index = 2, #env.releases do
+        gamma_arena_test_assert.is_true(env.releases[index - 1] > env.releases[index], "actor grenade cleanup submits releases in reverse creation order")
+    end
+
+    local failed = actor_loadout_ownership_fixture({ loadout = loadout, fail_section = "grenade_gd-05" })
+    gamma_arena_test_assert.is_false(failed.applied.ok, "second actor grenade creation failure rolls back")
+    local first_grenade_released = false
+    for _, id in ipairs(failed.releases) do
+        local item = failed.current[id]
+        if item and item.section_name == "grenade_f1" then first_grenade_released = true end
+    end
+    gamma_arena_test_assert.is_true(first_grenade_released, "first actor grenade remains ownership-proven during rollback")
 end
 
 local function runtime_actor_loadout_consumed_absent_id_retires_without_release()
@@ -5006,6 +5037,38 @@ local function runtime_entity_partial_failures_rollback_in_reverse()
     local actor_adapter = gamma_arena_entity_adapter.new(actor_deps)
     gamma_arena_test_assert.is_false(begin_entity_apply(actor_adapter, actor_env, entity_spec(1), "session-actor-fail").ok, "actor loadout failure remains observable")
     gamma_arena_test_assert.equals(actor_env.create_npc_count, 0, "actor loadout failure must happen before opponents")
+end
+
+local function runtime_entity_creates_physical_grenade_and_rolls_back_failure()
+    local spec = entity_spec(1)
+    spec.opponents()[1].loadout.grenades = { "grenade_rgd5" }
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, spec, "session-grenade")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "opponent physical grenade transaction becomes active")
+    local grenade_call
+    for _, call in ipairs(env.create_item_calls) do if call.section == "grenade_rgd5" then grenade_call = call end end
+    gamma_arena_test_assert.is_true(grenade_call ~= nil, "opponent grenade is created as an ordinary physical item")
+    gamma_arena_test_assert.equals(grenade_call.parent_id, snapshot.npcs[1].id, "opponent grenade parent is its NPC")
+    gamma_arena_test_assert.is_false(grenade_call.is_ammo, "opponent grenade never uses the ammo quantity path")
+    local grenade_record
+    for _, record in ipairs(snapshot.items) do if record.section == "grenade_rgd5" then grenade_record = record end end
+    gamma_arena_test_assert.equals(grenade_record.role, "grenade", "opponent grenade is registered with its explicit role")
+    gamma_arena_test_assert.equals(grenade_record.source, "assigned", "opponent grenade uses normal owned-item cleanup")
+
+    local failed_spec = entity_spec(1)
+    failed_spec.opponents()[1].loadout.grenades = { "grenade_rgd5" }
+    local failed_env, failed_deps = fake_entity_environment({ fail_phase = "item", fail_item_at = 7 })
+    local failed_adapter = gamma_arena_entity_adapter.new(failed_deps)
+    begin_entity_apply(failed_adapter, failed_env, failed_spec, "session-grenade-failure")
+    local failed_result, failed_snapshot = pump_entity(failed_adapter, failed_env)
+    gamma_arena_test_assert.is_false(failed_result.ok, "opponent grenade creation failure is observable")
+    gamma_arena_test_assert.equals(failed_snapshot.state, "ERROR", "opponent grenade failure completes owned rollback")
+    gamma_arena_test_assert.equals(failed_env.create_item_calls[7].section, "grenade_rgd5", "failure is injected at the opponent grenade descriptor")
+    for index = 2, #failed_env.release_requests do
+        gamma_arena_test_assert.is_true(failed_env.release_requests[index - 1] > failed_env.release_requests[index], "opponent grenade rollback remains reverse ordered")
+    end
 end
 
 local function runtime_entity_purges_only_snapshot_children_still_parented()
@@ -6326,8 +6389,8 @@ local function task8_validated_spec(index, session_seed)
         session_seed = session_seed or 42,
         fight_index = index,
         fight_id = "ga-task8-" .. tostring(index),
-        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, bonus_ammo = { section = "ammo_bonus_test", requested_category = "standard", resolved_category = "standard", boxes = 1 }, outfit = "outfit_test", knife = "knife_test", consumables = { "medkit_test" }, cost = 4 } },
-        opponents = { { slot = 1, profile = "gamma_arena_bandit_novice", spawn_path = "spawn_test", loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, cost = 4 } } }
+        actor = { loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, bonus_ammo = { section = "ammo_bonus_test", requested_category = "standard", resolved_category = "standard", boxes = 1 }, outfit = "outfit_test", knife = "knife_test", consumables = { "medkit_test" }, grenades = {}, cost = 4 } },
+        opponents = { { slot = 1, profile = "gamma_arena_bandit_novice", spawn_path = "spawn_test", loadout = { weapon = "wpn_test", ammo = "ammo_test", ammo_boxes = 1, outfit = "outfit_test", consumables = { "medkit_test" }, grenades = {}, cost = 4 } } }
     }
     return {
         session_seed = function() return private.session_seed end,
@@ -8960,6 +9023,7 @@ local cases = {
     ,{ name = "runtime_actor_loadout_malformed_ownership_proof_fails_closed", fn = runtime_actor_loadout_malformed_ownership_proof_fails_closed }
     ,{ name = "runtime_actor_loadout_exact_owned_match_releases_once", fn = runtime_actor_loadout_exact_owned_match_releases_once }
     ,{ name = "runtime_actor_loadout_bonus_ammo_rollback_is_owned", fn = runtime_actor_loadout_bonus_ammo_rollback_is_owned }
+    ,{ name = "runtime_actor_loadout_creates_physical_grenades_and_rolls_back", fn = runtime_actor_loadout_creates_physical_grenades_and_rolls_back }
     ,{ name = "runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids", fn = runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids }
     ,{ name = "runtime_actor_loadout_apply_failures_never_drop_valid_created_ids", fn = runtime_actor_loadout_apply_failures_never_drop_valid_created_ids }
     ,{ name = "runtime_actor_loadout_failed_tag_write_never_manufactures_ownership", fn = runtime_actor_loadout_failed_tag_write_never_manufactures_ownership }
@@ -8968,6 +9032,7 @@ local cases = {
     ,{ name = "runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation", fn = runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation }
     ,{ name = "runtime_entity_preflights_base_and_bonus_ammo_independently", fn = runtime_entity_preflights_base_and_bonus_ammo_independently }
     ,{ name = "runtime_entity_partial_failures_rollback_in_reverse", fn = runtime_entity_partial_failures_rollback_in_reverse }
+    ,{ name = "runtime_entity_creates_physical_grenade_and_rolls_back_failure", fn = runtime_entity_creates_physical_grenade_and_rolls_back_failure }
     ,{ name = "runtime_entity_purges_only_snapshot_children_still_parented", fn = runtime_entity_purges_only_snapshot_children_still_parented }
     ,{ name = "runtime_entity_supports_real_get_children_iterator", fn = runtime_entity_supports_real_get_children_iterator }
     ,{ name = "runtime_entity_multi_return_ammo_is_exact", fn = runtime_entity_multi_return_ammo_is_exact }
