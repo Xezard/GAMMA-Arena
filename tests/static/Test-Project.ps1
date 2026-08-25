@@ -379,7 +379,7 @@ $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_m
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
     Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_first_main_menu_click','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_both_arena_menu_clicks','main_menu_restart_is_acceptance_gated','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('defeat_intent_is_transactional_and_cross_vm_safe','defeat_promotion_is_atomic_and_conflict_safe','gad1:1000:death_1','issue_launch_from_defeat')) {
@@ -395,7 +395,13 @@ if (Test-Path -LiteralPath $MainMenuPath) {
     Assert-True ($MainMenuContent -notmatch '(?m)^function\s+on_game_start\s*\(') 'Main-menu adapter must not register after the first cold-start init'
     Assert-True ($MainMenuContent -notmatch 'RegisterScriptCallback') 'Main-menu adapter registration must be owned by the early DXML bootstrap'
     Assert-True ($MainMenuContent -match 'type\s*\(\s*menu\.AddCallback\s*\)\s*==\s*"function"') 'Main-menu adapter must feature-probe AddCallback'
-    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind only btn_gamma_arena'
+    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind btn_gamma_arena'
+    Assert-True ($MainMenuContent -match 'AddCallback\s*\(\s*"btn_gamma_arena_restart"\s*,\s*ui_events\.BUTTON_CLICKED') 'Main-menu adapter must bind the in-game Arena restart button'
+    Assert-True ($MainMenuContent -match '(?m)^function\s+request_restart\s*\(') 'Main-menu adapter must expose a testable restart seam'
+    Assert-True ($MainMenuContent -match 'request_restart[\s\S]{0,1800}OnButton_return_game') 'Accepted restart must close the pause menu through the stock return action'
+    foreach ($Code in @('GA_ARENA_RESTART_UNAVAILABLE','GA_ARENA_RESTART_FAILED','GA_ARENA_RESTART_RESULT_INVALID','GA_ARENA_RESTART_MENU_CLOSE_FAILED')) {
+        Assert-True ($MainMenuContent -match [regex]::Escape($Code)) "Main-menu restart adapter must fail closed with $Code"
+    }
     Assert-True ($MainMenuContent -notmatch 'ui_main_menu') 'Main-menu adapter must not monkey-patch ui_main_menu'
 }
 
