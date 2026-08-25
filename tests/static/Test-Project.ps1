@@ -2348,6 +2348,7 @@ if ((Test-Path -LiteralPath $McmEnglishPath) -and (Test-Path -LiteralPath $McmRu
     Assert-True ($McmRussianContent -match 'encoding="windows-1251"') 'Arena MCM Russian localization must declare the Anomaly/GAMMA Windows-1251 encoding.'
     [xml]$McmRussianXml = $McmRussianContent
     foreach ($StringId in @(
+        'ui_mcm_menu_gamma_arena',
         'ui_mcm_gamma_arena_title',
         'ui_mcm_gamma_arena_commentator',
         'ui_mcm_gamma_arena_commentator_desc',
