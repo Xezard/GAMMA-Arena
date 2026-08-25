@@ -3,7 +3,9 @@ Diagnostics.__index = Diagnostics
 
 local MAX_LINE_BYTES = 1024
 local CRITICAL_FIELD_ORDER = {
-    "session_id", "fight_index", "fight_id", "phase", "weapon_section", "actor_id", "item_id"
+    "session_id", "fight_index", "fight_id", "phase", "weapon_section", "actor_id", "item_id",
+    "weapon_kind", "weapon_slot", "ammo_section", "ammo_class", "parent_section", "world_visual",
+    "hud_section", "hud_item_visual", "hud_anm_show", "hud_anm_idle", "hud_anm_idle_empty", "hud_anm_hide"
 }
 
 local function fail(code, message, context)
@@ -49,19 +51,26 @@ end
 
 function Diagnostics:line(code, fields)
     self.sequence = self.sequence + 1
-    local entries = {
-        "seq=" .. tostring(self.sequence),
-        "event=" .. clean_text(code)
-    }
+    local entries, byte_count = {}, 0
+    local function append(entry)
+        local separator_bytes = #entries > 0 and 1 or 0
+        if byte_count + separator_bytes + #entry > MAX_LINE_BYTES - 1 then return false end
+        entries[#entries + 1] = entry
+        byte_count = byte_count + separator_bytes + #entry
+        return true
+    end
+    if not append("seq=" .. tostring(self.sequence)) then return nil, "sequence" end
+    if not append("event=" .. clean_text(code)) then return nil, "event" end
     local clock = self:clock()
-    if clock ~= nil then entries[#entries + 1] = "clock=" .. clock end
+    if clock ~= nil then append("clock=" .. clock) end
     local level = self:level()
-    if level ~= nil then entries[#entries + 1] = "level=" .. level end
+    if level ~= nil then append("level=" .. level) end
     local keys, included = {}, {}
     if type(fields) == "table" then
         for _, key in ipairs(CRITICAL_FIELD_ORDER) do
-            if scalar_value(fields[key]) ~= nil then
-                entries[#entries + 1] = clean_text(key) .. "=" .. scalar_value(fields[key])
+            local value = scalar_value(fields[key])
+            if value ~= nil then
+                if not append(clean_text(key) .. "=" .. value) then return nil, key end
                 included[key] = true
             end
         end
@@ -71,11 +80,9 @@ function Diagnostics:line(code, fields)
     end
     table.sort(keys)
     for _, key in ipairs(keys) do
-        entries[#entries + 1] = clean_text(key) .. "=" .. scalar_value(fields[key])
+        append(clean_text(key) .. "=" .. scalar_value(fields[key]))
     end
-    local line = table.concat(entries, " ")
-    if #line > MAX_LINE_BYTES - 1 then line = line:sub(1, MAX_LINE_BYTES - 1) end
-    return line .. "\n"
+    return table.concat(entries, " ") .. "\n", nil
 end
 
 function Diagnostics:checkpoint(code, fields)
@@ -86,7 +93,17 @@ function Diagnostics:checkpoint(code, fields)
         self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal is unavailable", { event = code })
         return fail("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal is unavailable", { event = code })
     end
-    local line = self:line(code, fields)
+    local line, overflow_key = self:line(code, fields)
+    if line == nil then
+        self:fallback("GA_DIAGNOSTICS_RECORD_TOO_LARGE", "Checkpoint required metadata exceeds the bounded journal record", {
+            event = code,
+            field = overflow_key
+        })
+        return fail("GA_DIAGNOSTICS_RECORD_TOO_LARGE", "Checkpoint required metadata exceeds the bounded journal record", {
+            event = code,
+            field = overflow_key
+        })
+    end
     local opened, handle, open_error = pcall(self.deps.open, self.path, "a")
     if not opened or handle == nil then
         self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal could not be opened", {
@@ -98,7 +115,9 @@ function Diagnostics:checkpoint(code, fields)
     local wrote, write_result = pcall(function() return handle:write(line) end)
     local flushed, flush_result = pcall(function() return handle:flush() end)
     local closed, close_result = pcall(function() return handle:close() end)
-    if not wrote or write_result == false or not flushed or flush_result == false or not closed or close_result == false then
+    if not wrote or write_result == nil or write_result == false
+        or not flushed or flush_result == nil or flush_result == false
+        or not closed or close_result == nil or close_result == false then
         self:fallback("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal write was incomplete", { event = code })
         return fail("GA_DIAGNOSTICS_WRITE_FAILED", "Checkpoint journal write was incomplete", { event = code })
     end

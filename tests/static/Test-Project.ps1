@@ -2073,6 +2073,12 @@ if ((Test-Path -LiteralPath $ArenaSaveGuardPath) -and (Test-Path -LiteralPath $A
     foreach ($Marker in @('MAX_LINE_BYTES = 1024','CRITICAL_FIELD_ORDER','weapon_section','function Diagnostics:checkpoint','handle:flush()','handle:close()')) {
         Assert-True ($ArenaDiagnosticsContent -match [regex]::Escape($Marker)) "Arena diagnostics journal contract is missing: $Marker"
     }
+    foreach ($ResultName in @('write_result','flush_result','close_result')) {
+        Assert-True ($ArenaDiagnosticsContent -match ($ResultName + '\s*==\s*nil')) "Arena diagnostics must reject Lua nil I/O results: $ResultName"
+    }
+    foreach ($Marker in @('hud_item_visual','GA_DIAGNOSTICS_RECORD_TOO_LARGE','overflow_key')) {
+        Assert-True ($ArenaDiagnosticsContent -match [regex]::Escape($Marker)) "Arena diagnostics must fail closed before truncating required metadata: $Marker"
+    }
 }
 if (Test-Path -LiteralPath $ArenaWeaponDiagnosticsPath) {
     $ArenaWeaponDiagnosticsContent = Get-Content -LiteralPath $ArenaWeaponDiagnosticsPath -Raw
@@ -2182,7 +2188,7 @@ if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
     Assert-True ($ArenaActivateBlock -notmatch 'enter_fatal\s*\(\s*ownership\s*,\s*true') 'Rejected non-mutating launch ownership must be cleared by common fatal routing.'
     Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
 }
-foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_weapon_diagnostics_reads_effective_hud_metadata','runtime_weapon_diagnostics_missing_reads_are_unavailable','runtime_actor_weapon_checkpoint_precedes_native_activation','runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back','runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
+foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_diagnostics_checkpoint_rejects_nil_io_results','runtime_diagnostics_checkpoint_rejects_oversized_required_metadata','runtime_weapon_diagnostics_reads_effective_hud_metadata','runtime_weapon_diagnostics_missing_reads_are_unavailable','runtime_actor_weapon_checkpoint_precedes_native_activation','runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back','runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }

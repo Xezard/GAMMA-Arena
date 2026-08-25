@@ -8254,6 +8254,45 @@ local function runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed()
     gamma_arena_test_assert.is_true(env.writes[1]:find("weapon_section=wpn_exact_evidence", 1, true) ~= nil, "critical weapon identity survives bounded truncation")
 end
 
+local function runtime_diagnostics_checkpoint_rejects_nil_io_results()
+    for _, failed_method in ipairs({ "write", "flush", "close" }) do
+        local handle = {}
+        function handle:write() if failed_method == "write" then return nil, "disk full" end; return true end
+        function handle:flush() if failed_method == "flush" then return nil, "flush failed" end; return true end
+        function handle:close() if failed_method == "close" then return nil, "close failed" end; return true end
+        local fallbacks = 0
+        local journal = gamma_arena_diagnostics.new({
+            path = "gamma_arena_diagnostics.log",
+            open = function() return handle end,
+            fallback_log = function() fallbacks = fallbacks + 1 end
+        })
+        local result = journal:checkpoint("GA_TEST_IO_FAILURE", { weapon_section = "wpn_test" })
+        gamma_arena_test_assert.is_false(result.ok, failed_method .. " nil result rejects the durable checkpoint")
+        gamma_arena_test_assert.equals(result.error.code, "GA_DIAGNOSTICS_WRITE_FAILED", failed_method .. " failure code is stable")
+        gamma_arena_test_assert.equals(fallbacks, 1, failed_method .. " failure reaches fallback logging once")
+    end
+end
+
+local function runtime_diagnostics_checkpoint_rejects_oversized_required_metadata()
+    local opens, fallbacks = 0, 0
+    local journal = gamma_arena_diagnostics.new({
+        path = "gamma_arena_diagnostics.log",
+        open = function()
+            opens = opens + 1
+            return nil
+        end,
+        fallback_log = function() fallbacks = fallbacks + 1 end
+    })
+    local result = journal:checkpoint("GA_ACTOR_WEAPON_PRE_ACTIVATE", {
+        weapon_section = "wpn_test",
+        hud_item_visual = string.rep("x", 1500)
+    })
+    gamma_arena_test_assert.is_false(result.ok, "oversized required metadata rejects the durable checkpoint")
+    gamma_arena_test_assert.equals(result.error.code, "GA_DIAGNOSTICS_RECORD_TOO_LARGE", "oversized metadata failure code is stable")
+    gamma_arena_test_assert.equals(opens, 0, "oversized required metadata is rejected before opening the journal")
+    gamma_arena_test_assert.equals(fallbacks, 1, "oversized required metadata reaches fallback logging once")
+end
+
 local function runtime_weapon_diagnostics_reads_effective_hud_metadata()
     local sections = {
         wpn_test = {
@@ -8372,6 +8411,8 @@ local cases = {
     { name = "runtime_save_guard_failures_block_launch_mutation", fn = runtime_save_guard_failures_block_launch_mutation },
     { name = "runtime_save_guard_suppresses_only_owned_save_commands", fn = runtime_save_guard_suppresses_only_owned_save_commands },
     { name = "runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed", fn = runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed },
+    { name = "runtime_diagnostics_checkpoint_rejects_nil_io_results", fn = runtime_diagnostics_checkpoint_rejects_nil_io_results },
+    { name = "runtime_diagnostics_checkpoint_rejects_oversized_required_metadata", fn = runtime_diagnostics_checkpoint_rejects_oversized_required_metadata },
     { name = "runtime_weapon_diagnostics_reads_effective_hud_metadata", fn = runtime_weapon_diagnostics_reads_effective_hud_metadata },
     { name = "runtime_weapon_diagnostics_missing_reads_are_unavailable", fn = runtime_weapon_diagnostics_missing_reads_are_unavailable },
     { name = "runtime_entity_forensics_are_bounded_non_mutating_and_classified", fn = runtime_entity_forensics_are_bounded_non_mutating_and_classified },
