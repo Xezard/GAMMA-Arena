@@ -8406,6 +8406,91 @@ local function runtime_entity_forensics_are_bounded_non_mutating_and_classified(
     gamma_arena_test_assert.is_true(adapter:on_npc_before_hit({ id = function() return 99 end }, hit, 4, flags).value == false, "foreign NPCs are ignored")
 end
 
+local function runtime_battle_identity_formatter_is_exact()
+    local separator = string.char(194, 183)
+    local translated = function(key)
+        return ({
+            st_gamma_arena_battle_seed = "Seed",
+            st_gamma_arena_battle_fight = "Fight"
+        })[key]
+    end
+    local first = gamma_arena_ui_battle.format_identity({ session_seed = 1, fight_index = 0 }, translated)
+    gamma_arena_test_assert.is_true(first.ok, "minimum battle identity formats")
+    gamma_arena_test_assert.equals(first.value, "Seed: 1 " .. separator .. " Fight: 1", "first fight is one-based")
+    local maximum = gamma_arena_ui_battle.format_identity({
+        session_seed = 2147483646,
+        fight_index = 4294967295
+    }, translated)
+    gamma_arena_test_assert.is_true(maximum.ok, "maximum battle identity formats")
+    gamma_arena_test_assert.equals(maximum.value, "Seed: 2147483646 " .. separator .. " Fight: 4294967296", "maximum identity stays exact")
+    for _, model in ipairs({
+        {},
+        { session_seed = 0, fight_index = 0 },
+        { session_seed = 1.5, fight_index = 0 },
+        { session_seed = 1, fight_index = -1 },
+        { session_seed = 1, fight_index = 4294967296 }
+    }) do
+        gamma_arena_test_assert.is_false(gamma_arena_ui_battle.format_identity(model, translated).ok, "invalid battle identity rejects")
+    end
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.format_identity({ session_seed = 1, fight_index = 0 }, function() error("translate") end).ok, "translation exception is structured")
+end
+
+local function runtime_battle_identity_adapter_owns_one_window()
+    local env = { adds = 0, removes = 0, created = 0 }
+    local hud = {
+        AddDialogToRender = function(_, window) env.adds = env.adds + 1; env.added = window end,
+        RemoveDialogToRender = function(_, window) env.removes = env.removes + 1; env.removed = window end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function(text)
+            env.created = env.created + 1
+            return {
+                text = text,
+                SetIdentity = function(self, value) self.text = value end
+            }
+        end
+    })
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 0 }).ok, "battle identity shows")
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 1 }).ok, "battle identity refreshes")
+    gamma_arena_test_assert.equals(env.created, 1, "one battle identity window is owned")
+    gamma_arena_test_assert.equals(env.adds, 1, "battle identity window is registered once")
+    gamma_arena_test_assert.equals(env.added.text, "Seed: 42 " .. string.char(194, 183) .. " Fight: 2", "existing battle identity window refreshes")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "battle identity clears")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "duplicate battle identity clear is idempotent")
+    gamma_arena_test_assert.equals(env.removes, 1, "owned battle identity window is removed once")
+    gamma_arena_test_assert.equals(env.removed, env.added, "battle identity removes the exact owned window")
+end
+
+local function runtime_battle_identity_removal_failure_is_retryable()
+    local attempts = 0
+    local window = { SetIdentity = function() end }
+    local hud = {
+        AddDialogToRender = function() end,
+        RemoveDialogToRender = function()
+            attempts = attempts + 1
+            if attempts == 1 then error("remove") end
+        end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function() return window end
+    })
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 0 }).ok, "retry fixture shows")
+    gamma_arena_test_assert.is_false(ui:clear_identity().ok, "first battle identity removal failure is structured")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "second battle identity removal retries")
+    gamma_arena_test_assert.equals(attempts, 2, "failed battle identity removal retains ownership")
+end
+
+local function runtime_battle_identity_main_hud_visibility_is_safe()
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.main_hud_visible(function() return true end), "visible main HUD shows battle identity")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() return false end), "hidden main HUD hides battle identity")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() error("hud") end), "HUD visibility exception hides safely")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(nil), "missing HUD visibility port hides safely")
+end
+
 local cases = {
     { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },
     { name = "runtime_save_guard_failures_block_launch_mutation", fn = runtime_save_guard_failures_block_launch_mutation },
@@ -8652,6 +8737,10 @@ local cases = {
     ,{ name = "runtime_entity_death_neutralization_without_actor_still_clears_enemy", fn = runtime_entity_death_neutralization_without_actor_still_clears_enemy }
     ,{ name = "runtime_entity_death_neutralization_aggregates_every_failure", fn = runtime_entity_death_neutralization_aggregates_every_failure }
     ,{ name = "runtime_task9_countdown_escape_model_routes_main_menu_cleanup", fn = runtime_task9_countdown_escape_model_routes_main_menu_cleanup }
+    ,{ name = "runtime_battle_identity_formatter_is_exact", fn = runtime_battle_identity_formatter_is_exact }
+    ,{ name = "runtime_battle_identity_adapter_owns_one_window", fn = runtime_battle_identity_adapter_owns_one_window }
+    ,{ name = "runtime_battle_identity_removal_failure_is_retryable", fn = runtime_battle_identity_removal_failure_is_retryable }
+    ,{ name = "runtime_battle_identity_main_hud_visibility_is_safe", fn = runtime_battle_identity_main_hud_visibility_is_safe }
 }
 
 function run(run_case_fn)

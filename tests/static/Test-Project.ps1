@@ -644,6 +644,44 @@ if (Test-Path -LiteralPath $Task9UiXmlPath) {
     } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
 }
 
+$BattleUiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_battle.script'
+$BattleUiXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_battle.xml'
+$BattleUiEngPath = Join-Path $RepoRoot 'src\gamedata\configs\text\eng\st_gamma_arena.xml'
+$BattleUiRusPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
+Assert-True (Test-Path -LiteralPath $BattleUiScriptPath) 'Battle identity HUD adapter is missing'
+Assert-True (Test-Path -LiteralPath $BattleUiXmlPath) 'Battle identity HUD XML is missing'
+if (Test-Path -LiteralPath $BattleUiScriptPath) {
+    $BattleUiContent = Get-Content -LiteralPath $BattleUiScriptPath -Raw
+    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
+        Assert-True ($BattleUiContent -match [regex]::Escape($Marker)) "Battle identity HUD must cover $Marker"
+    }
+    Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
+    Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
+}
+if (Test-Path -LiteralPath $BattleUiXmlPath) {
+    try {
+        [xml]$BattleUiXml = Get-Content -LiteralPath $BattleUiXmlPath -Raw
+        foreach ($Id in @('gamma_arena_battle','panel','identity')) {
+            Assert-True ($null -ne $BattleUiXml.SelectSingleNode("//*[local-name()='$Id']")) "Battle identity HUD XML is missing control $Id"
+        }
+        $BattlePanel = $BattleUiXml.SelectSingleNode("//*[local-name()='panel']")
+        Assert-True ([int]$BattlePanel.x + [int]$BattlePanel.width -eq 994) 'Battle identity HUD must retain the approved right safe-area inset'
+    } catch { Assert-True $false "Battle identity HUD XML must parse: $($_.Exception.Message)" }
+}
+foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
+    Assert-True (Test-Path -LiteralPath $TextPath) "Battle identity localization file is missing: $TextPath"
+    if (Test-Path -LiteralPath $TextPath) {
+        $BattleText = Get-Content -LiteralPath $TextPath -Raw
+        foreach ($Id in @('st_gamma_arena_battle_seed','st_gamma_arena_battle_fight')) {
+            Assert-True ($BattleText -match [regex]::Escape($Id)) "Battle identity localization must define $Id in $TextPath"
+        }
+    }
+}
+$BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
+foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_main_hud_visibility_is_safe')) {
+    Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
+}
+
 $Task6MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
 $Task6UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
 $Task6TextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena.xml'
