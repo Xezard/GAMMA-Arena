@@ -8566,11 +8566,85 @@ local function runtime_battle_identity_removal_failure_is_retryable()
     gamma_arena_test_assert.equals(attempts, 2, "failed battle identity removal retains ownership")
 end
 
+local function runtime_battle_identity_initialization_failure_prevents_registration()
+    local adds = 0
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function()
+            return { AddDialogToRender = function() adds = adds + 1 end }
+        end,
+        create_window = function()
+            return {
+                initialization_result = gamma_arena_result.err(
+                    "GA_TEST_BATTLE_UI_TEXT_FAILED",
+                    "injected SetIdentity failure"
+                ),
+                SetIdentity = function() end
+            }
+        end
+    })
+    local shown = ui:show_identity({ session_seed = 42, fight_index = 0 })
+    gamma_arena_test_assert.is_false(shown.ok, "failed battle identity initialization is structured")
+    gamma_arena_test_assert.equals(shown.error.code, "GA_TEST_BATTLE_UI_TEXT_FAILED", "SetIdentity failure is preserved")
+    gamma_arena_test_assert.equals(adds, 0, "uninitialized battle identity is never registered")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "failed initialization owns no window")
+end
+
+local function runtime_battle_identity_partial_add_is_rolled_back_or_retryable()
+    local env = { adds = 0, removes = 0, fail_remove = true }
+    local window = { SetIdentity = function() end }
+    local hud = {
+        AddDialogToRender = function(_, added)
+            env.adds = env.adds + 1
+            env.registered = added
+            error("after add")
+        end,
+        RemoveDialogToRender = function(_, removed)
+            env.removes = env.removes + 1
+            gamma_arena_test_assert.equals(removed, window, "rollback removes the exact pending window")
+            if env.fail_remove then error("remove") end
+            env.registered = nil
+        end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function() return window end
+    })
+    local shown = ui:show_identity({ session_seed = 42, fight_index = 0 })
+    gamma_arena_test_assert.is_false(shown.ok, "throw-after-add remains a structured show failure")
+    gamma_arena_test_assert.equals(env.adds, 1, "partial add is attempted once")
+    gamma_arena_test_assert.equals(env.removes, 1, "partial add triggers immediate rollback")
+    gamma_arena_test_assert.equals(env.registered, window, "failed rollback retains pending ownership")
+    env.fail_remove = false
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "later clear retries failed rollback")
+    gamma_arena_test_assert.equals(env.removes, 2, "failed rollback is retried once")
+    gamma_arena_test_assert.equals(env.registered, nil, "retry removes the pending window")
+end
+
 local function runtime_battle_identity_main_hud_visibility_is_safe()
     gamma_arena_test_assert.is_true(gamma_arena_ui_battle.main_hud_visible(function() return true end), "visible main HUD shows battle identity")
     gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() return false end), "hidden main HUD hides battle identity")
     gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() error("hud") end), "HUD visibility exception hides safely")
     gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(nil), "missing HUD visibility port hides safely")
+end
+
+local function runtime_battle_identity_visibility_sync_is_structured()
+    local root = {
+        Show = function(self, visible)
+            self.visible = visible
+            self.transitions = (self.transitions or 0) + 1
+        end
+    }
+    local hidden = gamma_arena_ui_battle.sync_visibility(root, function() return false end)
+    gamma_arena_test_assert.is_true(hidden.ok, "hidden HUD visibility sync succeeds")
+    gamma_arena_test_assert.is_false(root.visible, "hidden main HUD hides battle identity before registration")
+    local visible = gamma_arena_ui_battle.sync_visibility(root, function() return true end)
+    gamma_arena_test_assert.is_true(visible.ok, "visible HUD visibility sync succeeds")
+    gamma_arena_test_assert.is_true(root.visible, "visible main HUD shows battle identity")
+    gamma_arena_test_assert.equals(root.transitions, 2, "visibility transitions are explicit")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.sync_visibility(root, function() error("hud") end).ok, "visibility port error is structured")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.sync_visibility({}, function() return true end).ok, "missing root Show is structured")
 end
 
 local cases = {
@@ -8825,7 +8899,10 @@ local cases = {
     ,{ name = "runtime_battle_identity_formatter_is_exact", fn = runtime_battle_identity_formatter_is_exact }
     ,{ name = "runtime_battle_identity_adapter_owns_one_window", fn = runtime_battle_identity_adapter_owns_one_window }
     ,{ name = "runtime_battle_identity_removal_failure_is_retryable", fn = runtime_battle_identity_removal_failure_is_retryable }
+    ,{ name = "runtime_battle_identity_initialization_failure_prevents_registration", fn = runtime_battle_identity_initialization_failure_prevents_registration }
+    ,{ name = "runtime_battle_identity_partial_add_is_rolled_back_or_retryable", fn = runtime_battle_identity_partial_add_is_rolled_back_or_retryable }
     ,{ name = "runtime_battle_identity_main_hud_visibility_is_safe", fn = runtime_battle_identity_main_hud_visibility_is_safe }
+    ,{ name = "runtime_battle_identity_visibility_sync_is_structured", fn = runtime_battle_identity_visibility_sync_is_structured }
 }
 
 function run(run_case_fn)

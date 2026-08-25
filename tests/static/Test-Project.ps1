@@ -652,7 +652,7 @@ Assert-True (Test-Path -LiteralPath $BattleUiScriptPath) 'Battle identity HUD ad
 Assert-True (Test-Path -LiteralPath $BattleUiXmlPath) 'Battle identity HUD XML is missing'
 if (Test-Path -LiteralPath $BattleUiScriptPath) {
     $BattleUiContent = Get-Content -LiteralPath $BattleUiScriptPath -Raw
-    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
+    foreach ($Marker in @('class "UIBattleIdentity" (CUIScriptWnd)','format_identity','main_hud_visible','sync_visibility','initialization_result','rollback_partial_add','show_identity','clear_identity','AddDialogToRender','RemoveDialogToRender','main_hud_shown')) {
         Assert-True ($BattleUiContent -match [regex]::Escape($Marker)) "Battle identity HUD must cover $Marker"
     }
     Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
@@ -678,7 +678,7 @@ foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
     }
 }
 $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
-foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_main_hud_visibility_is_safe')) {
+foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
 $BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
