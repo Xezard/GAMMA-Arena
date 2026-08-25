@@ -4,14 +4,16 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
-- Restored the main-menu Arena Start callback by removing a diagnostic level-state query that is invalid before the new-game engine context exists.
+- Scaled the actor's ordinary ammunition for every firearm class with opponent count: one guaranteed box plus deterministic per-opponent chances (40% pistol, 25% SMG/shotgun, 20% rifle, 10% sniper), outside the gear budget and without a gameplay ceiling.
+- Isolated every Arena-owned human NPC behind the engine-native `arena_enemy` community while retaining its generated source faction for presentation and loadout selection; added ownership-bounded net-spawn enforcement and activation readback without overriding any foreign mod.
+- Restored the main-menu Arena Start callback by removing diagnostic level-state and file-I/O probes that are invalid before the new-game engine context exists.
 - Restored the Arena Start handoff by deferring the global save-command guard until the new-game runtime accepts Arena launch ownership, while still arming suppression before any Arena activation or `fake_start` deferral.
 - Suppressed every Lua `save` command and the known GAMMA new-game autosave event for Arena-owned launches while leaving campaign saves unchanged; added flushed crash checkpoints and passive bounded hit/state evidence for unexplained early NPC deaths.
 - Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
 - Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
 - Added deterministic budgeted medical loadouts for the actor and opponents, with a curated 16-item combat pool and separate gear/medical costs in FightSpec v5.
 - Added physical opponent use of assigned bandages and medkits with rank-based reaction delays, bounded healing, ownership-safe consumption, and stock-AI conflict detection.
-- Published catalog/difficulty identities 6/7/7 and 4/5, generated medical balance tables, and the independent FightSpec v5 golden oracle.
+- Published catalog/difficulty identities 7/8/8 and 4/5, generated medical and actor-ammunition balance tables, and the independent FightSpec v6 golden oracle.
 - Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.

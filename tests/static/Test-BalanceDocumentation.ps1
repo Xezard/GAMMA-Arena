@@ -20,6 +20,9 @@ if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
 if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
     throw 'Arena balance document must contain exactly one Mermaid diagram'
 }
+if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v6"\]' -or $RepositoryDocument -match 'FightSpec v5') {
+    throw 'Arena balance generation diagram must identify FightSpec v6'
+}
 $Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
 if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
     throw 'README does not link the Arena balance dashboard'
@@ -129,6 +132,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $CatalogText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'))
     $LayoutText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'))
     $TacticalText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'))
+    $GeneratorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_generator.script'))
     $TacticalDirectorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'))
     $DifficultyIds = @('rookie', 'stalker', 'veteran', 'master')
     $WeaponClasses = @('w_pistol', 'w_smg', 'w_shotgun', 'w_rifle', 'w_sniper')
@@ -139,7 +143,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         'difficulty-dashboard' = 20
         'medical-loadouts' = 30
         'npc-medical-runtime' = 20
-        'actor-equipment' = 66
+        'actor-equipment' = 73
         'opponent-budgets' = 28
         'arena-tactics' = 33
         'balance-diagnostics' = 21
@@ -252,6 +256,28 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     })
     $BandageCost = [int](Get-TestLtxValue $CatalogText 'consumable_bandage' 'cost')
     $ActorBlock = Get-TestGeneratedBlock $DocumentText 'actor-equipment'
+    $AmmoChanceTable = [regex]::Match($GeneratorText, '(?s)local\s+PLAYER_AMMO_CHANCE\s*=\s*\{(?<body>.*?)\r?\n\}')
+    if (-not $AmmoChanceTable.Success) { throw 'Test oracle cannot find PLAYER_AMMO_CHANCE' }
+    $AmmoChanceEntries = @([regex]::Matches($AmmoChanceTable.Groups['body'].Value, '(?m)^\s*(w_pistol|w_smg|w_shotgun|w_rifle|w_sniper)\s*=\s*(\d+)\s*,?\s*$'))
+    if ($AmmoChanceEntries.Count -ne $WeaponClasses.Count) { throw 'PLAYER_AMMO_CHANCE has unexpected cardinality' }
+    $AmmoScaleRows = @([regex]::Matches($ActorBlock, '(?m)^\| (w_pistol|w_smg|w_shotgun|w_rifle|w_sniper) \| (\d+)% \| 1 \| 1\.\.N\+1 \| ([\d.]+) \| ([\d.]+) \| ([\d.]+) \| ([\d.]+) \|$'))
+    if ($AmmoScaleRows.Count -ne $WeaponClasses.Count) { throw 'Player ammo scaling table has unexpected cardinality' }
+    foreach ($Entry in $AmmoChanceEntries) {
+        $Kind = $Entry.Groups[1].Value
+        $Chance = [int]$Entry.Groups[2].Value
+        $Row = @($AmmoScaleRows | Where-Object { $_.Groups[1].Value -eq $Kind })
+        if ($Row.Count -ne 1 -or [int]$Row[0].Groups[2].Value -ne $Chance) {
+            throw "Player ammo scaling chance differs: $Kind"
+        }
+        for ($Index = 0; $Index -lt 4; $Index++) {
+            $OpponentCount = @(1, 5, 20, 100)[$Index]
+            $Actual = [double]::Parse($Row[0].Groups[$Index + 3].Value, [Globalization.CultureInfo]::InvariantCulture)
+            $Expected = 1 + $OpponentCount * $Chance / 100.0
+            if ([Math]::Abs($Actual - $Expected) -gt 0.000001) {
+                throw "Player ammo scaling expectation differs: $Kind/N=$OpponentCount"
+            }
+        }
+    }
     $ActorPairRows = @([regex]::Matches($ActorBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (w_pistol|w_smg|w_shotgun|w_rifle|w_sniper) \| ([^|]+) \| ([^|]+) \|$'))
     if ($ActorPairRows.Count -ne ($DifficultyIds.Count * $WeaponClasses.Count)) { throw 'Fallback pair matrix has unexpected cardinality' }
     $ActorCountRows = @([regex]::Matches($ActorBlock, '(?m)^\| (rookie|stalker|veteran|master) \| (\d+) / 25 \| (\d+) / 25 \|$'))
@@ -336,7 +362,7 @@ try {
     }
     & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
-        '| Catalog | schema 6 / revision 7 / generator 7 |',
+        '| Catalog | schema 7 / revision 8 / generator 8 |',
         '| Difficulties | schema 4 / revision 5 |',
         '| Layout | schema 2 / revision 2 |',
         '| Tactics | schema 1 / revision 1 |',
@@ -359,6 +385,14 @@ try {
         '| master | 12 / 25 | 13 / 25 |',
         '| rookie | w_pistol | light, medium, scientific | heavy, powered_exo |',
         '| w_pistol | 2 |',
+        '`gear_cost = weapon + ammo_cost * budgeted_boxes + outfit`; scaled ordinary boxes and medicine are outside this budget',
+        '`scaled_boxes = 1 + independent success per opponent`; deterministic stream `actor_scaled_ammo:<index>`, range `1..N+1`, no balance ceiling',
+        '`final ammo_boxes = max(budgeted_boxes, ceil(3 * magazine_size / box_size)) + scaled_boxes`; FightSpec stores only this final value',
+        '| w_pistol | 40% | 1 | 1..N+1 | 1.4 | 3 | 9 | 41 |',
+        '| w_smg | 25% | 1 | 1..N+1 | 1.25 | 2.25 | 6 | 26 |',
+        '| w_shotgun | 25% | 1 | 1..N+1 | 1.25 | 2.25 | 6 | 26 |',
+        '| w_rifle | 20% | 1 | 1..N+1 | 1.2 | 2 | 5 | 21 |',
+        '| w_sniper | 10% | 1 | 1..N+1 | 1.1 | 1.5 | 3 | 11 |',
         '| o_heavy | 5 | heavy; powered_exo when exo/proto |',
         '| ammo_5.45x39_fmj | 2 | fallback |',
         '| dynamic discovered ammo | 1 | runtime discovery |',
@@ -397,7 +431,7 @@ try {
 
     & $ToolPath -RepoRoot $Fixture -Verify
 
-    $Stale = $Second.Replace('Catalog | schema 6 /', 'Catalog | schema 999 /')
+    $Stale = $Second.Replace('Catalog | schema 7 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
     $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
     if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
@@ -582,6 +616,15 @@ try {
     & $ToolPath -RepoRoot $Fixture
     $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
+
+    $AmmoChanceChanged = $GeneratorText.Replace('w_pistol = 40', 'w_pistol = 41')
+    [IO.File]::WriteAllText($Generator, $AmmoChanceChanged, (New-Object Text.UTF8Encoding($false)))
+    $BeforeFailure = [IO.File]::ReadAllText($Document)
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+    if ($BeforeFailure -cne [IO.File]::ReadAllText($Document)) {
+        throw 'Changed player ammo chance rewrote the document during verification'
+    }
+    [IO.File]::WriteAllText($Generator, $GeneratorText, (New-Object Text.UTF8Encoding($false)))
 
     $KnifePickChanged = $GeneratorText.Replace(
         'local choice = rng:pick(knives)',

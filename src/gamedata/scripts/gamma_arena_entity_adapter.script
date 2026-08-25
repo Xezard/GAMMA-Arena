@@ -16,7 +16,7 @@ local FORENSIC_SAMPLE_INTERVAL_MS = 250
 local FORENSIC_RING_SIZE = 12
 local FORENSIC_MOVEMENT_METERS = 2.5
 local EXPECTED_HUMAN_CLASS = "AI_STL_S"
-local EXPECTED_COMMUNITY = "bandit"
+local ARENA_RUNTIME_COMMUNITY = "arena_enemy"
 local ACTOR_GOODWILL = -5000
 local OPPONENT_STATES = {
     ALIVE = "ALIVE",
@@ -512,6 +512,53 @@ function EntityAdapter:tag_record(record)
     return gamma_arena_result.ok(true)
 end
 
+function EntityAdapter:verify_runtime_community(record, npc, phase)
+    local observed = result_call("GA_ENTITY_RUNTIME_COMMUNITY_READ_FAILED", self.deps.runtime_community, npc)
+    if not observed.ok then return observed end
+    if observed.value ~= ARENA_RUNTIME_COMMUNITY then
+        return fail("GA_ENTITY_RUNTIME_COMMUNITY_VERIFY_FAILED", "Arena opponent runtime community is not isolated", {
+            id = record.id,
+            expected_community = ARENA_RUNTIME_COMMUNITY,
+            observed_community = observed.value
+        })
+    end
+    record.runtime_community = ARENA_RUNTIME_COMMUNITY
+    if type(self.deps.log_info) == "function" then
+        pcall(self.deps.log_info, "GA_ENTITY_RUNTIME_COMMUNITY_VERIFIED", "Arena opponent runtime community is isolated", {
+            session_id = self.session_id,
+            slot = record.slot,
+            id = record.id,
+            phase = phase,
+            runtime_community = ARENA_RUNTIME_COMMUNITY
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function EntityAdapter:on_npc_net_spawn(npc)
+    local id = read_entity_id(npc)
+    if id == nil then return gamma_arena_result.ok(false) end
+    local record = self.record_by_id[id]
+    if record == nil or record.kind ~= "npc" or record.tagged ~= true or record.released then
+        return gamma_arena_result.ok(false)
+    end
+    local owner = self:load_owner_tag(id)
+    if not owner.ok then return owner end
+    if owner.value ~= self.session_id then
+        return fail("GA_ENTITY_RUNTIME_COMMUNITY_OWNER_MISMATCH", "Arena opponent ownership changed before runtime isolation", {
+            id = id,
+            expected_owner = self.session_id,
+            observed_owner = owner.value
+        })
+    end
+    local assigned = result_call("GA_ENTITY_RUNTIME_COMMUNITY_SET_FAILED", self.deps.set_runtime_community, npc, ARENA_RUNTIME_COMMUNITY)
+    if not assigned.ok then return assigned end
+    local verified = self:verify_runtime_community(record, npc, "net_spawn")
+    if not verified.ok then return verified end
+    record.net_spawn_community_verified = true
+    return gamma_arena_result.ok(true)
+end
+
 function EntityAdapter:register_record(kind, id, values)
     if not valid_id(id) or self.record_by_id[id] ~= nil then
         return fail("GA_ENTITY_ID_INVALID", "Arena entity id is invalid or duplicated", { id = id })
@@ -782,7 +829,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
         opponents[index] = copy_participant(participant, index)
         if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
         if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = index, route = opponents[index].tactical_route }) end
-        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, opponents[index].community)
+        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, ARENA_RUNTIME_COMMUNITY)
         if not effective.ok then return effective end
     end
     if actor_spec.loadout.bonus_ammo == nil then
@@ -1233,6 +1280,11 @@ function EntityAdapter:drive_online()
         if object.value == nil then
             pending_id = pending_id or record.id
         else
+            if not record.activation_community_verified then
+                local community = self:verify_runtime_community(record, object.value, "activation")
+                if not community.ok then return community end
+                record.activation_community_verified = true
+            end
             local alive = self:is_alive(object.value)
             if not alive.ok then return alive end
             if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "Arena opponent is not alive before activation", { id = record.id }) end

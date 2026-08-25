@@ -13,6 +13,7 @@ local callback_names = {
     "actor_on_update",
     "actor_on_before_death",
     "actor_on_death",
+    "npc_on_net_spawn",
     "npc_on_before_hit",
     "npc_on_hit_callback",
     "npc_on_death_callback",
@@ -27,6 +28,7 @@ local callback_names = {
 local guarded_callbacks = {
     actor_on_before_death = true,
     actor_on_death = true,
+    npc_on_net_spawn = true,
     npc_on_before_hit = true,
     npc_on_hit_callback = true,
     npc_on_death_callback = true,
@@ -555,22 +557,6 @@ function new_actor_loadout_port(ports)
         if bonus_ammo_rounds ~= math.floor(bonus_ammo_rounds) or bonus_ammo_rounds < 1 or bonus_ammo_rounds >= UINT32_MOD then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor bonus ammo boxes cannot be translated to a bounded exact round count", { section = loadout.bonus_ammo.section, ammo_boxes = loadout.bonus_ammo.boxes, box_size = bonus_box_size.value, role = "bonus_ammo" })
         end
-        if ports.reserve_magazines ~= nil then
-            if type(ports.reserve_magazines) ~= "number" or ports.reserve_magazines ~= math.floor(ports.reserve_magazines)
-                or ports.reserve_magazines < 1 or ports.reserve_magazines >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazine policy must be a positive bounded integer")
-            end
-            local capacity = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", ports.magazine_capacity, loadout.weapon)
-            if not capacity.ok then return capacity end
-            if type(capacity.value) ~= "number" or capacity.value ~= math.floor(capacity.value) or capacity.value < 1 or capacity.value >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", "Weapon ammo_mag_size must be a positive bounded integer", { section = loadout.weapon })
-            end
-            local reserve_rounds = ports.reserve_magazines * capacity.value
-            if reserve_rounds ~= math.floor(reserve_rounds) or reserve_rounds < 1 or reserve_rounds >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazines cannot be translated to a bounded exact round count", { section = loadout.weapon })
-            end
-            ammo_rounds = math.max(ammo_rounds, reserve_rounds)
-        end
         local descriptors = {
             { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
             { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo", box_size = box_size.value },
@@ -994,7 +980,6 @@ local function default_actor_adapter(active_instance)
     local loadout = new_actor_loadout_port({
         clock = function() return time_global() end,
         timeout_ms = 5000,
-        reserve_magazines = 3,
         actor_id = runtime_object_id,
         ownership_token = function()
             local instance = active_instance()
@@ -1520,6 +1505,32 @@ local function default_entity_adapter(actor_adapter, active_instance, diagnostic
         ammo_box_size = effective_ammo_box_size,
         profile_runtime = { effective_profile = entity_effective_profile },
         actor_object = function() return db and db.actor end,
+        set_runtime_community = function(npc, community)
+            local lookup_ok, method = pcall(function() return npc and npc.set_character_community end)
+            if not lookup_ok or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_SET_FAILED", "game_object.set_character_community is unavailable")
+            end
+            local called, value = pcall(method, npc, community, 0, 0)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_SET_FAILED", "Opponent runtime community assignment failed safely", {
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        runtime_community = function(npc)
+            local lookup_ok, method = pcall(function() return npc and npc.character_community end)
+            if not lookup_ok or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_READ_FAILED", "game_object.character_community is unavailable")
+            end
+            local called, value = pcall(method, npc)
+            if not called or type(value) ~= "string" or value == "" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_READ_FAILED", "Opponent runtime community readback failed safely", {
+                    reason = called and nil or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(value)
+        end,
         clear_enemy = function(npc)
             local called, value = pcall(function() return npc:set_enemy(nil) end)
             if not called or value == false then
@@ -1627,7 +1638,11 @@ local function default_diagnostics()
         open = function(file_path, mode) return io.open(file_path, mode) end,
         clock = function() return time_global() end,
         level = function()
-            if level == nil or type(level.name) ~= "function" then return "unavailable" end
+            if level == nil or type(level.present) ~= "function" or type(level.name) ~= "function" then
+                return "unavailable"
+            end
+            local present_called, present = pcall(level.present)
+            if not present_called or present ~= true then return "unavailable" end
             local called, current = pcall(level.name)
             return called and current or "unavailable"
         end,
@@ -1769,11 +1784,6 @@ function compose(overrides)
         log = overrides.log or gamma_arena_log
     }
     instance = gamma_arena_orchestrator.new(deps)
-    pcall(function()
-        diagnostics:checkpoint("GA_VM_BOOTSTRAP_READY", {
-            save_guard_installed = false
-        })
-    end)
     return instance
 end
 

@@ -27,12 +27,14 @@ foreach ($Marker in @(
     'read_string',
     'read_string_result',
     'read_u32',
+    'ammo_mag_size',
+    'magazine_size',
     'compatible_weapon_variant',
     'parent_section',
     'scopes',
     'ammo_variants',
     'armor_piercing',
-    'dynamic_catalog_v6',
+    'dynamic_catalog_v7',
     'fingerprint_parts',
     'w_pistol',
     'w_smg',
@@ -61,6 +63,9 @@ if ($Production -notmatch 'table\.sort') {
 }
 if (-not $Production.Contains('slot = slot')) {
     throw 'Dynamic catalog discovery must retain the effective weapon inventory slot'
+}
+if ($Production -notmatch 'table\.concat\s*\(\s*\{\s*"weapon"[^\r\n]+item\.magazine_size') {
+    throw 'Dynamic catalog discovery fingerprint must include normalized magazine capacity'
 }
 if ($Production -match 'xrs_rnd_npc_loadout|wpn_addon_rifle|addon_medium_outfit') {
     throw 'Production discovery must use semantic metadata without fixture IDs or native loadout mutation'
@@ -123,8 +128,11 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*6' -or $Catalog -notmatch 'revision\s*=\s*7' -or $Catalog -notmatch 'generator_version\s*=\s*7') {
+if ($Catalog -notmatch 'schema_version\s*=\s*7' -or $Catalog -notmatch 'revision\s*=\s*8' -or $Catalog -notmatch 'generator_version\s*=\s*8') {
     throw 'Catalog snapshot version markers are stale'
+}
+if ($Catalog -notmatch 'validate_weapon_magazine_sizes[\s\S]*ammo_mag_size' -or $Catalog -notmatch 'weapon\.magazine_size') {
+    throw 'Fallback catalog weapons must normalize effective ammo_mag_size'
 }
 $AppendDiscoveredStart = $Catalog.IndexOf('local function append_discovered')
 $AppendDiscoveredEnd = $Catalog.IndexOf('local function sort_catalog_list', $AppendDiscoveredStart)
@@ -157,7 +165,7 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'function select_bonus_ammo' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
-    @{ Content = $Generator; Marker = 'FightSpecV5' },
+    @{ Content = $Generator; Marker = 'FightSpecV6' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' },
@@ -166,10 +174,10 @@ foreach ($Contract in @(
     @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_SCOPE_INVALID' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        throw "FightSpec v5 bonus-ammo contract is missing marker: $($Contract.Marker)"
+        throw "FightSpec v6 bonus-ammo contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v5 bonus-ammo static contract passed'
+Write-Host 'PASS: FightSpec v6 bonus-ammo static contract passed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
