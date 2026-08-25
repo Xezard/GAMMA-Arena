@@ -1603,6 +1603,11 @@ local function runtime_bootstrap_status_preserves_initialization_result()
     gamma_arena_test_assert.is_true(registered.instance == instance and registered.callbacks == callbacks and registered.registered == registered_entries and registered.last_result == last_result, "readiness must not change registrar fields")
 end
 
+local function runtime_bootstrap_restart_without_registered_runtime_is_inert()
+    local result = gamma_arena_bootstrap.request_restart()
+    gamma_arena_test_assert.is_true(result.ok and result.value == false, "restart without a registered runtime is inert")
+end
+
 local function runtime_ordinary_start_preflight_precedes_mutation()
     local request = {
         schema_version = 1,
@@ -6803,6 +6808,43 @@ local function runtime_task8_victory_next_cleans_heals_and_increments_once()
     gamma_arena_test_assert.is_true(env.orchestrator.fight_spec:fight_id() ~= first_fight_id, "next fight has a distinct fight_id")
 end
 
+local function runtime_manual_restart_reuses_next_fight_once()
+    local env = task8_environment(); task8_pump_to_active(env)
+    local seed = env.orchestrator.session.session_seed
+    local difficulty = env.orchestrator.session.difficulty_id
+    local first_fight_id = env.orchestrator.fight_spec:fight_id()
+    local accepted = env.orchestrator:restart_arena_action()
+    local duplicate = env.orchestrator:restart_arena_action()
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value == true, "manual restart is accepted")
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "duplicate manual restart is inert")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "NEXT_CLEANUP", "manual restart enters existing cleanup")
+    gamma_arena_test_assert.equals(env.generated, 1, "manual restart creates nothing before cleanup")
+    for _ = 1, 5 do env.orchestrator:actor_on_update() end
+    gamma_arena_test_assert.equals(env.cleanup_calls, 1, "manual restart cleans once")
+    gamma_arena_test_assert.equals(env.reset_actor, 1, "manual restart resets actor once")
+    gamma_arena_test_assert.equals(env.orchestrator.session.session_seed, seed, "manual restart preserves seed")
+    gamma_arena_test_assert.equals(env.orchestrator.session.difficulty_id, difficulty, "manual restart preserves difficulty")
+    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, 1, "manual restart advances once")
+    gamma_arena_test_assert.equals(env.generated, 2, "manual restart generates one replacement FightSpec")
+    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec:fight_id() ~= first_fight_id, "manual restart generates a distinct fight")
+end
+
+local function runtime_manual_restart_inactive_and_exhausted_are_inert()
+    local inactive = task8_environment()
+    local ignored = inactive.orchestrator:restart_arena_action()
+    gamma_arena_test_assert.is_true(ignored.ok and ignored.value == false, "inactive Arena ignores manual restart")
+    gamma_arena_test_assert.equals(inactive.cleanup_calls, 0, "inactive restart starts no cleanup")
+
+    local exhausted = task8_environment(); task8_pump_to_active(exhausted)
+    exhausted.orchestrator.session.fight_index = 4294967295
+    local failed = exhausted.orchestrator:restart_arena_action()
+    gamma_arena_test_assert.is_false(failed.ok, "exhausted manual restart is rejected")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_FIGHT_INDEX_EXHAUSTED", "manual restart exhaustion code is stable")
+    gamma_arena_test_assert.equals(exhausted.orchestrator:runtime_stage_snapshot(), "ACTIVE", "exhausted restart leaves combat active")
+    gamma_arena_test_assert.is_false(exhausted.orchestrator.result_action_locked, "exhausted restart does not acquire the action latch")
+    gamma_arena_test_assert.equals(exhausted.cleanup_calls, 0, "exhausted restart precedes cleanup")
+end
+
 local function runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent()
     local env = task8_environment(); task8_pump_to_active(env)
     env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
@@ -8477,6 +8519,7 @@ local cases = {
     { name = "runtime_bootstrap_registration_poison_blocks_retry", fn = bootstrap_registration_poison_blocks_retry },
     { name = "runtime_bootstrap_requires_unregister_before_composition", fn = bootstrap_requires_unregister_before_composition },
     { name = "runtime_bootstrap_status_preserves_initialization_result", fn = runtime_bootstrap_status_preserves_initialization_result },
+    { name = "runtime_bootstrap_restart_without_registered_runtime_is_inert", fn = runtime_bootstrap_restart_without_registered_runtime_is_inert },
     { name = "runtime_ordinary_start_preflight_precedes_mutation", fn = runtime_ordinary_start_preflight_precedes_mutation },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
@@ -8617,6 +8660,8 @@ local cases = {
     ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
+    ,{ name = "runtime_manual_restart_reuses_next_fight_once", fn = runtime_manual_restart_reuses_next_fight_once }
+    ,{ name = "runtime_manual_restart_inactive_and_exhausted_are_inert", fn = runtime_manual_restart_inactive_and_exhausted_are_inert }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }
     ,{ name = "runtime_task8_main_menu_disconnect_retries_after_failure", fn = runtime_task8_main_menu_disconnect_retries_after_failure }
     ,{ name = "runtime_task8_death_errors_defer_fatal_ui_to_update", fn = runtime_task8_death_errors_defer_fatal_ui_to_update }
