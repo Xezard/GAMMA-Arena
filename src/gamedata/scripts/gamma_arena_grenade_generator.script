@@ -1,0 +1,64 @@
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function dense_item_pool(values)
+    if type(values) ~= "table" or #values == 0 then return false end
+    local count = 0
+    for key, item in pairs(values) do
+        if not gamma_arena_number.is_positive_integer(key) or type(item) ~= "table" or type(item.section) ~= "string" or item.section == "" then return false end
+        count = count + 1
+    end
+    return count == #values
+end
+
+local function rng_with(rng, method)
+    return type(rng) == "table" and type(rng[method]) == "function"
+end
+
+local function valid_actor_arguments(catalogs, streams)
+    return type(catalogs) == "table" and dense_item_pool(catalogs.actor_grenade_list)
+        and type(streams) == "table" and rng_with(streams.count, "next_int")
+        and type(streams.sections) == "table" and rng_with(streams.sections[1], "pick") and rng_with(streams.sections[2], "pick")
+end
+
+local function valid_enemy_arguments(catalogs, streams)
+    return type(catalogs) == "table" and dense_item_pool(catalogs.npc_grenade_list)
+        and type(streams) == "table" and rng_with(streams.presence, "next_int") and rng_with(streams.section, "pick")
+end
+
+function generate_actor(catalogs, streams)
+    if not valid_actor_arguments(catalogs, streams) then
+        return fail("GA_GRENADE_ARGUMENT_INVALID", "Actor grenade generation requires normalized catalogs and streams")
+    end
+    local draw = streams.count:next_int(1, 100)
+    if not gamma_arena_number.is_integer(draw) or draw < 1 or draw > 100 then
+        return fail("GA_GRENADE_SELECTION_INVALID", "Actor grenade count draw is outside the requested range", { draw = draw })
+    end
+    local count = draw == 1 and 2 or (draw <= 6 and 1 or 0)
+    local sections = {}
+    for index = 1, count do
+        local item = streams.sections[index]:pick(catalogs.actor_grenade_list)
+        if type(item) ~= "table" or type(item.section) ~= "string" or item.section == "" then
+            return fail("GA_GRENADE_SELECTION_INVALID", "Actor grenade selection failed", { index = index })
+        end
+        sections[index] = item.section
+    end
+    return gamma_arena_result.ok({ sections = sections })
+end
+
+function generate_enemy(catalogs, streams)
+    if not valid_enemy_arguments(catalogs, streams) then
+        return fail("GA_GRENADE_ARGUMENT_INVALID", "Opponent grenade generation requires normalized catalogs and streams")
+    end
+    local draw = streams.presence:next_int(1, 100)
+    if not gamma_arena_number.is_integer(draw) or draw < 1 or draw > 100 then
+        return fail("GA_GRENADE_SELECTION_INVALID", "Opponent grenade presence draw is outside the requested range", { draw = draw })
+    end
+    if draw > 10 then return gamma_arena_result.ok({ sections = {} }) end
+    local item = streams.section:pick(catalogs.npc_grenade_list)
+    if type(item) ~= "table" or type(item.section) ~= "string" or item.section == "" then
+        return fail("GA_GRENADE_SELECTION_INVALID", "Opponent grenade selection failed")
+    end
+    return gamma_arena_result.ok({ sections = { item.section } })
+end

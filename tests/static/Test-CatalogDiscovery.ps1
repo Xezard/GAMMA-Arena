@@ -96,9 +96,14 @@ if ($Tests -notmatch '(?m)\{\s*name\s*=\s*"catalog_discovery_filters_weapon_vari
 Write-Host 'PASS: dynamic catalog discovery static contract passed'
 
 $CatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
+$GrenadeGeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
 $GeneratorTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
 $Catalog = Get-Content -Raw -LiteralPath $CatalogPath
 $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestPath
+if (-not (Test-Path -LiteralPath $GrenadeGeneratorPath)) {
+    throw 'Grenade loadout generator production module is missing'
+}
+$GrenadeGenerator = Get-Content -Raw -LiteralPath $GrenadeGeneratorPath
 foreach ($Marker in @(
     'gamma_arena_catalog_discovery.discover',
     'enumerate_system_sections',
@@ -128,8 +133,17 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*7' -or $Catalog -notmatch 'revision\s*=\s*8' -or $Catalog -notmatch 'generator_version\s*=\s*8') {
+if ($Catalog -notmatch 'schema_version\s*=\s*8' -or $Catalog -notmatch 'revision\s*=\s*9' -or $Catalog -notmatch 'generator_version\s*=\s*9') {
     throw 'Catalog snapshot version markers are stale'
+}
+foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
+    if (-not $Catalog.Contains($Marker)) { throw "Grenade catalog contract is missing marker: $Marker" }
+}
+foreach ($Marker in @('function generate_actor', 'function generate_enemy', 'GA_GRENADE_ARGUMENT_INVALID', 'GA_GRENADE_SELECTION_INVALID')) {
+    if (-not $GrenadeGenerator.Contains($Marker)) { throw "Grenade generator contract is missing marker: $Marker" }
+}
+foreach ($CaseName in @('grenade_catalog_and_probability_boundaries', 'grenade_generator_rejects_malformed_arguments')) {
+    if (-not $GeneratorTests.Contains($CaseName)) { throw "Grenade generator regression case is missing: $CaseName" }
 }
 if ($Catalog -notmatch 'validate_weapon_magazine_sizes[\s\S]*ammo_mag_size' -or $Catalog -notmatch 'weapon\.magazine_size') {
     throw 'Fallback catalog weapons must normalize effective ammo_mag_size'
