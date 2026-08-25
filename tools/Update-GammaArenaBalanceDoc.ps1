@@ -469,7 +469,7 @@ $ActorGrenadeIds = @(Get-LtxCsv $Catalog 'grenades' 'ids' $CatalogPath)
 $NpcGrenadeIds = @(Get-LtxCsv $Catalog 'grenades' 'npc_ids' $CatalogPath)
 $ActorGrenadeSections = @($ActorGrenadeIds | ForEach-Object { Get-RequiredLtxValue $Catalog ('grenade_' + $_) 'section' $CatalogPath })
 $NpcGrenadeSections = @($NpcGrenadeIds | ForEach-Object { Get-RequiredLtxValue $Catalog ('grenade_' + $_) 'section' $CatalogPath })
-if (($ActorGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05, grenade_smoke') { throw 'Actor grenade pool differs from the approved ordered pool' }
+if (($ActorGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Actor grenade pool differs from the approved ordered pool' }
 if (($NpcGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Opponent grenade pool differs from the approved ordered pool' }
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'

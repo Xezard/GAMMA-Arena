@@ -169,10 +169,10 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     if ($ActorGrenadeRows -ne 3 -or $OpponentGrenadeRows -ne 2) {
         throw 'Grenade probability matrix differs from 94/5/1 and 90/10'
     }
-    $ActorPoolHasSmoke = $GrenadeBlock -match '(?m)^\| actor_pool \| [^\r\n]*grenade_smoke[^\r\n]* \|$'
+    $ActorPoolHasSmoke = $GrenadeBlock -match '(?m)^\| actor_pool \| [^\r\n]*grenade_smoke'
     $OpponentPoolHasSmoke = $GrenadeBlock -match '(?m)^\| opponent_pool \| [^\r\n]*grenade_smoke'
-    if (-not $ActorPoolHasSmoke -or $OpponentPoolHasSmoke) {
-        throw 'Grenade participant pools do not enforce the opponent smoke exclusion'
+    if ($ActorPoolHasSmoke -or $OpponentPoolHasSmoke) {
+        throw 'Grenade participant pools do not enforce the complete smoke exclusion'
     }
 
     $DifficultyBlock = Get-TestGeneratedBlock $DocumentText 'difficulty-dashboard'
@@ -422,7 +422,7 @@ try {
         '| actor | exactly 2 | 1% |',
         '| each opponent | none | 90% |',
         '| each opponent | exactly 1 | 10% |',
-        '| actor_pool | grenade_f1, grenade_rgd5, grenade_gd-05, grenade_smoke |',
+        '| actor_pool | grenade_f1, grenade_rgd5, grenade_gd-05 |',
         '| opponent_pool | grenade_f1, grenade_rgd5, grenade_gd-05 |',
         '| two_actor_picks | independent; duplicates allowed |',
         '| budget_cost | 0; outside gear and medical budgets |',

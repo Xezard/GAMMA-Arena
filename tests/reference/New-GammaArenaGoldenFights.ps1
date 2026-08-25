@@ -143,7 +143,7 @@ $actorGrenadeIds = @($catalog.grenades.ids.Split(',') | ForEach-Object { $_.Trim
 $npcGrenadeIds = @($catalog.grenades.npc_ids.Split(',') | ForEach-Object { $_.Trim() })
 $actorGrenadePool = @($actorGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
 $npcGrenadePool = @($npcGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
-if ($actorGrenadePool.Count -ne 4 -or $npcGrenadePool.Count -ne 3 -or $actorGrenadePool -notcontains 'grenade_smoke' -or $npcGrenadePool -contains 'grenade_smoke') {
+if ($actorGrenadePool.Count -ne 3 -or $npcGrenadePool.Count -ne 3 -or $actorGrenadePool -contains 'grenade_smoke' -or $npcGrenadePool -contains 'grenade_smoke') {
     throw 'Reference grenade pools differ from the FightSpec v7 contract.'
 }
 $bandageCost = [int]$catalog.consumable_bandage.cost

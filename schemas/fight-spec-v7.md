@@ -28,13 +28,12 @@ ordered array of concrete game section names. Grenades never contribute to
 The actor count draw is uniform over 1..100. Draw 1 produces two grenades,
 draws 2..6 produce one, and draws 7..100 produce none: exactly 1%, 5%, and 94%.
 Actor selections are independent uniform picks from `grenade_f1`,
-`grenade_rgd5`, `grenade_gd-05`, and `grenade_smoke`; duplicate two-grenade
-selections are valid.
+`grenade_rgd5`, and `grenade_gd-05`; duplicate two-grenade selections are
+valid. `grenade_smoke` is excluded from every participant pool.
 
 Each logical opponent independently receives one grenade on draws 1..10 and
 none on draws 11..100: exactly 10% and 90%. Opponent picks are uniform across
-`grenade_f1`, `grenade_rgd5`, and `grenade_gd-05`. `grenade_smoke` is forbidden
-for opponents.
+the same three-section pool.
 
 Generation uses core/equipment RNG epoch 6 and isolated tags:
 
