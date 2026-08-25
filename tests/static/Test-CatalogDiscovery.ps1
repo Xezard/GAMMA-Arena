@@ -179,7 +179,7 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'function select_bonus_ammo' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
-    @{ Content = $Generator; Marker = 'FightSpecV6' },
+    @{ Content = $Generator; Marker = 'FightSpecV7' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' },
@@ -188,10 +188,10 @@ foreach ($Contract in @(
     @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_SCOPE_INVALID' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        throw "FightSpec v6 bonus-ammo contract is missing marker: $($Contract.Marker)"
+        throw "FightSpec v7 loadout contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v6 bonus-ammo static contract passed'
+Write-Host 'PASS: FightSpec v7 loadout static contract passed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
