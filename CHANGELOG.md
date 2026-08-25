@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-26
+
 - Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1%, while each opponent independently has a 10% chance for one; both use the F1/RGD-5/GD-05 pool, smoke is excluded, and native AI remains responsible for throws.
 - Added a non-modal top-right combat HUD showing the validated Arena seed and one-based fight number, hidden with the main HUD and removed on every terminal path.
 - Added independently configurable original Rostok Arena commentator and crowd reactions, with live MCM toggles, automatic compatibility with add-on 474's winning VFS resources, deterministic clip rotation, and fail-soft owned-channel cleanup.

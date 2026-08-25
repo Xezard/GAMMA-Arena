@@ -81,6 +81,9 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitattributes')) '.gi
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitignore is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
+$AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
+Assert-True ($AddonVersion -ceq '0.2.0') 'Active add-on version must be 0.2.0.'
+Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
     $_.FullName -notmatch '[\\/](dist|build)[\\/]'
@@ -268,6 +271,7 @@ foreach ($RelativePath in $Task4DataFiles) {
 $MigrationPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script'
 if (Test-Path -LiteralPath $MigrationPath) {
     $MigrationContent = Get-Content -LiteralPath $MigrationPath -Raw
+    Assert-True ($MigrationContent -match ('CURRENT_ADDON_VERSION\s*=\s*"' + [regex]::Escape($AddonVersion) + '"')) 'Runtime add-on version must match VERSION.'
     Assert-True ($MigrationContent -match 'GA_SETTINGS_SCHEMA_NEWER') 'Settings migration must reject future schemas'
     Assert-True ($MigrationContent -match 'events') 'Settings reads and migrations must report events'
     Assert-True ($MigrationContent -match 'settings_schema_version') 'Settings migration must write schema v1'
