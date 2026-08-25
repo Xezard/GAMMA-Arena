@@ -2209,6 +2209,64 @@ foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','r
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }
 
+$AudioPath = Join-Path $SourceGamedata 'scripts\gamma_arena_audio.script'
+$McmPath = Join-Path $SourceGamedata 'scripts\gamma_arena_mcm.script'
+$AudioTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_audio.script'
+Assert-True (Test-Path -LiteralPath $AudioPath) 'Arena audio controller must be packaged.'
+Assert-True (Test-Path -LiteralPath $McmPath) 'Arena MCM page must be packaged.'
+Assert-True (Test-Path -LiteralPath $AudioTestPath) 'Arena audio behavioral contract is missing.'
+Assert-True ($ArenaRuntimeTestContent -ne $null) 'Arena runtime test fixture must remain readable.'
+if (Test-Path -LiteralPath $AudioPath) {
+    $AudioContent = Get-Content -LiteralPath $AudioPath -Raw
+    foreach ($Channel in @('crowd','reaction','commentator')) {
+        Assert-True ($AudioContent -match ('["'']' + [regex]::Escape($Channel) + '["'']')) "Arena audio must own the $Channel channel."
+    }
+    foreach ($Resource in @(
+        'ambient\\arena\\crowd_1',
+        'ambient\\arena\\crowd_2',
+        'ambient\\arena\\crowd_3',
+        'ambient\\arena\\crowd_wave_1',
+        'ambient\\arena\\crowd_wave_2',
+        'ambient\\arena\\crowd_wave_3',
+        'characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_start',
+        'characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_win_1',
+        'characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_dead'
+    )) {
+        Assert-True ($AudioContent.Contains($Resource)) "Arena audio resource is missing: $Resource"
+    }
+    Assert-True ($AudioContent -notmatch '\bbar_arena_fight') 'Arena audio must not mutate stock Arena fight info portions.'
+    Assert-True ($AudioContent -notmatch '\bmath\.random(seed)?\b') 'Arena audio must not consume non-deterministic or gameplay RNG.'
+}
+if (Test-Path -LiteralPath $McmPath) {
+    $McmContent = Get-Content -LiteralPath $McmPath -Raw
+    Assert-True ($McmContent -match '["'']gamma_arena/commentator["'']') 'Arena MCM must read the commentator option.'
+    Assert-True ($McmContent -match '["'']gamma_arena/crowd_reactions["'']') 'Arena MCM must read the crowd reactions option.'
+    Assert-True (([regex]::Matches($McmContent, 'type\s*=\s*["'']check["'']')).Count -eq 2) 'Arena MCM must expose exactly two check controls.'
+    Assert-True (([regex]::Matches($McmContent, 'def\s*=\s*true')).Count -eq 2) 'Arena MCM checks must both default to true.'
+    Assert-True ($McmContent -notmatch '\bbar_arena_fight') 'Arena MCM must not mutate stock Arena fight info portions.'
+}
+if (Test-Path -LiteralPath $AudioTestPath) {
+    $AudioTestContent = Get-Content -LiteralPath $AudioTestPath -Raw
+    foreach ($CaseName in @(
+        'audio_enabled_start_uses_owned_channels',
+        'audio_settings_disable_channel_families_independently',
+        'audio_accepted_deaths_rotate_reactions',
+        'audio_ambience_advances_without_duplicate_update',
+        'audio_live_settings_stop_and_resume_only_ambience',
+        'audio_terminal_events_stop_crowd_and_announce',
+        'audio_stop_all_is_idempotent_and_aggregates_failures',
+        'audio_settings_failures_are_structured',
+        'audio_mcm_defaults_and_boolean_values_are_safe'
+    )) {
+        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($CaseName) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*\}'
+        Assert-True (([regex]::Matches($AudioTestContent, $Registration)).Count -eq 1) "Arena audio contract must register exactly one case: $CaseName"
+    }
+}
+$AudioDomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($AudioDomainContent -match 'gamma_arena_test_audio\.run\s*\(\s*run_case_fn\s*\)') 'Arena audio tests must run from the Dev domain suite.'
+$PackagedSoundAssets = @($AllSourceFiles | Where-Object { $_.Extension -ieq '.ogg' })
+Assert-True ($PackagedSoundAssets.Count -eq 0) 'Gamma Arena must reuse effective VFS audio resources instead of packaging OGG files.'
+
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
         Write-Host "FAIL: $Failure"
