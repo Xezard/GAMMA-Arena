@@ -864,7 +864,16 @@ $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena
 if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
     $CheckpointFreeStateContent = Get-Content -LiteralPath $CheckpointFreeStatePath -Raw
     Assert-True ($CheckpointFreeStateContent -match '\[event_values\.PREFLIGHT_SUCCEEDED\]\s*=\s*state_values\.PREPARING') 'Dedicated Arena preflight must advance directly to PREPARING'
+    Assert-True ($CheckpointFreeStateContent -match 'RESTART\s*=\s*"RESTART"') 'Arena state graph must expose the manual restart event'
+    Assert-True ($CheckpointFreeStateContent -match '\[event_values\.RESTART\]\s*=\s*state_values\.RESULT') 'Active manual restart must enter the existing result continuation boundary'
     Assert-True ($CheckpointFreeStateContent -notmatch 'state_values\.(CHECKPOINTING|RECOVERING)') 'Dedicated Arena state graph must not contain checkpoint or save-recovery states'
+}
+
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
+Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
+foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
+    Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
 }
 
 if (Test-Path -LiteralPath $Task5BootstrapPath) {
