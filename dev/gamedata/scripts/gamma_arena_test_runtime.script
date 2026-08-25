@@ -6366,7 +6366,8 @@ local function task8_environment(options)
         npc_medical_starts = 0,
         npc_medical_updates = 0,
         npc_medical_stops = 0,
-        npc_medical_stop_reasons = {}
+        npc_medical_stop_reasons = {},
+        audio_calls = {}
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
@@ -6449,6 +6450,21 @@ local function task8_environment(options)
         env.npc_medical_stop_reasons[#env.npc_medical_stop_reasons + 1] = reason
         return gamma_arena_result.ok(true)
     end
+    local audio = {}
+    local function audio_call(method_name, context)
+        env.audio_calls[#env.audio_calls + 1] = { method = method_name, context = clone(context or {}) }
+        env.events[#env.events + 1] = "audio:" .. method_name
+        if options.audio_error == true or options.audio_error == method_name then
+            return gamma_arena_result.err("GA_TEST_AUDIO", "injected audio failure", { method = method_name })
+        end
+        return gamma_arena_result.ok(true)
+    end
+    function audio:begin_fight(context) return audio_call("begin_fight", context) end
+    function audio:update(context) return audio_call("update", context) end
+    function audio:opponent_defeated(context) return audio_call("opponent_defeated", context) end
+    function audio:victory(context) return audio_call("victory", context) end
+    function audio:defeat(context) return audio_call("defeat", context) end
+    function audio:stop_all(context) return audio_call("stop_all", context) end
     local store
     local checkpoint = { current = "READY" }
     function checkpoint:create() env.checkpoint_create = env.checkpoint_create + 1; return gamma_arena_result.ok(true) end
@@ -6550,6 +6566,7 @@ local function task8_environment(options)
         actor = actor,
         entities = entities,
         npc_medical = npc_medical,
+        audio = audio,
         checkpoint = checkpoint,
         layout = function() return gamma_arena_result.ok({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end,
         mode_policy = gamma_arena_mode_skirmish,
@@ -6727,6 +6744,76 @@ local function runtime_task8_only_registered_deaths_queue_victory()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 0, "death callback queues and never opens result UI")
     env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "registered final death opens result UI on next update")
+end
+
+local function count_audio_calls(env, method_name)
+    local count = 0
+    for index = 1, #env.audio_calls do
+        if env.audio_calls[index].method == method_name then count = count + 1 end
+    end
+    return count
+end
+
+local function runtime_audio_events_follow_owned_lifecycle()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    gamma_arena_test_assert.equals(count_audio_calls(env, "begin_fight"), 1, "ACTIVE starts owned Arena audio exactly once")
+    gamma_arena_test_assert.is_true(count_audio_calls(env, "update") >= 1, "ACTIVE updates owned Arena audio")
+
+    env.orchestrator:npc_on_death_callback({ id = function() return 999999 end })
+    gamma_arena_test_assert.equals(count_audio_calls(env, "opponent_defeated"), 0, "foreign death remains silent")
+    local registered = env.registry.npcs[1].id
+    gamma_arena_test_assert.is_true(env.orchestrator:npc_on_death_callback({ id = function() return registered end }).ok, "registered death remains accepted")
+    gamma_arena_test_assert.equals(count_audio_calls(env, "opponent_defeated"), 1, "accepted owned death emits one crowd reaction")
+    env.orchestrator:npc_on_death_callback({ id = function() return registered end })
+    gamma_arena_test_assert.equals(count_audio_calls(env, "opponent_defeated"), 1, "duplicate death remains silent")
+
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "victory update remains successful")
+    gamma_arena_test_assert.equals(count_audio_calls(env, "victory"), 1, "victory announcement precedes result ownership")
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "victory UI remains available")
+    gamma_arena_test_assert.is_true(env.victory_dialogs[1].on_next().ok, "next-fight action remains successful")
+    gamma_arena_test_assert.equals(count_audio_calls(env, "stop_all"), 1, "continuation stops every owned audio channel")
+end
+
+local function runtime_audio_cleanup_covers_exit_boundaries()
+    local game_load = task8_environment(); task8_pump_to_active(game_load)
+    gamma_arena_test_assert.is_true(game_load.orchestrator:on_game_load().ok, "game-load reset succeeds")
+    gamma_arena_test_assert.equals(count_audio_calls(game_load, "stop_all"), 1, "game-load reset stops owned audio")
+
+    local level_change = task8_environment(); task8_pump_to_active(level_change)
+    gamma_arena_test_assert.is_true(level_change.orchestrator:on_before_level_changing().ok, "level-change cleanup succeeds")
+    gamma_arena_test_assert.equals(count_audio_calls(level_change, "stop_all"), 1, "level change stops owned audio")
+
+    local actor_destroy = task8_environment(); task8_pump_to_active(actor_destroy)
+    gamma_arena_test_assert.is_true(actor_destroy.orchestrator:actor_on_net_destroy().ok, "actor destroy cleanup succeeds")
+    gamma_arena_test_assert.equals(count_audio_calls(actor_destroy, "stop_all"), 1, "actor destroy stops owned audio")
+
+    local fatal = task8_environment(); task8_pump_to_active(fatal)
+    local fatal_result = fatal.orchestrator:enter_fatal(gamma_arena_result.err("GA_TEST_FATAL", "expected fatal fixture"), true)
+    gamma_arena_test_assert.is_false(fatal_result.ok, "fatal routing preserves its original failure")
+    gamma_arena_test_assert.equals(count_audio_calls(fatal, "stop_all"), 1, "fatal routing stops owned audio")
+
+    local main_menu = task8_environment(); task8_pump_to_active(main_menu)
+    main_menu.orchestrator:npc_on_death_callback({ id = function() return main_menu.registry.npcs[1].id end })
+    main_menu.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(main_menu.victory_dialogs[1].on_main_menu().ok, "main-menu cleanup succeeds")
+    gamma_arena_test_assert.equals(count_audio_calls(main_menu, "stop_all"), 1, "main-menu exit stops owned audio")
+end
+
+local function runtime_audio_failures_are_diagnostic_only()
+    local env = task8_environment({ audio_error = true })
+    task8_pump_to_active(env)
+    local registered = env.registry.npcs[1].id
+    gamma_arena_test_assert.is_true(env.orchestrator:npc_on_death_callback({ id = function() return registered end }).ok, "audio reaction failure cannot reject an owned death")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "audio victory failure cannot reject result transition")
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "audio failures cannot suppress result UI")
+    gamma_arena_test_assert.is_true(env.victory_dialogs[1].on_next().ok, "audio cleanup failure cannot block continuation")
+    gamma_arena_test_assert.is_true(env.orchestrator.machine_state ~= gamma_arena_state_machine.states.ERROR, "audio failure never enters fatal state")
+    local diagnostics = 0
+    for index = 1, #env.logs do
+        if env.logs[index].code == "GA_AUDIO_EVENT_FAILED" then diagnostics = diagnostics + 1 end
+    end
+    gamma_arena_test_assert.is_true(diagnostics >= 5, "every failed audio event emits a bounded diagnostic")
 end
 
 local function runtime_active_poll_queues_victory_without_death_callback()
@@ -7031,7 +7118,7 @@ end
 
 local function natural_death_environment(options)
     options = options or {}
-    local env = { arm = 0, confirm = 0, tactical_stop = 0, neutralize = 0, actor_mutations = 0 }
+    local env = { arm = 0, confirm = 0, tactical_stop = 0, neutralize = 0, actor_mutations = 0, audio_calls = {} }
     local store = fake_store()
     function store:arm_defeat(_, context)
         env.arm = env.arm + 1
@@ -7046,6 +7133,17 @@ local function natural_death_environment(options)
         return gamma_arena_result.ok(true)
     end
     local deps = fake_orchestrator_deps(store)
+    deps.audio = {
+        defeat = function(_, context)
+            env.audio_calls[#env.audio_calls + 1] = { method = "defeat", context = clone(context or {}) }
+            if options.audio_error then return gamma_arena_result.err("GA_TEST_AUDIO", "injected defeat audio failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        stop_all = function(_, context)
+            env.audio_calls[#env.audio_calls + 1] = { method = "stop_all", context = clone(context or {}) }
+            return gamma_arena_result.ok(true)
+        end
+    }
     deps.actor.hold_after_logical_death = function()
         env.actor_mutations = env.actor_mutations + 1
         return gamma_arena_result.ok(true)
@@ -7138,6 +7236,18 @@ local function runtime_natural_death_outside_active_arena_is_inert()
         gamma_arena_test_assert.equals(flags.ret_value, true, stage .. " never mutates stock death flags")
         gamma_arena_test_assert.equals(env.arm + env.confirm + env.neutralize, 0, stage .. " writes no Arena defeat state")
     end
+end
+
+local function runtime_audio_defeat_failure_never_cancels_death()
+    local env = natural_death_environment({ audio_error = true })
+    local flags = { ret_value = true }
+    local result = env.orchestrator:actor_on_before_death(77, flags)
+    gamma_arena_test_assert.is_true(result.ok, "defeat audio failure cannot reject natural death arming")
+    gamma_arena_test_assert.equals(#env.audio_calls, 1, "natural death emits one defeat audio event")
+    gamma_arena_test_assert.equals(env.audio_calls[1].method, "defeat", "natural death uses the defeat event")
+    gamma_arena_test_assert.equals(env.arm, 1, "defeat intent remains armed after audio failure")
+    gamma_arena_test_assert.equals(env.tactical_stop, 1, "tactical stop remains ordered after audio failure")
+    gamma_arena_test_assert.equals(flags.ret_value, true, "audio failure never cancels lethal damage")
 end
 
 local function defeat_menu_test_owner()
@@ -8612,6 +8722,9 @@ local cases = {
     ,{ name = "runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation", fn = runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
+    ,{ name = "runtime_audio_events_follow_owned_lifecycle", fn = runtime_audio_events_follow_owned_lifecycle }
+    ,{ name = "runtime_audio_cleanup_covers_exit_boundaries", fn = runtime_audio_cleanup_covers_exit_boundaries }
+    ,{ name = "runtime_audio_failures_are_diagnostic_only", fn = runtime_audio_failures_are_diagnostic_only }
     ,{ name = "runtime_active_poll_queues_victory_without_death_callback", fn = runtime_active_poll_queues_victory_without_death_callback }
     ,{ name = "runtime_orchestrator_integrity_retries_same_spec_twice", fn = runtime_orchestrator_integrity_retries_same_spec_twice }
     ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
@@ -8632,6 +8745,7 @@ local cases = {
     ,{ name = "runtime_natural_death_arms_confirms_and_neutralizes_once", fn = runtime_natural_death_arms_confirms_and_neutralizes_once }
     ,{ name = "runtime_natural_death_failures_never_cancel_engine_death", fn = runtime_natural_death_failures_never_cancel_engine_death }
     ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
+    ,{ name = "runtime_audio_defeat_failure_never_cancels_death", fn = runtime_audio_defeat_failure_never_cancels_death }
     ,{ name = "runtime_defeat_menu_rejects_invalid_or_expired_handoff", fn = runtime_defeat_menu_rejects_invalid_or_expired_handoff }
     ,{ name = "runtime_defeat_menu_fresh_failures_are_bounded", fn = runtime_defeat_menu_fresh_failures_are_bounded }
     ,{ name = "runtime_defeat_menu_preflight_failure_identity_is_preserved", fn = runtime_defeat_menu_preflight_failure_identity_is_preserved }

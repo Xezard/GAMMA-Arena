@@ -2290,6 +2290,16 @@ $AudioDomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedat
 Assert-True ($AudioDomainContent -match 'gamma_arena_test_audio\.run\s*\(\s*run_case_fn\s*\)') 'Arena audio tests must run from the Dev domain suite.'
 $PackagedSoundAssets = @($AllSourceFiles | Where-Object { $_.Extension -ieq '.ogg' })
 Assert-True ($PackagedSoundAssets.Count -eq 0) 'Gamma Arena must reuse effective VFS audio resources instead of packaging OGG files.'
+foreach ($Marker in @('gamma_arena_audio.new','sound_object','sound_object.s3d','play_at_pos','overrides.audio','gamma_arena_mcm.snapshot')) {
+    Assert-True ($ArenaBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap Arena audio port must cover: $Marker"
+}
+foreach ($Marker in @('function Orchestrator:audio_event','"begin_fight"','"update"','"opponent_defeated"','"victory"','"defeat"','"stop_all"','GA_AUDIO_EVENT_FAILED')) {
+    Assert-True ($ArenaOrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator Arena audio lifecycle must cover: $Marker"
+}
+foreach ($Name in @('runtime_audio_events_follow_owned_lifecycle','runtime_audio_cleanup_covers_exit_boundaries','runtime_audio_failures_are_diagnostic_only','runtime_audio_defeat_failure_never_cancels_death')) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Arena audio runtime case must be registered exactly: $Name -> $Name"
+}
 
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {
