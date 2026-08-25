@@ -2188,6 +2188,21 @@ if ($ArenaActivateStart -ge 0 -and $ArenaActivateEnd -gt $ArenaActivateStart) {
     Assert-True ($ArenaActivateBlock -notmatch 'enter_fatal\s*\(\s*ownership\s*,\s*true') 'Rejected non-mutating launch ownership must be cleared by common fatal routing.'
     Assert-True ($ArenaArmIndex -ge 0 -and $ArenaDeferIndex -gt $ArenaArmIndex) 'Deferred fake_start launch must arm save suppression before handoff.'
 }
+$ArenaPrepareFightStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:prepare_fight')
+$ArenaPrepareFightEnd = if ($ArenaPrepareFightStart -ge 0) { $ArenaOrchestratorContent.IndexOf('function Orchestrator:begin_countdown_after_equipment', $ArenaPrepareFightStart) } else { -1 }
+Assert-True ($ArenaPrepareFightStart -ge 0 -and $ArenaPrepareFightEnd -gt $ArenaPrepareFightStart) 'Arena prepare_fight boundary must remain structurally testable.'
+if ($ArenaPrepareFightStart -ge 0 -and $ArenaPrepareFightEnd -gt $ArenaPrepareFightStart) {
+    $ArenaPrepareFightBlock = $ArenaOrchestratorContent.Substring($ArenaPrepareFightStart, $ArenaPrepareFightEnd - $ArenaPrepareFightStart)
+    Assert-True ($ArenaPrepareFightBlock -match 'safe_value_call\s*\(\s*"GA_ENTITY_SPEC_INVALID"\s*,\s*spec\.actor\s*\)') 'FightSpec actor accessor must accept its plain participant value.'
+    Assert-True ($ArenaPrepareFightBlock -notmatch 'safe_result_call\s*\(\s*"GA_ENTITY_SPEC_INVALID"\s*,\s*spec\.actor\s*\)') 'FightSpec actor accessor must not require a Result wrapper.'
+}
+$Task8ValidatedSpecStart = $ArenaRuntimeTestContent.IndexOf('local function task8_validated_spec')
+$Task8ValidatedSpecEnd = if ($Task8ValidatedSpecStart -ge 0) { $ArenaRuntimeTestContent.IndexOf('local function task8_environment', $Task8ValidatedSpecStart) } else { -1 }
+Assert-True ($Task8ValidatedSpecStart -ge 0 -and $Task8ValidatedSpecEnd -gt $Task8ValidatedSpecStart) 'Task 8 FightSpec fixture must remain structurally testable.'
+if ($Task8ValidatedSpecStart -ge 0 -and $Task8ValidatedSpecEnd -gt $Task8ValidatedSpecStart) {
+    $Task8ValidatedSpecBlock = $ArenaRuntimeTestContent.Substring($Task8ValidatedSpecStart, $Task8ValidatedSpecEnd - $Task8ValidatedSpecStart)
+    Assert-True ($Task8ValidatedSpecBlock -match 'actor\s*=\s*function\s*\(\s*\)\s*return\s+clone\s*\(\s*private\.actor\s*\)\s*end') 'Selected-weapon diagnostic regression must exercise a plain FightSpec actor table accessor.'
+}
 foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_diagnostics_checkpoint_rejects_nil_io_results','runtime_diagnostics_checkpoint_rejects_oversized_required_metadata','runtime_weapon_diagnostics_reads_effective_hud_metadata','runtime_weapon_diagnostics_missing_reads_are_unavailable','runtime_actor_weapon_checkpoint_precedes_native_activation','runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back','runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
