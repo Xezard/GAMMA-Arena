@@ -1181,9 +1181,9 @@ $Task3DataFiles = @(
     'schemas\fight-spec-v4.md',
     'tests\fixtures\golden-fights-v5.txt',
     'schemas\fight-spec-v5.md',
-    'tests\fixtures\golden-fights-v6.txt',
     'schemas\fight-spec-v6.md',
-    'schemas\fight-spec-v7.md'
+    'schemas\fight-spec-v7.md',
+    'tests\fixtures\golden-fights-v7.txt'
 )
 foreach ($RelativePath in $Task3DataFiles) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
@@ -1434,13 +1434,13 @@ if (Test-Path -LiteralPath $FightSpecV7Path) {
         Assert-True ($FightSpecV7Content -match [regex]::Escape($Marker)) "FightSpecV7 grenade contract must document $Marker"
     }
 }
-$GoldenV6Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v6.txt'
-if (Test-Path -LiteralPath $GoldenV6Path) {
-    $GoldenV6Content = Get-Content -LiteralPath $GoldenV6Path -Raw
-    Assert-True (([regex]::Matches($GoldenV6Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=6\|.+\|diagnostic=FightSpecV6 .+$')).Count -eq 4) 'Golden fixture must contain four complete v6 stable encodings'
-    Assert-True ($GoldenV6Content -match 'generator_version=8\|catalog_revision=8' -and $GoldenV6Content -match 'fight_id=ga-[^|]+-g8-c8-l2') 'Golden v6 fixture must use active generator/catalog identity 8/8'
-    Assert-True ($GoldenV6Content -match 'actor=[^|]*,ammo_[^,]+,[5-9][0-9]*,') 'Golden v6 fixture must encode the final scaled actor ammo_boxes value'
-    Assert-True ($GoldenV6Content -match 'medical:[^|,]*\+?[^|,]*,\d+,\d+,\d+') 'Golden v6 fixture must encode medicine plus separated costs'
+$GoldenV7Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v7.txt'
+if (Test-Path -LiteralPath $GoldenV7Path) {
+    $GoldenV7Content = Get-Content -LiteralPath $GoldenV7Path -Raw
+    Assert-True (([regex]::Matches($GoldenV7Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=7\|.+\|diagnostic=FightSpecV7 .+$')).Count -eq 4) 'Golden fixture must contain four complete v7 stable encodings'
+    Assert-True ($GoldenV7Content -match 'generator_version=9\|catalog_revision=9' -and $GoldenV7Content -match 'fight_id=ga-[^|]+-g9-c9-l2') 'Golden v7 fixture must use active generator/catalog identity 9/9'
+    Assert-True ($GoldenV7Content -match 'actor=[^|]*,ammo_[^,]+,[5-9][0-9]*,') 'Golden v7 fixture must encode the final scaled actor ammo_boxes value'
+    Assert-True ($GoldenV7Content -match 'medical:[^|,]*\+?[^|,]*,grenades:[^,]*,\d+,\d+,\d+') 'Golden v7 fixture must encode grenades separately from medicine and costs'
 }
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'
@@ -1516,7 +1516,7 @@ if ($IsRepositoryCheckout) {
         )) {
             Assert-True ($BuildContent -match ("(?m)^\s*" + [regex]::Escape($Field) + "\s*=")) "Release manifest must record $Field"
         }
-        Assert-True ($BuildContent -match '(?m)^\s*fight_spec_schema_version\s*=\s*6\s*$' -and $BuildContent -match '(?m)^\s*generator_version\s*=\s*8\s*$' -and $BuildContent -match '(?m)^\s*catalog_revision\s*=\s*8\s*$') 'Release manifest must record active FightSpec/catalog identity 6/8/8'
+        Assert-True ($BuildContent -match '(?m)^\s*fight_spec_schema_version\s*=\s*7\s*$' -and $BuildContent -match '(?m)^\s*generator_version\s*=\s*9\s*$' -and $BuildContent -match '(?m)^\s*catalog_revision\s*=\s*9\s*$') 'Release manifest must record active FightSpec/catalog identity 7/9/9'
         Assert-True ($BuildContent -match 'Get-OrdinalSortedPaths') 'Release manifest files must be sorted ordinally'
         Assert-True ($BuildContent -match 'Get-FileHash[^\r\n]+SHA256') 'Release manifest must checksum raw staged files with SHA-256'
         Assert-True ($BuildContent -match 'UTF8Encoding\(\$false\)') 'Release manifest must use UTF-8 without BOM'

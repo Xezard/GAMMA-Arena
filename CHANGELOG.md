@@ -4,6 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1% from four sections (including smoke), while each opponent independently has a 10% chance for one non-smoke grenade; native AI remains responsible for throws.
 - Added a non-modal top-right combat HUD showing the validated Arena seed and one-based fight number, hidden with the main HUD and removed on every terminal path.
 - Added independently configurable original Rostok Arena commentator and crowd reactions, with live MCM toggles, automatic compatibility with add-on 474's winning VFS resources, deterministic clip rotation, and fail-soft owned-channel cleanup.
 - Added a localized in-game `Restart Arena` action that reuses the authoritative next-fight cleanup, advances `fight_index` once, and regenerates the fight without reloading the level.
@@ -18,7 +19,7 @@ All notable changes to Gamma Arena are documented in this file.
 - Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
 - Added deterministic budgeted medical loadouts for the actor and opponents, with a curated 16-item combat pool and separate gear/medical costs in FightSpec v5.
 - Added physical opponent use of assigned bandages and medkits with rank-based reaction delays, bounded healing, ownership-safe consumption, and stock-AI conflict detection.
-- Published catalog/difficulty identities 7/8/8 and 4/5, generated medical and actor-ammunition balance tables, and the independent FightSpec v6 golden oracle.
+- Published catalog/difficulty identities 8/9/9 and 4/5, generated grenade/medical/actor-ammunition balance tables, and the independent FightSpec v7 golden oracle.
 - Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.

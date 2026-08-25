@@ -20,8 +20,8 @@ if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
 if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
     throw 'Arena balance document must contain exactly one Mermaid diagram'
 }
-if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v6"\]' -or $RepositoryDocument -match 'FightSpec v5') {
-    throw 'Arena balance generation diagram must identify FightSpec v6'
+if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v7"\]' -or $RepositoryDocument -match 'FightSpec v5') {
+    throw 'Arena balance generation diagram must identify FightSpec v7'
 }
 $Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
 if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
@@ -43,6 +43,8 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_grenade_generator.script',
+        'src\gamedata\scripts\gamma_arena_entity_adapter.script',
         'src\gamedata\scripts\gamma_arena_medical_generator.script',
         'src\gamedata\scripts\gamma_arena_npc_medical.script',
         'src\gamedata\scripts\gamma_arena_tactical_director.script'
@@ -64,6 +66,9 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: medical-loadouts -->
 <!-- END GENERATED: medical-loadouts -->
+
+<!-- BEGIN GENERATED: grenade-loadouts -->
+<!-- END GENERATED: grenade-loadouts -->
 
 <!-- BEGIN GENERATED: npc-medical-runtime -->
 <!-- END GENERATED: npc-medical-runtime -->
@@ -142,12 +147,13 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         'state-passport' = 6
         'difficulty-dashboard' = 20
         'medical-loadouts' = 30
+        'grenade-loadouts' = 14
         'npc-medical-runtime' = 20
         'actor-equipment' = 73
         'opponent-budgets' = 28
         'arena-tactics' = 33
         'balance-diagnostics' = 21
-        'source-map' = 13
+        'source-map' = 14
     }
     foreach ($BlockName in $ExpectedTableRows.Keys) {
         $Block = Get-TestGeneratedBlock $DocumentText $BlockName
@@ -155,6 +161,18 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         if ($Rows.Count -ne $ExpectedTableRows[$BlockName]) {
             throw "Generated table-row cardinality differs for $BlockName"
         }
+    }
+
+    $GrenadeBlock = Get-TestGeneratedBlock $DocumentText 'grenade-loadouts'
+    $ActorGrenadeRows = [regex]::Matches($GrenadeBlock, '(?m)^\| actor \| (none|exactly 1|exactly 2) \| (94|5|1)% \|$').Count
+    $OpponentGrenadeRows = [regex]::Matches($GrenadeBlock, '(?m)^\| each opponent \| (none|exactly 1) \| (90|10)% \|$').Count
+    if ($ActorGrenadeRows -ne 3 -or $OpponentGrenadeRows -ne 2) {
+        throw 'Grenade probability matrix differs from 94/5/1 and 90/10'
+    }
+    $ActorPoolHasSmoke = $GrenadeBlock -match '(?m)^\| actor_pool \| [^\r\n]*grenade_smoke[^\r\n]* \|$'
+    $OpponentPoolHasSmoke = $GrenadeBlock -match '(?m)^\| opponent_pool \| [^\r\n]*grenade_smoke'
+    if (-not $ActorPoolHasSmoke -or $OpponentPoolHasSmoke) {
+        throw 'Grenade participant pools do not enforce the opponent smoke exclusion'
     }
 
     $DifficultyBlock = Get-TestGeneratedBlock $DocumentText 'difficulty-dashboard'
@@ -362,7 +380,7 @@ try {
     }
     & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
-        '| Catalog | schema 7 / revision 8 / generator 8 |',
+        '| Catalog | schema 8 / revision 9 / generator 9 |',
         '| Difficulties | schema 4 / revision 5 |',
         '| Layout | schema 2 / revision 2 |',
         '| Tactics | schema 1 / revision 1 |',
@@ -399,6 +417,16 @@ try {
         '| medkit | 2 | medical pool: NPC-capable |',
         '| knives | 9 | no budget cost; uniform section pick |',
         '| knife sections | - | wpn_knife, wpn_knife2, wpn_knife3, wpn_knife4, wpn_knife5, wpn_knife6, wpn_knife7, wpn_knife8, wpn_knife9 |',
+        '| actor | none | 94% |',
+        '| actor | exactly 1 | 5% |',
+        '| actor | exactly 2 | 1% |',
+        '| each opponent | none | 90% |',
+        '| each opponent | exactly 1 | 10% |',
+        '| actor_pool | grenade_f1, grenade_rgd5, grenade_gd-05, grenade_smoke |',
+        '| opponent_pool | grenade_f1, grenade_rgd5, grenade_gd-05 |',
+        '| two_actor_picks | independent; duplicates allowed |',
+        '| budget_cost | 0; outside gear and medical budgets |',
+        '| NPC use | physical possession required; native AI decides whether to throw |',
         '| master | 7 | 15, 15, 14, 14, 14, 14, 14 | 6 | 1 |',
         '| master | 10 | 10 x 10 | 8 | 2 |',
         '| PRIMARY_BAND_PERCENT | 70% |',
@@ -417,6 +445,7 @@ try {
         '| derived | capacity-clipped difficulties | none |',
         '| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |',
         '| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |',
+        '| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |',
         '| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |'
     )) {
         if (-not $First.Contains($Expected)) {
@@ -431,7 +460,7 @@ try {
 
     & $ToolPath -RepoRoot $Fixture -Verify
 
-    $Stale = $Second.Replace('Catalog | schema 7 /', 'Catalog | schema 999 /')
+    $Stale = $Second.Replace('Catalog | schema 8 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
     $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
     if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
@@ -458,6 +487,8 @@ try {
 <!-- END GENERATED: difficulty-dashboard -->
 <!-- BEGIN GENERATED: medical-loadouts -->
 <!-- END GENERATED: medical-loadouts -->
+<!-- BEGIN GENERATED: grenade-loadouts -->
+<!-- END GENERATED: grenade-loadouts -->
 <!-- BEGIN GENERATED: npc-medical-runtime -->
 <!-- END GENERATED: npc-medical-runtime -->
 <!-- BEGIN GENERATED: actor-equipment -->

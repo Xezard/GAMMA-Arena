@@ -4,7 +4,7 @@ param([switch]$Verify, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 if ($Verify -and $Update) { throw 'Choose either -Verify or -Update.' }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v6.txt'
+$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v7.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
@@ -34,11 +34,11 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 7 -or [int]$catalog.meta.revision -ne 8 -or [int]$catalog.meta.generator_version -ne 8 -or
+if ([int]$catalog.meta.schema_version -ne 8 -or [int]$catalog.meta.revision -ne 9 -or [int]$catalog.meta.generator_version -ne 9 -or
     [int]$difficulties.meta.schema_version -ne 4 -or [int]$difficulties.meta.revision -ne 5 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
-    $generatorText -notmatch 'schema_version\s*=\s*6' -or $generatorText -notmatch 'FightSpecV6') {
-    throw 'Reference oracle requires catalog schema 7, generator/catalog 8/8, medical difficulty v5, layout v2, and FightSpec v6.'
+    $generatorText -notmatch 'schema_version\s*=\s*7' -or $generatorText -notmatch 'FightSpecV7') {
+    throw 'Reference oracle requires catalog schema 8, generator/catalog 9/9, medical difficulty v5, layout v2, and FightSpec v7.'
 }
 
 $difficultyManifest = @{
@@ -139,6 +139,13 @@ $weapons = @($catalog.weapons.ids.Split(',') | ForEach-Object { $_.Trim() } | So
 $outfits = @($catalog.outfits.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["outfit_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost;ArmorClass=$entry.armor_class} })
 $profiles = @($catalog.profiles.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $entry=$catalog["profile_$_"]; [pscustomobject]@{Section=$entry.section;Cost=[int]$entry.cost} })
 $knives = @($catalog.knives.ids.Split(',') | ForEach-Object { $_.Trim() } | Sort-Object | ForEach-Object { $catalog["knife_$_"].section })
+$actorGrenadeIds = @($catalog.grenades.ids.Split(',') | ForEach-Object { $_.Trim() })
+$npcGrenadeIds = @($catalog.grenades.npc_ids.Split(',') | ForEach-Object { $_.Trim() })
+$actorGrenadePool = @($actorGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
+$npcGrenadePool = @($npcGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
+if ($actorGrenadePool.Count -ne 4 -or $npcGrenadePool.Count -ne 3 -or $actorGrenadePool -notcontains 'grenade_smoke' -or $npcGrenadePool -contains 'grenade_smoke') {
+    throw 'Reference grenade pools differ from the FightSpec v7 contract.'
+}
 $bandageCost = [int]$catalog.consumable_bandage.cost
 $medicalItems = @($catalog.medical_items.ids.Split(',') | ForEach-Object { $_.Trim() } | ForEach-Object {
     $entry = $catalog["medical_$_"]
@@ -248,6 +255,19 @@ function New-GaScaledAmmoBoxes([pscustomobject]$Request, [int]$FightIndex, [stri
     }
     return $boxes
 }
+function New-GaActorGrenades([pscustomobject]$Request, [int]$FightIndex) {
+    $draw = Get-GaNextInt (New-GaStream $Request $FightIndex 'actor_grenade_count') 1 100
+    $count = if ($draw -eq 1) { 2 } elseif ($draw -le 6) { 1 } else { 0 }
+    $values = [Collections.Generic.List[string]]::new()
+    for ($index = 1; $index -le $count; $index++) {
+        $values.Add((Select-GaPick (New-GaStream $Request $FightIndex "actor_grenade_section:$index") $actorGrenadePool))
+    }
+    return @($values)
+}
+function New-GaEnemyGrenades([pscustomobject]$Request, [int]$FightIndex, [int]$Slot) {
+    if ((Get-GaNextInt (New-GaStream $Request $FightIndex "enemy_grenade_presence:$Slot") 1 100) -gt 10) { return @() }
+    return @(Select-GaPick (New-GaStream $Request $FightIndex "enemy_grenade_section:$Slot") $npcGrenadePool)
+}
 function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscustomobject]$Difficulty, [string]$Knife, [int]$OpponentCount) {
     $pairs = @()
     foreach ($weaponClass in @('w_pistol','w_smg','w_shotgun','w_rifle','w_sniper')) {
@@ -296,7 +316,8 @@ function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscust
     $minimumBoxes = [int][Math]::Ceiling(3.0 * $weapon.MagazineSize / $weapon.BoxSize)
     $scaledBoxes = New-GaScaledAmmoBoxes $Request $FightIndex $weapon.Kind $OpponentCount
     $finalAmmoBoxes = [int][Math]::Max($ammoBoxes, $minimumBoxes) + $scaledBoxes
-    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$finalAmmoBoxes,$($outfit.Section),$Knife,medical:$($medical.Sections -join '+'),$gearCost,$($medical.Cost),$totalCost,$bonus";Cost=$totalCost;GearCost=$gearCost;MedicalCost=$medical.Cost;Kind=$weapon.Kind;BudgetedAmmoBoxes=$ammoBoxes;AmmoBoxes=$finalAmmoBoxes;ScaledAmmoBoxes=$scaledBoxes}
+    $grenades = @(New-GaActorGrenades $Request $FightIndex)
+    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$finalAmmoBoxes,$($outfit.Section),$Knife,medical:$($medical.Sections -join '+'),grenades:$($grenades -join '+'),$gearCost,$($medical.Cost),$totalCost,$bonus";Cost=$totalCost;GearCost=$gearCost;MedicalCost=$medical.Cost;Kind=$weapon.Kind;BudgetedAmmoBoxes=$ammoBoxes;AmmoBoxes=$finalAmmoBoxes;ScaledAmmoBoxes=$scaledBoxes;Grenades=$grenades}
 }
 
 $resolvedSlots = @()
@@ -354,18 +375,19 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $profile=Select-GaBand (New-GaStream $request $FightIndex "enemy_profile:$index") $eligibleProfiles $profileMaximum
         $knife=Select-GaPick (New-GaStream $request $FightIndex "enemy_knife:$index") $knives
         $gear=New-GaLoadout (New-GaStream $request $FightIndex "enemy_loadout:$index") ($slotBudget-$profile.Cost) $roleCombinations $knife
-        $records += [pscustomobject]@{Index=$index;Role=$role;Profile=$profile;Gear=$gear;Physical=$slots[$zero];Route=$assigned[$zero]}
+        $grenades = @(New-GaEnemyGrenades $request $FightIndex $index)
+        $records += [pscustomobject]@{Index=$index;Role=$role;Profile=$profile;Gear=$gear;Grenades=$grenades;Physical=$slots[$zero];Route=$assigned[$zero]}
     }
     $medicalAllocations = New-GaEnemyMedical $request $FightIndex $records
     $opponents=@()
     for ($zero=0; $zero -lt $records.Count; $zero++) {
         $record=$records[$zero]; $medical=$medicalAllocations[$zero]; $physical=$record.Physical
         $position="$(ConvertTo-GaNumber $physical.X),$(ConvertTo-GaNumber $physical.Y),$(ConvertTo-GaNumber $physical.Z)"
-        $loadout="$($record.Gear.Weapon),$($record.Gear.Ammo),$($record.Gear.AmmoBoxes),$($record.Gear.Outfit),$($record.Gear.Knife),medical:$($medical.Sections -join '+'),$($record.Gear.GearCost),$($medical.Cost),$($record.Gear.GearCost+$medical.Cost)"
+        $loadout="$($record.Gear.Weapon),$($record.Gear.Ammo),$($record.Gear.AmmoBoxes),$($record.Gear.Outfit),$($record.Gear.Knife),medical:$($medical.Sections -join '+'),grenades:$($record.Grenades -join '+'),$($record.Gear.GearCost),$($medical.Cost),$($record.Gear.GearCost+$medical.Cost)"
         $total=$record.Profile.Cost+$record.Gear.GearCost+$medical.Cost
         $opponents += "$($record.Index):$($record.Index),$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($record.Route),$($record.Role),$($record.Profile.Section),$($record.Profile.Cost),$loadout,$total"
     }
-    $fields=@('schema_version=6','generator_version=8','catalog_revision=8','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g8-c8-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV6 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=7','generator_version=9','catalog_revision=9','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g9-c9-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV7 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 
@@ -386,12 +408,12 @@ $requests=@(
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
 if((New-GaEncodedFight 0 veteran 7)-cne(New-GaEncodedFight 1 veteran 7)){throw 'Normalized seed aliases must match'}
 if($Verify){
-    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v6 fixture is missing'}
+    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v7 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
-    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v6 reference oracle.'}
+    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v7 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
 }elseif($Update){
-    $lines = @('# Gamma Arena FightSpec v6 deterministic golden encodings.') + $expected
+    $lines = @('# Gamma Arena FightSpec v7 deterministic golden encodings.') + $expected
     [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
     Write-Host "Updated golden fixture: $fixturePath"
 }else{$expected}
