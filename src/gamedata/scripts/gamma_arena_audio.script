@@ -1,0 +1,321 @@
+local Controller = {}
+Controller.__index = Controller
+
+local CHANNELS = { "crowd", "reaction", "commentator" }
+local CROWD_PATHS = {
+    "ambient\\arena\\crowd_1",
+    "ambient\\arena\\crowd_2",
+    "ambient\\arena\\crowd_3"
+}
+local REACTION_PATHS = {
+    "ambient\\arena\\crowd_wave_1",
+    "ambient\\arena\\crowd_wave_2",
+    "ambient\\arena\\crowd_wave_3"
+}
+local COMMENTATOR_PATHS = {
+    start = "characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_start",
+    victory = "characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_win_1",
+    defeat = "characters_voice\\scenario\\bar\\arena_megafon\\mega_arena_dead"
+}
+
+local function valid_result(result)
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return false
+    end
+    if result.ok then
+        return true
+    end
+    return type(result.error) == "table" and type(result.error.code) == "string"
+end
+
+local function call_port(port_name, port, ...)
+    local called, result = pcall(port, ...)
+    if not called then
+        return gamma_arena_result.err("GA_AUDIO_PORT_FAILED", "Arena audio port threw", {
+            port = port_name,
+            reason = tostring(result)
+        })
+    end
+    if not valid_result(result) then
+        return gamma_arena_result.err("GA_AUDIO_PORT_INVALID", "Arena audio port returned an invalid Result", {
+            port = port_name,
+            result_type = type(result)
+        })
+    end
+    return result
+end
+
+local function normalized_index(value)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+        return 1
+    end
+    local integer = math.floor(value)
+    return (integer % 3) + 1
+end
+
+local function next_index(value)
+    return (value % 3) + 1
+end
+
+local function copy_settings(value)
+    if type(value) ~= "table" then
+        return nil
+    end
+    return {
+        commentator = value.commentator ~= false,
+        crowd_reactions = value.crowd_reactions ~= false
+    }
+end
+
+function Controller:read_settings()
+    local result = call_port("settings", self.deps.settings)
+    if not result.ok then
+        return result
+    end
+    local settings = copy_settings(result.value)
+    if settings == nil then
+        return gamma_arena_result.err("GA_AUDIO_SETTINGS_INVALID", "Arena audio settings must be a table", {
+            value_type = type(result.value)
+        })
+    end
+    return gamma_arena_result.ok(settings)
+end
+
+function Controller:play(channel, path)
+    return call_port("play", self.deps.play, channel, path, self.position)
+end
+
+function Controller:stop(channel)
+    return call_port("stop", self.deps.stop, channel)
+end
+
+function Controller:is_playing(channel)
+    local result = call_port("playing", self.deps.playing, channel)
+    if not result.ok then
+        return result
+    end
+    if type(result.value) ~= "boolean" then
+        return gamma_arena_result.err("GA_AUDIO_PLAYING_INVALID", "Arena audio playing port must return a boolean value", {
+            channel = channel,
+            value_type = type(result.value)
+        })
+    end
+    return result
+end
+
+function Controller:play_next_crowd()
+    local result = self:play("crowd", CROWD_PATHS[self.crowd_index])
+    if result.ok then
+        self.crowd_index = next_index(self.crowd_index)
+    end
+    return result
+end
+
+function Controller:begin_fight(context)
+    local settings_result = self:read_settings()
+    if not settings_result.ok then
+        return settings_result
+    end
+    local current = context or {}
+    local start_index = normalized_index(current.fight_index)
+    self.active = true
+    self.terminal = false
+    self.position = current.position
+    self.crowd_index = start_index
+    self.reaction_index = start_index
+    self.last_settings = settings_result.value
+
+    local first_error = nil
+    if self.last_settings.crowd_reactions then
+        local crowd_result = self:play_next_crowd()
+        if not crowd_result.ok then
+            first_error = crowd_result.error
+        end
+    end
+    if self.last_settings.commentator then
+        local commentator_result = self:play("commentator", COMMENTATOR_PATHS.start)
+        if not commentator_result.ok and first_error == nil then
+            first_error = commentator_result.error
+        end
+    end
+    if first_error ~= nil then
+        return gamma_arena_result.err("GA_AUDIO_BEGIN_FAILED", "Arena audio fight start was incomplete", {
+            cause = first_error
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Controller:update(context)
+    if not self.active or self.terminal then
+        return gamma_arena_result.ok(false)
+    end
+    if context ~= nil and context.position ~= nil then
+        self.position = context.position
+    end
+    local settings_result = self:read_settings()
+    if not settings_result.ok then
+        return settings_result
+    end
+    local current = settings_result.value
+    local previous = self.last_settings
+    local committed = copy_settings(current)
+    local first_error = nil
+
+    if not current.crowd_reactions then
+        if previous.crowd_reactions then
+            local crowd_stop = self:stop("crowd")
+            if not crowd_stop.ok then first_error = crowd_stop.error end
+            local reaction_stop = self:stop("reaction")
+            if not reaction_stop.ok and first_error == nil then first_error = reaction_stop.error end
+            if not crowd_stop.ok or not reaction_stop.ok then
+                committed.crowd_reactions = previous.crowd_reactions
+            end
+        end
+    elseif not previous.crowd_reactions then
+        local restarted = self:play_next_crowd()
+        if not restarted.ok then
+            first_error = restarted.error
+            committed.crowd_reactions = previous.crowd_reactions
+        end
+    else
+        local playing = self:is_playing("crowd")
+        if not playing.ok then
+            first_error = playing.error
+        elseif not playing.value then
+            local advanced = self:play_next_crowd()
+            if not advanced.ok then first_error = advanced.error end
+        end
+    end
+
+    if not current.commentator and previous.commentator then
+        local stopped = self:stop("commentator")
+        if not stopped.ok then
+            if first_error == nil then first_error = stopped.error end
+            committed.commentator = previous.commentator
+        end
+    end
+    self.last_settings = committed
+    if first_error ~= nil then
+        return gamma_arena_result.err("GA_AUDIO_UPDATE_FAILED", "Arena audio update was incomplete", {
+            cause = first_error
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Controller:opponent_defeated(context)
+    if not self.active or self.terminal then
+        return gamma_arena_result.ok(false)
+    end
+    if context ~= nil and context.position ~= nil then
+        self.position = context.position
+    end
+    local settings_result = self:read_settings()
+    if not settings_result.ok then
+        return settings_result
+    end
+    if not settings_result.value.crowd_reactions then
+        return gamma_arena_result.ok(false)
+    end
+    local result = self:play("reaction", REACTION_PATHS[self.reaction_index])
+    if result.ok then
+        self.reaction_index = next_index(self.reaction_index)
+    end
+    return result
+end
+
+function Controller:stop_channels(channels, error_code)
+    local failures = {}
+    for index = 1, #channels do
+        local channel = channels[index]
+        local result = self:stop(channel)
+        if not result.ok then
+            failures[#failures + 1] = {
+                channel = channel,
+                cause = result.error
+            }
+        end
+    end
+    if #failures > 0 then
+        return gamma_arena_result.err(error_code, "One or more Arena audio channels could not be stopped", {
+            failures = failures
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Controller:terminal_event(kind, context)
+    if context ~= nil and context.position ~= nil then
+        self.position = context.position
+    end
+    self.active = false
+    self.terminal = true
+    local stopped = self:stop_channels({ "crowd", "reaction" }, "GA_AUDIO_TERMINAL_STOP_FAILED")
+    local settings_result = self:read_settings()
+    local announcement = gamma_arena_result.ok(false)
+    if settings_result.ok then
+        self.last_settings = settings_result.value
+        if settings_result.value.commentator then
+            announcement = self:play("commentator", COMMENTATOR_PATHS[kind])
+        else
+            announcement = self:stop("commentator")
+        end
+    end
+    if not stopped.ok or not settings_result.ok or not announcement.ok then
+        return gamma_arena_result.err("GA_AUDIO_TERMINAL_FAILED", "Arena terminal audio was incomplete", {
+            stop_cause = stopped.ok and nil or stopped.error,
+            settings_cause = settings_result.ok and nil or settings_result.error,
+            announcement_cause = announcement.ok and nil or announcement.error
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Controller:victory(context)
+    return self:terminal_event("victory", context)
+end
+
+function Controller:defeat(context)
+    return self:terminal_event("defeat", context)
+end
+
+function Controller:stop_all(context)
+    self.active = false
+    self.terminal = false
+    self.position = context and context.position or self.position
+    return self:stop_channels(CHANNELS, "GA_AUDIO_STOP_FAILED")
+end
+
+function Controller:snapshot()
+    return {
+        active = self.active,
+        terminal = self.terminal,
+        crowd_index = self.crowd_index,
+        reaction_index = self.reaction_index,
+        commentator = self.last_settings.commentator,
+        crowd_reactions = self.last_settings.crowd_reactions
+    }
+end
+
+function new(deps)
+    if type(deps) ~= "table"
+        or type(deps.settings) ~= "function"
+        or type(deps.play) ~= "function"
+        or type(deps.playing) ~= "function"
+        or type(deps.stop) ~= "function" then
+        return nil
+    end
+    return setmetatable({
+        deps = deps,
+        active = false,
+        terminal = false,
+        position = nil,
+        crowd_index = 1,
+        reaction_index = 1,
+        last_settings = {
+            commentator = true,
+            crowd_reactions = true
+        }
+    }, Controller)
+end

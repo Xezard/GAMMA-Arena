@@ -1720,6 +1720,123 @@ local function default_npc_medical_controller(entity_adapter)
     })
 end
 
+local function default_audio_controller(layout_port)
+    local sounds = {}
+    local active = {}
+    local anchor = nil
+
+    local function resolve_anchor()
+        if anchor ~= nil then return gamma_arena_result.ok(anchor) end
+        local resolved = layout_port("rostok_arena_v1")
+        if type(resolved) ~= "table" or type(resolved.ok) ~= "boolean" then
+            return gamma_arena_result.err("GA_AUDIO_LAYOUT_FAILED", "Arena audio layout port returned an invalid Result")
+        end
+        if not resolved.ok then return resolved end
+        local path = resolved.value and resolved.value.actor_spawn_path or nil
+        if type(path) ~= "string" or path == "" then
+            return gamma_arena_result.err("GA_AUDIO_ANCHOR_FAILED", "Arena audio anchor path is unavailable")
+        end
+        local called, position = pcall(function()
+            local path_object = patrol(path)
+            if path_object == nil then return nil end
+            return path_object:point(0)
+        end)
+        if not called or position == nil then
+            return gamma_arena_result.err("GA_AUDIO_ANCHOR_FAILED", "Arena audio anchor could not be resolved safely", {
+                path = path,
+                reason = called and nil or tostring(position)
+            })
+        end
+        anchor = position
+        return gamma_arena_result.ok(anchor)
+    end
+
+    local function stop_channel(channel)
+        local handle = active[channel]
+        if handle == nil then return gamma_arena_result.ok(false) end
+        local called, value = pcall(function() return handle:stop() end)
+        if not called or value == false then
+            return gamma_arena_result.err("GA_AUDIO_STOP_PORT_FAILED", "Owned Arena sound could not be stopped safely", {
+                channel = channel,
+                reason = called and "explicit false" or tostring(value)
+            })
+        end
+        active[channel] = nil
+        return gamma_arena_result.ok(true)
+    end
+
+    local function sound_for(path)
+        if sounds[path] ~= nil then return gamma_arena_result.ok(sounds[path]) end
+        local called, handle = pcall(function() return sound_object(path) end)
+        if not called or handle == nil then
+            return gamma_arena_result.err("GA_AUDIO_RESOURCE_FAILED", "Arena sound resource could not be created safely", {
+                path = path,
+                reason = called and nil or tostring(handle)
+            })
+        end
+        sounds[path] = handle
+        return gamma_arena_result.ok(handle)
+    end
+
+    local controller = gamma_arena_audio.new({
+        settings = function()
+            local called, value = pcall(gamma_arena_mcm.snapshot)
+            if not called or type(value) ~= "table" then
+                return gamma_arena_result.err("GA_AUDIO_MCM_FAILED", "Arena audio settings could not be read safely", {
+                    reason = called and nil or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(value)
+        end,
+        play = function(channel, path, position)
+            local stopped = stop_channel(channel)
+            if not stopped.ok then return stopped end
+            local actor = db and db.actor or nil
+            if actor == nil then return gamma_arena_result.err("GA_AUDIO_ACTOR_FAILED", "Arena audio requires the current actor") end
+            local selected_position = position
+            if selected_position == nil then
+                local resolved = resolve_anchor()
+                if not resolved.ok then return resolved end
+                selected_position = resolved.value
+            end
+            local sound = sound_for(path)
+            if not sound.ok then return sound end
+            local mode_ok, mode = pcall(function() return sound_object.s3d end)
+            if not mode_ok or mode == nil then
+                return gamma_arena_result.err("GA_AUDIO_MODE_FAILED", "3D Arena sound mode is unavailable")
+            end
+            local called, value = pcall(function()
+                return sound.value:play_at_pos(actor, selected_position, 0, mode)
+            end)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_AUDIO_PLAY_PORT_FAILED", "Owned Arena sound could not be played safely", {
+                    channel = channel,
+                    path = path,
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            active[channel] = sound.value
+            return gamma_arena_result.ok(true)
+        end,
+        playing = function(channel)
+            local handle = active[channel]
+            if handle == nil then return gamma_arena_result.ok(false) end
+            local called, value = pcall(function() return handle:playing() end)
+            if not called then
+                return gamma_arena_result.err("GA_AUDIO_PLAYING_PORT_FAILED", "Owned Arena sound state could not be read safely", {
+                    channel = channel,
+                    reason = tostring(value)
+                })
+            end
+            local playing = value == true
+            if not playing then active[channel] = nil end
+            return gamma_arena_result.ok(playing)
+        end,
+        stop = stop_channel
+    })
+    return controller
+end
+
 local function default_diagnostics()
     local path = nil
     local resolved, value = pcall(function()
@@ -1807,6 +1924,8 @@ function compose(overrides)
         if not resolved.ok then return resolved end
         return gamma_arena_result.ok(true)
     end
+    local audio = overrides.audio
+    if audio == nil then audio = default_audio_controller(layout_port) end
     local teardown_clock = overrides.teardown_clock or function() return time_global() end
     local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
     local teardown_max_updates = overrides.teardown_max_updates or 64
@@ -1870,6 +1989,7 @@ function compose(overrides)
         actor = actor_adapter,
         entities = entity_adapter,
         npc_medical = npc_medical,
+        audio = audio,
         diagnostics = diagnostics,
         weapon_diagnostics = weapon_diagnostics,
         save_guard = save_guard,
