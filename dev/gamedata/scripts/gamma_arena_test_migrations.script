@@ -1181,14 +1181,18 @@ end
 local function dxml_fixture(options)
     options = options or {}
     local menu = { kids = {} }
+    local pause = { kids = {} }
     local names = options.without_new_game
         and { "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
         or { "btn_newgame", "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
     for _, name in ipairs(names) do
         menu.kids[#menu.kids + 1] = { name = name, parent = menu }
     end
+    for _, name in ipairs({ "btn_ret", "btn_lastsave", "btn_load", "btn_save", "btn_options", "btn_mcm", "btn_quit_to_mm", "btn_quit" }) do
+        pause.kids[#pause.kids + 1] = { name = name, parent = pause }
+    end
 
-    local xml = { insertions = 0, menu = menu }
+    local xml = { insertions = 0, menu = menu, pause = pause }
     function xml:query(selector)
         if selector == "menu_main btn[name=btn_gamma_arena]" then
             for _, child in ipairs(self.menu.kids) do
@@ -1208,6 +1212,19 @@ local function dxml_fixture(options)
             end
             return {}
         end
+        if selector == "menu_main_single btn[name=btn_gamma_arena_restart]" then
+            for _, child in ipairs(self.pause.kids) do
+                if child.name == "btn_gamma_arena_restart" then return { child } end
+            end
+            return {}
+        end
+        if selector == "menu_main_single" then return { self.pause } end
+        if selector == "menu_main_single > btn[name=btn_ret]" then
+            for _, child in ipairs(self.pause.kids) do
+                if child.name == "btn_ret" then return { child } end
+            end
+            return {}
+        end
         return {}
     end
     if not options.without_position_api then
@@ -1218,8 +1235,9 @@ local function dxml_fixture(options)
             end
         end
     end
-    function xml:insertFromXMLString(_, parent, position)
-        table.insert(parent.kids, position, { name = "btn_gamma_arena", parent = parent })
+    function xml:insertFromXMLString(value, parent, position)
+        local name = string.find(value, "btn_gamma_arena_restart", 1, true) and "btn_gamma_arena_restart" or "btn_gamma_arena"
+        table.insert(parent.kids, position, { name = name, parent = parent })
         self.insertions = self.insertions + 1
     end
     return xml
@@ -1228,15 +1246,15 @@ end
 local function dxml_accepts_canonical_callback_path()
     local canonical = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("ui\\ui_mm_main.xml", canonical).ok, "canonical DXML callback path is accepted")
-    gamma_arena_test_assert.equals(canonical.insertions, 1, "canonical callback inserts Arena once")
+    gamma_arena_test_assert.equals(canonical.insertions, 2, "canonical callback inserts both Arena entries once")
 
     local normalized = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("UI/UI_MM_MAIN.XML", normalized).ok, "case and slash normalization is accepted")
-    gamma_arena_test_assert.equals(normalized.insertions, 1, "normalized canonical callback inserts Arena once")
+    gamma_arena_test_assert.equals(normalized.insertions, 2, "normalized canonical callback inserts both Arena entries once")
 
     local gamma_widescreen = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", gamma_widescreen).ok, "effective GAMMA 16:9 DXML callback path is accepted")
-    gamma_arena_test_assert.equals(gamma_widescreen.insertions, 1, "effective GAMMA 16:9 callback inserts Arena once")
+    gamma_arena_test_assert.equals(gamma_widescreen.insertions, 2, "effective GAMMA 16:9 callback inserts both Arena entries once")
 
     local unrelated = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("other/ui_mm_main.xml", unrelated).ok, "unrelated DXML callback is ignored without error")
@@ -1289,8 +1307,22 @@ local function dxml_places_arena_after_new_game()
 
     local duplicate = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
     gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "second DXML pass is a no-op")
-    gamma_arena_test_assert.equals(ordered.insertions, 1, "Arena is inserted exactly once")
+    gamma_arena_test_assert.equals(ordered.insertions, 2, "both Arena entries are inserted exactly once")
     gamma_arena_test_assert.equals(#ordered.menu.kids, 8, "duplicate pass does not grow the menu")
+end
+
+local function dxml_places_restart_after_return()
+    local ordered = dxml_fixture()
+    local inserted = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(inserted.ok and inserted.value == true, "in-game Arena restart is inserted")
+    gamma_arena_test_assert.equals(ordered.pause.kids[1].name, "btn_ret", "Return to Game remains first")
+    gamma_arena_test_assert.equals(ordered.pause.kids[2].name, "btn_gamma_arena_restart", "Restart Arena is directly below Return to Game")
+    gamma_arena_test_assert.equals(ordered.pause.kids[3].name, "btn_lastsave", "former second in-game item follows Restart Arena")
+
+    local duplicate = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "second restart DXML pass is a no-op")
+    gamma_arena_test_assert.equals(ordered.insertions, 2, "duplicate pass inserts neither Arena entry twice")
+    gamma_arena_test_assert.equals(#ordered.pause.kids, 9, "duplicate pass does not grow the in-game menu")
 end
 
 local function dxml_placement_failures_are_structured()
@@ -1792,6 +1824,7 @@ local cases = {
     { name = "dxml_cold_start_registration", fn = dxml_registers_first_main_menu_click },
     { name = "dxml_registration_failures", fn = dxml_registration_failures_are_structured },
     { name = "dxml_menu_order", fn = dxml_places_arena_after_new_game },
+    { name = "dxml_restart_menu_order", fn = dxml_places_restart_after_return },
     { name = "dxml_placement_failures", fn = dxml_placement_failures_are_structured },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
     { name = "character_creation_bridge_fresh_store_restore", fn = character_creation_bridge_restores_exactly_from_fresh_store },

@@ -359,13 +359,18 @@ if (Test-Path -LiteralPath $DxmlPath) {
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main btn\[name=btn_gamma_arena\]"\s*\)') 'DXML handler must query the exact duplicate guard selector'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main"\s*\)') 'DXML handler must feature-probe menu_main'
     Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main\s*>\s*btn\[name=btn_newgame\]"\s*\)') 'DXML handler must locate the direct New Game child'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single btn\[name=btn_gamma_arena_restart\]"\s*\)') 'DXML handler must query the exact in-game restart duplicate guard selector'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single"\s*\)') 'DXML handler must feature-probe the live single-player menu'
+    Assert-True ($DxmlContent -match 'query\s*\(\s*"menu_main_single\s*>\s*btn\[name=btn_ret\]"\s*\)') 'DXML handler must locate the direct Return to Game child'
     Assert-True ($DxmlContent -match 'getElementPosition') 'DXML handler must derive the insertion point from New Game'
     Assert-True ($DxmlContent -match 'new_game_position\s*\+\s*1') 'Arena must be inserted immediately after New Game'
+    Assert-True ($DxmlContent -match 'return_position\s*\+\s*1') 'Restart Arena must be inserted immediately after Return to Game'
     Assert-True ($DxmlContent -notmatch 'menu\[1\]\s*,\s*#menu\[1\]\.kids') 'Arena insertion must not use an end-relative menu position'
     foreach ($Code in @('GA_DXML_POSITION_API_UNAVAILABLE','GA_DXML_MENU_MISSING','GA_DXML_NEW_GAME_MISSING','GA_DXML_NEW_GAME_PARENT_MISMATCH','GA_DXML_NEW_GAME_POSITION_INVALID')) {
         Assert-True ($DxmlContent -match [regex]::Escape($Code)) "DXML placement must fail closed with $Code"
     }
     Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena" caption="st_gamma_arena_main_menu"\s*/>')).Count -eq 1) 'DXML module must contain exactly one Arena button insertion'
+    Assert-True (([regex]::Matches($DxmlContent, '<btn name="btn_gamma_arena_restart" caption="st_gamma_arena_restart"\s*/>')).Count -eq 1) 'DXML module must contain exactly one in-game Arena restart insertion'
     Assert-True ($DxmlContent -match 'insertFromXMLString') 'DXML handler must insert through insertFromXMLString'
     Assert-True ($DxmlContent -match 'pcall\s*\(\s*(gamma_arena_log\.error|logger)\s*,\s*result\.error\.code\s*,\s*result\.error\.message\s*,\s*result\.error\.context') 'DXML callback must internally log structured failures because callback returns are ignored'
 }
@@ -433,7 +438,7 @@ foreach ($Locale in @('rus','eng')) {
         [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
         Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
-        foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
+    foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
             Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
         }
     }
@@ -464,6 +469,22 @@ if (Test-Path -LiteralPath $RussianLocalePath) {
     foreach ($Text in $RussianExpected) {
         Assert-True ($RussianContent.Contains($Text)) "Russian localization must contain exact Windows-1251 text: $Text"
     }
+}
+
+$EnglishRestartPath = Join-Path $RepoRoot 'src\gamedata\configs\text\eng\st_gamma_arena.xml'
+$RussianRestartPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_gamma_arena_restart.xml'
+if (Test-Path -LiteralPath $EnglishRestartPath) {
+    [xml]$EnglishRestartXml = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($EnglishRestartPath))
+    $EnglishRestart = $EnglishRestartXml.SelectSingleNode('//string[@id="st_gamma_arena_restart"]/text')
+    Assert-True ($null -ne $EnglishRestart -and $EnglishRestart.InnerText -ceq 'RESTART ARENA') 'English restart caption must be exact'
+}
+if (Test-Path -LiteralPath $RussianRestartPath) {
+    $RussianRestartBytes = [IO.File]::ReadAllBytes($RussianRestartPath)
+    Assert-True (($RussianRestartBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Russian restart localization source must remain ASCII-safe Windows-1251 XML'
+    [xml]$RussianRestartXml = [Text.Encoding]::GetEncoding(1251).GetString($RussianRestartBytes)
+    $RussianRestart = $RussianRestartXml.SelectSingleNode('//string[@id="st_gamma_arena_restart"]/text')
+    $RussianRestartExpected = ConvertFrom-Json '"\u041f\u0415\u0420\u0415\u0417\u0410\u041f\u0423\u0421\u0422\u0418\u0422\u042c \u0410\u0420\u0415\u041d\u0423"'
+    Assert-True ($null -ne $RussianRestart -and $RussianRestart.InnerText -ceq $RussianRestartExpected) 'Russian restart caption must be exact'
 }
 
 $GitAttributesPath = Join-Path $RepoRoot '.gitattributes'
