@@ -47,6 +47,12 @@ foreach ($Expected in @(
 foreach ($Marker in @('device_list','GA_DEVICE_EFFECTIVE_INVALID','TORCH_S','nightvision_1','nightvision_2','nightvision_3')) {
     if (-not $CatalogLoader.Contains($Marker)) { throw "Actor device catalog loader contract is missing: $Marker" }
 }
+if ($CatalogLoader -notmatch '(?s)if\s+configured_effect\s*==\s*"none"\s+then\s+item\.nv_effect\s*=\s*nil\s+else\s+item\.nv_effect\s*=\s*configured_effect\s+end') {
+    throw 'Headlamp nv_effect marker must normalize to nil through an explicit branch'
+}
+if ($CatalogLoader -match 'configured_effect\s*==\s*"none"\s+and\s+nil\s+or\s+configured_effect') {
+    throw 'Headlamp nv_effect normalization must not use the falsey Lua and/or idiom'
+}
 if ($CatalogLoader -notmatch 'effective_slot\s*~=\s*9') {
     throw 'Actor device catalog validation must accept raw Anomaly device slot 9'
 }
@@ -76,6 +82,14 @@ foreach ($Marker in @('function select','function generate','actor_device','GA_D
 }
 foreach ($CaseName in @('device_catalog_and_probability_boundaries','device_generator_rejects_malformed_arguments','device_catalog_rejects_effective_mismatch')) {
     if (-not $GeneratorTests.Contains($CaseName)) { throw "Actor device regression case is missing: $CaseName" }
+}
+foreach ($Assertion in @(
+    'snapshot.devices.headlamp.nv_effect, nil, "headlamp effect marker normalizes to nil"',
+    'snapshot.devices.nv_gen1.nv_effect, "nightvision_1", "Gen 1 effect remains exact"',
+    'snapshot.devices.nv_gen2.nv_effect, "nightvision_2", "Gen 2 effect remains exact"',
+    'snapshot.devices.nv_gen3.nv_effect, "nightvision_3", "Gen 3 effect remains exact"'
+)) {
+    if (-not $GeneratorTests.Contains($Assertion)) { throw "Actor device effect normalization regression is missing: $Assertion" }
 }
 
 foreach ($Marker in @('gamma_arena_device_generator.generate','schema_version = 8','FightSpecV8','device:')) {
