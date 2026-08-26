@@ -133,11 +133,14 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*8' -or $Catalog -notmatch 'revision\s*=\s*9' -or $Catalog -notmatch 'generator_version\s*=\s*9') {
+if ($Catalog -notmatch 'schema_version\s*=\s*9' -or $Catalog -notmatch 'revision\s*=\s*10' -or $Catalog -notmatch 'generator_version\s*=\s*10') {
     throw 'Catalog snapshot version markers are stale'
 }
 foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
     if (-not $Catalog.Contains($Marker)) { throw "Grenade catalog contract is missing marker: $Marker" }
+}
+foreach ($Marker in @('device_list', 'GA_DEVICE_EFFECTIVE_INVALID', 'TORCH_S')) {
+    if (-not $Catalog.Contains($Marker)) { throw "Actor device catalog contract is missing marker: $Marker" }
 }
 foreach ($Marker in @('function generate_actor', 'function generate_enemy', 'GA_GRENADE_ARGUMENT_INVALID', 'GA_GRENADE_SELECTION_INVALID')) {
     if (-not $GrenadeGenerator.Contains($Marker)) { throw "Grenade generator contract is missing marker: $Marker" }
