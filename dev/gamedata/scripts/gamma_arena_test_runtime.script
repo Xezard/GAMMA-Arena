@@ -1040,7 +1040,7 @@ local function runtime_orchestrator_npc_net_spawn_is_active_only()
     gamma_arena_test_assert.equals(calls, 0, "inactive spawn callback cannot reach the entity adapter")
 
     orchestrator.active = true
-    orchestrator:set_runtime_stage("SPAWNING")
+    orchestrator:set_runtime_stage("ACTIVATING")
     local active = orchestrator:npc_on_net_spawn({ marker = "owned" })
     gamma_arena_test_assert.is_true(active.ok and active.value, "active spawn callback delegates to the entity adapter")
     gamma_arena_test_assert.equals(calls, 1, "active spawn callback delegates exactly once")
@@ -1064,7 +1064,7 @@ local function runtime_npc_net_spawn_errors_defer_fatal_ui_to_update()
     end
     local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator.active = true
-    orchestrator:set_runtime_stage("SPAWNING")
+    orchestrator:set_runtime_stage("ACTIVATING")
     local callbacks = gamma_arena_bootstrap.make_callbacks(orchestrator)
     local failed = callbacks.npc_on_net_spawn({})
     gamma_arena_test_assert.is_false(failed.ok, "net-spawn isolation failure remains structured")
@@ -6762,6 +6762,7 @@ local function task8_environment(options)
         countdown_models = {},
         victory_dialogs = {},
         defeat_dialogs = {},
+        result_visible = false,
         restore_calls = 0,
         actor_loadout_owned = false,
         actor_loadout_cleanup = 0,
@@ -6774,7 +6775,10 @@ local function task8_environment(options)
         npc_medical_stop_reasons = {},
         battle_identity_models = {},
         battle_identity_clears = 0,
-        audio_calls = {}
+        audio_calls = {},
+        boundary_calls = 0,
+        ordered_calls = {},
+        entity_stage_updates = 0
     }
     local actor = {
         begin_update = function() return gamma_arena_result.ok(true) end,
@@ -6785,6 +6789,13 @@ local function task8_environment(options)
         end,
         acquire_input = function() env.acquired_input = env.acquired_input + 1; return gamma_arena_result.ok(true) end,
         release_input = function() env.released_input = env.released_input + 1; return gamma_arena_result.ok(true) end,
+        begin_rematch_boundary = function()
+            env.boundary_calls = env.boundary_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "boundary"
+            if options.boundary_error then return gamma_arena_result.err("GA_ACTOR_INPUT_DISABLE_FAILED", "injected rematch boundary failure") end
+            env.acquired_input = env.acquired_input + 1
+            return gamma_arena_result.ok(true)
+        end,
         cleanup_loadout_for_restore = function()
             env.actor_loadout_cleanup = env.actor_loadout_cleanup + 1
             env.events[#env.events + 1] = "actor_cleanup"
@@ -6806,17 +6817,32 @@ local function task8_environment(options)
         env.applied = env.applied + 1
         env.living = #spec.opponents()
         env.integrity_fault = nil
-        env.registry = { state = "COUNTDOWN", session_id = session_id, npcs = {}, items = {}, error = nil }
+        local initial_state = (options.entity_ready_delay or 0) > 0 and "WAIT_ONLINE" or "READY"
+        env.registry = {
+            state = initial_state,
+            session_id = session_id,
+            npcs = {},
+            items = {},
+            error = nil,
+            actor_loadout = { ready = true, weapon = "wpn_test", knife = "knife_test", outfit = "outfit_test", magazine_rounds = 30, reserve_rounds = 30 }
+        }
         for index = 1, env.living do
             env.next_id = env.next_id + 1
             env.registry.npcs[index] = { id = env.next_id, dead = false, released = false }
         end
         env.next_id = env.next_id + 1
         env.registry.items[1] = { id = env.next_id, released = false }
-        return gamma_arena_result.ok({ state = "COUNTDOWN" })
+        return gamma_arena_result.ok({ state = initial_state })
     end
     function entities:update()
-        if env.registry.state == "COUNTDOWN" and env.orchestrator:is_opponent_activation_allowed() then env.registry.state = "ACTIVE" end
+        if env.registry.state == "WAIT_ONLINE" then
+            env.entity_stage_updates = env.entity_stage_updates + 1
+            if env.entity_stage_updates >= (options.entity_ready_delay or 0) then env.registry.state = "READY" end
+        end
+        if env.registry.state == "READY" and env.orchestrator:is_opponent_activation_allowed() then
+            if options.activation_error then return gamma_arena_result.err("GA_TEST_ACTIVATION", "injected activation failure") end
+            env.registry.state = "ACTIVE"
+        end
         if env.registry.state == "CLEANING" then env.registry = { state = "CLEAN", session_id = nil, npcs = {}, items = {}, error = nil } end
         return gamma_arena_result.ok({ state = env.registry.state })
     end
@@ -6924,6 +6950,7 @@ local function task8_environment(options)
     end
     function result_ui:show_victory(model)
         env.victory_dialogs[#env.victory_dialogs + 1] = model
+        env.result_visible = true
         return gamma_arena_result.ok(true)
     end
     function result_ui:show_result(model)
@@ -6932,11 +6959,14 @@ local function task8_environment(options)
         elseif model.kind == "defeat" then
             env.defeat_dialogs[#env.defeat_dialogs + 1] = model
         end
+        env.result_visible = true
         return gamma_arena_result.ok(true)
     end
     function result_ui:clear_result()
         if options.clear_result_error then return gamma_arena_result.err("GA_TEST_RESULT_CLEAR", "injected result clear failure") end
+        env.ordered_calls[#env.ordered_calls + 1] = "clear_result"
         env.events[#env.events + 1] = "clear_ui"
+        env.result_visible = false
         return gamma_arena_result.ok(true)
     end
     local battle_ui = {}
@@ -7056,14 +7086,17 @@ end
 
 local function task8_pump_to_countdown(env)
     gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "PREPARING creates one immutable validated spec")
+    for _ = 1, 8 do
+        if env.orchestrator:runtime_stage_snapshot() == "COUNTDOWN" then break end
+        gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "fully staged READY opens countdown")
+    end
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "COUNTDOWN", "preparation reaches COUNTDOWN")
 end
 
 local function task8_pump_to_active(env)
     task8_pump_to_countdown(env)
     env.now = env.now + 3000
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "countdown deadline opens opponent gate")
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "entity activation is observed on the next update")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "countdown deadline activates entities in the same update")
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "fight becomes ACTIVE")
 end
 
@@ -7072,8 +7105,7 @@ local function runtime_battle_identity_lifecycle_is_active_only()
     task8_pump_to_countdown(env)
     gamma_arena_test_assert.equals(#env.battle_identity_models, 0, "battle identity stays hidden during countdown")
     env.now = env.now + 3000
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "battle identity fixture opens opponent gate")
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "battle identity fixture reaches active combat")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "battle identity fixture activates in one update")
     gamma_arena_test_assert.equals(#env.battle_identity_models, 1, "active fight shows one battle identity")
     gamma_arena_test_assert.equals(env.battle_identity_models[1].session_seed, 42, "validated seed is forwarded")
     gamma_arena_test_assert.equals(env.battle_identity_models[1].fight_index, 0, "zero-based fight index is forwarded")
@@ -7107,11 +7139,10 @@ local function runtime_battle_identity_mismatch_fails_before_active()
     local env = task8_environment({ fight_spec_seed = 43 })
     task8_pump_to_countdown(env)
     env.now = env.now + 3000
-    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "mismatch fixture opens opponent gate")
     local failed = env.orchestrator:actor_on_update()
     gamma_arena_test_assert.is_false(failed.ok, "FightSpec and session seed mismatch fails closed")
     gamma_arena_test_assert.equals(failed.error.code, "GA_BATTLE_IDENTITY_MISMATCH", "battle identity mismatch code is stable")
-    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "SPAWNING", "identity mismatch cannot enter active combat")
+    gamma_arena_test_assert.is_true(env.orchestrator:runtime_stage_snapshot() ~= "ACTIVE", "identity mismatch cannot enter active combat")
     gamma_arena_test_assert.equals(#env.battle_identity_models, 0, "identity mismatch never mutates HUD")
 end
 
@@ -7171,7 +7202,7 @@ end
 local function runtime_task8_logs_one_immutable_spec_before_apply()
     local env = task8_environment()
     task8_pump_to_countdown(env)
-    gamma_arena_test_assert.equals(table.concat(env.events, ","), "catalogs,generate,validate,log,weapon_diagnostic,log,apply", "stable FightSpec and selected-weapon diagnostics precede apply")
+    gamma_arena_test_assert.equals(table.concat(env.events, ","), "catalogs,generate,validate,log,weapon_diagnostic,log,apply,log", "stable FightSpec and selected-weapon diagnostics precede apply and READY countdown proof")
     gamma_arena_test_assert.equals(#env.logs, 2, "each prepared fight emits one FightSpec and one selected-weapon diagnostic")
     gamma_arena_test_assert.equals(env.logs[1].code, "GA_FIGHT_SPEC", "FightSpec diagnostic code is stable")
 end
@@ -7203,6 +7234,41 @@ local function runtime_task8_countdown_uses_global_time_not_frame_count()
     gamma_arena_test_assert.equals(table.concat(env.countdown, ","), "3,2,1", "time_global drives the 3,2,1 HUD sequence")
     env.now = env.now + 1000; env.orchestrator:actor_on_update()
     gamma_arena_test_assert.equals(env.countdown[#env.countdown], "clear", "countdown HUD is removed at its deadline")
+end
+
+local function runtime_countdown_waits_for_fully_staged_ready_state()
+    local env = task8_environment({ entity_ready_delay = 2 })
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "preparation starts entity staging")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "EQUIPPING", "orchestrator waits while entities stage")
+    gamma_arena_test_assert.equals(#env.countdown, 0, "WAIT_ONLINE cannot display countdown")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "delayed online staging reaches READY")
+    gamma_arena_test_assert.equals(env.registry.state, "READY", "entity transaction proves full readiness")
+    gamma_arena_test_assert.equals(#env.countdown, 0, "the update proving READY does not start countdown early")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "READY starts countdown")
+    gamma_arena_test_assert.equals(env.countdown[1], "3", "visible countdown starts only from READY")
+end
+
+local function runtime_countdown_deadline_activates_and_releases_in_same_update()
+    local env = task8_environment()
+    task8_pump_to_countdown(env)
+    local releases = env.released_input
+    env.now = env.now + 3000
+    local activated = env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(activated.ok, "countdown deadline update succeeds")
+    gamma_arena_test_assert.equals(env.registry.state, "ACTIVE", "deadline opens hostility gate")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "same callback observes entity ACTIVE")
+    gamma_arena_test_assert.equals(env.released_input, releases + 1, "same callback releases Arena input exactly once")
+end
+
+local function runtime_activation_failure_never_releases_input()
+    local env = task8_environment({ activation_error = true })
+    task8_pump_to_countdown(env)
+    local releases = env.released_input
+    env.now = env.now + 3000
+    local failed = env.orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "hostility activation failure remains observable")
+    gamma_arena_test_assert.equals(env.released_input, releases, "failed activation never releases gameplay input")
+    gamma_arena_test_assert.is_true(env.orchestrator:runtime_stage_snapshot() ~= "ACTIVE", "failed activation never publishes coarse ACTIVE")
 end
 
 local function runtime_task8_only_registered_deaths_queue_victory()
@@ -7370,6 +7436,27 @@ local function runtime_task8_victory_next_cleans_heals_and_increments_once()
     gamma_arena_test_assert.is_true(env.orchestrator.fight_spec:fight_id() ~= first_fight_id, "next fight has a distinct fight_id")
 end
 
+local function runtime_victory_next_locks_before_result_ui_closes()
+    local env = task8_environment(); task8_pump_to_active(env)
+    env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
+    local accepted = env.victory_dialogs[1].on_next()
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value == true, "victory next owns the transition")
+    gamma_arena_test_assert.equals(table.concat(env.ordered_calls, ","), "boundary,clear_result", "input boundary precedes Result UI close")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "NEXT_CLEANUP", "locked victory enters cleanup")
+end
+
+local function runtime_victory_next_boundary_failure_retains_result()
+    local env = task8_environment({ boundary_error = true }); task8_pump_to_active(env)
+    env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end }); env.orchestrator:actor_on_update()
+    local failed = env.victory_dialogs[1].on_next()
+    gamma_arena_test_assert.is_false(failed.ok, "rematch boundary failure is returned to Result UI")
+    gamma_arena_test_assert.is_true(env.result_visible, "failed boundary retains Result UI")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "RESULT", "failed boundary starts no continuation")
+    gamma_arena_test_assert.is_false(env.orchestrator.result_action_locked, "failed boundary rolls back duplicate-action latch")
+    gamma_arena_test_assert.equals(env.cleanup_calls, 0, "failed boundary starts no cleanup")
+    gamma_arena_test_assert.equals(env.fatal_shown, 0, "recoverable boundary failure does not replace Result UI with fatal UI")
+end
+
 local function runtime_manual_restart_reuses_next_fight_once()
     local env = task8_environment(); task8_pump_to_active(env)
     local seed = env.orchestrator.session.session_seed
@@ -7407,6 +7494,20 @@ local function runtime_manual_restart_inactive_and_exhausted_are_inert()
     gamma_arena_test_assert.equals(exhausted.orchestrator:runtime_stage_snapshot(), "ACTIVE", "exhausted restart leaves combat active")
     gamma_arena_test_assert.is_false(exhausted.orchestrator.result_action_locked, "exhausted restart does not acquire the action latch")
     gamma_arena_test_assert.equals(exhausted.cleanup_calls, 0, "exhausted restart precedes cleanup")
+end
+
+local function runtime_manual_and_integrity_transitions_share_boundary()
+    local manual = task8_environment(); task8_pump_to_active(manual)
+    gamma_arena_test_assert.is_true(manual.orchestrator:restart_arena_action().ok, "manual restart transition succeeds")
+    gamma_arena_test_assert.equals(manual.boundary_calls, 1, "manual restart owns one rematch boundary")
+    gamma_arena_test_assert.is_true(manual.orchestrator:restart_arena_action().ok, "duplicate manual restart stays inert")
+    gamma_arena_test_assert.equals(manual.boundary_calls, 1, "duplicate manual restart cannot reacquire boundary")
+
+    local integrity = task8_environment(); task8_pump_to_active(integrity)
+    integrity.integrity_fault = { cause = "vertical_escape" }
+    gamma_arena_test_assert.is_true(integrity.orchestrator:actor_on_update().ok, "integrity retry transition succeeds")
+    gamma_arena_test_assert.equals(integrity.boundary_calls, 1, "integrity retry owns the same rematch boundary")
+    gamma_arena_test_assert.equals(integrity.orchestrator:runtime_stage_snapshot(), "NEXT_CLEANUP", "integrity retry enters cleanup behind boundary")
 end
 
 local function runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent()
@@ -7602,6 +7703,7 @@ local function runtime_task8_duplicate_result_clicks_are_idempotent()
     local duplicate = env.victory_dialogs[1].on_next()
     gamma_arena_test_assert.is_true(first.ok and first.value == true, "first result action owns the transition")
     gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "duplicate result action is ignored")
+    gamma_arena_test_assert.equals(env.boundary_calls, 1, "duplicate result action cannot reacquire the rematch boundary")
 end
 
 local function runtime_task8_one_hundred_fights_leave_empty_registries()
@@ -7626,8 +7728,9 @@ local function runtime_task8_one_hundred_fights_leave_empty_registries()
             gamma_arena_test_assert.equals(#env.registry.npcs, 0, "registry NPC ids are empty between fights")
             gamma_arena_test_assert.equals(#env.registry.items, 0, "registry item ids are empty between fights")
             env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
+            env.orchestrator:actor_on_update()
             env.now = env.now + 3000
-            env.orchestrator:actor_on_update(); env.orchestrator:actor_on_update()
+            env.orchestrator:actor_on_update()
         end
     end
     gamma_arena_test_assert.equals(env.generated, 100, "100 victories generate 100 deterministic FightSpecs")
@@ -9445,6 +9548,9 @@ local cases = {
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation", fn = runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
+    ,{ name = "runtime_countdown_waits_for_fully_staged_ready_state", fn = runtime_countdown_waits_for_fully_staged_ready_state }
+    ,{ name = "runtime_countdown_deadline_activates_and_releases_in_same_update", fn = runtime_countdown_deadline_activates_and_releases_in_same_update }
+    ,{ name = "runtime_activation_failure_never_releases_input", fn = runtime_activation_failure_never_releases_input }
     ,{ name = "runtime_task8_only_registered_deaths_queue_victory", fn = runtime_task8_only_registered_deaths_queue_victory }
     ,{ name = "runtime_audio_events_follow_owned_lifecycle", fn = runtime_audio_events_follow_owned_lifecycle }
     ,{ name = "runtime_audio_manual_restart_stops_channels", fn = runtime_audio_manual_restart_stops_channels }
@@ -9455,8 +9561,11 @@ local cases = {
     ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
+    ,{ name = "runtime_victory_next_locks_before_result_ui_closes", fn = runtime_victory_next_locks_before_result_ui_closes }
+    ,{ name = "runtime_victory_next_boundary_failure_retains_result", fn = runtime_victory_next_boundary_failure_retains_result }
     ,{ name = "runtime_manual_restart_reuses_next_fight_once", fn = runtime_manual_restart_reuses_next_fight_once }
     ,{ name = "runtime_manual_restart_inactive_and_exhausted_are_inert", fn = runtime_manual_restart_inactive_and_exhausted_are_inert }
+    ,{ name = "runtime_manual_and_integrity_transitions_share_boundary", fn = runtime_manual_and_integrity_transitions_share_boundary }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }
     ,{ name = "runtime_task8_main_menu_disconnect_retries_after_failure", fn = runtime_task8_main_menu_disconnect_retries_after_failure }
     ,{ name = "runtime_task8_death_errors_defer_fatal_ui_to_update", fn = runtime_task8_death_errors_defer_fatal_ui_to_update }

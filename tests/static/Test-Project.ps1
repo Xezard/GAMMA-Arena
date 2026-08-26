@@ -942,6 +942,25 @@ $RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot '
 foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_transient_readback_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
 }
+foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition orchestration regression must cover $Name"
+}
+$VictoryNextStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:victory_next_action')
+$VictoryNextEnd = if ($VictoryNextStart -ge 0) { $Task5OrchestratorContent.IndexOf('function Orchestrator:restart_arena_action', $VictoryNextStart) } else { -1 }
+Assert-True ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) 'Victory-next boundary must remain structurally testable'
+if ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) {
+    $VictoryNextBlock = $Task5OrchestratorContent.Substring($VictoryNextStart, $VictoryNextEnd - $VictoryNextStart)
+    $VictoryBoundaryIndex = $VictoryNextBlock.IndexOf('begin_rematch_boundary')
+    $VictoryClearIndex = $VictoryNextBlock.IndexOf('clear_result')
+    Assert-True ($VictoryBoundaryIndex -ge 0 -and $VictoryClearIndex -gt $VictoryBoundaryIndex) 'Victory-next must acquire the rematch boundary before closing Result UI'
+}
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:queue_integrity_retry[\s\S]{0,900}begin_rematch_boundary') 'Integrity retry must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action[\s\S]{0,900}begin_rematch_boundary') 'Manual restart must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:is_opponent_activation_allowed\(\)[\s\S]{0,160}runtime_stage\s*==\s*"ACTIVATING"') 'Opponent activation gate must open only in orchestrator ACTIVATING'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:begin_countdown_after_equipment[\s\S]{0,350}snapshot\.state\s*~=\s*"READY"') 'Visible countdown must wait for the fully staged entity READY state'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:update_countdown[\s\S]{0,550}set_runtime_stage\("ACTIVATING"\)') 'Countdown deadline must enter the bounded ACTIVATING stage'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,350}stage\s*=\s*"ACTIVATING"') 'Activation observation must remain ACTIVATING until entity ACTIVE is proven'
+Assert-True ($Task5OrchestratorContent -match 'GA_ENTITY_UPDATE_FAILED[\s\S]{0,500}runtime_stage\s*==\s*"ACTIVATING"[\s\S]{0,350}observe_entity_activation') 'Orchestrator must observe entity activation again after the entity update'
 
 $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_state_machine.script'
 if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
@@ -954,7 +973,7 @@ if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
 
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
-Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,900}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1500}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
 Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
 foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
     Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
