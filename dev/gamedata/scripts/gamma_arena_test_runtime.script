@@ -3703,6 +3703,15 @@ local function fake_entity_environment(options)
         if options.fail_phase == "actor" then return gamma_arena_result.err("GA_TEST_ACTOR_FAIL", "injected actor loadout failure") end
         return gamma_arena_result.ok(true)
     end
+    function actor_port:update_loadout()
+        return gamma_arena_result.ok({
+            ready = true,
+            weapon = "wpn_pm",
+            ammo = "ammo_9x18_fmj",
+            ammo_in_magazine = 8,
+            reserve_rounds = 60
+        })
+    end
     function actor_port:release_input()
         env.actor_input_releases = env.actor_input_releases + 1
         env.events[#env.events + 1] = "release_input"
@@ -4041,16 +4050,17 @@ local function release_request_position(env, id)
     return nil
 end
 
-local function runtime_entity_does_not_spawn_before_begin_apply()
+local function runtime_entity_actor_loadout_readiness_starts_spawning_without_gate()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
-    adapter:begin_apply(entity_spec(1), "session-countdown")
-    for _ = 1, 3 do
-        local waiting = adapter:update()
-        gamma_arena_test_assert.is_true(waiting.ok, "closed opponent gate is a valid pending query")
-        gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "COUNTDOWN", "repeated closed-gate updates remain COUNTDOWN")
-    end
-    gamma_arena_test_assert.equals(env.create_npc_count, 0, "begin_apply and countdown updates must never spawn opponents before the explicit gate")
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-ready-spawn").ok, "entity transaction starts with a closed activation gate")
+    local equipped = adapter:update()
+    gamma_arena_test_assert.is_true(equipped.ok, "actor loadout readiness is accepted")
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "SPAWNING", "actor readiness starts server staging without waiting for countdown")
+    gamma_arena_test_assert.equals(env.create_npc_count, 0, "readiness transition itself performs no combined spawn mutation")
+    gamma_arena_test_assert.is_true(adapter:update().ok, "next frame begins ownership-safe spawn")
+    gamma_arena_test_assert.equals(env.create_npc_count, 1, "closed hostility gate never blocks NPC staging")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "closed hostility gate applies no enemy relation")
 end
 
 local function runtime_entity_actor_loadout_precedes_spawn()
@@ -4069,7 +4079,7 @@ end
 local function runtime_entity_npcs_are_offline_until_atomic_activation()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
-    begin_entity_apply(adapter, env, entity_spec(2), "session-offline-hold")
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(2), "session-offline-hold").ok, "closed-gate staging transaction begins")
     local snapshot
     for _ = 1, 100 do
         local result = adapter:update()
@@ -4093,12 +4103,19 @@ local function runtime_entity_npcs_are_offline_until_atomic_activation()
         local activated = adapter:update()
         gamma_arena_test_assert.is_true(activated.ok, "future online-object polling remains retryable")
         snapshot = adapter:registry_snapshot()
-        if snapshot.state == "ACTIVE" then break end
+        if snapshot.state == "READY" then break end
         for _, event in ipairs(env.events) do
             gamma_arena_test_assert.is_true(not string.find(event, "^hostile:"), "no hostility is applied while any opponent remains pending")
         end
     end
-    gamma_arena_test_assert.equals(snapshot.state, "ACTIVE", "all opponents become active only after future-frame discovery, friendly hold, and equipment verification")
+    gamma_arena_test_assert.equals(snapshot.state, "READY", "all opponents become READY only after future-frame discovery, friendly hold, and equipment verification")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "READY opponents remain friendly while the activation gate is closed")
+    gamma_arena_test_assert.equals(env.tactical_begin_calls, 1, "READY includes successful tactical binding")
+    env.opponents_enabled = true
+    gamma_arena_test_assert.is_true(adapter:update().ok, "opening the gate activates the already staged fight")
+    snapshot = adapter:registry_snapshot()
+    gamma_arena_test_assert.equals(snapshot.state, "ACTIVE", "READY publishes ACTIVE after every hostility call succeeds")
+    gamma_arena_test_assert.equals(env.hostile_calls, 2, "each staged opponent becomes hostile exactly once")
     for _, npc in ipairs(snapshot.npcs) do gamma_arena_test_assert.is_false(npc.held_offline, "ACTIVE registry releases every offline hold") end
     local first_request, first_hold, first_equip, last_equip, first_hostile, request_counts = nil, nil, nil, nil, nil, {}
     for index, event in ipairs(env.events) do
@@ -9313,7 +9330,7 @@ local cases = {
     ,{ name = "runtime_actor_future_seams_are_injected_and_total", fn = runtime_actor_future_seams_are_injected_and_total }
     ,{ name = "runtime_failed_teardown_retries_then_latches_success", fn = runtime_failed_teardown_retries_then_latches_success }
     ,{ name = "runtime_dedicated_start_reaches_preparing_without_checkpoint", fn = runtime_dedicated_start_reaches_preparing_without_checkpoint }
-    ,{ name = "runtime_entity_does_not_spawn_before_begin_apply", fn = runtime_entity_does_not_spawn_before_begin_apply }
+    ,{ name = "runtime_entity_actor_loadout_readiness_starts_spawning_without_gate", fn = runtime_entity_actor_loadout_readiness_starts_spawning_without_gate }
     ,{ name = "runtime_entity_consumes_owned_medical_item_once", fn = runtime_entity_consumes_owned_medical_item_once }
     ,{ name = "runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items", fn = runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items }
     ,{ name = "runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses", fn = runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses }
