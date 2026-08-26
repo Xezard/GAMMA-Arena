@@ -47,6 +47,27 @@ foreach ($Expected in @(
 foreach ($Marker in @('device_list','GA_DEVICE_EFFECTIVE_INVALID','TORCH_S','nightvision_1','nightvision_2','nightvision_3')) {
     if (-not $CatalogLoader.Contains($Marker)) { throw "Actor device catalog loader contract is missing: $Marker" }
 }
+if ($CatalogLoader -notmatch 'effective_slot\s*~=\s*9') {
+    throw 'Actor device catalog validation must accept raw Anomaly device slot 9'
+}
+if ($Compat -notmatch 'slot\s*~=\s*9') {
+    throw 'Actor device compatibility preflight must accept raw Anomaly device slot 9'
+}
+if ($Bootstrap -notmatch 'return\s+engine_inventory_slot\(configured\.value\)') {
+    throw 'Actor device runtime must retain the LTX-to-Lua slot translation'
+}
+if ($Bootstrap -notmatch 'role\s*==\s*"device"\s+and\s+slot\.value\s*~=\s*10') {
+    throw 'Actor device runtime must retain Lua inventory slot 10'
+}
+if (-not $GeneratorTests.Contains('device_torch_dummy={class="TORCH_S",slot="9"}')) {
+    throw 'Actor device catalog fixture must model raw Anomaly device slot 9'
+}
+if (-not $GeneratorTests.Contains('device_torch_nv_2={class="TORCH_S",slot="10",nv_effect="nightvision_2"}')) {
+    throw 'Actor device catalog mismatch fixture must reject raw slot 10'
+}
+if (-not $RuntimeTests.Contains('sections[device.section] = { class = "TORCH_S", slot = 9, nv_effect = device.nv_effect }')) {
+    throw 'Actor device runtime preflight fixture must model raw Anomaly device slot 9'
+}
 foreach ($Marker in @('function select','function generate','actor_device','GA_DEVICE_ARGUMENT_INVALID','GA_DEVICE_SELECTION_INVALID','next_int(1, 100)')) {
     if (-not $DeviceGenerator.Contains($Marker)) { throw "Actor device generator contract is missing: $Marker" }
 }
