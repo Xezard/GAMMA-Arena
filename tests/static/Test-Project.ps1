@@ -895,9 +895,14 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     }
     Assert-True ($Task6ActorContent -notmatch 'function\s+ActorAdapter:enforce_boundary') 'Closed Rostok Arena must not run a per-update actor boundary teleport guard'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_for_rematch') 'Actor adapter must expose one shared in-memory rematch reset'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:begin_rematch_boundary') 'Actor adapter must expose an immediate rematch input boundary'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_transient_state') 'Actor adapter must expose one authoritative transient reset boundary'
+    Assert-True ($Task6ActorContent -match 'interrupt_item_use[\s\S]{0,900}acquire_input') 'Item-use interruption must precede Arena input acquisition in the rematch boundary'
+    Assert-True ($Task6ActorContent -match 'reset_transient_state[\s\S]{0,1500}loadout\.cleanup') 'Transient cleanup must precede rematch loadout cleanup'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:normalize_for_arena[\s\S]{0,1300}if\s+acquired\.value\s*==\s*true\s+then[\s\S]{0,220}release_input') 'Normalization rollback may release only an input lease acquired by that invocation'
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
-    Assert-True ($Task6ActorContent.Contains('mod_body_health_reset')) 'Actor adapter must reset GAMMA Body Health System state between rounds'
+    Assert-True ($Task6ActorContent.Contains('reset_transient_state')) 'Actor adapter must reset GAMMA transient state between rounds'
     foreach ($Forbidden in @('set_power','set_radiation','set_bleeding','set_psy_health')) {
         Assert-True ($Task6ActorContent -notmatch [regex]::Escape($Forbidden)) "Actor adapter must not call nonexistent Anomaly method $Forbidden"
     }
@@ -928,9 +933,35 @@ if (Test-Path -LiteralPath $Task6CheckpointPath) {
     Assert-True ($Task6CheckpointContent -notmatch 'pcall\(fs\.exist\s*,\s*fs\s*,\s*path\s*\)') 'Checkpoint existence must never pass one absolute path to getFS.exist'
 }
 $Task6BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils_obj.save_var', 'utils_obj.load_var', 'mod_body_health_reset')) {
+foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils.save_var', 'utils.load_var', 'mod_body_health_reset')) {
     Assert-True ($Task6BootstrapContent.Contains($Marker)) "Bootstrap GAMMA Body Health integration is missing marker: $Marker"
 }
+foreach ($Marker in @('lam2.abort','ClearWounds','ClearAllBoosters','WoundForEach','BoosterForEach','GetAlcohol','ChangeAlcohol','remove_all_psy_ppe_effects','RemoveTimeEvent','set_stage_two','655808','655820','99123','99133','8053','reset_transient_state')) {
+    Assert-True ($Task6BootstrapContent.Contains($Marker)) "Round transient reset integration is missing marker: $Marker"
+}
+$RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_preowned_input_survives_normalize_failure','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_transient_readback_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact','runtime_entity_ready_revalidates_items_before_hostility')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
+}
+foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition orchestration regression must cover $Name"
+}
+$VictoryNextStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:victory_next_action')
+$VictoryNextEnd = if ($VictoryNextStart -ge 0) { $Task5OrchestratorContent.IndexOf('function Orchestrator:restart_arena_action', $VictoryNextStart) } else { -1 }
+Assert-True ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) 'Victory-next boundary must remain structurally testable'
+if ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) {
+    $VictoryNextBlock = $Task5OrchestratorContent.Substring($VictoryNextStart, $VictoryNextEnd - $VictoryNextStart)
+    $VictoryBoundaryIndex = $VictoryNextBlock.IndexOf('begin_rematch_boundary')
+    $VictoryClearIndex = $VictoryNextBlock.IndexOf('clear_result')
+    Assert-True ($VictoryBoundaryIndex -ge 0 -and $VictoryClearIndex -gt $VictoryBoundaryIndex) 'Victory-next must acquire the rematch boundary before closing Result UI'
+}
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:queue_integrity_retry[\s\S]{0,900}begin_rematch_boundary') 'Integrity retry must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action[\s\S]{0,900}begin_rematch_boundary') 'Manual restart must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:is_opponent_activation_allowed\(\)[\s\S]{0,160}runtime_stage\s*==\s*"ACTIVATING"') 'Opponent activation gate must open only in orchestrator ACTIVATING'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:begin_countdown_after_equipment[\s\S]{0,350}snapshot\.state\s*~=\s*"READY"') 'Visible countdown must wait for the fully staged entity READY state'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:update_countdown[\s\S]{0,550}set_runtime_stage\("ACTIVATING"\)') 'Countdown deadline must enter the bounded ACTIVATING stage'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,350}stage\s*=\s*"ACTIVATING"') 'Activation observation must remain ACTIVATING until entity ACTIVE is proven'
+Assert-True ($Task5OrchestratorContent -match 'GA_ENTITY_UPDATE_FAILED[\s\S]{0,500}runtime_stage\s*==\s*"ACTIVATING"[\s\S]{0,350}observe_entity_activation') 'Orchestrator must observe entity activation again after the entity update'
 
 $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_state_machine.script'
 if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
@@ -943,7 +974,7 @@ if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
 
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
-Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,900}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1500}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
 Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
 foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
     Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
@@ -1092,6 +1123,11 @@ if (Test-Path -LiteralPath $Task7NpcPath) {
 if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'ARENA_RUNTIME_COMMUNITY\s*=\s*"arena_enemy"') 'Entity adapter must define the isolated Arena runtime community'
     Assert-True ($Task7EntityContent -match 'validate_effective_profile\([^\r\n]+ARENA_RUNTIME_COMMUNITY') 'Entity pre-spawn validation must require the isolated runtime community'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready') 'Entity adapter must split fully staged READY from hostile activation'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready[\s\S]{0,700}verify_item_ownership[\s\S]{0,3000}set_actor_hostile') 'READY activation must revalidate assigned item ownership before applying hostility'
+    Assert-True ($Task7EntityContent -match 'WAIT_ACTOR_LOADOUT[\s\S]{0,700}set_state\("SPAWNING"\)') 'Actor loadout readiness must start spawning before countdown'
+    Assert-True ($Task7EntityContent -match 'self\.state_value\s*==\s*"READY"[\s\S]{0,350}opponent_gate_open') 'Closed activation gate must hold a fully staged READY transaction'
+    Assert-True ($Task7EntityContent -notmatch 'set_state\("COUNTDOWN"\)') 'Entity adapter must not own the visible countdown state'
 }
 
 $Task7CatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
@@ -1157,7 +1193,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
 }
 
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_preflight_requires_task7_entity_ports_and_ammo_metadata','runtime_entity_actor_loadout_precedes_spawn','runtime_entity_npcs_are_offline_until_atomic_activation','runtime_entity_online_wait_is_bounded_and_wrap_safe','runtime_entity_active_defers_input_release_to_task8','runtime_bootstrap_actor_loadout_port_is_bound_and_exact','runtime_actor_loadout_creates_physical_grenades_and_rolls_back','runtime_actor_loadout_rollback_blocks_disconnect_until_absent','runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect','runtime_bootstrap_actor_existence_lookup_fails_closed','runtime_bootstrap_hostility_port_is_feature_probed','runtime_entity_ammo_box_size_failure_precedes_actor_mutation','runtime_entity_partial_failures_rollback_in_reverse','runtime_entity_creates_physical_grenade_and_rolls_back_failure','runtime_entity_purges_only_snapshot_children_still_parented','runtime_entity_supports_real_get_children_iterator','runtime_entity_multi_return_ammo_is_exact','runtime_entity_death_dropped_is_persisted_and_round_tripped','runtime_entity_multi_return_late_failure_is_fully_registered','runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation','runtime_entity_registry_is_plain_ids_only','runtime_entity_cleanup_requires_registry_and_tag','runtime_entity_forged_tag_is_ignored','runtime_entity_tag_loss_fails_safe','runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal','runtime_entity_parent_release_blocks_unreadable_child_parent','runtime_entity_cleanup_is_idempotent','runtime_entity_lifecycle_cleanup_takes_over_mid_rollback','runtime_entity_existence_result_must_be_boolean','runtime_entity_duplicate_death_is_idempotent','runtime_entity_unregistered_death_is_ignored','runtime_entity_object_death_signature_is_normalized','runtime_entity_numeric_death_requires_test_injection','runtime_registered_death_owner_tag_failures_route_through_real_callback_router','runtime_registered_death_mismatching_owner_tag_is_benign','runtime_entity_release_is_async_and_never_direct','runtime_entity_release_timeout_is_wrap_safe','runtime_entity_max_cardinality_cleanup_fits_default_budget','runtime_entity_relations_friend_first_then_actor_hostile','runtime_entity_activation_does_not_wait_for_precombat_active_item','runtime_entity_callbacks_fail_closed','runtime_validator_rejects_effective_nonhuman_profile','runtime_entity_runtime_profile_check_precedes_actor_mutation','runtime_orchestrator_living_count_fails_closed','runtime_entity_does_not_spawn_before_begin_apply')) {
+    foreach ($Marker in @('runtime_preflight_requires_task7_entity_ports_and_ammo_metadata','runtime_entity_actor_loadout_precedes_spawn','runtime_entity_npcs_are_offline_until_atomic_activation','runtime_entity_online_wait_is_bounded_and_wrap_safe','runtime_entity_active_defers_input_release_to_task8','runtime_bootstrap_actor_loadout_port_is_bound_and_exact','runtime_actor_loadout_creates_physical_grenades_and_rolls_back','runtime_actor_loadout_rollback_blocks_disconnect_until_absent','runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect','runtime_bootstrap_actor_existence_lookup_fails_closed','runtime_bootstrap_hostility_port_is_feature_probed','runtime_entity_ammo_box_size_failure_precedes_actor_mutation','runtime_entity_partial_failures_rollback_in_reverse','runtime_entity_creates_physical_grenade_and_rolls_back_failure','runtime_entity_purges_only_snapshot_children_still_parented','runtime_entity_supports_real_get_children_iterator','runtime_entity_multi_return_ammo_is_exact','runtime_entity_death_dropped_is_persisted_and_round_tripped','runtime_entity_multi_return_late_failure_is_fully_registered','runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation','runtime_entity_registry_is_plain_ids_only','runtime_entity_cleanup_requires_registry_and_tag','runtime_entity_forged_tag_is_ignored','runtime_entity_tag_loss_fails_safe','runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal','runtime_entity_parent_release_blocks_unreadable_child_parent','runtime_entity_cleanup_is_idempotent','runtime_entity_lifecycle_cleanup_takes_over_mid_rollback','runtime_entity_existence_result_must_be_boolean','runtime_entity_duplicate_death_is_idempotent','runtime_entity_unregistered_death_is_ignored','runtime_entity_object_death_signature_is_normalized','runtime_entity_numeric_death_requires_test_injection','runtime_registered_death_owner_tag_failures_route_through_real_callback_router','runtime_registered_death_mismatching_owner_tag_is_benign','runtime_entity_release_is_async_and_never_direct','runtime_entity_release_timeout_is_wrap_safe','runtime_entity_max_cardinality_cleanup_fits_default_budget','runtime_entity_relations_friend_first_then_actor_hostile','runtime_entity_activation_does_not_wait_for_precombat_active_item','runtime_entity_callbacks_fail_closed','runtime_validator_rejects_effective_nonhuman_profile','runtime_entity_runtime_profile_check_precedes_actor_mutation','runtime_orchestrator_living_count_fails_closed','runtime_entity_actor_loadout_readiness_starts_spawning_without_gate')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 7 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_entity_consumes_owned_medical_item_once','runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items')) {
@@ -1859,7 +1895,8 @@ foreach ($Task11Marker in @('stable_encode', 'deps.tactical', 'tactical_disabled
 Assert-True ($Task11EntityContent -match 'function\s+EntityAdapter:reconcile_active_deaths\s*\(') 'ACTIVE entity updates must reconcile dead registered opponents when an external death callback is missed'
 $Task11OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
 Assert-True ($Task11OrchestratorContent -match 'function\s+Orchestrator:reconcile_active_victory\s*\(') 'ACTIVE orchestration must derive victory from the reconciled living-opponent count'
-Assert-True ($Task11EntityContent -match 'tactical[\s\S]{0,1800}set_actor_hostile[\s\S]{0,1000}set_state\("ACTIVE"\)') 'Tactical bind must precede hostility and ACTIVE'
+Assert-True ($Task11EntityContent -match 'tactical_started\s*=\s*true[\s\S]{0,300}set_state\("READY"\)') 'Tactical bind must be part of READY staging'
+Assert-True ($Task11EntityContent -match 'function\s+EntityAdapter:activate_ready[\s\S]{0,2500}set_actor_hostile[\s\S]{0,1000}set_state\("ACTIVE"\)') 'READY activation must apply hostility before ACTIVE'
 $Task11BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 Assert-True ($Task11BootstrapContent -match 'gamma_arena_tactical_adapter\.new') 'Bootstrap must compose the production tactical adapter'
 Assert-True ($Task11BootstrapContent -match 'function\s+TacticalProxy:begin[\s\S]{0,500}ensure_adapter') 'Tactical adapter must be created lazily after the Arena actor exists'
