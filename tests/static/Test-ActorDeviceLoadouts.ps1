@@ -64,16 +64,14 @@ foreach ($CaseName in @('actor_device_is_difficulty_independent_and_stable','val
     if (-not $GeneratorTests.Contains($CaseName)) { throw "FightSpec v8 actor device regression case is missing: $CaseName" }
 }
 
-if ($Bootstrap.Contains('GA_ACTOR_DEVICE_CHARGE_FAILED')) {
-    foreach ($Marker in @('"outfit", "knife", "device", "weapon"','CHARGE_DEVICE','set_item_condition','item_condition','shutdown_device','device_neutralized','device_condition')) {
-        if (-not $Bootstrap.Contains($Marker)) { throw "Actor device runtime contract is missing: $Marker" }
-    }
-    foreach ($Marker in @('item_device.is_nv_active','item_device.set_nightvision','item_device.is_torch_active','item_device.toggle_torch','game_object.set_condition','game_object.enable_torch')) {
-        if (-not $Compat.Contains($Marker) -and -not $Bootstrap.Contains($Marker)) { throw "Actor device compatibility contract is missing: $Marker" }
-    }
-    foreach ($CaseName in @('actor_device_is_equipped_and_fully_charged','actor_device_charge_failure_rolls_back','actor_device_cleanup_neutralizes_active_effects','actor_device_cleanup_retains_unconfirmed_effect')) {
-        if (-not $RuntimeTests.Contains($CaseName)) { throw "Actor device runtime regression case is missing: $CaseName" }
-    }
+foreach ($Marker in @('GA_ACTOR_DEVICE_CHARGE_FAILED','"outfit", "knife", "device", "weapon"','CHARGE_DEVICE','set_item_condition','item_condition','shutdown_device','device_neutralized','device_condition')) {
+    if (-not $Bootstrap.Contains($Marker)) { throw "Actor device runtime contract is missing: $Marker" }
+}
+foreach ($Marker in @('item_device.is_nv_active','item_device.set_nightvision','item_device.is_torch_active','item_device.toggle_torch','game_object.set_condition','game_object.enable_torch')) {
+    if (-not $Compat.Contains($Marker) -and -not $Bootstrap.Contains($Marker)) { throw "Actor device compatibility contract is missing: $Marker" }
+}
+foreach ($CaseName in @('actor_device_is_equipped_and_fully_charged','actor_device_charge_failure_rolls_back','actor_device_cleanup_neutralizes_active_effects','actor_device_cleanup_retains_unconfirmed_effect')) {
+    if (-not $RuntimeTests.Contains($CaseName)) { throw "Actor device runtime regression case is missing: $CaseName" }
 }
 
 Write-Host 'PASS: actor lighting device static contract passed'

@@ -73,11 +73,18 @@ local required_capabilities = {
     { name = "game_object.enemy", present = function(p) return field_present(p.game_object, "enemy") end },
     { name = "game_object.set_ammo_elapsed", present = function(p) return field_present(p.game_object, "set_ammo_elapsed") end },
     { name = "game_object.get_ammo_in_magazine", present = function(p) return field_present(p.game_object, "get_ammo_in_magazine") end },
+    { name = "game_object.condition", present = function(p) return field_present(p.game_object, "condition") end },
+    { name = "game_object.set_condition", present = function(p) return field_present(p.game_object, "set_condition") end },
+    { name = "game_object.enable_torch", present = function(p) return field_present(p.game_object, "enable_torch") end },
     { name = "game_object.critically_wounded", present = function(p) return field_present(p.game_object, "critically_wounded") end },
     { name = "game_object.name", present = function(p) return field_present(p.game_object, "name") end },
     { name = "game_object.change_health", present = function(p) return field_present(p.game_object, "change_health") end },
     { name = "axr_main.config", present = function(p) return type(p.axr_main) == "table" and p.axr_main.config ~= nil end },
-    { name = "safe_release_manager.release", present = function(p) return type(p.safe_release_manager) == "table" and type(p.safe_release_manager.release) == "function" end }
+    { name = "safe_release_manager.release", present = function(p) return type(p.safe_release_manager) == "table" and type(p.safe_release_manager.release) == "function" end },
+    { name = "item_device.is_nv_active", present = function(p) return type(p.item_device) == "table" and type(p.item_device.is_nv_active) == "function" end },
+    { name = "item_device.set_nightvision", present = function(p) return type(p.item_device) == "table" and type(p.item_device.set_nightvision) == "function" end },
+    { name = "item_device.is_torch_active", present = function(p) return type(p.item_device) == "table" and type(p.item_device.is_torch_active) == "function" end },
+    { name = "item_device.toggle_torch", present = function(p) return type(p.item_device) == "table" and type(p.item_device.toggle_torch) == "function" end }
 }
 
 local config_methods = { "r_value", "r_string_ex", "line_exist", "w_value", "remove_line", "save" }
@@ -262,10 +269,10 @@ local function resolve_path(probes, path, errors, resolved)
     resolved[coordinate_key] = path
 end
 
-local function append_unique(target, seen, section, kind, community)
+local function append_unique(target, seen, section, kind, community, nv_effect)
     if type(section) == "string" and section ~= "" and not seen[section] then
         seen[section] = true
-        target[#target + 1] = { section = section, kind = kind, community = community }
+        target[#target + 1] = { section = section, kind = kind, community = community, nv_effect = nv_effect }
     end
 end
 
@@ -279,6 +286,7 @@ local function ordered_sections(catalogs)
     for _, section in ipairs(ammo) do append_unique(result, seen, section, "ammo") end
     for _, outfit in ipairs(catalogs.outfit_list or {}) do append_unique(result, seen, outfit.section, "equipped") end
     for _, knife in ipairs(catalogs.knife_list or {}) do append_unique(result, seen, knife.section, "equipped") end
+    for _, device in ipairs(catalogs.device_list or {}) do append_unique(result, seen, device.section, "device", nil, device.nv_effect) end
     local consumables = {}
     for _, item in pairs(catalogs.consumables or {}) do consumables[#consumables + 1] = item.section end
     table.sort(consumables)
@@ -324,6 +332,40 @@ local function validate_item_u32(system, section, key, minimum, code, accessors,
     end
 end
 
+local validate_profile_value
+local device_class_error_codes = {
+    api = "GA_ACTOR_DEVICE_CLASS_API_MISSING",
+    missing = "GA_ACTOR_DEVICE_CLASS_MISSING",
+    read = "GA_ACTOR_DEVICE_CLASS_READ_FAILED",
+    invalid = "GA_ACTOR_DEVICE_CLASS_INVALID"
+}
+
+local function validate_device_value(system, entry, accessors, errors)
+    validate_profile_value(system, entry.section, "class", "TORCH_S", device_class_error_codes, nil, accessors, errors)
+    if type(accessors.line_exist) ~= "function" or type(accessors.r_u32) ~= "function" or type(accessors.r_string_ex) ~= "function" then
+        add_error(errors, "GA_ACTOR_DEVICE_METADATA_API_MISSING", "Effective actor device metadata lookup is unavailable", { section = entry.section })
+        return
+    end
+    local slot_present_ok, slot_present = safe_call(accessors.line_exist, system, entry.section, "slot")
+    local slot_ok, slot = safe_call(accessors.r_u32, system, entry.section, "slot")
+    if not slot_present_ok or slot_present ~= true or not slot_ok or slot ~= 10 then
+        add_error(errors, "GA_ACTOR_DEVICE_SLOT_INVALID", "Effective actor device slot must be 10", { section = entry.section, slot = slot })
+    end
+    local effect_present_ok, effect_present = safe_call(accessors.line_exist, system, entry.section, "nv_effect")
+    if not effect_present_ok then
+        add_error(errors, "GA_ACTOR_DEVICE_EFFECT_READ_FAILED", "Effective actor device NV effect presence could not be read", { section = entry.section })
+    elseif entry.nv_effect == nil then
+        if effect_present == true then add_error(errors, "GA_ACTOR_DEVICE_EFFECT_INVALID", "Headlamp must not expose an NV effect", { section = entry.section }) end
+    elseif effect_present ~= true then
+        add_error(errors, "GA_ACTOR_DEVICE_EFFECT_INVALID", "NVG device is missing its effective NV effect", { section = entry.section, expected = entry.nv_effect })
+    else
+        local effect_ok, effect = safe_call(accessors.r_string_ex, system, entry.section, "nv_effect")
+        if not effect_ok or effect ~= entry.nv_effect then
+            add_error(errors, "GA_ACTOR_DEVICE_EFFECT_INVALID", "NVG device effective NV effect is incompatible", { section = entry.section, expected = entry.nv_effect, actual = effect })
+        end
+    end
+end
+
 local function normalized_community(value)
     if type(value) ~= "string" then return nil end
     return string.lower((string.gsub(value, "^%s*(.-)%s*$", "%1")))
@@ -344,7 +386,7 @@ local profile_error_codes = {
     }
 }
 
-local function validate_profile_value(system, section, key, expected, codes, normalize, accessors, errors)
+validate_profile_value = function(system, section, key, expected, codes, normalize, accessors, errors)
     if type(accessors.line_exist) ~= "function" then
         add_error(errors, codes.api, "Effective NPC profile line lookup is unavailable", {
             section = section,
@@ -424,6 +466,8 @@ local function validate_sections(system, catalogs, errors)
             validate_item_u32(system, entry.section, "ammo_mag_size", 1, "GA_ACTOR_LOADOUT_MAGAZINE", accessors, errors)
         elseif entry.kind == "equipped" then
             validate_item_u32(system, entry.section, "slot", 0, "GA_ACTOR_LOADOUT_SLOT", accessors, errors)
+        elseif entry.kind == "device" then
+            validate_device_value(system, entry, accessors, errors)
         end
     end
 end

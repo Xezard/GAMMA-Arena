@@ -34,9 +34,11 @@ end
 local function all_sections(snapshot)
     local sections = {}
     for _, profile in ipairs(snapshot.profile_list) do sections[profile.section] = { class = "AI_STL_S", community = profile.runtime_community } end
-    for _, weapon in ipairs(snapshot.weapon_list) do sections[weapon.section] = {} end
+    for _, weapon in ipairs(snapshot.weapon_list) do sections[weapon.section] = { slot = weapon.slot, ammo_mag_size = 30 } end
     for _, ammo in pairs(snapshot.ammo) do sections[ammo.section] = { box_size = 20 } end
-    for _, outfit in ipairs(snapshot.outfit_list) do sections[outfit.section] = {} end
+    for _, outfit in ipairs(snapshot.outfit_list) do sections[outfit.section] = { slot = 6 } end
+    for _, knife in ipairs(snapshot.knife_list) do sections[knife.section] = { slot = 0 } end
+    for _, device in ipairs(snapshot.device_list or {}) do sections[device.section] = { class = "TORCH_S", slot = 10, nv_effect = device.nv_effect } end
     for _, consumable in pairs(snapshot.consumables) do sections[consumable.section] = {} end
     for _, medical in pairs(snapshot.medical_items or {}) do sections[medical.section] = {} end
     return sections
@@ -134,6 +136,10 @@ local function valid_preflight_probes()
     function actor:set_actor_direction() return true end
     function actor:set_invulnerable() return true end
     function actor:position() return positions[snapshot.layouts.rostok_arena_v1.actor_spawn_path] end
+    function actor:move_to_slot() return true end
+    function actor:item_in_slot() return nil end
+    function actor:make_item_active() return true end
+    function actor:active_item() return nil end
     local arena_zone = {}
     function arena_zone:inside() return true end
 
@@ -166,7 +172,7 @@ local function valid_preflight_probes()
             enable_input = function() return true end
         },
         db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
-        game_object = { friend = 1, enemy = 2, name = function() return "test_npc" end, change_health = function() return true end },
+        game_object = { friend = 1, enemy = 2, name = function() return "test_npc" end, change_health = function() return true end, set_ammo_elapsed = function() end, get_ammo_in_magazine = function() return 0 end, condition = function() return 1 end, set_condition = function() end, enable_torch = function() end, critically_wounded = function() return false end },
         xr_logic = {
             configure_schemes = function() return true end,
             activate_by_section = function() return true end,
@@ -178,6 +184,7 @@ local function valid_preflight_probes()
         relation_registry = { set_goodwill = function() return true end },
         axr_main = { config = config },
         safe_release_manager = { release = function() return true end },
+        item_device = { is_nv_active=function() return false end, set_nightvision=function() end, is_torch_active=function() return false end, toggle_torch=function() end },
         catalogs = snapshot,
         _sections = sections,
         _positions = positions,
@@ -3348,7 +3355,7 @@ local function entity_spec(opponent_count)
         loadout = {
             weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2,
             bonus_ammo = { section = "ammo_9x18_ap", requested_category = "armor_piercing", resolved_category = "armor_piercing", boxes = 1 },
-            outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, grenades = {}, cost = 6
+            outfit = "novice_outfit", knife = "wpn_knife", device = { catalog_id="headlamp", section="device_torch_dummy", kind="headlamp", weight=50 }, consumables = { "bandage" }, grenades = {}, cost = 6
         }
     }
     local opponents = {}
@@ -4022,7 +4029,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local actor = { id = function() return 77 end }
     local result = port.apply(actor, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "production-shaped actor loadout port applies exact descriptors")
-    gamma_arena_test_assert.equals(#calls, 6, "actor receives weapon, base ammo, bonus ammo, outfit, knife and consumables exactly once")
+    gamma_arena_test_assert.equals(#calls, 7, "actor receives weapon, base ammo, bonus ammo, outfit, knife, device and consumables exactly once")
     gamma_arena_test_assert.equals(calls[2].section, "ammo_9x18_fmj", "actor ammo section is exact")
     gamma_arena_test_assert.equals(calls[2].count, entity_spec(1).actor().loadout.ammo_boxes * 20, "actor creates exact final ordinary rounds")
     gamma_arena_test_assert.equals(magazine_capacity_calls, 0, "runtime does not regenerate the reserve floor while creating inventory")
@@ -4147,6 +4154,7 @@ local function runtime_actor_loadout_progress_survives_clock_stalls()
         item_slot = function(section)
             if section == loadout.outfit then return 7 end
             if section == loadout.knife then return 1 end
+            if section == loadout.device.section then return 10 end
             if section == loadout.weapon then return 3 end
         end,
         move_to_slot = function(_, item, slot)
@@ -4169,6 +4177,9 @@ local function runtime_actor_loadout_progress_survives_clock_stalls()
         end,
         active_item = function() return active end,
         outfit_requires_power = function() return false end,
+        set_item_condition = function(item, value) item.condition_value = value; return true end,
+        item_condition = function(item) return item.condition_value end,
+        shutdown_device = function() return gamma_arena_result.ok(true) end,
         resolve_entity = function(id) return present[id] end,
         release_item = function(id) present[id] = nil; return true end
     })
@@ -4185,7 +4196,7 @@ local function runtime_actor_loadout_progress_survives_clock_stalls()
         if pending_active ~= nil then active = pending_active; pending_active = nil end
     end
     gamma_arena_test_assert.is_true(result.ok and result.value.ready == true, "equipment reaches READY only after later-frame slot, magazine and active-item proofs")
-    gamma_arena_test_assert.equals(move_calls, 3, "outfit, knife and weapon moves are each submitted once")
+    gamma_arena_test_assert.equals(move_calls, 4, "outfit, knife, device and weapon moves are each submitted once")
     gamma_arena_test_assert.equals(magazine_calls, 1, "magazine fill is submitted once")
     gamma_arena_test_assert.equals(active_calls, 1, "active weapon selection is submitted once")
 end
@@ -4238,7 +4249,7 @@ end
 
 local function new_actor_loadout_test_fixture(options)
     options = options or {}
-    local fixture = { calls = { is_exo = 0, get = 0, init = 0, set = 0, release = 0, checkpoint = 0, activate = 0, log = 0 }, events = {}, stored = options.stored }
+    local fixture = { calls = { is_exo = 0, get = 0, init = 0, set = 0, release = 0, checkpoint = 0, activate = 0, log = 0, device_set = 0, device_shutdown = 0 }, events = {}, stored = options.stored, released_sections = {} }
     local next_id, present, tags, slots, magazine = 1600, {}, {}, {}, {}
     local active = nil
     local actor = { id = function() return 77 end }
@@ -4250,6 +4261,7 @@ local function new_actor_loadout_test_fixture(options)
         bonus_ammo = loadout.bonus_ammo,
         outfit = options.outfit or loadout.outfit,
         knife = loadout.knife,
+        device = loadout.device,
         consumables = loadout.consumables,
         grenades = loadout.grenades
     }
@@ -4276,6 +4288,7 @@ local function new_actor_loadout_test_fixture(options)
         item_slot = function(section)
             if section == loadout.outfit then return 7 end
             if section == loadout.knife then return 1 end
+            if section == loadout.device.section then return options.device_slot or 10 end
             if section == loadout.weapon then return 3 end
         end,
         move_to_slot = function(_, item, slot) slots[slot] = item; return true end,
@@ -4314,12 +4327,27 @@ local function new_actor_loadout_test_fixture(options)
         end,
         active_item = function() return active end,
         outfit_requires_power = options.outfit_requires_power,
+        set_item_condition = function(item, value)
+            fixture.calls.device_set = fixture.calls.device_set + 1
+            if options.device_set_failure then return gamma_arena_result.err("GA_TEST_DEVICE_SET_FAILED", "injected device condition failure") end
+            item.condition_value = value
+            return true
+        end,
+        item_condition = function(item)
+            if options.device_read_failure then return gamma_arena_result.err("GA_TEST_DEVICE_READ_FAILED", "injected device condition read failure") end
+            return options.device_condition or item.condition_value
+        end,
+        shutdown_device = function()
+            fixture.calls.device_shutdown = fixture.calls.device_shutdown + 1
+            if options.device_shutdown_pending then return gamma_arena_result.ok(false) end
+            return gamma_arena_result.ok(true)
+        end,
         exo_is_object = options.exo_is_object,
         exo_get_data = options.exo_get_data,
         exo_init_data = options.exo_init_data,
         exo_set_data = options.exo_set_data,
         resolve_entity = function(id) return present[id] end,
-        release_item = function(id) fixture.calls.release = fixture.calls.release + 1; present[id] = nil; return true end
+        release_item = function(id) fixture.calls.release = fixture.calls.release + 1; fixture.released_sections[#fixture.released_sections + 1] = present[id] and present[id].section_name or nil; present[id] = nil; return true end
     })
     fixture.actor = actor
     fixture.applied = fixture.port.apply(actor, loadout)
@@ -4333,6 +4361,51 @@ local function new_actor_loadout_test_fixture(options)
         return result
     end
     return fixture
+end
+
+local function actor_device_is_equipped_and_fully_charged()
+    local fixture = new_actor_loadout_test_fixture({ outfit_requires_power = function() return false end })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "actor device fixture reaches READY")
+    gamma_arena_test_assert.equals(ready.value.device, "device_torch_dummy", "readiness records the exact actor device")
+    gamma_arena_test_assert.equals(ready.value.device_slot, 10, "actor device is equipped in slot 10")
+    gamma_arena_test_assert.is_true(ready.value.device_condition >= 0.999, "actor device starts fully charged")
+    gamma_arena_test_assert.equals(fixture.calls.device_set, 1, "actor device condition is written exactly once")
+end
+
+local function actor_device_charge_failure_rolls_back()
+    for _, options in ipairs({
+        { outfit_requires_power=function() return false end, device_slot=9 },
+        { outfit_requires_power=function() return false end, device_set_failure=true },
+        { outfit_requires_power=function() return false end, device_read_failure=true },
+        { outfit_requires_power=function() return false end, device_condition=0.5 }
+    }) do
+        local fixture = new_actor_loadout_test_fixture(options)
+        local result = fixture.drive_to_ready()
+        gamma_arena_test_assert.is_false(result.ok, "wrong slot or device charge failure rejects READY")
+        gamma_arena_test_assert.is_true(fixture.calls.release > 0, "device charge failure rolls back owned items")
+    end
+end
+
+local function actor_device_cleanup_neutralizes_active_effects()
+    local fixture = new_actor_loadout_test_fixture({ outfit_requires_power = function() return false end })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "device cleanup fixture reaches READY")
+    local cleaned = fixture.port.cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok, "device cleanup succeeds after neutralization")
+    gamma_arena_test_assert.equals(fixture.calls.device_shutdown, 1, "device cleanup neutralizes global state exactly once")
+    local second = fixture.port.cleanup()
+    gamma_arena_test_assert.is_true(second.ok, "device cleanup remains idempotent")
+    gamma_arena_test_assert.equals(fixture.calls.device_shutdown, 1, "idempotent cleanup never retoggles the device")
+end
+
+local function actor_device_cleanup_retains_unconfirmed_effect()
+    local fixture = new_actor_loadout_test_fixture({ outfit_requires_power = function() return false end, device_shutdown_pending = true })
+    local ready = fixture.drive_to_ready()
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "pending device shutdown fixture reaches READY")
+    local cleaned = fixture.port.cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value.pending == true, "unconfirmed device effect keeps cleanup pending")
+    for _, section in ipairs(fixture.released_sections) do gamma_arena_test_assert.is_false(section == "device_torch_dummy", "unconfirmed active device is never released") end
 end
 
 local function runtime_actor_weapon_checkpoint_precedes_native_activation()
@@ -5190,6 +5263,7 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         item_slot = function(section)
             if section == "novice_outfit" then return 7 end
             if section == "wpn_knife" then return 1 end
+            if section == "device_torch_dummy" then return 10 end
             if section == "wpn_pm" then return 3 end
         end,
         move_to_slot = function(_, item, slot) slots[slot] = item; return true end,
@@ -5198,7 +5272,10 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         get_ammo_in_magazine = function(item) return magazine[item:id()] or 0 end,
         make_item_active = function(_, item) active = item; return true end,
         active_item = function() return active end,
-        outfit_requires_power = function() return false end
+        outfit_requires_power = function() return false end,
+        set_item_condition = function(item, value) item.condition_value = value; return true end,
+        item_condition = function(item) return item.condition_value end,
+        shutdown_device = function() return gamma_arena_result.ok(true) end
     })
     local result = port.apply({ id = function() return 77 end }, entity_spec(1).actor().loadout)
     gamma_arena_test_assert.is_true(result.ok, "actor loadout creates the validated bonus ammo box")
@@ -5208,6 +5285,7 @@ local function runtime_actor_loadout_creates_exact_bonus_ammo_box()
         { section = "ammo_9x18_ap", count = 7, ammo = true },
         { section = "novice_outfit", count = 1, ammo = false },
         { section = "wpn_knife", count = 1, ammo = false },
+        { section = "device_torch_dummy", count = 1, ammo = false },
         { section = "bandage", count = 1, ammo = false }
     }
     gamma_arena_test_assert.equals(#created, #expected, "actor descriptor count includes exactly one bonus ammo descriptor")
@@ -9004,6 +9082,10 @@ local cases = {
     ,{ name = "runtime_bootstrap_actor_loadout_port_is_bound_and_exact", fn = runtime_bootstrap_actor_loadout_port_is_bound_and_exact }
     ,{ name = "runtime_actor_loadout_translates_ltx_slots_to_lua_slots", fn = runtime_actor_loadout_translates_ltx_slots_to_lua_slots }
     ,{ name = "runtime_actor_loadout_progress_survives_clock_stalls", fn = runtime_actor_loadout_progress_survives_clock_stalls }
+    ,{ name = "actor_device_is_equipped_and_fully_charged", fn = actor_device_is_equipped_and_fully_charged }
+    ,{ name = "actor_device_charge_failure_rolls_back", fn = actor_device_charge_failure_rolls_back }
+    ,{ name = "actor_device_cleanup_neutralizes_active_effects", fn = actor_device_cleanup_neutralizes_active_effects }
+    ,{ name = "actor_device_cleanup_retains_unconfirmed_effect", fn = actor_device_cleanup_retains_unconfirmed_effect }
     ,{ name = "runtime_actor_loadout_no_progress_timeout_has_context", fn = runtime_actor_loadout_no_progress_timeout_has_context }
     ,{ name = "runtime_actor_weapon_checkpoint_precedes_native_activation", fn = runtime_actor_weapon_checkpoint_precedes_native_activation }
     ,{ name = "runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back", fn = runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back }
