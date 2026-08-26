@@ -895,9 +895,13 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     }
     Assert-True ($Task6ActorContent -notmatch 'function\s+ActorAdapter:enforce_boundary') 'Closed Rostok Arena must not run a per-update actor boundary teleport guard'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_for_rematch') 'Actor adapter must expose one shared in-memory rematch reset'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:begin_rematch_boundary') 'Actor adapter must expose an immediate rematch input boundary'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_transient_state') 'Actor adapter must expose one authoritative transient reset boundary'
+    Assert-True ($Task6ActorContent -match 'interrupt_item_use[\s\S]{0,900}acquire_input') 'Item-use interruption must precede Arena input acquisition in the rematch boundary'
+    Assert-True ($Task6ActorContent -match 'reset_transient_state[\s\S]{0,1500}loadout\.cleanup') 'Transient cleanup must precede rematch loadout cleanup'
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
-    Assert-True ($Task6ActorContent.Contains('mod_body_health_reset')) 'Actor adapter must reset GAMMA Body Health System state between rounds'
+    Assert-True ($Task6ActorContent.Contains('reset_transient_state')) 'Actor adapter must reset GAMMA transient state between rounds'
     foreach ($Forbidden in @('set_power','set_radiation','set_bleeding','set_psy_health')) {
         Assert-True ($Task6ActorContent -notmatch [regex]::Escape($Forbidden)) "Actor adapter must not call nonexistent Anomaly method $Forbidden"
     }
@@ -928,8 +932,15 @@ if (Test-Path -LiteralPath $Task6CheckpointPath) {
     Assert-True ($Task6CheckpointContent -notmatch 'pcall\(fs\.exist\s*,\s*fs\s*,\s*path\s*\)') 'Checkpoint existence must never pass one absolute path to getFS.exist'
 }
 $Task6BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils_obj.save_var', 'utils_obj.load_var', 'mod_body_health_reset')) {
+foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils.save_var', 'utils.load_var', 'mod_body_health_reset')) {
     Assert-True ($Task6BootstrapContent.Contains($Marker)) "Bootstrap GAMMA Body Health integration is missing marker: $Marker"
+}
+foreach ($Marker in @('lam2.abort','ClearWounds','ClearAllBoosters','WoundForEach','BoosterForEach','GetAlcohol','ChangeAlcohol','remove_all_psy_ppe_effects','RemoveTimeEvent','set_stage_two','655808','655820','99123','99133','8053','reset_transient_state')) {
+    Assert-True ($Task6BootstrapContent.Contains($Marker)) "Round transient reset integration is missing marker: $Marker"
+}
+$RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_transient_readback_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
 }
 
 $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_state_machine.script'

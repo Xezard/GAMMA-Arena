@@ -78,6 +78,7 @@ function ActorAdapter:__init(deps)
     self.inventory_drain = nil
     self.inventory_clean = false
     self.victory_reset_started = false
+    self.rematch_transients_reset = false
 end
 
 function ActorAdapter:begin_update()
@@ -115,6 +116,19 @@ function ActorAdapter:release_input()
     if not released.ok then return released end
     self.input_owned = false
     return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:begin_rematch_boundary()
+    if self.input_owned then return gamma_arena_result.ok(false) end
+    if type(self.deps.interrupt_item_use) == "function" then
+        local interrupted = dependency_result("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", self.deps.interrupt_item_use)
+        if not interrupted.ok then return interrupted end
+    end
+    return self:acquire_input()
+end
+
+function ActorAdapter:reset_transient_state(actor)
+    return dependency_result("GA_ACTOR_TRANSIENT_RESET_FAILED", self.deps.reset_transient_state, actor)
 end
 
 function ActorAdapter:inventory_clock()
@@ -305,14 +319,6 @@ function ActorAdapter:normalize_status(actor)
         local applied = set_actor_condition(actor, entry[1], entry[2])
         if not applied.ok then return applied end
     end
-    if type(self.deps.mod_body_health_reset) == "function" then
-        local body_health = dependency_result("GA_ACTOR_BODY_HEALTH_RESET_FAILED", self.deps.mod_body_health_reset, actor)
-        if not body_health.ok then return body_health end
-    end
-    if type(self.deps.mod_psy_reset) == "function" then
-        local ok, reason = pcall(self.deps.mod_psy_reset, actor)
-        if not ok then pcall(gamma_arena_log.warn, "GA_ACTOR_OPTIONAL_PSY_RESET_FAILED", "Optional GAMMA psy reset failed", { reason = tostring(reason) }) end
-    end
     local effects = self.deps.effects
     if type(effects) == "table" and type(effects.disable_effects_timer) == "function" then
         local ok, reason = pcall(effects.disable_effects_timer, 100)
@@ -367,15 +373,19 @@ function ActorAdapter:zero_money(actor)
     return call_actor(actor, "give_money", -money.value)
 end
 
-function ActorAdapter:normalize_for_arena(layout)
+function ActorAdapter:normalize_for_arena(layout, transients_already_reset)
     local owned = self:owned_actor()
     if not owned.ok then return owned end
     local acquired = self:acquire_input()
     if not acquired.ok then return acquired end
     local actor = owned.value
     local position_snapshot = nil
-    local steps = {
-        function() return self:purge_inventory(actor) end,
+    local steps = {}
+    if transients_already_reset ~= true then
+        steps[#steps + 1] = function() return self:reset_transient_state(actor) end
+    end
+    steps[#steps + 1] = function() return self:purge_inventory(actor) end
+    local remaining_steps = {
         function() return self:normalize_status(actor) end,
         function()
             local positioned = self:position_actor(actor, layout)
@@ -384,6 +394,7 @@ function ActorAdapter:normalize_for_arena(layout)
         end,
         function() return self:zero_money(actor) end
     }
+    for index = 1, #remaining_steps do steps[#steps + 1] = remaining_steps[index] end
     for index = 1, #steps do
         local result = steps[index]()
         if not result.ok then
@@ -425,7 +436,15 @@ function ActorAdapter:reset_for_rematch(layout)
         if not empty.ok then return empty end
         if empty.value ~= true then return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" }) end
         self.victory_reset_started = false
+        self.rematch_transients_reset = false
         return gamma_arena_result.ok(true)
+    end
+    if not self.rematch_transients_reset then
+        local owned = self:owned_actor()
+        if not owned.ok then return owned end
+        local transients = self:reset_transient_state(owned.value)
+        if not transients.ok then return transients end
+        self.rematch_transients_reset = true
     end
     local loadout = self.deps.loadout
     if type(loadout) == "table" and type(loadout.cleanup) == "function" then
@@ -433,7 +452,7 @@ function ActorAdapter:reset_for_rematch(layout)
         if not cleaned.ok then return cleaned end
         if type(cleaned.value) == "table" and cleaned.value.pending == true then return cleaned end
     end
-    local normalized = self:normalize_for_arena(layout)
+    local normalized = self:normalize_for_arena(layout, true)
     if not normalized.ok then return normalized end
     self.victory_reset_started = true
     return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" })
@@ -457,6 +476,7 @@ function ActorAdapter:cleanup()
     self.inventory_drain = nil
     self.inventory_clean = false
     self.victory_reset_started = false
+    self.rematch_transients_reset = false
     if #errors > 0 then return fail("GA_ACTOR_CLEANUP_FAILED", "Arena actor cleanup failed", { errors = errors }) end
     if loadout_pending then return gamma_arena_result.ok({ pending = true, stage = "actor_loadout" }) end
     return gamma_arena_result.ok(true)

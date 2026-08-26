@@ -1864,6 +1864,11 @@ local function fake_actor_adapter_env()
         now = 0,
         input_acquires = 0,
         input_releases = 0,
+        ordered_calls = {},
+        interrupt_calls = 0,
+        transient_reset_calls = 0,
+        interrupt_failure = false,
+        transient_reset_failure = false,
         effect_calls = 0,
         body_health_reset_calls = 0,
         bhs = {
@@ -1989,7 +1994,16 @@ local function fake_actor_adapter_env()
             return gamma_arena_result.ok(env.boundary_inside)
         end,
         effects = { disable_effects_timer = function() env.effect_calls = env.effect_calls + 1 end },
-        mod_body_health_reset = function(candidate)
+        interrupt_item_use = function()
+            env.interrupt_calls = env.interrupt_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "interrupt"
+            if env.interrupt_failure then return gamma_arena_result.err("GA_TEST_INTERRUPT", "injected item-use interrupt failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        reset_transient_state = function(candidate)
+            env.transient_reset_calls = env.transient_reset_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "transients"
+            if env.transient_reset_failure then return gamma_arena_result.err("GA_TEST_TRANSIENT", "injected transient reset failure") end
             gamma_arena_test_assert.is_true(candidate == actor, "body-health reset only touches the owned Arena actor")
             env.body_health_reset_calls = env.body_health_reset_calls + 1
             for part, maximum in pairs(env.bhs.maxhp) do
@@ -1999,11 +2013,178 @@ local function fake_actor_adapter_env()
             return gamma_arena_result.ok(true)
         end,
         input = {
-            acquire = function() env.input_acquires = env.input_acquires + 1; return gamma_arena_result.ok(true) end,
+            acquire = function()
+                env.input_acquires = env.input_acquires + 1
+                env.ordered_calls[#env.ordered_calls + 1] = "input"
+                return gamma_arena_result.ok(true)
+            end,
             release = function() env.input_releases = env.input_releases + 1; return gamma_arena_result.ok(true) end
         }
     }
     return env, gamma_arena_actor_adapter.new(deps)
+end
+
+local function runtime_actor_rematch_boundary_aborts_before_input_lock()
+    local env, adapter = fake_actor_adapter_env()
+    local result = adapter:begin_rematch_boundary()
+    gamma_arena_test_assert.is_true(result.ok, "rematch boundary succeeds")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "interrupt", "LAM2 interruption precedes Arena input ownership")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "input", "Arena input ownership is the final boundary mutation")
+    gamma_arena_test_assert.equals(env.interrupt_calls, 1, "item presentation is interrupted once")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "input is acquired once")
+end
+
+local function runtime_actor_rematch_boundary_failure_never_acquires_input()
+    local env, adapter = fake_actor_adapter_env()
+    env.interrupt_failure = true
+    local result = adapter:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(result.ok, "throwing/present item integration fails the boundary")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_INTERRUPT", "boundary preserves the structured integration failure")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "failed interruption cannot acquire the Arena input lease")
+end
+
+local function runtime_actor_rematch_transients_clear_once_before_loadout_cleanup()
+    local env, adapter = fake_actor_adapter_env()
+    local cleanup_calls = 0
+    adapter.deps.loadout = {
+        cleanup = function()
+            cleanup_calls = cleanup_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "loadout"
+            return gamma_arena_result.ok({ pending = true })
+        end
+    }
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local second = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending, "first rematch reset waits for loadout cleanup")
+    gamma_arena_test_assert.is_true(second.ok and second.value.pending, "repeated rematch reset remains pending")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "transients", "round transients clear before loadout cleanup")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "loadout", "loadout cleanup follows the one-shot transient clear")
+    gamma_arena_test_assert.equals(env.transient_reset_calls, 1, "pending loadout updates never repeat transient cleanup")
+    gamma_arena_test_assert.equals(cleanup_calls, 2, "loadout cleanup remains retryable while pending")
+end
+
+local function runtime_actor_transient_failure_prevents_loadout_cleanup()
+    local env, adapter = fake_actor_adapter_env()
+    local cleanup_calls = 0
+    env.transient_reset_failure = true
+    adapter.deps.loadout = { cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end }
+    adapter:begin_update()
+    local result = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "transient reset failure stops rematch")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_TRANSIENT", "transient failure identity is preserved")
+    gamma_arena_test_assert.equals(cleanup_calls, 0, "loadout cleanup cannot run after failed transient reset")
+end
+
+local function fake_actor_conditions(options)
+    options = options or {}
+    local conditions = {
+        wound_count = options.wounds or 2,
+        booster_count = options.boosters or 2,
+        alcohol = options.alcohol or 0.5
+    }
+    function conditions:ClearWounds()
+        if not options.retain_wounds then self.wound_count = 0 end
+    end
+    function conditions:ClearAllBoosters()
+        if not options.retain_boosters then self.booster_count = 0 end
+    end
+    function conditions:GetAlcohol() return self.alcohol end
+    function conditions:ChangeAlcohol(delta)
+        if not options.retain_alcohol then self.alcohol = self.alcohol + delta end
+    end
+    function conditions:WoundForEach(callback)
+        for index = 1, self.wound_count do callback({ index = index }) end
+    end
+    function conditions:BoosterForEach(callback)
+        for index = 1, self.booster_count do callback(index, 1, 1) end
+    end
+    local cast = { conditions = function() return conditions end }
+    local actor = { cast_Actor = function() return cast end }
+    return actor, conditions
+end
+
+local function runtime_bootstrap_engine_transients_clear_and_verify()
+    local actor, conditions = fake_actor_conditions()
+    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+    gamma_arena_test_assert.is_true(result.ok, "engine transient reset succeeds with complete condition APIs")
+    gamma_arena_test_assert.equals(conditions.wound_count, 0, "engine wounds are authoritatively cleared")
+    gamma_arena_test_assert.equals(conditions.booster_count, 0, "engine boosters are authoritatively cleared")
+    gamma_arena_test_assert.equals(conditions.alcohol, 0, "engine alcohol is authoritatively zeroed")
+end
+
+local function runtime_bootstrap_engine_transient_readback_fails_closed()
+    for _, options in ipairs({
+        { retain_wounds = true },
+        { retain_boosters = true },
+        { retain_alcohol = true }
+    }) do
+        local actor = fake_actor_conditions(options)
+        local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+        gamma_arena_test_assert.is_false(result.ok, "surviving engine transient fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_TRANSIENT_VERIFY_FAILED", "engine readback failure code is stable")
+    end
+    local actor = fake_actor_conditions()
+    actor.cast_Actor = nil
+    local missing = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+    gamma_arena_test_assert.is_false(missing.ok, "missing required condition API fails closed")
+    gamma_arena_test_assert.equals(missing.error.code, "GA_ACTOR_CONDITIONS_API_MISSING", "missing condition API code is stable")
+end
+
+local function runtime_bootstrap_gamma_transient_integrations_are_exact()
+    local parts = { "head", "torso", "rightarm", "leftarm", "rightleg", "leftleg" }
+    local bhs = { health = {}, maxhp = {}, timedhp = {}, head_tbl = { previous = 1, stage = 2, volume = 0.75 } }
+    for _, part in ipairs(parts) do bhs.health[part] = 1; bhs.maxhp[part] = part == "head" and 11 or 5; bhs.timedhp[part] = 2 end
+    function bhs.save_state(out)
+        out.head_tbl = { previous = bhs.head_tbl.previous, stage = bhs.head_tbl.stage, volume = bhs.head_tbl.volume }
+    end
+    function bhs.load_state(value) bhs.head_tbl = value.head_tbl end
+    local persisted, removed_event, command = {}, nil, nil
+    local utils = {
+        save_var = function(_, key, value) persisted[key] = value end,
+        load_var = function(_, key) return persisted[key] end
+    }
+    local reset = gamma_arena_bootstrap.test_reset_gamma_body_health({}, {
+        bhs = bhs,
+        utils = utils,
+        remove_time_event = function(kind, name) removed_event = { kind = kind, name = name } end,
+        execute = function(value) command = value end
+    })
+    gamma_arena_test_assert.is_true(reset.ok, "complete BHS integration resets successfully")
+    for _, part in ipairs(parts) do
+        gamma_arena_test_assert.equals(bhs.health[part], bhs.maxhp[part], "BHS part is fully restored: " .. part)
+        gamma_arena_test_assert.equals(bhs.timedhp[part], 0, "BHS timed treatment is cleared: " .. part)
+    end
+    gamma_arena_test_assert.equals(bhs.head_tbl.previous, bhs.maxhp.head, "BHS concussion baseline becomes healthy")
+    gamma_arena_test_assert.equals(bhs.head_tbl.stage, 0, "BHS concussion stage is cleared")
+    gamma_arena_test_assert.equals(bhs.head_tbl.volume, 0.75, "BHS configured effect volume is preserved")
+    gamma_arena_test_assert.equals(removed_event.kind, 0, "BHS delayed stage event namespace is exact")
+    gamma_arena_test_assert.equals(removed_event.name, "set_stage_two", "BHS delayed stage event is cancelled")
+    gamma_arena_test_assert.equals(command, "snd_volume_eff 0.75", "BHS effect volume is restored")
+
+    local psy_calls = {}
+    local psy = {
+        set_psy_health = function(value) psy_calls[#psy_calls + 1] = value end,
+        remove_all_psy_ppe_effects = function() psy_calls[#psy_calls + 1] = "clear" end
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_bootstrap.test_reset_gamma_psy(psy).ok, "GAMMA psy integration resets successfully")
+    gamma_arena_test_assert.equals(psy_calls[1], 1, "GAMMA psy health is restored first")
+    gamma_arena_test_assert.equals(psy_calls[2], "clear", "GAMMA psy PPE is removed second")
+
+    local pp, cam = {}, {}
+    local effectors = gamma_arena_bootstrap.test_clear_round_effectors({
+        remove_pp_effector = function(id) pp[#pp + 1] = id end,
+        remove_cam_effector = function(id) cam[#cam + 1] = id end
+    })
+    gamma_arena_test_assert.is_true(effectors.ok, "bounded Arena effector cleanup succeeds")
+    gamma_arena_test_assert.equals(#pp, 21, "only the bounded PP allowlist is removed")
+    gamma_arena_test_assert.equals(pp[1], 2011, "condition PP range starts exactly")
+    gamma_arena_test_assert.equals(pp[8], 99133, "BHS PP allowlist is exact")
+    gamma_arena_test_assert.equals(pp[9], 655808, "BHS blur allowlist starts exactly")
+    gamma_arena_test_assert.equals(pp[21], 655820, "BHS blur allowlist ends exactly")
+    gamma_arena_test_assert.equals(#cam, 8, "only the bounded camera allowlist is removed")
+    gamma_arena_test_assert.equals(cam[1], 1001, "bleed camera effector is removed")
+    gamma_arena_test_assert.equals(cam[8], 99271, "BHS camera allowlist is exact")
 end
 
 local function runtime_actor_inventory_release_is_deferred_and_verified()
@@ -9114,6 +9295,13 @@ local cases = {
     ,{ name = "runtime_actor_inventory_drain_cleanup_clears_transaction", fn = runtime_actor_inventory_drain_cleanup_clears_transaction }
     ,{ name = "runtime_actor_normalization_uses_gamma_bleeding_sentinel", fn = runtime_actor_normalization_uses_gamma_bleeding_sentinel }
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
+    ,{ name = "runtime_actor_rematch_boundary_aborts_before_input_lock", fn = runtime_actor_rematch_boundary_aborts_before_input_lock }
+    ,{ name = "runtime_actor_rematch_boundary_failure_never_acquires_input", fn = runtime_actor_rematch_boundary_failure_never_acquires_input }
+    ,{ name = "runtime_actor_rematch_transients_clear_once_before_loadout_cleanup", fn = runtime_actor_rematch_transients_clear_once_before_loadout_cleanup }
+    ,{ name = "runtime_actor_transient_failure_prevents_loadout_cleanup", fn = runtime_actor_transient_failure_prevents_loadout_cleanup }
+    ,{ name = "runtime_bootstrap_engine_transients_clear_and_verify", fn = runtime_bootstrap_engine_transients_clear_and_verify }
+    ,{ name = "runtime_bootstrap_engine_transient_readback_fails_closed", fn = runtime_bootstrap_engine_transient_readback_fails_closed }
+    ,{ name = "runtime_bootstrap_gamma_transient_integrations_are_exact", fn = runtime_bootstrap_gamma_transient_integrations_are_exact }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
     ,{ name = "runtime_actor_victory_reset_waits_for_inventory_absence", fn = runtime_actor_victory_reset_waits_for_inventory_absence }
     ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }

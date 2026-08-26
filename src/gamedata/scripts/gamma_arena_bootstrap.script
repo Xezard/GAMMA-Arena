@@ -1068,12 +1068,92 @@ end
 
 local BHS_PARTS = { "head", "torso", "rightarm", "leftarm", "rightleg", "leftleg" }
 
-local function reset_gamma_body_health(actor)
-    local bhs = zzz_player_injuries
+local function finite_runtime_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function runtime_object_method(code, object, method_name, ...)
+    local looked_up, method = pcall(function() return object and object[method_name] end)
+    if not looked_up or type(method) ~= "function" then
+        return gamma_arena_result.err(code, "Required runtime method is unavailable", { method = method_name })
+    end
+    local called, value = pcall(method, object, ...)
+    if not called then
+        return gamma_arena_result.err(code, "Required runtime method failed safely", { method = method_name, reason = tostring(value) })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function clear_engine_actor_transients(actor)
+    local cast = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", actor, "cast_Actor")
+    if not cast.ok or cast.value == nil then return cast.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor cast is unavailable") or cast end
+    local conditions = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", cast.value, "conditions")
+    if not conditions.ok or conditions.value == nil then return conditions.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor conditions are unavailable") or conditions end
+    local api = conditions.value
+    local wounds = runtime_object_method("GA_ACTOR_WOUND_CLEAR_FAILED", api, "ClearWounds")
+    if not wounds.ok then return wounds end
+    local boosters = runtime_object_method("GA_ACTOR_BOOSTER_CLEAR_FAILED", api, "ClearAllBoosters")
+    if not boosters.ok then return boosters end
+    local alcohol = runtime_object_method("GA_ACTOR_ALCOHOL_CLEAR_FAILED", api, "GetAlcohol")
+    if not alcohol.ok or not finite_runtime_number(alcohol.value) then
+        return alcohol.ok and gamma_arena_result.err("GA_ACTOR_ALCOHOL_CLEAR_FAILED", "Actor alcohol value is invalid") or alcohol
+    end
+    if math.abs(alcohol.value) > 0.0001 then
+        local changed = runtime_object_method("GA_ACTOR_ALCOHOL_CLEAR_FAILED", api, "ChangeAlcohol", -alcohol.value)
+        if not changed.ok then return changed end
+    end
+
+    local wound_count = 0
+    local wound_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "WoundForEach", function()
+        wound_count = wound_count + 1
+        return false
+    end)
+    if not wound_readback.ok then return wound_readback end
+    local booster_count = 0
+    local booster_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "BoosterForEach", function()
+        booster_count = booster_count + 1
+        return false
+    end)
+    if not booster_readback.ok then return booster_readback end
+    local alcohol_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "GetAlcohol")
+    if not alcohol_readback.ok or not finite_runtime_number(alcohol_readback.value) then
+        return alcohol_readback.ok and gamma_arena_result.err("GA_ACTOR_TRANSIENT_VERIFY_FAILED", "Actor alcohol readback is invalid") or alcohol_readback
+    end
+    if wound_count ~= 0 or booster_count ~= 0 or math.abs(alcohol_readback.value) > 0.0001 then
+        return gamma_arena_result.err("GA_ACTOR_TRANSIENT_VERIFY_FAILED", "Actor transient conditions survived reset", {
+            wounds = wound_count,
+            boosters = booster_count,
+            alcohol = alcohol_readback.value
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function reset_gamma_body_health(actor, ports)
+    ports = ports or {}
+    local bhs = ports.bhs or zzz_player_injuries
+    local utils = ports.utils or utils_obj
+    local remove_time_event = ports.remove_time_event or RemoveTimeEvent
+    local execute = ports.execute or exec_console_cmd
     if type(bhs) ~= "table" then return gamma_arena_result.ok(false) end
     if type(bhs.health) ~= "table" or type(bhs.maxhp) ~= "table" or type(bhs.timedhp) ~= "table"
-        or type(utils_obj) ~= "table" or type(utils_obj.save_var) ~= "function" or type(utils_obj.load_var) ~= "function" then
+        or type(bhs.save_state) ~= "function" or type(bhs.load_state) ~= "function"
+        or type(utils) ~= "table" or type(utils.save_var) ~= "function" or type(utils.load_var) ~= "function"
+        or type(remove_time_event) ~= "function" then
         return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Installed Body Health System API is incomplete")
+    end
+    local prior_state = {}
+    local saved, save_reason = pcall(bhs.save_state, prior_state)
+    if not saved or type(prior_state.head_tbl) ~= "table" then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state is unavailable", { reason = tostring(save_reason) })
+    end
+    local volume = prior_state.head_tbl.volume
+    if volume ~= nil and not finite_runtime_number(volume) then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume is invalid")
+    end
+    local timer_removed, timer_reason = pcall(remove_time_event, 0, "set_stage_two")
+    if not timer_removed then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System concussion timer could not be removed", { reason = tostring(timer_reason) })
     end
     for _, part in ipairs(BHS_PARTS) do
         local maximum = bhs.maxhp[part]
@@ -1083,17 +1163,92 @@ local function reset_gamma_body_health(actor)
         local assigned, reason = pcall(function()
             bhs.health[part] = maximum
             bhs.timedhp[part] = 0
-            utils_obj.save_var(actor, "health." .. part, maximum)
-            utils_obj.save_var(actor, "timedhp." .. part, 0)
+            utils.save_var(actor, "health." .. part, maximum)
+            utils.save_var(actor, "timedhp." .. part, 0)
         end)
         if not assigned then
             return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset failed safely", { part = part, reason = tostring(reason) })
         end
-        local loaded_health_ok, loaded_health = pcall(utils_obj.load_var, actor, "health." .. part)
-        local loaded_timed_ok, loaded_timed = pcall(utils_obj.load_var, actor, "timedhp." .. part)
+        local loaded_health_ok, loaded_health = pcall(utils.load_var, actor, "health." .. part)
+        local loaded_timed_ok, loaded_timed = pcall(utils.load_var, actor, "timedhp." .. part)
         if not loaded_health_ok or loaded_health ~= maximum or not loaded_timed_ok or loaded_timed ~= 0 then
             return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset did not round-trip", { part = part })
         end
+    end
+    local head_state = { previous = bhs.maxhp.head, stage = 0, volume = volume }
+    local loaded, load_reason = pcall(bhs.load_state, { head_tbl = head_state })
+    if not loaded then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state reset failed safely", { reason = tostring(load_reason) })
+    end
+    local verified_state = {}
+    local verified, verify_reason = pcall(bhs.save_state, verified_state)
+    local verified_head = verified_state.head_tbl
+    if not verified or type(verified_head) ~= "table" or verified_head.previous ~= bhs.maxhp.head
+        or verified_head.stage ~= 0 or verified_head.volume ~= volume then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state reset did not round-trip", { reason = tostring(verify_reason) })
+    end
+    if volume ~= nil then
+        if type(execute) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume restore API is unavailable")
+        end
+        local restored, restore_reason = pcall(execute, "snd_volume_eff " .. tostring(volume))
+        if not restored then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume restore failed safely", { reason = tostring(restore_reason) })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local mod_body_health_reset = reset_gamma_body_health
+
+local function reset_gamma_psy(psy_port)
+    local psy = psy_port or arszi_psy
+    if type(psy) ~= "table" then return gamma_arena_result.ok(false) end
+    if type(psy.set_psy_health) ~= "function" or type(psy.remove_all_psy_ppe_effects) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "Installed GAMMA psy API is incomplete")
+    end
+    local set_ok, set_reason = pcall(psy.set_psy_health, 1)
+    if not set_ok then return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "GAMMA psy health reset failed safely", { reason = tostring(set_reason) }) end
+    local clear_ok, clear_reason = pcall(psy.remove_all_psy_ppe_effects)
+    if not clear_ok then return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "GAMMA psy presentation reset failed safely", { reason = tostring(clear_reason) }) end
+    return gamma_arena_result.ok(true)
+end
+
+local function clear_round_effectors(level_port)
+    local runtime_level = level_port or level
+    if type(runtime_level) ~= "table" and type(runtime_level) ~= "userdata" then
+        return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Level effector API is unavailable")
+    end
+    local pp_ok, remove_pp = pcall(function() return runtime_level.remove_pp_effector end)
+    local cam_ok, remove_cam = pcall(function() return runtime_level.remove_cam_effector end)
+    if not pp_ok or type(remove_pp) ~= "function" or not cam_ok or type(remove_cam) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Level effector removal API is incomplete")
+    end
+    local pp_ids = { 2011, 2012, 2013, 2014, 2015, 2016, 99123, 99133 }
+    for id = 655808, 655820 do pp_ids[#pp_ids + 1] = id end
+    for _, id in ipairs(pp_ids) do
+        local removed, reason = pcall(remove_pp, id)
+        if not removed then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Round PP effector removal failed safely", { id = id, reason = tostring(reason) }) end
+    end
+    for _, id in ipairs({ 1001, 2190, 8053, 96872, 9921, 99251, 99261, 99271 }) do
+        local removed, reason = pcall(remove_cam, id)
+        if not removed then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Round camera effector removal failed safely", { id = id, reason = tostring(reason) }) end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function reset_gamma_actor_transients(actor)
+    local engine = clear_engine_actor_transients(actor)
+    if not engine.ok then return engine end
+    local body = mod_body_health_reset(actor)
+    if not body.ok then return body end
+    local psy = reset_gamma_psy()
+    if not psy.ok then return psy end
+    local effectors = clear_round_effectors()
+    if not effectors.ok then return effectors end
+    if type(actor_effects) == "table" and type(actor_effects.disable_effects_timer) == "function" then
+        local disabled, reason = pcall(actor_effects.disable_effects_timer, 100)
+        if not disabled then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Actor effect scheduling reset failed safely", { reason = tostring(reason) }) end
     end
     return gamma_arena_result.ok(true)
 end
@@ -1287,10 +1442,14 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         item_section = function(item) return item:section() end,
         patrol = function(path) return patrol(path) end,
         effects = effects,
-        mod_body_health_reset = reset_gamma_body_health,
-        mod_psy_reset = function()
-            if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
+        interrupt_item_use = function()
+            if type(lam2) ~= "table" then return gamma_arena_result.ok(false) end
+            if type(lam2.abort) ~= "function" then return gamma_arena_result.err("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "Installed LAM2 abort API is incomplete") end
+            local called, reason = pcall(lam2.abort)
+            if not called then return gamma_arena_result.err("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "LAM2 item-use interruption failed safely", { reason = tostring(reason) }) end
+            return gamma_arena_result.ok(true)
         end,
+        reset_transient_state = reset_gamma_actor_transients,
         input = input,
         loadout = loadout
     })
@@ -2346,6 +2505,22 @@ function request_restart()
     return invoke_callback(runtime_orchestrator, "manual_restart", function()
         return call_instance(runtime_orchestrator, "restart_arena_action")
     end)
+end
+
+function test_clear_engine_actor_transients(actor)
+    return clear_engine_actor_transients(actor)
+end
+
+function test_reset_gamma_body_health(actor, ports)
+    return reset_gamma_body_health(actor, ports)
+end
+
+function test_reset_gamma_psy(psy)
+    return reset_gamma_psy(psy)
+end
+
+function test_clear_round_effectors(runtime_level)
+    return clear_round_effectors(runtime_level)
 end
 
 function on_game_start()
