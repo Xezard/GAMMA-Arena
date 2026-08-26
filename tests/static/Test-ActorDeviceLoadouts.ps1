@@ -11,12 +11,13 @@ $CatalogLoaderPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catal
 $DeviceGeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_device_generator.script'
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 $ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
+$EntityAdapterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $BootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
 $GeneratorTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
 $RuntimeTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 
-foreach ($Path in @($CatalogPath, $CatalogLoaderPath, $DeviceGeneratorPath, $GeneratorPath, $ValidatorPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
+foreach ($Path in @($CatalogPath, $CatalogLoaderPath, $DeviceGeneratorPath, $GeneratorPath, $ValidatorPath, $EntityAdapterPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Actor device integration file is missing: $Path" }
 }
 
@@ -25,6 +26,7 @@ $CatalogLoader = Get-Content -Raw -LiteralPath $CatalogLoaderPath
 $DeviceGenerator = Get-Content -Raw -LiteralPath $DeviceGeneratorPath
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
+$EntityAdapter = Get-Content -Raw -LiteralPath $EntityAdapterPath
 $Bootstrap = Get-Content -Raw -LiteralPath $BootstrapPath
 $Compat = Get-Content -Raw -LiteralPath $CompatPath
 $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestsPath
@@ -100,6 +102,12 @@ foreach ($Marker in @('GA_LOADOUT_DEVICE_INVALID','gamma_arena_device_generator.
 }
 foreach ($CaseName in @('actor_device_is_difficulty_independent_and_stable','validator_rejects_forged_actor_devices','validator_copies_actor_device')) {
     if (-not $GeneratorTests.Contains($CaseName)) { throw "FightSpec v8 actor device regression case is missing: $CaseName" }
+}
+foreach ($Marker in @('loadout.device.catalog_id','loadout.device.section','loadout.device.kind','loadout.device.weight','loadout.device.nv_effect','device = device')) {
+    if (-not $EntityAdapter.Contains($Marker)) { throw "EntityAdapter actor device copy contract is missing: $Marker" }
+}
+if (-not $RuntimeTests.Contains('runtime_entity_preserves_actor_device_across_copy')) {
+    throw 'EntityAdapter runtime regression must preserve the exact actor device across the FightSpec copy boundary'
 }
 
 foreach ($Marker in @('GA_ACTOR_DEVICE_CHARGE_FAILED','"outfit", "knife", "device", "weapon"','CHARGE_DEVICE','set_item_condition','item_condition','shutdown_device','device_neutralized','device_condition')) {
