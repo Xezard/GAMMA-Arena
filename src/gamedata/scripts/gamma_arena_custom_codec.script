@@ -1,5 +1,12 @@
 local MAX_ROSTER = 10
 local MAX_ITEMS = 64
+local MAX_SAFE_INTEGER = 9007199254740991
+local CONFIG_FIELDS = {
+    schema_version = true, faction = true, roster = true,
+    actor_items = true, catalog_fingerprint = true
+}
+local ROSTER_FIELDS = { rank = true }
+local ITEM_FIELDS = { section = true, quantity = true, equipped_slot = true }
 
 local function failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
@@ -7,6 +14,33 @@ end
 
 local function valid_prefix(prefix)
     return type(prefix) == "string" and #prefix <= 64 and string.match(prefix, "^[%w_]*$") ~= nil
+end
+
+local function valid_text(value)
+    return type(value) == "string" and value ~= "" and #value <= 256
+end
+
+local function finite_positive_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= 1 and value <= MAX_SAFE_INTEGER
+end
+
+local function exact_fields(value, allowed, path)
+    if type(value) ~= "table" then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec value must be a table", { path = path })
+    end
+    for key in pairs(value) do
+        if type(key) ~= "string" or not allowed[key] then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec value contains an unknown field", {
+                path = path, field = tostring(key)
+            })
+        end
+    end
+    return nil
+end
+
+local function canonical_integer(value)
+    return string.format("%.0f", value)
 end
 
 local function dense_length(value, maximum)
@@ -42,7 +76,7 @@ local function decimal_integer(value, minimum, maximum, field)
     end
     local parsed = tonumber(value)
     if type(parsed) ~= "number" or parsed ~= math.floor(parsed) or parsed < minimum or parsed > maximum
-        or tostring(parsed) ~= value then
+        or canonical_integer(parsed) ~= value then
         return nil, failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom integer is non-canonical", { field = field, value = value })
     end
     return parsed
@@ -61,9 +95,10 @@ end
 
 local function encode_internal(config, prefix)
     if not valid_prefix(prefix) then return failure("GA_CUSTOM_CODEC_PREFIX_INVALID", "Custom codec prefix is invalid") end
-    if type(config) ~= "table" or config.schema_version ~= 1 or type(config.faction) ~= "string"
-        or type(config.catalog_fingerprint) ~= "string" or type(config.roster) ~= "table"
-        or type(config.actor_items) ~= "table" then
+    local field_error = exact_fields(config, CONFIG_FIELDS, "config")
+    if field_error then return field_error end
+    if config.schema_version ~= 1 or not valid_text(config.faction) or not valid_text(config.catalog_fingerprint)
+        or type(config.roster) ~= "table" or type(config.actor_items) ~= "table" then
         return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec input is not a bounded normalized config")
     end
     local roster_count = dense_length(config.roster, MAX_ROSTER)
@@ -78,11 +113,24 @@ local function encode_internal(config, prefix)
         [prefix .. "roster_count"] = roster_count,
         [prefix .. "actor_item_count"] = item_count
     }
-    for index, entry in ipairs(config.roster) do values[prefix .. "roster_" .. tostring(index) .. "_rank"] = entry.rank end
+    for index, entry in ipairs(config.roster) do
+        field_error = exact_fields(entry, ROSTER_FIELDS, "roster[" .. tostring(index) .. "]")
+        if field_error then return field_error end
+        if not valid_text(entry.rank) then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec roster rank is malformed", { index = index })
+        end
+        values[prefix .. "roster_" .. tostring(index) .. "_rank"] = entry.rank
+    end
     for index, entry in ipairs(config.actor_items) do
+        field_error = exact_fields(entry, ITEM_FIELDS, "actor_items[" .. tostring(index) .. "]")
+        if field_error then return field_error end
+        if not valid_text(entry.section) or not finite_positive_integer(entry.quantity)
+            or (entry.equipped_slot ~= nil and not valid_text(entry.equipped_slot)) then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec item scalar is malformed", { index = index })
+        end
         local base = prefix .. "actor_item_" .. tostring(index) .. "_"
         values[base .. "section"] = entry.section
-        values[base .. "quantity"] = entry.quantity
+        values[base .. "quantity"] = canonical_integer(entry.quantity)
         if entry.equipped_slot ~= nil then values[base .. "equipped_slot"] = entry.equipped_slot end
     end
     local operations = {}

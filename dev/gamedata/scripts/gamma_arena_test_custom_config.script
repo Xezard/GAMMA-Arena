@@ -145,6 +145,38 @@ local function custom_config_rejects_equipment_compatibility_and_budget_matrix()
     reject(function(value) value.actor_items[#value.actor_items + 1] = { section = "grenade_gd05", quantity = 1 } end, nil, "GA_CUSTOM_GRENADE_LIMIT", "third grenade")
 end
 
+local function custom_config_rejects_non_unit_physical_equipment()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_config.validate(value, context), "GA_CUSTOM_EQUIPMENT_QUANTITY", label)
+    end
+    reject(function(value) value.actor_items[1].quantity = 2 end, "outfit quantity two")
+    reject(function(value) value.actor_items[4].quantity = 2 end, "knife quantity two")
+    reject(function(value)
+        table.insert(value.actor_items, 2, { section = "helmet_open", quantity = 2, equipped_slot = "helmet" })
+    end, "helmet quantity two")
+    reject(function(value) value.actor_items[2].quantity = 2 end, "equipped weapon quantity two")
+end
+
+local function custom_config_preserves_legitimate_inventory_stacks()
+    local catalog = make_catalog()
+    catalog.items.wpn_spare = {
+        section = "wpn_spare", category = "weapon", price = 1, weight_mg = 1,
+        ltx_slot = 2, ammo_sections = { "ammo_alpha" }, healing = false,
+        helmet_allowed = true, carry_bonus_mg = 0
+    }
+    local value = make_valid_config(catalog)
+    value.actor_items[5].quantity = 2
+    table.insert(value.actor_items, 6, { section = "wpn_spare", quantity = 2 })
+    local validated = gamma_arena_custom_config.validate(value, make_context(catalog))
+    gamma_arena_test_assert.is_true(validated.ok, "medicine and unequipped weapon stacks remain valid")
+    gamma_arena_test_assert.equals(validated.value.actor_items[5].quantity, 2, "medicine stack is preserved")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].quantity, 2, "unequipped weapon stack is preserved")
+end
+
 local function custom_config_grenade_order_is_semantic()
     local catalog = make_catalog()
     local forward = make_valid_config(catalog)
@@ -194,13 +226,52 @@ local function custom_codec_rejects_sparse_and_oversized_shapes()
         "GA_CUSTOM_CODEC_TRAILING_KEY", "trailing indexed key")
 end
 
+local function custom_codec_encode_rejects_unknown_fields_and_malformed_scalars()
+    local catalog = make_catalog()
+    local function reject(mutate, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_codec.encode(value, "launch_custom_"), "GA_CUSTOM_CODEC_INVALID", label)
+    end
+    reject(function(value) value.future = true end, "codec top-level unknown field")
+    reject(function(value) value.roster[1].future = true end, "codec roster unknown field")
+    reject(function(value) value.actor_items[1].future = true end, "codec item unknown field")
+    reject(function(value) value.faction = nil end, "codec missing top-level scalar")
+    reject(function(value) value.roster[1].rank = nil end, "codec missing roster scalar")
+    reject(function(value) value.actor_items[1].section = nil end, "codec missing item section")
+    reject(function(value) value.actor_items[1].quantity = nil end, "codec missing item quantity")
+    reject(function(value) value.faction = "" end, "codec empty faction")
+    reject(function(value) value.catalog_fingerprint = "" end, "codec empty fingerprint")
+    reject(function(value) value.roster[1].rank = {} end, "codec malformed roster rank")
+    reject(function(value) value.actor_items[1].section = false end, "codec malformed item section")
+    reject(function(value) value.actor_items[1].quantity = "1" end, "codec malformed item quantity")
+    reject(function(value) value.actor_items[1].equipped_slot = 1 end, "codec malformed equipped slot")
+end
+
+local function custom_codec_encode_uses_canonical_decimal_quantities()
+    local catalog = make_catalog()
+    local value = make_valid_config(catalog)
+    value.actor_items[3].quantity = 9007199254740991
+    local encoded = gamma_arena_custom_codec.encode(value, "launch_custom_")
+    gamma_arena_test_assert.is_true(encoded.ok, "maximum safe quantity encodes structurally")
+    local quantity
+    for _, operation in ipairs(encoded.value) do
+        if operation.key == "launch_custom_actor_item_3_quantity" then quantity = operation.value; break end
+    end
+    gamma_arena_test_assert.equals(quantity, "9007199254740991", "quantity encoding is canonical decimal text")
+end
+
 local cases = {
     { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
     { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
     { name = "custom_config_rejects_equipment_compatibility_and_budget_matrix", fn = custom_config_rejects_equipment_compatibility_and_budget_matrix },
+    { name = "custom_config_rejects_non_unit_physical_equipment", fn = custom_config_rejects_non_unit_physical_equipment },
+    { name = "custom_config_preserves_legitimate_inventory_stacks", fn = custom_config_preserves_legitimate_inventory_stacks },
     { name = "custom_config_grenade_order_is_semantic", fn = custom_config_grenade_order_is_semantic },
     { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
     ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
+    ,{ name = "custom_codec_encode_rejects_unknown_fields_and_malformed_scalars", fn = custom_codec_encode_rejects_unknown_fields_and_malformed_scalars }
+    ,{ name = "custom_codec_encode_uses_canonical_decimal_quantities", fn = custom_codec_encode_uses_canonical_decimal_quantities }
 }
 
 function run(run_case_fn)
