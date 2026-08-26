@@ -68,6 +68,9 @@ if (-not $GeneratorTests.Contains('device_torch_nv_2={class="TORCH_S",slot="10",
 if (-not $RuntimeTests.Contains('sections[device.section] = { class = "TORCH_S", slot = 9, nv_effect = device.nv_effect }')) {
     throw 'Actor device runtime preflight fixture must model raw Anomaly device slot 9'
 }
+if (-not $RuntimeTests.Contains('{ label = "device", ltx_slot = 9, lua_slot = 10 }')) {
+    throw 'Actor device runtime regression must prove raw slot 9 translates to Lua slot 10'
+}
 foreach ($Marker in @('function select','function generate','actor_device','GA_DEVICE_ARGUMENT_INVALID','GA_DEVICE_SELECTION_INVALID','next_int(1, 100)')) {
     if (-not $DeviceGenerator.Contains($Marker)) { throw "Actor device generator contract is missing: $Marker" }
 }
