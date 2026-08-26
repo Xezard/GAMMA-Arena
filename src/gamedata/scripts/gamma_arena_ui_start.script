@@ -184,10 +184,12 @@ local function handoff_failure(config, failure)
     return failure
 end
 
-function issue_launch_with_defeat_recovery(config, request, ports)
+function issue_launch_with_defeat_recovery(config, request, ports, custom_context)
     ports = ports or {}
     local issue_launch = ports.issue_launch or gamma_arena_session_store.issue_launch
-    local launch_options = ports.launch_options
+    local launch_options = {}
+    for key, value in pairs(ports.launch_options or {}) do launch_options[key] = value end
+    if custom_context ~= nil then launch_options.custom_context = custom_context end
     local function issue()
         return issue_launch(config, request, launch_options)
     end
@@ -210,6 +212,51 @@ function issue_launch_with_defeat_recovery(config, request, ports)
     local cleared = clear_defeat(config)
     if not cleared.ok then return cleared end
     return retry_stale(issue())
+end
+
+local function prepare_start_request(request, ports)
+    if type(request) ~= "table" then
+        return gamma_arena_result.err("GA_START_REQUEST_INVALID", "ArenaStartRequest must be a table")
+    end
+    if request.schema_version == 1 then
+        local validated = gamma_arena_session_store.validate_start_request(request)
+        return validated.ok and gamma_arena_result.ok({ request = validated.value }) or validated
+    end
+    if request.schema_version ~= 2 then
+        return gamma_arena_result.err("GA_START_REQUEST_SCHEMA_INVALID", "ArenaStartRequest schema is unsupported", { value = request.schema_version })
+    end
+    local catalogs = ports and ports.catalogs or gamma_arena_catalog.load
+    if type(catalogs) ~= "function" then
+        return gamma_arena_result.err("GA_START_CATALOG_UNAVAILABLE", "Active Arena catalog loader is unavailable")
+    end
+    local called, loaded = pcall(catalogs)
+    if not called then
+        return gamma_arena_result.err("GA_START_CATALOG_UNAVAILABLE", "Active Arena catalog loading failed safely", { reason = tostring(loaded) })
+    end
+    if type(loaded) ~= "table" or type(loaded.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_START_CATALOG_UNAVAILABLE", "Active Arena catalog loader returned an invalid Result")
+    end
+    if not loaded.ok then return loaded end
+    local catalog = loaded.value
+    local layout = type(catalog) == "table" and type(catalog.layouts) == "table" and catalog.layouts.rostok_arena_v1 or nil
+    local custom_context = { catalog = catalog, layout = layout }
+    local candidate = {
+        schema_version = 2,
+        mode_id = request.mode_id,
+        difficulty_id = request.difficulty_id,
+        generation_recipe = request.generation_recipe,
+        seed_mode = request.seed_mode,
+        session_seed = request.session_seed,
+        generator_version = catalog and catalog.generator_version or nil,
+        catalog_revision = catalog and catalog.revision or nil,
+        catalog_fingerprint = catalog and catalog.fingerprint or nil,
+        custom_config = request.custom_config
+    }
+    if candidate.difficulty_id == nil then candidate.difficulty_id = nil end
+    if candidate.custom_config == nil then candidate.custom_config = nil end
+    local validated = gamma_arena_session_store.validate_start_request(candidate, custom_context)
+    if not validated.ok then return validated end
+    return gamma_arena_result.ok({ request = validated.value, custom_context = custom_context })
 end
 
 function handoff_start_game(owner, config)
@@ -305,14 +352,20 @@ function begin_start(owner, config, request, ports)
     debug_trace("GA_DEBUG_START_PREFLIGHT_RESULT", "Arena Start runtime preflight returned", debug_result_context(runtime))
     if not runtime.ok then return runtime end
 
-    local save_preferences = ports.save_preferences or gamma_arena_session_store.save_preferences
-    debug_trace("GA_DEBUG_START_PREFERENCES_BEGIN", "Arena Start preference persistence began")
-    local preferences = save_preferences(config, request.difficulty_id, request.seed_mode)
-    debug_trace("GA_DEBUG_START_PREFERENCES_RESULT", "Arena Start preference persistence returned", debug_result_context(preferences))
-    if not preferences.ok then return preferences end
+    local prepared = prepare_start_request(request, ports)
+    if not prepared.ok then return prepared end
+    request = prepared.value.request
+
+    if request.generation_recipe ~= "custom" then
+        local save_preferences = ports.save_preferences or gamma_arena_session_store.save_preferences
+        debug_trace("GA_DEBUG_START_PREFERENCES_BEGIN", "Arena Start preference persistence began")
+        local preferences = save_preferences(config, request.difficulty_id, request.seed_mode)
+        debug_trace("GA_DEBUG_START_PREFERENCES_RESULT", "Arena Start preference persistence returned", debug_result_context(preferences))
+        if not preferences.ok then return preferences end
+    end
 
     debug_trace("GA_DEBUG_START_INTENT_BEGIN", "Arena Start launch intent began")
-    local launch = issue_launch_with_defeat_recovery(config, request, ports)
+    local launch = issue_launch_with_defeat_recovery(config, request, ports, prepared.value.custom_context)
     debug_trace("GA_DEBUG_START_INTENT_RESULT", "Arena Start launch intent returned", debug_result_context(launch))
     if not launch.ok then return launch end
 
@@ -353,22 +406,13 @@ function UIStart:OnStart()
     if seed_mode == "random" and seed_text ~= self.last_random_seed_text then
         seed_mode = "manual"
     end
-    local request = gamma_arena_session_store.validate_start_request({
-        schema_version = 1,
+    local request = gamma_arena_result.ok({
+        schema_version = 2,
         mode_id = "skirmish",
+        generation_recipe = "random",
         difficulty_id = difficulty_id,
         seed_mode = seed_mode,
         session_seed = seed_result.value
-    })
-    if not request.ok then
-        debug_trace("GA_DEBUG_START_VALIDATION_FAILED", "Arena Start request validation failed", debug_result_context(request))
-        self:ShowValidation(request)
-        return
-    end
-    debug_trace("GA_DEBUG_START_VALIDATED", "Arena Start request validation passed", {
-        difficulty_id = request.value.difficulty_id,
-        seed_mode = request.value.seed_mode,
-        session_seed = request.value.session_seed
     })
     self.validation:Show(false)
     local started = begin_start(self.owner, axr_main.config, request.value, self.ports)

@@ -1,0 +1,210 @@
+local function clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then error("cyclic fixture") end
+    seen[value] = true
+    local copied = {}
+    for key, child in pairs(value) do copied[key] = clone(child, seen) end
+    seen[value] = nil
+    return copied
+end
+
+function make_catalog()
+    local function item(section, category, price, weight_mg, extra)
+        local value = {
+            section = section, category = category, price = price, weight_mg = weight_mg,
+            ammo_sections = {}, healing = false, helmet_allowed = true, carry_bonus_mg = 0
+        }
+        for key, child in pairs(extra or {}) do value[key] = child end
+        return value
+    end
+    local items = {
+        outfit_field = item("outfit_field", "outfit", 100, 5000, { carry_bonus_mg = 10000 }),
+        helmet_open = item("helmet_open", "helmet", 50, 1000),
+        wpn_knife = item("wpn_knife", "knife", 50, 500),
+        wpn_alpha = item("wpn_alpha", "weapon", 100, 3000, { ltx_slot = 2, ammo_sections = { "ammo_alpha" } }),
+        ammo_alpha = item("ammo_alpha", "ammo", 20, 100),
+        medkit = item("medkit", "medicine", 30, 100, { healing = true }),
+        grenade_f1 = item("grenade_f1", "grenade", 40, 400),
+        grenade_rgd5 = item("grenade_rgd5", "grenade", 70, 500),
+        grenade_gd05 = item("grenade_gd05", "grenade", 30, 300)
+    }
+    return {
+        schema_version = 9, revision = 10, generator_version = 10,
+        fingerprint = "ga-catalog-v9-custom001",
+        layouts = { rostok_arena_v1 = { id = "rostok_arena_v1", virtual_capacity = 10 } },
+        base_budget = 600, max_entries = 64, max_physical_items_per_participant = 256,
+        max_selected_grenades = 2, max_quantity_per_grenade = 1,
+        second_grenade_price_multiplier = 2, base_carry_weight = 50000,
+        rank_ids = { "novice", "legend" },
+        ranks = {
+            novice = { id = "novice", threat = 100 },
+            legend = { id = "legend", threat = 400 }
+        },
+        faction_ids = { "stalker" },
+        factions = {
+            stalker = { id = "stalker", ranks = { novice = { id = "novice" }, legend = { id = "legend" } } }
+        },
+        items = items
+    }
+end
+
+function make_context(catalog)
+    return { catalog = catalog or make_catalog(), layout = { id = "rostok_arena_v1", virtual_capacity = 10 } }
+end
+
+function make_valid_config(catalog)
+    catalog = catalog or make_catalog()
+    return {
+        schema_version = 1,
+        faction = "stalker",
+        roster = { { rank = "novice" } },
+        actor_items = {
+            { section = "outfit_field", quantity = 1, equipped_slot = "outfit" },
+            { section = "wpn_alpha", quantity = 1, equipped_slot = "weapon_2" },
+            { section = "ammo_alpha", quantity = 2 },
+            { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+            { section = "medkit", quantity = 1 },
+            { section = "grenade_f1", quantity = 1 },
+            { section = "grenade_rgd5", quantity = 1 }
+        },
+        catalog_fingerprint = catalog.fingerprint
+    }
+end
+
+local function assert_code(result, code, message)
+    gamma_arena_test_assert.is_false(result.ok, message)
+    gamma_arena_test_assert.equals(result.error.code, code, message .. " code")
+end
+
+local function custom_config_accepts_and_copies_valid_ordered_input()
+    local catalog = make_catalog()
+    local value = make_valid_config(catalog)
+    local validated = gamma_arena_custom_config.validate(value, make_context(catalog))
+    gamma_arena_test_assert.is_true(validated.ok, "valid custom config")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].section, "grenade_f1", "first grenade order")
+    gamma_arena_test_assert.equals(validated.value.actor_items[7].section, "grenade_rgd5", "second grenade order")
+    value.roster[1].rank = "legend"
+    value.actor_items[6].section = "grenade_rgd5"
+    gamma_arena_test_assert.equals(validated.value.roster[1].rank, "novice", "roster is copied")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].section, "grenade_f1", "items are copied")
+    local budget = gamma_arena_custom_config.budget(validated.value.roster, catalog)
+    local totals = gamma_arena_custom_config.totals(validated.value, catalog)
+    gamma_arena_test_assert.equals(budget.value, 700, "budget is base plus threat")
+    gamma_arena_test_assert.equals(totals.value.points, 500, "second grenade receives multiplier")
+    gamma_arena_test_assert.equals(totals.value.weight_mg, 9700, "physical weight is authoritative")
+    gamma_arena_test_assert.equals(totals.value.weight_limit_mg, 60000, "outfit increases carry limit")
+end
+
+local function custom_config_rejects_roster_catalog_and_shape_matrix()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate, code, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_config.validate(value, context), code, label)
+    end
+    reject(function(value) value.roster = {} end, "GA_CUSTOM_ROSTER_LIMIT", "zero roster")
+    reject(function(value) for index = 2, 11 do value.roster[index] = { rank = "novice" } end end, "GA_CUSTOM_ROSTER_LIMIT", "eleven roster")
+    reject(function(value) value.faction = "unknown" end, "GA_CUSTOM_FACTION_UNKNOWN", "unknown faction")
+    reject(function(value) value.roster[1].rank = "unknown" end, "GA_CUSTOM_RANK_UNKNOWN", "unknown rank")
+    reject(function(value) value.actor_items[5].section = "unknown" end, "GA_CUSTOM_ITEM_UNKNOWN", "unknown section")
+    reject(function(value) value.catalog_fingerprint = "ga-catalog-v9-stale" end, "GA_CUSTOM_CATALOG_STALE", "stale fingerprint")
+    reject(function(value) value.actor_items[7].section = value.actor_items[6].section end, "GA_CUSTOM_ITEM_DUPLICATE", "duplicate section")
+    reject(function(value) value.points = 500 end, "GA_CUSTOM_UNKNOWN_FIELD", "supplied derived total")
+
+    local too_many = make_valid_config(catalog)
+    for index = #too_many.actor_items + 1, 65 do
+        local section = "fixture_item_" .. tostring(index)
+        catalog.items[section] = { section = section, category = "medicine", price = 1, weight_mg = 1, healing = false, ammo_sections = {} }
+        too_many.actor_items[index] = { section = section, quantity = 1 }
+    end
+    assert_code(gamma_arena_custom_config.validate(too_many, context), "GA_CUSTOM_ENTRY_LIMIT", "65 entries")
+
+    reject(function(value) value.actor_items[3].quantity = 251 end, "GA_CUSTOM_PHYSICAL_LIMIT", "257 physical items")
+end
+
+local function custom_config_rejects_equipment_compatibility_and_budget_matrix()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate_config, mutate_catalog, code, label)
+        local local_catalog = clone(catalog)
+        local value = make_valid_config(local_catalog)
+        if mutate_config then mutate_config(value) end
+        if mutate_catalog then mutate_catalog(local_catalog) end
+        assert_code(gamma_arena_custom_config.validate(value, make_context(local_catalog)), code, label)
+    end
+    reject(function(value) value.actor_items[5].equipped_slot = "weapon_1" end, nil, "GA_CUSTOM_SLOT_INVALID", "illegal slot")
+    reject(function(value) table.insert(value.actor_items, 2, { section = "helmet_open", quantity = 1, equipped_slot = "helmet" }) end,
+        function(value) value.items.outfit_field.helmet_allowed = false end, "GA_CUSTOM_HELMET_INCOMPATIBLE", "incompatible helmet")
+    reject(nil, function(value) value.items.wpn_alpha.ammo_sections = { "ammo_other" } end, "GA_CUSTOM_AMMO_INCOMPATIBLE", "incompatible ammo")
+    reject(function(value) table.remove(value.actor_items, 5) end, nil, "GA_CUSTOM_HEALING_REQUIRED", "missing healing")
+    reject(nil, function(value) value.items.medkit.price = 1000 end, "GA_CUSTOM_OVERSPEND", "overspend")
+    reject(nil, function(value) value.items.wpn_alpha.weight_mg = 70000 end, "GA_CUSTOM_OVERWEIGHT", "overweight")
+    reject(function(value) value.actor_items[6].quantity = 2 end, nil, "GA_CUSTOM_GRENADE_LIMIT", "grenade quantity two")
+    reject(function(value) value.actor_items[#value.actor_items + 1] = { section = "grenade_gd05", quantity = 1 } end, nil, "GA_CUSTOM_GRENADE_LIMIT", "third grenade")
+end
+
+local function custom_config_grenade_order_is_semantic()
+    local catalog = make_catalog()
+    local forward = make_valid_config(catalog)
+    local reverse_order = make_valid_config(catalog)
+    reverse_order.actor_items[6], reverse_order.actor_items[7] = reverse_order.actor_items[7], reverse_order.actor_items[6]
+    local first = gamma_arena_custom_config.totals(forward, catalog)
+    local second = gamma_arena_custom_config.totals(reverse_order, catalog)
+    gamma_arena_test_assert.equals(first.value.points, 500, "RGD5 is multiplied when second")
+    gamma_arena_test_assert.equals(second.value.points, 470, "F1 is multiplied when second")
+end
+
+local function custom_codec_round_trip_preserves_bounded_order()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local value = gamma_arena_custom_config.validate(make_valid_config(catalog), context).value
+    local encoded = gamma_arena_custom_codec.encode(value, "launch_custom_")
+    gamma_arena_test_assert.is_true(encoded.ok, "valid config encodes")
+    local persisted = {}
+    for _, operation in ipairs(encoded.value) do
+        if operation.action == "write" then persisted[operation.key] = tostring(operation.value)
+        else persisted[operation.key] = nil end
+    end
+    local decoded = gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context)
+    gamma_arena_test_assert.is_true(decoded.ok, "persisted config decodes")
+    gamma_arena_test_assert.equals(decoded.value.actor_items[6].section, "grenade_f1", "round trip first grenade")
+    gamma_arena_test_assert.equals(decoded.value.actor_items[7].section, "grenade_rgd5", "round trip second grenade")
+    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 207, "codec key space is bounded")
+end
+
+local function custom_codec_rejects_sparse_and_oversized_shapes()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local sparse = make_valid_config(catalog)
+    sparse.actor_items[3] = nil
+    assert_code(gamma_arena_custom_codec.encode(sparse, "launch_custom_"), "GA_CUSTOM_CODEC_INVALID", "sparse encode")
+    local persisted = {
+        launch_custom_schema_version = "1", launch_custom_faction = "stalker",
+        launch_custom_catalog_fingerprint = catalog.fingerprint,
+        launch_custom_roster_count = "1", launch_custom_actor_item_count = "65",
+        launch_custom_roster_1_rank = "novice"
+    }
+    assert_code(gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context),
+        "GA_CUSTOM_CODEC_INVALID", "oversized decode")
+    persisted.launch_custom_actor_item_count = "7"
+    persisted.launch_custom_roster_2_rank = "legend"
+    assert_code(gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context),
+        "GA_CUSTOM_CODEC_TRAILING_KEY", "trailing indexed key")
+end
+
+local cases = {
+    { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
+    { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
+    { name = "custom_config_rejects_equipment_compatibility_and_budget_matrix", fn = custom_config_rejects_equipment_compatibility_and_budget_matrix },
+    { name = "custom_config_grenade_order_is_semantic", fn = custom_config_grenade_order_is_semantic },
+    { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
+    ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end

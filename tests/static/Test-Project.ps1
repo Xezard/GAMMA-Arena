@@ -254,6 +254,38 @@ $Task7CurrentArtifacts = @(
     'tests\fixtures\golden-fights-v8.txt',
     'tests\fixtures\golden-random-selections-v8.txt'
 )
+
+$Task8CustomContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'GA_CUSTOM_GRENADE_LIMIT', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes') }
+)
+
+foreach ($Contract in $Task8CustomContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 8 custom contract is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 8 script must not create a self-named namespace table: $($Contract.Path)"
+        foreach ($Pattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $Pattern) "Task 8 custom marker is missing from $($Contract.Path): $Pattern"
+        }
+    }
+}
+
+$Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
+foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
+    Assert-True ($Task8SessionContent -match [regex]::Escape($Marker)) "Task 8 session persistence is missing: $Marker"
+}
+$Task8MigrationContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script') -Raw
+Assert-True ($Task8MigrationContent -match 'gamma_arena_custom_codec\.keys\s*\(\s*"launch_custom_"\s*\)') 'Task 8 migration cleanup must include every bounded custom launch key.'
+$Task8RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+Assert-True ($Task8RuntimeTests -match 'runtime_custom_start_validates_before_launch_mutation') 'Task 8 runtime tests must prove validation precedes launch mutation.'
+$Task8MigrationTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script') -Raw
+foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_bound', 'custom_launch_rejects_mixed_schema_and_recipe_keys', 'custom_launch_faults_cover_indexed_key_range')) {
+    Assert-True ($Task8MigrationTests -match [regex]::Escape($Marker)) "Task 8 migration tests must cover $Marker."
+}
 foreach ($Path in $Task7CurrentArtifacts) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"
 }

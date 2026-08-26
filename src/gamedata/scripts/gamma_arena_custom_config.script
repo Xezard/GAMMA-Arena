@@ -1,0 +1,296 @@
+local MAX_SAFE_INTEGER = 9007199254740991
+local SLOT_CATEGORY = {
+    outfit = "outfit", helmet = "helmet", knife = "knife",
+    weapon_1 = "weapon", weapon_2 = "weapon"
+}
+local CONFIG_FIELDS = {
+    schema_version = true, faction = true, roster = true,
+    actor_items = true, catalog_fingerprint = true
+}
+local ROSTER_FIELDS = { rank = true }
+local ITEM_FIELDS = { section = true, quantity = true, equipped_slot = true }
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= (minimum or 0) and value <= MAX_SAFE_INTEGER
+end
+
+local function finite_positive(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value > 0 and value <= MAX_SAFE_INTEGER
+end
+
+local function text(value)
+    return type(value) == "string" and value ~= "" and #value <= 256
+end
+
+local function exact_fields(value, allowed, code, path)
+    if type(value) ~= "table" then return failure(code, "Custom Arena value must be a table", { path = path }) end
+    for key in pairs(value) do
+        if type(key) ~= "string" or not allowed[key] then
+            return failure(code, "Custom Arena value contains an unknown field", { path = path, field = tostring(key) })
+        end
+    end
+    return nil
+end
+
+local function dense_length(value, code, path)
+    if type(value) ~= "table" then return nil, failure(code, "Custom Arena array must be a table", { path = path }) end
+    local maximum, count = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then
+            return nil, failure(code, "Custom Arena arrays require positive integer keys", { path = path, key = tostring(key) })
+        end
+        maximum = math.max(maximum, key)
+        count = count + 1
+    end
+    if maximum ~= count then return nil, failure(code, "Custom Arena arrays must be dense", { path = path }) end
+    return count
+end
+
+local function copy_config(value)
+    local copied = {
+        schema_version = 1,
+        faction = value.faction,
+        roster = {},
+        actor_items = {},
+        catalog_fingerprint = value.catalog_fingerprint
+    }
+    for index, entry in ipairs(value.roster) do copied.roster[index] = { rank = entry.rank } end
+    for index, entry in ipairs(value.actor_items) do
+        copied.actor_items[index] = {
+            section = entry.section,
+            quantity = entry.quantity,
+            equipped_slot = entry.equipped_slot
+        }
+        if entry.equipped_slot == nil then copied.actor_items[index].equipped_slot = nil end
+    end
+    return copied
+end
+
+local function budget_internal(roster, rank_catalog)
+    local count, array_error = dense_length(roster, "GA_CUSTOM_ROSTER_INVALID", "roster")
+    if count == nil then return array_error end
+    if count < 1 then return failure("GA_CUSTOM_ROSTER_LIMIT", "Custom roster must contain at least one opponent") end
+    if type(rank_catalog) ~= "table" or not finite_integer(rank_catalog.base_budget, 0)
+        or type(rank_catalog.ranks) ~= "table" then
+        return failure("GA_CUSTOM_CATALOG_INVALID", "Custom rank catalog is unavailable")
+    end
+    local total = rank_catalog.base_budget
+    for index, entry in ipairs(roster) do
+        local field_error = exact_fields(entry, ROSTER_FIELDS, "GA_CUSTOM_ROSTER_INVALID", "roster[" .. tostring(index) .. "]")
+        if field_error then return field_error end
+        local rank = text(entry.rank) and rank_catalog.ranks[entry.rank] or nil
+        if type(rank) ~= "table" or not finite_integer(rank.threat, 1) then
+            return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom roster rank is unknown", { index = index, rank = entry.rank })
+        end
+        total = total + rank.threat
+        if total > MAX_SAFE_INTEGER then return failure("GA_CUSTOM_BUDGET_INVALID", "Custom Arena budget exceeds the safe integer range") end
+    end
+    return gamma_arena_result.ok(total)
+end
+
+local function contains(values, expected)
+    for _, value in ipairs(values or {}) do if value == expected then return true end end
+    return false
+end
+
+local function totals_internal(config, catalog)
+    if type(config) ~= "table" or type(config.actor_items) ~= "table" or type(catalog) ~= "table"
+        or type(catalog.items) ~= "table" or not finite_positive(catalog.base_carry_weight) then
+        return failure("GA_CUSTOM_CATALOG_INVALID", "Custom item totals require the active catalog")
+    end
+    local totals = { points = 0, weight_mg = 0, weight_limit_mg = catalog.base_carry_weight }
+    local grenade_index = 0
+    local outfit_seen = false
+    for index, entry in ipairs(config.actor_items) do
+        local definition = type(entry) == "table" and catalog.items[entry.section] or nil
+        if type(definition) ~= "table" or not finite_positive(definition.price) or not finite_positive(definition.weight_mg)
+            or not finite_integer(entry.quantity, 1) then
+            return failure("GA_CUSTOM_ITEM_INVALID", "Custom item cannot be totaled", { index = index, section = entry and entry.section })
+        end
+        local multiplier = 1
+        if definition.category == "grenade" then
+            grenade_index = grenade_index + 1
+            if entry.quantity ~= catalog.max_quantity_per_grenade
+                or grenade_index > catalog.max_selected_grenades then
+                return failure("GA_CUSTOM_GRENADE_LIMIT", "Custom grenade selection is invalid", { index = index })
+            end
+            if grenade_index == 2 then multiplier = catalog.second_grenade_price_multiplier end
+            if not finite_integer(multiplier, 1) then
+                return failure("GA_CUSTOM_CATALOG_INVALID", "Custom grenade pricing policy is invalid")
+            end
+        end
+        totals.points = totals.points + definition.price * entry.quantity * multiplier
+        totals.weight_mg = totals.weight_mg + definition.weight_mg * entry.quantity
+        if totals.points > MAX_SAFE_INTEGER or totals.weight_mg > MAX_SAFE_INTEGER then
+            return failure("GA_CUSTOM_TOTAL_INVALID", "Custom item totals exceed the safe integer range")
+        end
+        if definition.category == "outfit" and not outfit_seen then
+            if not finite_integer(definition.carry_bonus_mg or 0, 0) then
+                return failure("GA_CUSTOM_CATALOG_INVALID", "Custom outfit carry contribution is invalid", { section = entry.section })
+            end
+            outfit_seen = true
+            totals.weight_limit_mg = totals.weight_limit_mg + (definition.carry_bonus_mg or 0)
+        end
+    end
+    return gamma_arena_result.ok(totals)
+end
+
+local function validate_internal(value, context)
+    local field_error = exact_fields(value, CONFIG_FIELDS, "GA_CUSTOM_UNKNOWN_FIELD", "config")
+    if field_error then return field_error end
+    if value.schema_version ~= 1 then
+        return failure("GA_CUSTOM_SCHEMA_INVALID", "CustomArenaConfig schema must be v1", { value = value.schema_version })
+    end
+    local catalog = type(context) == "table" and context.catalog or nil
+    local layout = type(context) == "table" and context.layout or nil
+    if type(catalog) ~= "table" or type(catalog.items) ~= "table" or type(catalog.ranks) ~= "table"
+        or type(catalog.factions) ~= "table" or not text(catalog.fingerprint)
+        or not finite_integer(catalog.max_entries, 1) or not finite_integer(catalog.max_physical_items_per_participant, 1)
+        or not finite_integer(catalog.max_selected_grenades, 1) or not finite_integer(catalog.max_quantity_per_grenade, 1)
+        or not finite_integer(catalog.second_grenade_price_multiplier, 1) then
+        return failure("GA_CUSTOM_CATALOG_INVALID", "Active custom catalog is invalid")
+    end
+    if type(layout) ~= "table" or not finite_integer(layout.virtual_capacity, 1) then
+        return failure("GA_CUSTOM_LAYOUT_INVALID", "Active Arena layout capacity is invalid")
+    end
+    if value.catalog_fingerprint ~= catalog.fingerprint then
+        return failure("GA_CUSTOM_CATALOG_STALE", "Custom configuration catalog fingerprint is stale", {
+            expected = catalog.fingerprint, actual = value.catalog_fingerprint
+        })
+    end
+    local faction = text(value.faction) and catalog.factions[value.faction] or nil
+    if type(faction) ~= "table" or type(faction.ranks) ~= "table" then
+        return failure("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction is unknown", { faction = value.faction })
+    end
+    local roster_count, roster_error = dense_length(value.roster, "GA_CUSTOM_ROSTER_INVALID", "roster")
+    if roster_count == nil then return roster_error end
+    if roster_count < 1 or roster_count > layout.virtual_capacity then
+        return failure("GA_CUSTOM_ROSTER_LIMIT", "Custom roster exceeds the active layout capacity", {
+            count = roster_count, capacity = layout.virtual_capacity
+        })
+    end
+    for index, entry in ipairs(value.roster) do
+        local roster_field_error = exact_fields(entry, ROSTER_FIELDS, "GA_CUSTOM_ROSTER_INVALID", "roster[" .. tostring(index) .. "]")
+        if roster_field_error then return roster_field_error end
+        if not text(entry.rank) or type(catalog.ranks[entry.rank]) ~= "table" or type(faction.ranks[entry.rank]) ~= "table" then
+            return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom rank is unavailable for the selected faction", { index = index, rank = entry.rank })
+        end
+    end
+
+    local item_count, item_error = dense_length(value.actor_items, "GA_CUSTOM_ITEM_INVALID", "actor_items")
+    if item_count == nil then return item_error end
+    if item_count < 1 or item_count > catalog.max_entries then
+        return failure("GA_CUSTOM_ENTRY_LIMIT", "Custom actor inventory has too many distinct entries", { count = item_count, limit = catalog.max_entries })
+    end
+    local seen, categories, equipped_weapons, weapons, ammunition = {}, {}, {}, {}, {}
+    local physical_count = 0
+    for index, entry in ipairs(value.actor_items) do
+        local item_field_error = exact_fields(entry, ITEM_FIELDS, "GA_CUSTOM_ITEM_INVALID", "actor_items[" .. tostring(index) .. "]")
+        if item_field_error then return item_field_error end
+        if not text(entry.section) or type(catalog.items[entry.section]) ~= "table" then
+            return failure("GA_CUSTOM_ITEM_UNKNOWN", "Custom item section is unknown", { index = index, section = entry.section })
+        end
+        if seen[entry.section] then return failure("GA_CUSTOM_ITEM_DUPLICATE", "Custom item sections must be distinct", { section = entry.section }) end
+        seen[entry.section] = true
+        if not finite_integer(entry.quantity, 1) then
+            return failure("GA_CUSTOM_QUANTITY_INVALID", "Custom item quantity must be a positive integer", { index = index })
+        end
+        physical_count = physical_count + entry.quantity
+        if physical_count > catalog.max_physical_items_per_participant then
+            return failure("GA_CUSTOM_PHYSICAL_LIMIT", "Custom actor inventory exceeds the physical item cap", {
+                count = physical_count, limit = catalog.max_physical_items_per_participant
+            })
+        end
+        local definition = catalog.items[entry.section]
+        local category = definition.category
+        if type(category) ~= "string" then return failure("GA_CUSTOM_ITEM_INVALID", "Custom item category is invalid", { section = entry.section }) end
+        categories[category] = (categories[category] or 0) + 1
+        local slot = entry.equipped_slot
+        if category == "outfit" or category == "helmet" or category == "knife" then
+            if slot ~= category then return failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must use its logical slot", { section = entry.section, slot = slot }) end
+        elseif category == "weapon" then
+            weapons[#weapons + 1] = definition
+            if slot ~= nil then
+                local expected_slot = definition.ltx_slot == 1 and "weapon_1" or (definition.ltx_slot == 2 and "weapon_2" or nil)
+                if expected_slot == nil or slot ~= expected_slot then
+                    return failure("GA_CUSTOM_SLOT_INVALID", "Custom weapon slot differs from the effective engine slot", { section = entry.section, slot = slot })
+                end
+                if equipped_weapons[slot] then return failure("GA_CUSTOM_SLOT_DUPLICATE", "Custom weapon slot is already occupied", { slot = slot }) end
+                equipped_weapons[slot] = true
+            end
+        else
+            if slot ~= nil or SLOT_CATEGORY[slot] ~= nil then
+                return failure("GA_CUSTOM_SLOT_INVALID", "Custom carried item cannot be equipped", { section = entry.section, slot = slot })
+            end
+            if category == "ammo" then ammunition[#ammunition + 1] = definition end
+        end
+    end
+    if categories.outfit ~= 1 then return failure("GA_CUSTOM_OUTFIT_REQUIRED", "Custom loadout requires exactly one outfit") end
+    if (categories.helmet or 0) > 1 then return failure("GA_CUSTOM_HELMET_LIMIT", "Custom loadout supports at most one helmet") end
+    if categories.knife ~= 1 then return failure("GA_CUSTOM_KNIFE_REQUIRED", "Custom loadout requires exactly one knife") end
+    if next(equipped_weapons) == nil then return failure("GA_CUSTOM_WEAPON_REQUIRED", "Custom loadout requires an equipped firearm") end
+    if (categories.helmet or 0) == 1 then
+        for _, entry in ipairs(value.actor_items) do
+            local definition = catalog.items[entry.section]
+            if definition.category == "outfit" and definition.helmet_allowed ~= true then
+                return failure("GA_CUSTOM_HELMET_INCOMPATIBLE", "Selected outfit does not allow a helmet")
+            end
+        end
+    end
+    for _, weapon in ipairs(weapons) do
+        local compatible = false
+        for _, ammo in ipairs(ammunition) do if contains(weapon.ammo_sections, ammo.section) then compatible = true; break end end
+        if not compatible then return failure("GA_CUSTOM_AMMO_INCOMPATIBLE", "Selected weapon has no compatible ammunition", { section = weapon.section }) end
+    end
+    for _, ammo in ipairs(ammunition) do
+        local compatible = false
+        for _, weapon in ipairs(weapons) do if contains(weapon.ammo_sections, ammo.section) then compatible = true; break end end
+        if not compatible then return failure("GA_CUSTOM_AMMO_ORPHAN", "Selected ammunition has no compatible weapon", { section = ammo.section }) end
+    end
+    local healing = false
+    for _, entry in ipairs(value.actor_items) do
+        local definition = catalog.items[entry.section]
+        if definition.category == "medicine" and definition.healing == true then healing = true; break end
+    end
+    if not healing then return failure("GA_CUSTOM_HEALING_REQUIRED", "Custom loadout requires healing medicine") end
+    local normalized = copy_config(value)
+    local budget_result = budget_internal(normalized.roster, catalog)
+    if not budget_result.ok then return budget_result end
+    local totals_result = totals_internal(normalized, catalog)
+    if not totals_result.ok then return totals_result end
+    if totals_result.value.points > budget_result.value then
+        return failure("GA_CUSTOM_OVERSPEND", "Custom loadout exceeds its rank-derived Arena-point budget", {
+            points = totals_result.value.points, budget = budget_result.value
+        })
+    end
+    if totals_result.value.weight_mg > totals_result.value.weight_limit_mg then
+        return failure("GA_CUSTOM_OVERWEIGHT", "Custom loadout exceeds its effective carry capacity", {
+            weight_mg = totals_result.value.weight_mg, weight_limit_mg = totals_result.value.weight_limit_mg
+        })
+    end
+    return gamma_arena_result.ok(normalized)
+end
+
+function budget(roster, rank_catalog)
+    local succeeded, result = pcall(budget_internal, roster, rank_catalog)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_BUDGET_INVALID", "Custom budget calculation failed safely", { reason = tostring(result) })
+end
+
+function totals(config, catalog)
+    local succeeded, result = pcall(totals_internal, config, catalog)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_TOTAL_INVALID", "Custom totals calculation failed safely", { reason = tostring(result) })
+end
+
+function validate(value, context)
+    local succeeded, result = pcall(validate_internal, value, context)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_INVALID", "CustomArenaConfig validation failed safely", { reason = tostring(result) })
+end

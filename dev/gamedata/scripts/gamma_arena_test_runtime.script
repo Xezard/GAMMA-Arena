@@ -1728,6 +1728,46 @@ local function runtime_ordinary_start_preflight_precedes_mutation()
     gamma_arena_test_assert.equals(table.concat(calls, " -> "), "runtime preflight -> save preferences -> issue launch -> write bridge -> StartGame", "ordinary start performs runtime preflight before every launch mutation")
 end
 
+local function runtime_custom_start_validates_before_launch_mutation()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local request = {
+        schema_version = 2,
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        seed_mode = "manual",
+        session_seed = 123,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+    local calls = {}
+    local captured = nil
+    local ports = {
+        runtime_status = function() calls[#calls + 1] = "preflight"; return gamma_arena_result.ok(true) end,
+        catalogs = function() calls[#calls + 1] = "catalog"; return gamma_arena_result.ok(catalog) end,
+        issue_launch = function(_, value)
+            calls[#calls + 1] = "launch"
+            captured = value
+            return gamma_arena_result.ok({ token = "ga1:1000:custom" })
+        end,
+        write_character_creation = function() calls[#calls + 1] = "bridge"; return gamma_arena_result.ok(true) end,
+        handoff_start_game = function() calls[#calls + 1] = "handoff"; return gamma_arena_result.ok(true) end
+    }
+    local started = gamma_arena_ui_start.begin_start({}, {}, request, ports)
+    gamma_arena_test_assert.is_true(started.ok, "valid custom start proceeds")
+    gamma_arena_test_assert.equals(table.concat(calls, ","), "preflight,catalog,launch,bridge,handoff", "custom validation precedes every launch mutation")
+    gamma_arena_test_assert.equals(captured.generator_version, catalog.generator_version, "generator identity derives from catalog")
+    gamma_arena_test_assert.equals(captured.catalog_revision, catalog.revision, "catalog revision derives from catalog")
+    gamma_arena_test_assert.equals(captured.catalog_fingerprint, catalog.fingerprint, "fingerprint derives from catalog")
+    gamma_arena_test_assert.is_true(captured.custom_config ~= request.custom_config, "validated custom config is copied")
+
+    calls = {}
+    local invalid = clone(request)
+    invalid.custom_config.actor_items[5].section = "unknown"
+    local rejected = gamma_arena_ui_start.begin_start({}, {}, invalid, ports)
+    gamma_arena_test_assert.is_false(rejected.ok, "invalid custom config rejects")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_ITEM_UNKNOWN", "validation failure is exact")
+    gamma_arena_test_assert.equals(table.concat(calls, ","), "preflight,catalog", "invalid custom config cannot persist or hand off")
+end
+
 local function net_destroy_teardown_honors_checkpoint_latch()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local reasons = {}
@@ -9441,6 +9481,7 @@ local cases = {
     { name = "runtime_bootstrap_status_preserves_initialization_result", fn = runtime_bootstrap_status_preserves_initialization_result },
     { name = "runtime_bootstrap_restart_without_registered_runtime_is_inert", fn = runtime_bootstrap_restart_without_registered_runtime_is_inert },
     { name = "runtime_ordinary_start_preflight_precedes_mutation", fn = runtime_ordinary_start_preflight_precedes_mutation },
+    { name = "runtime_custom_start_validates_before_launch_mutation", fn = runtime_custom_start_validates_before_launch_mutation },
     { name = "runtime_unexpected_net_destroy_clears_external_route", fn = unexpected_net_destroy_clears_external_route }
     ,{ name = "runtime_pre_session_fatal_waits_for_cleanup_before_disconnect", fn = runtime_pre_session_fatal_waits_for_cleanup_before_disconnect }
     ,{ name = "runtime_actor_inventory_release_is_deferred_and_verified", fn = runtime_actor_inventory_release_is_deferred_and_verified }
