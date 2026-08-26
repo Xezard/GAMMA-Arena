@@ -9400,7 +9400,84 @@ local function runtime_battle_identity_visibility_failure_reporting_is_bounded()
     gamma_arena_test_assert.equals(#reports, 2, "post-recovery visibility error reports once again")
 end
 
+local function runtime_custom_ui_launch_projection_is_authoritative()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local model = gamma_arena_custom_setup_model.new(catalog, layout)
+    local emitted = {}
+    local ports = {
+        random_session_seed = function() return gamma_arena_result.ok(77) end,
+        parse_manual_seed = gamma_arena_session_store.parse_manual_seed,
+        emit_start = function(request)
+            emitted[#emitted + 1] = request
+            return gamma_arena_result.ok(request)
+        end
+    }
+    local initial_projection = gamma_arena_ui_custom.project(model, "weapon")
+    gamma_arena_test_assert.is_false(initial_projection.launch_enabled, "initial invalid draft disables Start")
+    gamma_arena_test_assert.equals(initial_projection.validation_code, "GA_CUSTOM_FACTION_UNKNOWN", "validation error is projected")
+    local blocked = gamma_arena_ui_custom.submit(model, "", ports)
+    gamma_arena_test_assert.is_false(blocked.ok, "invalid draft emits no custom request")
+    gamma_arena_test_assert.equals(#emitted, 0, "invalid draft does not cross emit boundary")
+
+    model:set_faction("stalker")
+    model:add_item("outfit_field", 1); model:equip("outfit_field", "outfit")
+    model:add_item("wpn_alpha", 1); model:equip("wpn_alpha", "weapon_2")
+    model:add_item("ammo_alpha", 2)
+    model:add_item("wpn_knife", 1); model:equip("wpn_knife", "knife")
+    model:add_item("medkit", 1)
+    local ready_projection = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(ready_projection.launch_enabled, "authoritatively valid draft enables Start")
+    gamma_arena_test_assert.equals(ready_projection.validation_code, nil, "valid projection clears error")
+    local submitted = gamma_arena_ui_custom.submit(model, "", ports)
+    gamma_arena_test_assert.is_true(submitted.ok, "valid draft emits custom request")
+    gamma_arena_test_assert.equals(#emitted, 1, "valid draft emits exactly once")
+    gamma_arena_test_assert.equals(emitted[1].schema_version, 2, "custom request uses schema 2")
+    gamma_arena_test_assert.equals(emitted[1].generation_recipe, "custom", "custom request selects custom recipe")
+    gamma_arena_test_assert.equals(emitted[1].difficulty_id, nil, "custom request has no random difficulty")
+    gamma_arena_test_assert.equals(emitted[1].session_seed, 77, "empty custom seed becomes random normalized seed")
+    gamma_arena_test_assert.equals(emitted[1].custom_config.faction, "stalker", "emitted request contains validated config copy")
+    model:set_rank(1, "legend")
+    gamma_arena_test_assert.equals(emitted[1].custom_config.roster[1].rank, "novice", "emitted config is immutable from later edits")
+end
+
+local function runtime_custom_ui_grenade_projection_disables_cells_at_limit()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.categories = {
+        weapon = { "wpn_alpha" }, ammo = { "ammo_alpha" }, outfit = { "outfit_field" },
+        helmet = { "helmet_open" }, knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    model:add_item("grenade_f1", 1)
+    local one = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(one.catalog_cells[1].disabled, "selected grenade cell is disabled")
+    gamma_arena_test_assert.equals(one.catalog_cells[2].preview_multiplier, 2, "next grenade previews x2 pricing")
+    model:add_item("grenade_rgd5", 1)
+    local two = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(two.catalog_cells[1].disabled, "first selected grenade stays disabled")
+    gamma_arena_test_assert.is_true(two.catalog_cells[2].disabled, "second selected grenade stays disabled")
+    gamma_arena_test_assert.is_true(two.catalog_cells[3].disabled, "remaining grenades disable at two selections")
+    gamma_arena_test_assert.equals(two.selected_cells[2].price_text, "x2 140", "second selected grenade displays multiplier and effective price")
+end
+
+local function runtime_composed_catalog_supports_first_custom_item_edit()
+    local catalog = catalogs()
+    gamma_arena_test_assert.equals(catalog.base_budget, 600, "composed catalog exposes authoritative custom base budget")
+    gamma_arena_test_assert.equals(catalog.max_entries, 64, "composed catalog exposes authoritative custom entry cap")
+    local layout = catalog.layouts and catalog.layouts.rostok_arena_v1
+    local model = gamma_arena_custom_setup_model.new(catalog, layout)
+    local section = catalog.categories and catalog.categories.outfit and catalog.categories.outfit[1]
+    gamma_arena_test_assert.is_true(type(section) == "string", "composed catalog exposes a selectable outfit")
+    local added = model:add_item(section, 1)
+    gamma_arena_test_assert.is_true(added.ok, "composed catalog permits a structurally valid first item edit")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[1].section, section, "first composed-catalog item edit commits")
+end
+
 local cases = {
+    { name = "runtime_custom_ui_launch_projection_is_authoritative", fn = runtime_custom_ui_launch_projection_is_authoritative },
+    { name = "runtime_custom_ui_grenade_projection_disables_cells_at_limit", fn = runtime_custom_ui_grenade_projection_disables_cells_at_limit },
+    { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
     { name = "runtime_universal_items_preflight_enforces_physical_item_cap", fn = runtime_universal_items_preflight_enforces_physical_item_cap },
     { name = "runtime_universal_items_rollback_every_failure_in_reverse", fn = runtime_universal_items_rollback_every_failure_in_reverse },

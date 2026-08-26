@@ -286,6 +286,62 @@ $Task8MigrationTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gameda
 foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_bound', 'custom_launch_rejects_mixed_schema_and_recipe_keys', 'custom_launch_faults_cover_indexed_key_range')) {
     Assert-True ($Task8MigrationTests -match [regex]::Escape($Marker)) "Task 8 migration tests must cover $Marker."
 }
+
+$Task9CustomContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'x2', 'start_button:Enable') }
+)
+foreach ($Contract in $Task9CustomContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 9 custom UI contract is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 9 script must not create a self-named namespace table: $($Contract.Path)"
+        foreach ($Pattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $Pattern) "Task 9 marker is missing from $($Contract.Path): $Pattern"
+        }
+    }
+}
+
+$Task9StartContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script') -Raw
+foreach ($Marker in @('custom_mode', 'function UIStart:OnCustom', 'gamma_arena_ui_custom.create')) {
+    Assert-True ($Task9StartContent -match [regex]::Escape($Marker)) "Task 9 start-mode routing is missing: $Marker"
+}
+$Task9StartXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
+[xml]$Task9StartXml = Get-Content -LiteralPath $Task9StartXmlPath -Raw
+Assert-True ($null -ne $Task9StartXml.SelectSingleNode("//*[local-name()='custom_mode']")) 'Task 9 start XML must expose Custom mode.'
+$Task9CustomXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_custom.xml'
+Assert-True (Test-Path -LiteralPath $Task9CustomXmlPath) 'Task 9 custom UI XML is missing.'
+if (Test-Path -LiteralPath $Task9CustomXmlPath) {
+    [xml]$Task9CustomXml = Get-Content -LiteralPath $Task9CustomXmlPath -Raw
+    foreach ($Id in @('gamma_arena_custom','faction','count','seed','catalog_container','selected_container','budget','spent','remaining','weight','weight_limit','validation','start','random','back','category_grenade')) {
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 custom UI XML is missing control $Id"
+    }
+    foreach ($Index in 1..10) {
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='roster_row_$Index']")) "Task 9 custom UI XML is missing roster row $Index"
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='rank_$Index']")) "Task 9 custom UI XML is missing rank selector $Index"
+    }
+}
+foreach ($Locale in @('eng','rus')) {
+    $Task9Locale = Get-Content -LiteralPath (Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena.xml") -Raw
+    foreach ($StringId in @('st_gamma_arena_custom_mode','st_gamma_arena_custom_title','st_gamma_arena_custom_faction','st_gamma_arena_custom_count','st_gamma_arena_custom_seed','st_gamma_arena_custom_budget','st_gamma_arena_custom_spent','st_gamma_arena_custom_remaining','st_gamma_arena_custom_weight','st_gamma_arena_custom_weight_limit','st_gamma_arena_custom_random','st_gamma_arena_custom_category_grenade')) {
+        Assert-True ($Task9Locale -match ('id="' + [regex]::Escape($StringId) + '"')) "Task 9 $Locale localization is missing $StringId"
+    }
+}
+$Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
+foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
+    Assert-True ($Task9CustomTests -match [regex]::Escape($Name)) "Task 9 model tests must cover $Name"
+}
+$Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_composed_catalog_supports_first_custom_item_edit')) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
+}
+$Task9ItemCatalog = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
+foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.max_entries = rank_catalog.max_entries')) {
+    Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate custom rule field: $Marker"
+}
 foreach ($Path in $Task7CurrentArtifacts) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"
 }

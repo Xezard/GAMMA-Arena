@@ -1,0 +1,472 @@
+local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
+
+local function translated(string_id)
+    if game and type(game.translate_string) == "function" then
+        local called, value = pcall(game.translate_string, string_id)
+        if called and value then return value end
+    end
+    return string_id
+end
+
+local function valid_result(value)
+    return type(value) == "table" and type(value.ok) == "boolean"
+end
+
+local function protected_result(code, message, callback)
+    local called, result = pcall(callback)
+    if not called then return gamma_arena_result.err(code, message, { reason = tostring(result) }) end
+    if not valid_result(result) then return gamma_arena_result.err(code, message) end
+    return result
+end
+
+local function projection_failure(code)
+    return {
+        launch_enabled = false,
+        validation_code = code or "GA_CUSTOM_INVALID",
+        category = "weapon",
+        category_ids = CATEGORY_IDS,
+        catalog_cells = {}, selected_cells = {}, roster = {}, count = 0, capacity = 0,
+        faction_ids = {}, rank_ids = {}, budget = 0, spent = 0, remaining = 0,
+        weight_mg = 0, weight_limit_mg = 0
+    }
+end
+
+function project(model, category)
+    if type(model) ~= "table" or type(model.snapshot) ~= "function" then
+        return projection_failure("GA_CUSTOM_MODEL_INVALID")
+    end
+    local called, snapshot = pcall(model.snapshot, model)
+    if not called or type(snapshot) ~= "table" then return projection_failure("GA_CUSTOM_MODEL_INVALID") end
+    category = type(category) == "string" and snapshot.categories[category] and category or "weapon"
+    local catalog_cells = {}
+    for index, cell in ipairs(snapshot.categories[category] or {}) do
+        local multiplier = cell.preview_multiplier or 1
+        catalog_cells[index] = {
+            section = cell.section,
+            category = cell.category,
+            name_key = cell.name_key,
+            base_price = cell.base_price,
+            weight_mg = cell.weight_mg,
+            selected = cell.selected == true,
+            selected_quantity = cell.selected_quantity or 0,
+            disabled = cell.disabled == true,
+            preview_multiplier = multiplier,
+            effective_price = cell.preview_effective_price,
+            price_text = multiplier == 2 and ("x2 " .. tostring(cell.preview_effective_price))
+                or tostring(cell.preview_effective_price)
+        }
+    end
+    local selected_cells = {}
+    for index, cell in ipairs(snapshot.actor_items or {}) do
+        selected_cells[index] = {
+            section = cell.section,
+            category = cell.category,
+            name_key = cell.name_key,
+            quantity = cell.quantity,
+            equipped_slot = cell.equipped_slot,
+            base_price = cell.base_price,
+            weight_mg = cell.weight_mg,
+            multiplier = cell.multiplier,
+            effective_price = cell.effective_price,
+            price_text = cell.multiplier == 2 and ("x2 " .. tostring(cell.effective_price))
+                or tostring(cell.effective_price)
+        }
+    end
+    local validation_code = snapshot.validation and snapshot.validation.error and snapshot.validation.error.code or nil
+    return {
+        launch_enabled = snapshot.can_start == true,
+        validation_code = validation_code,
+        category = category,
+        category_ids = snapshot.category_ids,
+        catalog_cells = catalog_cells,
+        selected_cells = selected_cells,
+        roster = snapshot.roster,
+        count = snapshot.count,
+        capacity = snapshot.capacity,
+        faction = snapshot.faction,
+        faction_ids = snapshot.faction_ids,
+        rank_ids = snapshot.rank_ids,
+        budget = snapshot.budget,
+        spent = snapshot.spent,
+        remaining = snapshot.remaining,
+        weight_mg = snapshot.weight_mg,
+        weight_limit_mg = snapshot.weight_limit_mg,
+        last_operation = snapshot.last_operation
+    }
+end
+
+function submit(model, seed_text, ports)
+    ports = ports or {}
+    if type(model) ~= "table" or type(model.snapshot) ~= "function" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup model is unavailable")
+    end
+    local called, snapshot = pcall(model.snapshot, model)
+    if not called or type(snapshot) ~= "table" or type(snapshot.config) ~= "table" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup snapshot is unavailable")
+    end
+    local validated = gamma_arena_custom_config.validate(snapshot.config, { catalog = model.catalog, layout = model.layout })
+    if not validated.ok then return validated end
+
+    seed_text = seed_text == nil and "" or tostring(seed_text)
+    local seed_mode, seed_result
+    if seed_text == "" then
+        seed_mode = "random"
+        if type(ports.random_session_seed) == "function" then
+            seed_result = protected_result("GA_START_SEED_INVALID", "Custom random seed generation failed", ports.random_session_seed)
+        else
+            seed_result = gamma_arena_session_store.random_session_seed(ports.random_seed_provider)
+        end
+    else
+        seed_mode = "manual"
+        local parser = ports.parse_manual_seed or gamma_arena_session_store.parse_manual_seed
+        seed_result = protected_result("GA_START_SEED_INVALID", "Custom seed validation failed", function() return parser(seed_text) end)
+    end
+    if not seed_result.ok then return seed_result end
+
+    local request = {
+        schema_version = 2,
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        seed_mode = seed_mode,
+        session_seed = seed_result.value,
+        custom_config = validated.value
+    }
+    if type(ports.emit_start) ~= "function" then return gamma_arena_result.ok({ request = request }) end
+    local emitted = protected_result("GA_CUSTOM_START_FAILED", "Custom Arena start request failed safely", function()
+        return ports.emit_start(request)
+    end)
+    if not emitted.ok then return emitted end
+    return gamma_arena_result.ok({ request = request, emission = emitted.value })
+end
+
+local function load_catalog(ports)
+    if type(ports.catalog) == "table" then return gamma_arena_result.ok(ports.catalog) end
+    local loader = ports.catalogs or gamma_arena_catalog.load
+    if type(loader) ~= "function" then
+        return gamma_arena_result.err("GA_START_CATALOG_UNAVAILABLE", "Active Arena catalog loader is unavailable")
+    end
+    return protected_result("GA_START_CATALOG_UNAVAILABLE", "Active Arena catalog loading failed safely", loader)
+end
+
+local function faction_text(id)
+    return translated("st_gamma_arena_custom_faction_" .. tostring(id))
+end
+
+local function rank_text(id)
+    return translated("st_gamma_arena_custom_rank_" .. tostring(id))
+end
+
+local function category_text(id)
+    return translated("st_gamma_arena_custom_category_" .. tostring(id))
+end
+
+local function set_combo(combo, ids, selected, formatter, placeholder)
+    if selected == nil then combo:SetText(placeholder or "") return end
+    for index, id in ipairs(ids or {}) do
+        if id == selected then
+            combo:enable_id(index)
+            combo:SetText(formatter(id))
+            return
+        end
+    end
+end
+
+local function combo_value(combo, ids, formatter)
+    local text = combo:GetText()
+    for _, id in ipairs(ids or {}) do if text == formatter(id) then return id end end
+    return nil
+end
+
+local function format_weight(weight_mg)
+    return string.format("%.2f kg", (tonumber(weight_mg) or 0) / 1000)
+end
+
+class "UICustom" (CUIScriptWnd)
+
+function UICustom:__init(owner, ports) super()
+    self.owner = owner
+    self.ports = ports or {}
+    self.selected_category = "weapon"
+    self.catalog_result = load_catalog(self.ports)
+    local catalog = self.catalog_result.ok and self.catalog_result.value or {}
+    local layout = self.ports.layout or (type(catalog.layouts) == "table" and catalog.layouts.rostok_arena_v1 or nil) or {}
+    self.model = self.ports.model or gamma_arena_custom_setup_model.new(catalog, layout)
+    self:InitControls()
+    self:InitCallbacks()
+    self:Rebuild()
+end
+
+function UICustom:InitControls()
+    self:SetWndRect(Frect():set(0, 0, 1024, 768))
+    self:SetAutoDelete(true)
+    self.xml = CScriptXmlInit()
+    self.xml:ParseFile("gamma_arena_custom.xml")
+    self.root = self.xml:InitStatic("gamma_arena_custom", self)
+    self.title = self.xml:InitStatic("gamma_arena_custom:title", self.root)
+    self.faction_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:faction", self.root)
+    self.count_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:count", self.root)
+    self.seed_edit = self.xml:InitEditBox("gamma_arena_custom:enemy_setup:seed", self.root)
+    self.budget_text = self.xml:InitTextWnd("gamma_arena_custom:totals:budget", self.root)
+    self.spent_text = self.xml:InitTextWnd("gamma_arena_custom:totals:spent", self.root)
+    self.remaining_text = self.xml:InitTextWnd("gamma_arena_custom:totals:remaining", self.root)
+    self.weight_text = self.xml:InitTextWnd("gamma_arena_custom:totals:weight", self.root)
+    self.weight_limit_text = self.xml:InitTextWnd("gamma_arena_custom:totals:weight_limit", self.root)
+    self.validation_text = self.xml:InitTextWnd("gamma_arena_custom:validation", self.root)
+    self.start_button = self.xml:Init3tButton("gamma_arena_custom:start", self.root)
+    self.random_button = self.xml:Init3tButton("gamma_arena_custom:random", self.root)
+    self.back_button = self.xml:Init3tButton("gamma_arena_custom:back", self.root)
+    self:Register(self.faction_combo, "faction")
+    self:Register(self.count_combo, "count")
+    self:Register(self.seed_edit, "seed")
+    self:Register(self.start_button, "start")
+    self:Register(self.random_button, "random")
+    self:Register(self.back_button, "back")
+
+    local snapshot = self.model:snapshot()
+    for index, faction_id in ipairs(snapshot.faction_ids or {}) do self.faction_combo:AddItem(faction_text(faction_id), index) end
+    for count = 1, snapshot.capacity do self.count_combo:AddItem(tostring(count), count) end
+    self.roster_rows, self.rank_combos = {}, {}
+    for index = 1, 10 do
+        local row_path = "gamma_arena_custom:roster:roster_row_" .. tostring(index)
+        self.roster_rows[index] = self.xml:InitStatic(row_path, self.root)
+        self.rank_combos[index] = self.xml:InitComboBox(row_path .. ":rank_" .. tostring(index), self.roster_rows[index])
+        self:Register(self.rank_combos[index], "rank_" .. tostring(index))
+        for rank_index, rank_id in ipairs(snapshot.rank_ids or {}) do
+            self.rank_combos[index]:AddItem(rank_text(rank_id), rank_index)
+        end
+    end
+
+    self.category_buttons = {}
+    for _, category in ipairs(CATEGORY_IDS) do
+        local id = "category_" .. category
+        self.category_buttons[category] = self.xml:Init3tButton("gamma_arena_custom:categories:" .. id, self.root)
+        self:Register(self.category_buttons[category], id)
+    end
+    self.catalog_container = utils_ui.UICellContainer("catalog", self, nil, "gamma_arena_custom:catalog_container", self.root)
+    self.selected_container = utils_ui.UICellContainer("selected", self, nil, "gamma_arena_custom:selected_container", self.root)
+    for _, container in pairs({ self.catalog_container, self.selected_container }) do
+        container.showcase = true
+        container.disable_drag = true
+        container.disable_stack = true
+        container:SetGridSpecs(41, 2)
+    end
+end
+
+function UICustom:InitCallbacks()
+    self:AddCallback("faction", ui_events.LIST_ITEM_SELECT, self.OnFaction, self)
+    self:AddCallback("count", ui_events.LIST_ITEM_SELECT, self.OnCount, self)
+    self:AddCallback("start", ui_events.BUTTON_CLICKED, self.OnStart, self)
+    self:AddCallback("random", ui_events.BUTTON_CLICKED, self.OnRandom, self)
+    self:AddCallback("back", ui_events.BUTTON_CLICKED, self.OnBack, self)
+    self.rank_callbacks, self.category_callbacks = {}, {}
+    for index = 1, 10 do
+        self.rank_callbacks[index] = function() self:OnRank(index) end
+        self:AddCallback("rank_" .. tostring(index), ui_events.LIST_ITEM_SELECT, self.rank_callbacks[index], self)
+    end
+    for _, category in ipairs(CATEGORY_IDS) do
+        self.category_callbacks[category] = function() self:OnCategory(category) end
+        self:AddCallback("category_" .. category, ui_events.BUTTON_CLICKED, self.category_callbacks[category], self)
+    end
+end
+
+local function rebuild_container(container, cells, selected)
+    local sections, by_section = {}, {}
+    for index, view in ipairs(cells or {}) do
+        sections[index] = view.section
+        by_section[view.section] = view
+    end
+    container:Reinit(sections)
+    for _, cell in pairs(container.cell or {}) do
+        if cell:IsShown() then
+            local view = by_section[cell.section]
+            if view then
+                cell.flags.disabled = view.disabled == true
+                cell.flags.value = view.effective_price or view.base_price or 0
+                cell.flags.value_str = translated(view.name_key or view.section) .. " | "
+                    .. tostring(view.price_text or view.effective_price or view.base_price or 0) .. " AP | "
+                    .. format_weight(view.weight_mg)
+                cell.flags.name_key = view.name_key
+                cell.flags.weight_mg = view.weight_mg
+                local suffix = selected and (" q" .. tostring(view.quantity or 1)
+                    .. (view.equipped_slot and (" " .. tostring(view.equipped_slot)) or "")) or ""
+                cell:Add_CustomText(tostring(view.price_text or view.effective_price or view.base_price or 0) .. suffix)
+                if cell.cell and type(cell.cell.Enable) == "function" then cell.cell:Enable(not cell.flags.disabled) end
+            end
+        end
+    end
+end
+
+function UICustom:Rebuild()
+    local view = project(self.model, self.selected_category)
+    if not self.catalog_result.ok then
+        view.launch_enabled = false
+        view.validation_code = self.catalog_result.error.code
+    end
+    if self.submission_error and self.submission_error.error then
+        view.validation_code = self.submission_error.error.code
+    end
+    self.projection = view
+    set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
+    set_combo(self.count_combo, {}, nil, tostring, tostring(view.count))
+    self.count_combo:SetText(tostring(view.count))
+    for index = 1, 10 do
+        local visible = index <= view.count
+        self.roster_rows[index]:Show(visible)
+        if visible then set_combo(self.rank_combos[index], view.rank_ids, view.roster[index].rank, rank_text) end
+    end
+    self.budget_text:SetText(tostring(view.budget))
+    self.spent_text:SetText(tostring(view.spent))
+    self.remaining_text:SetText(tostring(view.remaining))
+    self.weight_text:SetText(format_weight(view.weight_mg))
+    self.weight_limit_text:SetText(format_weight(view.weight_limit_mg))
+    if view.validation_code then
+        self.validation_text:SetText(translated("st_gamma_arena_custom_invalid") .. " [" .. tostring(view.validation_code) .. "]")
+        self.validation_text:Show(true)
+    else
+        self.validation_text:SetText(translated("st_gamma_arena_custom_ready"))
+        self.validation_text:Show(true)
+    end
+    self.start_button:Enable(view.launch_enabled)
+    rebuild_container(self.catalog_container, view.catalog_cells, false)
+    rebuild_container(self.selected_container, view.selected_cells, true)
+end
+
+function UICustom:OnFaction()
+    self.submission_error = nil
+    local view = self.projection or project(self.model, self.selected_category)
+    local faction = combo_value(self.faction_combo, view.faction_ids, faction_text)
+    if faction then self.model:set_faction(faction) end
+    self:Rebuild()
+end
+
+function UICustom:OnCount()
+    self.submission_error = nil
+    local count = tonumber(self.count_combo:GetText())
+    self.model:set_count(count)
+    self:Rebuild()
+end
+
+function UICustom:OnRank(index)
+    self.submission_error = nil
+    local view = self.projection or project(self.model, self.selected_category)
+    local rank = combo_value(self.rank_combos[index], view.rank_ids, rank_text)
+    if rank then self.model:set_rank(index, rank) end
+    self:Rebuild()
+end
+
+function UICustom:OnCategory(category)
+    self.submission_error = nil
+    self.selected_category = category
+    self:Rebuild()
+end
+
+local function automatic_slot(definition)
+    if definition.category == "weapon" then
+        if definition.ltx_slot == 1 then return "weapon_1" end
+        if definition.ltx_slot == 2 then return "weapon_2" end
+    elseif definition.category == "outfit" or definition.category == "helmet" or definition.category == "knife" then
+        return definition.category
+    end
+    return nil
+end
+
+function UICustom:On_CC_Mouse1(container_id, index)
+    self.submission_error = nil
+    local container = container_id == "catalog" and self.catalog_container
+        or (container_id == "selected" and self.selected_container or nil)
+    local cell = container and container.cell and container.cell[index] or nil
+    if not cell or not cell.section or (cell.flags and cell.flags.disabled) then return end
+    if container_id == "catalog" then
+        local added = self.model:add_item(cell.section, 1)
+        if added.ok then
+            local definition = self.model.catalog.items[cell.section]
+            local slot = definition and automatic_slot(definition) or nil
+            if slot then self.model:equip(cell.section, slot) end
+        end
+    else
+        self.model:remove_item(cell.section)
+    end
+    self:Rebuild()
+end
+
+function UICustom:On_CC_Mouse2(container_id, index)
+    self.submission_error = nil
+    if container_id ~= "selected" then return end
+    local cell = self.selected_container.cell and self.selected_container.cell[index] or nil
+    if not cell or not cell.section then return end
+    local snapshot = self.model:snapshot()
+    for _, entry in ipairs(snapshot.actor_items or {}) do
+        if entry.section == cell.section then
+            if entry.equipped_slot then self.model:unequip(cell.section)
+            else
+                local definition = self.model.catalog.items[cell.section]
+                local slot = definition and automatic_slot(definition) or nil
+                if slot then self.model:equip(cell.section, slot) end
+            end
+            break
+        end
+    end
+    self:Rebuild()
+end
+
+function UICustom:HideSelf()
+    self:HideDialog()
+    self:Show(false)
+end
+
+function UICustom:OnRandom()
+    if self.owner then
+        if type(self.owner.ShowDialog) == "function" then self.owner:ShowDialog(true) end
+        if type(self.owner.Show) == "function" then self.owner:Show(true) end
+    end
+    self:HideSelf()
+end
+
+function UICustom:OnBack()
+    if self.owner and type(self.owner.RestoreOwner) == "function" then self.owner:RestoreOwner()
+    elseif self.owner then
+        if type(self.owner.ShowDialog) == "function" then self.owner:ShowDialog(true) end
+        if type(self.owner.Show) == "function" then self.owner:Show(true) end
+    end
+    self:HideSelf()
+end
+
+function UICustom:OnStart()
+    local main_owner = self.owner and self.owner.owner or self.owner
+    local started = submit(self.model, self.seed_edit:GetText(), {
+        random_session_seed = self.ports.random_session_seed,
+        random_seed_provider = self.ports.random_seed_provider,
+        parse_manual_seed = self.ports.parse_manual_seed,
+        emit_start = function(request)
+            if not axr_main or not axr_main.config then
+                return gamma_arena_result.err("GA_SETTINGS_CONFIG_UNAVAILABLE", "axr_main.config is unavailable")
+            end
+            local begin_start = self.ports.begin_start or gamma_arena_ui_start.begin_start
+            return begin_start(main_owner, axr_main.config, request, self.ports)
+        end
+    })
+    if started.ok then return started end
+    self.submission_error = started
+    self:Rebuild()
+    local code = started.error and started.error.code or ""
+    if string.sub(code, 1, 10) == "GA_CUSTOM_" or code == "GA_SESSION_SEED_INVALID" then return started end
+    if self.owner and type(self.owner.ShowFatal) == "function" then
+        self:OnRandom()
+        self.owner:ShowFatal({ started })
+    end
+    return started
+end
+
+function UICustom:OnKeyboard(dik, keyboard_action)
+    local result = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
+    if result == false then
+        self.catalog_container:OnKeyboard(dik, keyboard_action)
+        self.selected_container:OnKeyboard(dik, keyboard_action)
+        if keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then self:OnBack() end
+    end
+    return result
+end
+
+function create(owner, ports)
+    return UICustom(owner, ports)
+end

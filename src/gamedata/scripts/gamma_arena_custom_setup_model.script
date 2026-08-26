@@ -1,0 +1,382 @@
+local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
+local EQUIPMENT_SLOT = { outfit = "outfit", helmet = "helmet", knife = "knife" }
+local Model = {}
+Model.__index = Model
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= (minimum or 0) and value <= 9007199254740991
+end
+
+local function deep_copy(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return nil end
+    seen[value] = true
+    local copied = {}
+    for key, child in pairs(value) do copied[deep_copy(key, seen)] = deep_copy(child, seen) end
+    seen[value] = nil
+    return copied
+end
+
+local function copy_config(value)
+    local copied = {
+        schema_version = 1,
+        faction = value.faction,
+        roster = {},
+        actor_items = {},
+        catalog_fingerprint = value.catalog_fingerprint
+    }
+    for index, row in ipairs(value.roster or {}) do copied.roster[index] = { rank = row.rank } end
+    for index, entry in ipairs(value.actor_items or {}) do
+        copied.actor_items[index] = {
+            section = entry.section,
+            quantity = entry.quantity,
+            equipped_slot = entry.equipped_slot
+        }
+        if entry.equipped_slot == nil then copied.actor_items[index].equipped_slot = nil end
+    end
+    return copied
+end
+
+local function selected_index(config, section)
+    for index, entry in ipairs(config.actor_items) do
+        if entry.section == section then return index, entry end
+    end
+    return nil, nil
+end
+
+local function physical_count(config)
+    local total = 0
+    for _, entry in ipairs(config.actor_items) do total = total + (tonumber(entry.quantity) or 0) end
+    return total
+end
+
+local function category_count(config, catalog, category)
+    local total = 0
+    for _, entry in ipairs(config.actor_items) do
+        local definition = catalog.items and catalog.items[entry.section]
+        if definition and definition.category == category then total = total + 1 end
+    end
+    return total
+end
+
+local function expected_slot(definition)
+    if definition.category == "weapon" then
+        if definition.ltx_slot == 1 then return "weapon_1" end
+        if definition.ltx_slot == 2 then return "weapon_2" end
+        return nil
+    end
+    return EQUIPMENT_SLOT[definition.category]
+end
+
+local function reject(self, result)
+    self.last_operation = deep_copy(result)
+    return result
+end
+
+local function commit(self, candidate)
+    local validated = gamma_arena_custom_config.validate(candidate, { catalog = self.catalog, layout = self.layout })
+    self.draft = candidate
+    self.current_validation = validated
+    local accepted = gamma_arena_result.ok({ validation = deep_copy(validated) })
+    self.last_operation = deep_copy(accepted)
+    return accepted
+end
+
+local function item_definition(self, section)
+    if type(section) ~= "string" or section == "" or #section > 256
+        or type(self.catalog) ~= "table" or type(self.catalog.items) ~= "table"
+        or type(self.catalog.items[section]) ~= "table" then
+        return nil, failure("GA_CUSTOM_ITEM_UNKNOWN", "Custom item section is unknown", { section = section })
+    end
+    return self.catalog.items[section], nil
+end
+
+function Model:set_faction(faction)
+    if type(faction) ~= "string" or faction == "" or type(self.catalog.factions) ~= "table"
+        or type(self.catalog.factions[faction]) ~= "table" then
+        return reject(self, failure("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction is unknown", { faction = faction }))
+    end
+    local ranks = self.catalog.factions[faction].ranks
+    for index, row in ipairs(self.draft.roster) do
+        if type(ranks) ~= "table" or type(ranks[row.rank]) ~= "table" then
+            return reject(self, failure("GA_CUSTOM_RANK_UNKNOWN", "Custom rank is unavailable for the selected faction", {
+                faction = faction, index = index, rank = row.rank
+            }))
+        end
+    end
+    local candidate = copy_config(self.draft)
+    candidate.faction = faction
+    return commit(self, candidate)
+end
+
+function Model:set_count(count)
+    local capacity = type(self.layout) == "table" and self.layout.virtual_capacity or nil
+    if not finite_integer(count, 1) or not finite_integer(capacity, 1) or count > capacity then
+        return reject(self, failure("GA_CUSTOM_ROSTER_LIMIT", "Custom roster exceeds the active layout capacity", {
+            count = count, capacity = capacity
+        }))
+    end
+    local candidate = copy_config(self.draft)
+    while #candidate.roster > count do table.remove(candidate.roster) end
+    while #candidate.roster < count do candidate.roster[#candidate.roster + 1] = { rank = "novice" } end
+    return commit(self, candidate)
+end
+
+function Model:set_rank(index, rank)
+    if not finite_integer(index, 1) or index > #self.draft.roster then
+        return reject(self, failure("GA_CUSTOM_ROSTER_LIMIT", "Custom roster row is not visible", { index = index }))
+    end
+    if type(rank) ~= "string" or rank == "" or type(self.catalog.ranks) ~= "table"
+        or type(self.catalog.ranks[rank]) ~= "table" then
+        return reject(self, failure("GA_CUSTOM_RANK_UNKNOWN", "Custom roster rank is unknown", { index = index, rank = rank }))
+    end
+    if self.draft.faction ~= nil then
+        local faction = type(self.catalog.factions) == "table" and self.catalog.factions[self.draft.faction] or nil
+        if type(faction) ~= "table" or type(faction.ranks) ~= "table" or type(faction.ranks[rank]) ~= "table" then
+            return reject(self, failure("GA_CUSTOM_RANK_UNKNOWN", "Custom rank is unavailable for the selected faction", {
+                index = index, rank = rank, faction = self.draft.faction
+            }))
+        end
+    end
+    local candidate = copy_config(self.draft)
+    candidate.roster[index].rank = rank
+    return commit(self, candidate)
+end
+
+function Model:add_item(section, quantity, equipped_slot)
+    local definition, item_error = item_definition(self, section)
+    if item_error then return reject(self, item_error) end
+    if selected_index(self.draft, section) ~= nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_DUPLICATE", "Custom item sections must be distinct", { section = section }))
+    end
+    quantity = quantity == nil and 1 or quantity
+    if not finite_integer(quantity, 1) then
+        return reject(self, failure("GA_CUSTOM_QUANTITY_INVALID", "Custom item quantity must be a positive integer", { section = section }))
+    end
+    if not finite_integer(self.catalog.max_entries, 1) or #self.draft.actor_items + 1 > self.catalog.max_entries then
+        return reject(self, failure("GA_CUSTOM_ENTRY_LIMIT", "Custom actor inventory has too many distinct entries", {
+            count = #self.draft.actor_items + 1, limit = self.catalog.max_entries
+        }))
+    end
+    if not finite_integer(self.catalog.max_physical_items_per_participant, 1)
+        or physical_count(self.draft) + quantity > self.catalog.max_physical_items_per_participant then
+        return reject(self, failure("GA_CUSTOM_PHYSICAL_LIMIT", "Custom actor inventory exceeds the physical item cap", {
+            count = physical_count(self.draft) + quantity, limit = self.catalog.max_physical_items_per_participant
+        }))
+    end
+    local category = definition.category
+    if category == "grenade" then
+        if quantity ~= self.catalog.max_quantity_per_grenade
+            or category_count(self.draft, self.catalog, "grenade") >= self.catalog.max_selected_grenades then
+            return reject(self, failure("GA_CUSTOM_GRENADE_LIMIT", "Custom grenade selection is invalid", { section = section }))
+        end
+    elseif (category == "outfit" or category == "helmet" or category == "knife") and quantity ~= 1 then
+        return reject(self, failure("GA_CUSTOM_EQUIPMENT_QUANTITY", "Equipped physical items require quantity one", {
+            section = section, quantity = quantity
+        }))
+    elseif category == "outfit" and category_count(self.draft, self.catalog, category) >= 1 then
+        return reject(self, failure("GA_CUSTOM_OUTFIT_REQUIRED", "Custom loadout supports exactly one outfit", { section = section }))
+    elseif category == "helmet" and category_count(self.draft, self.catalog, category) >= 1 then
+        return reject(self, failure("GA_CUSTOM_HELMET_LIMIT", "Custom loadout supports at most one helmet", { section = section }))
+    elseif category == "knife" and category_count(self.draft, self.catalog, category) >= 1 then
+        return reject(self, failure("GA_CUSTOM_KNIFE_REQUIRED", "Custom loadout supports exactly one knife", { section = section }))
+    end
+    if equipped_slot ~= nil then
+        local expected = expected_slot(definition)
+        if expected == nil or equipped_slot ~= expected or quantity ~= 1 then
+            return reject(self, failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must use its effective logical slot", {
+                section = section, slot = equipped_slot
+            }))
+        end
+        for _, entry in ipairs(self.draft.actor_items) do
+            if entry.equipped_slot == equipped_slot then
+                return reject(self, failure("GA_CUSTOM_SLOT_DUPLICATE", "Custom equipment slot is already occupied", { slot = equipped_slot }))
+            end
+        end
+    end
+    local candidate = copy_config(self.draft)
+    candidate.actor_items[#candidate.actor_items + 1] = {
+        section = section, quantity = quantity, equipped_slot = equipped_slot
+    }
+    if equipped_slot == nil then candidate.actor_items[#candidate.actor_items].equipped_slot = nil end
+    return commit(self, candidate)
+end
+
+function Model:remove_item(section)
+    local index = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED", "Custom item is not selected", { section = section }))
+    end
+    local candidate = copy_config(self.draft)
+    table.remove(candidate.actor_items, index)
+    return commit(self, candidate)
+end
+
+function Model:equip(section, slot)
+    local index, entry = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED", "Custom item is not selected", { section = section }))
+    end
+    local definition = self.catalog.items[section]
+    local expected = expected_slot(definition)
+    if expected == nil or slot ~= expected then
+        return reject(self, failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must use its effective logical slot", {
+            section = section, slot = slot
+        }))
+    end
+    if entry.quantity ~= 1 then
+        return reject(self, failure("GA_CUSTOM_EQUIPMENT_QUANTITY", "Equipped physical items require quantity one", {
+            section = section, quantity = entry.quantity
+        }))
+    end
+    for other_index, other in ipairs(self.draft.actor_items) do
+        if other_index ~= index and other.equipped_slot == slot then
+            return reject(self, failure("GA_CUSTOM_SLOT_DUPLICATE", "Custom equipment slot is already occupied", { slot = slot }))
+        end
+    end
+    local candidate = copy_config(self.draft)
+    candidate.actor_items[index].equipped_slot = slot
+    return commit(self, candidate)
+end
+
+function Model:unequip(section)
+    local index, entry = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED", "Custom item is not selected", { section = section }))
+    end
+    if entry.equipped_slot == nil then
+        return reject(self, failure("GA_CUSTOM_SLOT_INVALID", "Custom item is not equipped", { section = section }))
+    end
+    local candidate = copy_config(self.draft)
+    candidate.actor_items[index].equipped_slot = nil
+    return commit(self, candidate)
+end
+
+function Model:validation()
+    self.current_validation = gamma_arena_custom_config.validate(self.draft, { catalog = self.catalog, layout = self.layout })
+    return deep_copy(self.current_validation)
+end
+
+local function sorted_category_sections(catalog, category)
+    local sections = {}
+    local declared = type(catalog.categories) == "table" and catalog.categories[category] or nil
+    if type(declared) == "table" then
+        for _, section in ipairs(declared) do
+            if type(catalog.items[section]) == "table" and catalog.items[section].category == category then
+                sections[#sections + 1] = section
+            end
+        end
+    else
+        for section, definition in pairs(catalog.items or {}) do
+            if type(definition) == "table" and definition.category == category then sections[#sections + 1] = section end
+        end
+        table.sort(sections)
+    end
+    return sections
+end
+
+function Model:snapshot()
+    local validated = self:validation()
+    local budget_result = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
+    local totals_result = gamma_arena_custom_config.totals(self.draft, self.catalog)
+    local selected, selected_map, selected_grenades = {}, {}, {}
+    local grenade_index = 0
+    for index, entry in ipairs(self.draft.actor_items) do
+        local definition = self.catalog.items and self.catalog.items[entry.section] or {}
+        local multiplier = 1
+        if definition.category == "grenade" then
+            grenade_index = grenade_index + 1
+            if grenade_index == 2 then multiplier = self.catalog.second_grenade_price_multiplier end
+        end
+        local view = {
+            index = index,
+            section = entry.section,
+            category = definition.category,
+            quantity = entry.quantity,
+            equipped_slot = entry.equipped_slot,
+            name_key = definition.name_key,
+            base_price = definition.price,
+            multiplier = multiplier,
+            effective_price = (definition.price or 0) * entry.quantity * multiplier,
+            weight_mg = (definition.weight_mg or 0) * entry.quantity
+        }
+        selected[#selected + 1] = view
+        selected_map[entry.section] = view
+        if definition.category == "grenade" then selected_grenades[#selected_grenades + 1] = view end
+    end
+
+    local categories = {}
+    for _, category in ipairs(CATEGORY_IDS) do
+        categories[category] = {}
+        for _, section in ipairs(sorted_category_sections(self.catalog, category)) do
+            local definition = self.catalog.items[section]
+            local is_selected = selected_map[section] ~= nil
+            local multiplier = category == "grenade" and #selected_grenades == 1 and self.catalog.second_grenade_price_multiplier or 1
+            local disabled = category == "grenade" and (is_selected or #selected_grenades >= self.catalog.max_selected_grenades) or false
+            categories[category][#categories[category] + 1] = {
+                section = section,
+                category = category,
+                name_key = definition.name_key,
+                base_price = definition.price,
+                weight_mg = definition.weight_mg,
+                selected = is_selected,
+                selected_quantity = is_selected and selected_map[section].quantity or 0,
+                disabled = disabled,
+                preview_multiplier = multiplier,
+                preview_effective_price = (definition.price or 0) * multiplier
+            }
+        end
+    end
+    local spent = totals_result.ok and totals_result.value.points or 0
+    local budget = budget_result.ok and budget_result.value or 0
+    return {
+        config = copy_config(self.draft),
+        faction = self.draft.faction,
+        faction_ids = deep_copy(self.catalog.faction_ids or {}),
+        rank_ids = deep_copy(self.catalog.rank_ids or {}),
+        roster = deep_copy(self.draft.roster),
+        count = #self.draft.roster,
+        capacity = self.layout and self.layout.virtual_capacity or 0,
+        category_ids = deep_copy(CATEGORY_IDS),
+        categories = categories,
+        actor_items = selected,
+        selected_grenades = selected_grenades,
+        distinct_count = #self.draft.actor_items,
+        max_entries = self.catalog.max_entries,
+        physical_count = physical_count(self.draft),
+        max_physical_items_per_participant = self.catalog.max_physical_items_per_participant,
+        budget = budget,
+        spent = spent,
+        remaining = budget - spent,
+        weight_mg = totals_result.ok and totals_result.value.weight_mg or 0,
+        weight_limit_mg = totals_result.ok and totals_result.value.weight_limit_mg or (self.catalog.base_carry_weight or 0),
+        validation = validated,
+        can_start = validated.ok == true,
+        last_operation = deep_copy(self.last_operation)
+    }
+end
+
+function new(catalog, layout)
+    catalog = type(catalog) == "table" and catalog or {}
+    layout = type(layout) == "table" and layout or {}
+    local self = setmetatable({
+        catalog = catalog,
+        layout = layout,
+        draft = {
+            schema_version = 1,
+            faction = nil,
+            roster = { { rank = "novice" } },
+            actor_items = {},
+            catalog_fingerprint = catalog.fingerprint
+        },
+        last_operation = nil
+    }, Model)
+    self.current_validation = gamma_arena_custom_config.validate(self.draft, { catalog = catalog, layout = layout })
+    return self
+end

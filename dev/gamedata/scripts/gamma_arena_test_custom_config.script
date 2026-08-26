@@ -188,6 +188,121 @@ local function custom_config_grenade_order_is_semantic()
     gamma_arena_test_assert.equals(second.value.points, 470, "F1 is multiplied when second")
 end
 
+local function custom_setup_model_preserves_order_and_recalculates_budget()
+    local catalog = make_catalog()
+    catalog.faction_ids = { "stalker", "monolith" }
+    catalog.factions.monolith = clone(catalog.factions.stalker)
+    catalog.factions.monolith.id = "monolith"
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    local initial = model:snapshot()
+    gamma_arena_test_assert.equals(initial.count, 1, "draft starts with one opponent")
+    gamma_arena_test_assert.equals(initial.roster[1].rank, "novice", "draft starts at novice")
+    gamma_arena_test_assert.equals(initial.faction, nil, "draft requires explicit faction")
+    gamma_arena_test_assert.is_false(model:validation().ok, "initial draft is not launchable")
+
+    gamma_arena_test_assert.is_true(model:set_count(3).ok, "count growth is accepted")
+    gamma_arena_test_assert.is_true(model:set_rank(2, "legend").ok, "visible row rank changes")
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "shared faction is selected")
+    local grown = model:snapshot()
+    gamma_arena_test_assert.equals(grown.roster[1].rank, "novice", "first rank survives growth")
+    gamma_arena_test_assert.equals(grown.roster[2].rank, "legend", "changed rank survives growth")
+    gamma_arena_test_assert.equals(grown.roster[3].rank, "novice", "growth appends novice")
+    gamma_arena_test_assert.equals(grown.budget, 1200, "budget is 600 plus ordered threats")
+    gamma_arena_test_assert.equals(grown.config.roster[1].faction, nil, "rows never store faction")
+
+    gamma_arena_test_assert.is_true(model:set_count(2).ok, "tail shrink is accepted")
+    gamma_arena_test_assert.is_true(model:set_count(3).ok, "regrowth is accepted")
+    gamma_arena_test_assert.is_true(model:set_faction("monolith").ok, "one faction changes the whole roster")
+    local regrown = model:snapshot()
+    gamma_arena_test_assert.equals(regrown.roster[1].rank, "novice", "shrink preserves first row")
+    gamma_arena_test_assert.equals(regrown.roster[2].rank, "legend", "shrink preserves second row")
+    gamma_arena_test_assert.equals(regrown.roster[3].rank, "novice", "regrowth creates novice tail")
+    gamma_arena_test_assert.equals(regrown.config.faction, "monolith", "single config faction is authoritative")
+    gamma_arena_test_assert.equals(regrown.budget, 1200, "regrowth recalculates budget")
+    gamma_arena_test_assert.is_false(model:set_count(11).ok, "layout capacity rejects eleventh row")
+    gamma_arena_test_assert.equals(model:snapshot().count, 3, "rejected count does not mutate")
+end
+
+local function custom_setup_model_progressively_assembles_valid_equipment_and_categories()
+    local catalog = make_catalog()
+    catalog.categories = {
+        weapon = { "wpn_alpha" }, ammo = { "ammo_alpha" }, outfit = { "outfit_field" },
+        helmet = { "helmet_open" }, knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    catalog.item_ids = {
+        "ammo_alpha", "grenade_f1", "grenade_gd05", "grenade_rgd5", "helmet_open",
+        "medkit", "outfit_field", "wpn_alpha", "wpn_knife"
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "faction edit commits while draft is incomplete")
+    gamma_arena_test_assert.is_true(model:add_item("outfit_field", 1).ok, "outfit is progressively selected")
+    gamma_arena_test_assert.is_true(model:equip("outfit_field", "outfit").ok, "outfit equips")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_alpha", 1).ok, "weapon is progressively selected")
+    gamma_arena_test_assert.is_true(model:equip("wpn_alpha", "weapon_2").ok, "weapon equips to effective slot")
+    gamma_arena_test_assert.is_true(model:add_item("ammo_alpha", 2).ok, "ammo quantity is selected")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_knife", 1).ok, "knife is progressively selected")
+    gamma_arena_test_assert.is_true(model:equip("wpn_knife", "knife").ok, "knife equips")
+    gamma_arena_test_assert.is_true(model:add_item("medkit", 1).ok, "healing is progressively selected")
+    gamma_arena_test_assert.is_true(model:validation().ok, "complete equipment passes authoritative validation")
+
+    local browsed = model:snapshot()
+    gamma_arena_test_assert.equals(#browsed.categories.weapon, 1, "weapon category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.ammo, 1, "ammo category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.outfit, 1, "outfit category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.helmet, 1, "helmet category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.knife, 1, "knife category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.medicine, 1, "medicine category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.grenade, 3, "grenade category browses curated actor pool")
+    gamma_arena_test_assert.equals(browsed.spent, 320, "progressive equipment points are derived")
+    gamma_arena_test_assert.equals(browsed.physical_count, 6, "physical quantities are derived")
+
+    local illegal = model:equip("medkit", "weapon_1")
+    assert_code(illegal, "GA_CUSTOM_SLOT_INVALID", "medicine cannot equip")
+    gamma_arena_test_assert.equals(model:snapshot().config.actor_items[5].equipped_slot, nil, "rejected equip does not mutate")
+    gamma_arena_test_assert.is_true(model:unequip("outfit_field").ok, "required equipment may be removed from draft")
+    gamma_arena_test_assert.is_false(model:validation().ok, "unequipped outfit disables launch")
+    gamma_arena_test_assert.is_true(model:equip("outfit_field", "outfit").ok, "outfit can be restored")
+    gamma_arena_test_assert.is_true(model:validation().ok, "restored equipment reenables launch")
+end
+
+local function custom_setup_model_grenade_selection_removal_and_reorder_are_semantic()
+    local catalog = make_catalog()
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    model:set_faction("stalker")
+    model:add_item("outfit_field", 1); model:equip("outfit_field", "outfit")
+    model:add_item("wpn_alpha", 1); model:equip("wpn_alpha", "weapon_2")
+    model:add_item("ammo_alpha", 2)
+    model:add_item("wpn_knife", 1); model:equip("wpn_knife", "knife")
+    model:add_item("medkit", 1)
+
+    gamma_arena_test_assert.is_true(model:add_item("grenade_f1", 1).ok, "first grenade is selected")
+    gamma_arena_test_assert.is_true(model:add_item("grenade_rgd5", 1).ok, "second grenade is selected")
+    local selected = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(selected[1].section, "grenade_f1", "F1 remains first")
+    gamma_arena_test_assert.equals(selected[1].base_price, 40, "first grenade exposes base price")
+    gamma_arena_test_assert.equals(selected[1].effective_price, 40, "first grenade uses base price")
+    gamma_arena_test_assert.equals(selected[2].section, "grenade_rgd5", "RGD5 remains second")
+    gamma_arena_test_assert.equals(selected[2].multiplier, 2, "second grenade exposes multiplier")
+    gamma_arena_test_assert.equals(selected[2].effective_price, 140, "second grenade doubles its own base price")
+
+    local rejected = model:add_item("grenade_gd05", 1)
+    assert_code(rejected, "GA_CUSTOM_GRENADE_LIMIT", "third grenade is rejected")
+    gamma_arena_test_assert.equals(#model:snapshot().selected_grenades, 2, "third grenade rejection does not mutate")
+    gamma_arena_test_assert.equals(model:snapshot().last_operation.error.code, "GA_CUSTOM_GRENADE_LIMIT", "rejected attempt stays observable")
+
+    gamma_arena_test_assert.is_true(model:remove_item("grenade_f1").ok, "first grenade removes")
+    local survivor = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(survivor[1].section, "grenade_rgd5", "survivor becomes first")
+    gamma_arena_test_assert.equals(survivor[1].effective_price, 70, "survivor returns to base price")
+    gamma_arena_test_assert.is_true(model:add_item("grenade_f1", 1).ok, "removed grenade can be appended")
+    local reordered = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(reordered[1].section, "grenade_rgd5", "survivor retains first order")
+    gamma_arena_test_assert.equals(reordered[1].effective_price, 70, "first remains base price")
+    gamma_arena_test_assert.equals(reordered[2].section, "grenade_f1", "re-added grenade becomes second")
+    gamma_arena_test_assert.equals(reordered[2].effective_price, 80, "new second grenade doubles its base price")
+end
+
 local function custom_codec_round_trip_preserves_bounded_order()
     local catalog = make_catalog()
     local context = make_context(catalog)
@@ -268,6 +383,9 @@ local cases = {
     { name = "custom_config_rejects_non_unit_physical_equipment", fn = custom_config_rejects_non_unit_physical_equipment },
     { name = "custom_config_preserves_legitimate_inventory_stacks", fn = custom_config_preserves_legitimate_inventory_stacks },
     { name = "custom_config_grenade_order_is_semantic", fn = custom_config_grenade_order_is_semantic },
+    { name = "custom_setup_model_preserves_order_and_recalculates_budget", fn = custom_setup_model_preserves_order_and_recalculates_budget },
+    { name = "custom_setup_model_progressively_assembles_valid_equipment_and_categories", fn = custom_setup_model_progressively_assembles_valid_equipment_and_categories },
+    { name = "custom_setup_model_grenade_selection_removal_and_reorder_are_semantic", fn = custom_setup_model_grenade_selection_removal_and_reorder_are_semantic },
     { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
     ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
     ,{ name = "custom_codec_encode_rejects_unknown_fields_and_malformed_scalars", fn = custom_codec_encode_rejects_unknown_fields_and_malformed_scalars }
