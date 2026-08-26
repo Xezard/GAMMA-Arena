@@ -4,7 +4,7 @@ param([switch]$Verify, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 if ($Verify -and $Update) { throw 'Choose either -Verify or -Update.' }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v7.txt'
+$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v8.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
@@ -34,11 +34,11 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $generatorText = Get-Content -Raw -LiteralPath $generatorPath
-if ([int]$catalog.meta.schema_version -ne 8 -or [int]$catalog.meta.revision -ne 9 -or [int]$catalog.meta.generator_version -ne 9 -or
+if ([int]$catalog.meta.schema_version -ne 9 -or [int]$catalog.meta.revision -ne 10 -or [int]$catalog.meta.generator_version -ne 10 -or
     [int]$difficulties.meta.schema_version -ne 4 -or [int]$difficulties.meta.revision -ne 5 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2 -or
-    $generatorText -notmatch 'schema_version\s*=\s*7' -or $generatorText -notmatch 'FightSpecV7') {
-    throw 'Reference oracle requires catalog schema 8, generator/catalog 9/9, medical difficulty v5, layout v2, and FightSpec v7.'
+    $generatorText -notmatch 'schema_version\s*=\s*8' -or $generatorText -notmatch 'FightSpecV8') {
+    throw 'Reference oracle requires catalog schema 9, generator/catalog 10/10, medical difficulty v5, layout v2, and FightSpec v8.'
 }
 
 $difficultyManifest = @{
@@ -144,7 +144,26 @@ $npcGrenadeIds = @($catalog.grenades.npc_ids.Split(',') | ForEach-Object { $_.Tr
 $actorGrenadePool = @($actorGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
 $npcGrenadePool = @($npcGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
 if ($actorGrenadePool.Count -ne 3 -or $npcGrenadePool.Count -ne 3 -or $actorGrenadePool -contains 'grenade_smoke' -or $npcGrenadePool -contains 'grenade_smoke') {
-    throw 'Reference grenade pools differ from the FightSpec v7 contract.'
+    throw 'Reference grenade pools differ from the FightSpec v8 contract.'
+}
+$deviceManifest = [ordered]@{
+    headlamp = @('device_torch_dummy', 'headlamp', 50, 'none')
+    nv_gen1 = @('device_torch_nv_1', 'gen1', 25, 'nightvision_1')
+    nv_gen2 = @('device_torch_nv_2', 'gen2', 18, 'nightvision_2')
+    nv_gen3 = @('device_torch_nv_3', 'gen3', 7, 'nightvision_3')
+}
+$deviceIds = @($catalog.devices.ids.Split(',') | ForEach-Object { $_.Trim() })
+$devices = @()
+foreach ($id in $deviceIds) {
+    if (-not $deviceManifest.Contains($id)) { throw "Reference device catalog contains unknown id '$id'." }
+    $entry = $catalog["device_$id"]
+    $expected = $deviceManifest[$id]
+    $actual = @($entry.section, $entry.kind, [int]$entry.weight, $entry.nv_effect)
+    if (@(Compare-Object $expected $actual -SyncWindow 0).Count -ne 0) { throw "Reference device '$id' differs from the FightSpec v8 contract." }
+    $devices += [pscustomobject]@{Id=$id;Section=$entry.section;Kind=$entry.kind;Weight=[int]$entry.weight;NvEffect=$entry.nv_effect}
+}
+if (($deviceIds -join ',') -cne 'headlamp,nv_gen1,nv_gen2,nv_gen3' -or ($devices | Measure-Object Weight -Sum).Sum -ne 100) {
+    throw 'Reference device catalog must be the exact ordered 50/25/18/7 distribution.'
 }
 $bandageCost = [int]$catalog.consumable_bandage.cost
 $medicalItems = @($catalog.medical_items.ids.Split(',') | ForEach-Object { $_.Trim() } | ForEach-Object {
@@ -268,6 +287,18 @@ function New-GaEnemyGrenades([pscustomobject]$Request, [int]$FightIndex, [int]$S
     if ((Get-GaNextInt (New-GaStream $Request $FightIndex "enemy_grenade_presence:$Slot") 1 100) -gt 10) { return @() }
     return @(Select-GaPick (New-GaStream $Request $FightIndex "enemy_grenade_section:$Slot") $npcGrenadePool)
 }
+function New-GaActorDevice([pscustomobject]$Request, [int]$FightIndex) {
+    $rng = New-GaRng @($Request.ModeId, [int64]$Request.SessionSeed, $FightIndex, 1, 2, 'actor_device')
+    $draw = Get-GaNextInt $rng 1 100
+    $cumulative = 0
+    foreach ($device in $devices) {
+        $cumulative += $device.Weight
+        if ($draw -le $cumulative) {
+            return "device:$($device.Id):$($device.Section):$($device.Kind):$($device.Weight):$($device.NvEffect)"
+        }
+    }
+    throw 'Reference device selection exhausted its range.'
+}
 function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscustomobject]$Difficulty, [string]$Knife, [int]$OpponentCount) {
     $pairs = @()
     foreach ($weaponClass in @('w_pistol','w_smg','w_shotgun','w_rifle','w_sniper')) {
@@ -317,7 +348,8 @@ function New-GaPlayerLoadout([pscustomobject]$Request, [int]$FightIndex, [pscust
     $scaledBoxes = New-GaScaledAmmoBoxes $Request $FightIndex $weapon.Kind $OpponentCount
     $finalAmmoBoxes = [int][Math]::Max($ammoBoxes, $minimumBoxes) + $scaledBoxes
     $grenades = @(New-GaActorGrenades $Request $FightIndex)
-    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$finalAmmoBoxes,$($outfit.Section),$Knife,medical:$($medical.Sections -join '+'),grenades:$($grenades -join '+'),$gearCost,$($medical.Cost),$totalCost,$bonus";Cost=$totalCost;GearCost=$gearCost;MedicalCost=$medical.Cost;Kind=$weapon.Kind;BudgetedAmmoBoxes=$ammoBoxes;AmmoBoxes=$finalAmmoBoxes;ScaledAmmoBoxes=$scaledBoxes;Grenades=$grenades}
+    $device = New-GaActorDevice $Request $FightIndex
+    return [pscustomobject]@{Encoded="$($weapon.Section),$($weapon.Ammo),$finalAmmoBoxes,$($outfit.Section),$Knife,medical:$($medical.Sections -join '+'),grenades:$($grenades -join '+'),$device,$gearCost,$($medical.Cost),$totalCost,$bonus";Cost=$totalCost;GearCost=$gearCost;MedicalCost=$medical.Cost;Kind=$weapon.Kind;BudgetedAmmoBoxes=$ammoBoxes;AmmoBoxes=$finalAmmoBoxes;ScaledAmmoBoxes=$scaledBoxes;Grenades=$grenades;Device=$device}
 }
 
 $resolvedSlots = @()
@@ -387,7 +419,7 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
         $total=$record.Profile.Cost+$record.Gear.GearCost+$medical.Cost
         $opponents += "$($record.Index):$($record.Index),$($physical.Id),$position,$($physical.Lvid),$($physical.Gvid),$($record.Route),$($record.Role),$($record.Profile.Section),$($record.Profile.Cost),$loadout,$total"
     }
-    $fields=@('schema_version=7','generator_version=9','catalog_revision=9','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g9-c9-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV7 skirmish $DifficultyId #$FightIndex"
+    $fields=@('schema_version=8','generator_version=10','catalog_revision=10','layout_version=2',"session_seed=$normalized","fight_index=$FightIndex","fight_id=ga-$normalized-$FightIndex-g10-c10-l2",'mode_id=skirmish',"difficulty_id=$DifficultyId",'layout_id=rostok_arena_v1',"level=$($layout.level)","actor=$($layout.actor_spawn_path),$($layout.actor_look_path),$($actor.Encoded)",'opponents=')+$opponents+"diagnostic=FightSpecV8 skirmish $DifficultyId #$FightIndex"
     return $fields -join '|'
 }
 
@@ -408,12 +440,12 @@ $requests=@(
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
 if((New-GaEncodedFight 0 veteran 7)-cne(New-GaEncodedFight 1 veteran 7)){throw 'Normalized seed aliases must match'}
 if($Verify){
-    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v7 fixture is missing'}
+    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v8 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
-    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v7 reference oracle.'}
+    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v8 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
 }elseif($Update){
-    $lines = @('# Gamma Arena FightSpec v7 deterministic golden encodings.') + $expected
+    $lines = @('# Gamma Arena FightSpec v8 deterministic golden encodings.') + $expected
     [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
     Write-Host "Updated golden fixture: $fixturePath"
 }else{$expected}
