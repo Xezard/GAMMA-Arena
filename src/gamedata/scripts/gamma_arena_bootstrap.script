@@ -73,6 +73,7 @@ local function runtime_probes(catalogs)
         npc_medical_ini = function() return ini_file("ai_tweaks\\xr_eat_medkit.ltx") end,
         axr_main = axr_main,
         safe_release_manager = safe_release_manager,
+        item_device = item_device,
         catalogs = catalogs
     }
 end
@@ -467,6 +468,7 @@ function new_actor_loadout_port(ports)
     local owned_records = {}
     local token_sequence = 0
     local equipment = { state = "IDLE" }
+    local loadout_actor = nil
     local cleanup
     local function normalize_entities(value)
         local single = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, value)
@@ -486,7 +488,9 @@ function new_actor_loadout_port(ports)
                 token = record.token,
                 role = record.role,
                 authorized = record.authorized == true,
-                release_submitted = record.release_submitted == true
+                release_submitted = record.release_submitted == true,
+                equipped = record.equipped == true,
+                device_neutralized = record.device_neutralized == true
             }
         end
         return values
@@ -548,12 +552,14 @@ function new_actor_loadout_port(ports)
         if #owned_records > 0 then return actor_loadout_failure("GA_ACTOR_LOADOUT_BUSY", "Prior Arena actor items are still owned or pending cleanup") end
         local actor_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTOR_INVALID", ports.actor_id, actor)
         if not actor_id.ok or type(actor_id.value) ~= "number" then return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Arena actor has no numeric id") or actor_id end
+        loadout_actor = actor
         local ownership = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", ports.ownership_token, actor, actor_id.value)
         if not ownership.ok then return ownership end
         if type(ownership.value) ~= "string" or ownership.value == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Arena actor loadout requires a non-empty session ownership token")
         end
-        if type(loadout) ~= "table" or not dense_section_array(loadout.consumables) or not dense_section_array(loadout.grenades) or type(loadout.knife) ~= "string" or loadout.knife == "" then
+        if type(loadout) ~= "table" or not dense_section_array(loadout.consumables) or not dense_section_array(loadout.grenades) or type(loadout.knife) ~= "string" or loadout.knife == ""
+            or type(loadout.device) ~= "table" or type(loadout.device.section) ~= "string" or loadout.device.section == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed")
         end
         local started = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
@@ -594,7 +600,8 @@ function new_actor_loadout_port(ports)
             { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo", box_size = box_size.value },
             { section = loadout.bonus_ammo.section, count = bonus_ammo_rounds, ammo = true, role = "bonus_ammo", box_size = bonus_box_size.value },
             { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
-            { section = loadout.knife, count = 1, ammo = false, role = "knife" }
+            { section = loadout.knife, count = 1, ammo = false, role = "knife" },
+            { section = loadout.device.section, count = 1, ammo = false, role = "device" }
         }
         for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "consumable" } end
         for index, section in ipairs(loadout.grenades) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "grenade", ordinal = index } end
@@ -660,7 +667,7 @@ function new_actor_loadout_port(ports)
         }
         return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
     end
-    local equipment_roles = { "outfit", "knife", "weapon" }
+    local equipment_roles = { "outfit", "knife", "device", "weapon" }
     local function equipment_record(role)
         local found = nil
         for _, record in ipairs(owned_records) do
@@ -683,6 +690,8 @@ function new_actor_loadout_port(ports)
                 role = equipment_roles[equipment.role_index]
             elseif equipment.phase == "CHARGE_OUTFIT" then
                 role = "outfit"
+            elseif equipment.phase == "CHARGE_DEVICE" then
+                role = "device"
             elseif equipment.phase == "SUBMIT_MAGAZINE" or equipment.phase == "WAIT_MAGAZINE_VERIFY"
                 or equipment.phase == "SUBMIT_ACTIVE" or equipment.phase == "WAIT_ACTIVE_VERIFY" then
                 role = "weapon"
@@ -764,6 +773,9 @@ function new_actor_loadout_port(ports)
             if item.value.pending == true then return pending_or_rollback() end
             local slot = effective_equipment_slot(item.value.record)
             if not slot.ok then return rollback(owned_records, slot) end
+            if role == "device" and slot.value ~= 10 then
+                return rollback(owned_records, actor_loadout_failure("GA_ACTOR_DEVICE_SLOT_INVALID", "Actor device effective slot must be 10", { section = item.value.record.section, slot = slot.value }))
+            end
             local moved = actor_loadout_call("GA_ACTOR_LOADOUT_EQUIP_FAILED", ports.move_to_slot, actor, item.value.object, slot.value)
             if not moved.ok then return rollback(owned_records, moved) end
             equipment.pending_slot = { role = role, id = item.value.record.id, section = item.value.record.section, slot = slot.value }
@@ -785,9 +797,15 @@ function new_actor_loadout_port(ports)
                 return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_VERIFY_FAILED", "Actor slot contains a different item", { section = pending_slot.section, slot = pending_slot.slot, expected_id = pending_slot.id, actual_id = current_id.value }))
             end
             equipment.slots[pending_slot.role] = pending_slot.slot
+            local equipped_record = equipment_record(pending_slot.role)
+            if equipped_record ~= nil then equipped_record.equipped = true end
             equipment.pending_slot = nil
             if pending_slot.role == "outfit" then
                 equipment.phase = "CHARGE_OUTFIT"
+                return pending_or_rollback(true)
+            end
+            if pending_slot.role == "device" then
+                equipment.phase = "CHARGE_DEVICE"
                 return pending_or_rollback(true)
             end
             equipment.role_index = equipment.role_index + 1
@@ -828,6 +846,24 @@ function new_actor_loadout_port(ports)
                 end
                 equipment.outfit_power = 100
             end
+            equipment.role_index = equipment.role_index + 1
+            equipment.phase = "SUBMIT_SLOT"
+            return pending_or_rollback(true)
+        end
+
+        if equipment.phase == "CHARGE_DEVICE" then
+            local device = required_equipment(actor, "device")
+            if not device.ok then return rollback(owned_records, device) end
+            if device.value.pending == true then return pending_or_rollback() end
+            local written = actor_loadout_call("GA_ACTOR_DEVICE_CHARGE_FAILED", ports.set_item_condition, device.value.object, 0.9999)
+            if not written.ok then return rollback(owned_records, written) end
+            local condition = actor_loadout_call("GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED", ports.item_condition, device.value.object)
+            if not condition.ok or type(condition.value) ~= "number" or condition.value ~= condition.value
+                or condition.value == math.huge or condition.value == -math.huge or condition.value < 0.999 then
+                local cause = condition.ok and actor_loadout_failure("GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED", "Actor device did not retain full charge", { section = device.value.record.section, condition = condition.value }) or condition
+                return rollback(owned_records, cause)
+            end
+            equipment.device_condition = condition.value
             equipment.role_index = equipment.role_index + 1
             equipment.phase = "SUBMIT_SLOT"
             return pending_or_rollback(true)
@@ -912,7 +948,8 @@ function new_actor_loadout_port(ports)
         if active_id.value ~= weapon.value.record.id then return pending_or_rollback() end
         local outfit = equipment_record("outfit")
         local knife = equipment_record("knife")
-        if outfit == nil or knife == nil then
+        local device = equipment_record("device")
+        if outfit == nil or knife == nil or device == nil then
             return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Required equipped item record is missing at readiness"))
         end
         equipment.summary = {
@@ -921,9 +958,12 @@ function new_actor_loadout_port(ports)
             weapon = weapon.value.record.section,
             knife = knife.section,
             outfit = outfit.section,
+            device = device.section,
             weapon_slot = equipment.slots.weapon,
             knife_slot = equipment.slots.knife,
             outfit_slot = equipment.slots.outfit,
+            device_slot = equipment.slots.device,
+            device_condition = equipment.device_condition,
             magazine_rounds = equipment.magazine_rounds,
             reserve_rounds = equipment.reserve_rounds,
             bonus_ammo_rounds = equipment.bonus_ammo_rounds,
@@ -932,8 +972,24 @@ function new_actor_loadout_port(ports)
         equipment.state = "READY"
         return gamma_arena_result.ok(equipment.summary)
     end
+    local function neutralize_device(record)
+        if record.role ~= "device" then return gamma_arena_result.ok(true) end
+        if record.equipped ~= true then record.device_neutralized = true; return gamma_arena_result.ok(true) end
+        local online = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.online_item, loadout_actor, record.id)
+        if not online.ok then return online end
+        if online.value ~= nil then
+            local online_id = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.entity_id, online.value)
+            if not online_id.ok then return online_id end
+            if online_id.value ~= record.id then return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Online actor device identity changed before shutdown", { id = record.id, actual_id = online_id.value }) end
+        end
+        local stopped = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.shutdown_device, online.value, record.id, record.section)
+        if not stopped.ok then return stopped end
+        if stopped.value ~= true then return gamma_arena_result.ok(false) end
+        record.device_neutralized = true
+        return gamma_arena_result.ok(true)
+    end
     cleanup = function()
-        if #owned_records == 0 then equipment = { state = "CLEAN" }; return gamma_arena_result.ok(false) end
+        if #owned_records == 0 then equipment = { state = "CLEAN" }; loadout_actor = nil; return gamma_arena_result.ok(false) end
         local remaining = {}
         local errors = {}
         for index = #owned_records, 1, -1 do
@@ -943,7 +999,15 @@ function new_actor_loadout_port(ports)
                 errors[#errors + 1] = resolved.error
                 table.insert(remaining, 1, record)
             elseif resolved.value == nil then
-                -- The authoritative current-id lookup proves the owned entity is gone.
+                local neutralized = neutralize_device(record)
+                if not neutralized.ok then
+                    errors[#errors + 1] = neutralized.error
+                    table.insert(remaining, 1, record)
+                elseif neutralized.value ~= true then
+                    table.insert(remaining, 1, record)
+                end
+                -- The authoritative current-id lookup proves the owned entity is
+                -- gone, but Beef's device state is global and must be cleared too.
             else
                 -- Cleanup may only consume durable ownership proof written during
                 -- creation. It must never manufacture ownership for a current
@@ -961,17 +1025,25 @@ function new_actor_loadout_port(ports)
                     -- mismatch is safe ID reuse: retire the old record and never
                     -- submit release against the new object. Token-only loss stays
                     -- tracked because it cannot prove whether the original remains.
-                elseif record.release_submitted == true then
-                    table.insert(remaining, 1, record)
                 else
-                    record.authorized = true
-                    local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, record.id)
-                    if not released.ok then
-                        errors[#errors + 1] = released.error
+                    local neutralized = neutralize_device(record)
+                    if not neutralized.ok then
+                        errors[#errors + 1] = neutralized.error
+                        table.insert(remaining, 1, record)
+                    elseif neutralized.value ~= true then
+                        table.insert(remaining, 1, record)
+                    elseif record.release_submitted == true then
+                        table.insert(remaining, 1, record)
                     else
-                        record.release_submitted = true
+                        record.authorized = true
+                        local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, record.id)
+                        if not released.ok then
+                            errors[#errors + 1] = released.error
+                        else
+                            record.release_submitted = true
+                        end
+                        table.insert(remaining, 1, record)
                     end
-                    table.insert(remaining, 1, record)
                 end
             end
         end
@@ -982,6 +1054,7 @@ function new_actor_loadout_port(ports)
             return gamma_arena_result.ok({ pending = true, remaining_ids = pending })
         end
         equipment = { state = "CLEAN" }
+        loadout_actor = nil
         return gamma_arena_result.ok(true)
     end
     return {
@@ -1120,6 +1193,27 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         magazine_capacity = function(section) return effective_magazine_size(section) end,
         move_to_slot = function(actor, item, slot) return actor:move_to_slot(item, slot) end,
         item_in_slot = function(actor, slot) return actor:item_in_slot(slot) end,
+        set_item_condition = function(item, value) return item:set_condition(value) end,
+        item_condition = function(item) return item:condition() end,
+        shutdown_device = function(item, id, section)
+            if type(item_device) ~= "table" or type(item_device.is_nv_active) ~= "function"
+                or type(item_device.set_nightvision) ~= "function" or type(item_device.is_torch_active) ~= "function"
+                or type(item_device.toggle_torch) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Installed item_device shutdown API is unavailable", { id = id, section = section })
+            end
+            if item_device.is_nv_active() then item_device.set_nightvision(section, false) end
+            if item_device.is_nv_active() then return gamma_arena_result.ok(false) end
+            if item_device.is_torch_active() == id then
+                item_device.toggle_torch()
+                -- toggle_torch derives its next state from the current slot-10
+                -- object. If that object changed during teardown, clear the state
+                -- it just selected instead of reporting a foreign torch as safe.
+                if item_device.is_torch_active() then item_device.toggle_torch() end
+            end
+            if item ~= nil then item:enable_torch(false) end
+            if item_device.is_torch_active() then return gamma_arena_result.ok(false) end
+            return gamma_arena_result.ok(true)
+        end,
         set_ammo_elapsed = function(weapon, count) return weapon:set_ammo_elapsed(count) end,
         get_ammo_in_magazine = function(weapon) return weapon:get_ammo_in_magazine() end,
         make_item_active = function(actor, item) return actor:make_item_active(item) end,
