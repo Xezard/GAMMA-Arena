@@ -184,6 +184,62 @@ local function device_catalog_rejects_effective_mismatch()
     gamma_arena_test_assert.is_false(effective.ok, "device catalog rejects altered effective slot")
 end
 
+local function actor_device_is_difficulty_independent_and_stable()
+    local snapshot = catalogs()
+    local selected_section
+    for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
+        local generated = generate_fixture(request(777, difficulty_id), 5, snapshot)
+        gamma_arena_test_assert.is_true(generated.ok, "device difficulty-independence fixture generates")
+        local device = generated.value.actor.loadout.device
+        gamma_arena_test_assert.is_true(type(device) == "table", "actor FightSpec contains a device record")
+        selected_section = selected_section or device.section
+        gamma_arena_test_assert.equals(device.section, selected_section, "difficulty does not participate in actor device selection")
+        gamma_arena_test_assert.equals(generated.value.opponents[1].loadout.device, nil, "opponents never receive actor devices")
+        local encoded = gamma_arena_generator.stable_encode(generated.value)
+        gamma_arena_test_assert.is_true(string.find(encoded, ",device:" .. device.catalog_id .. ":" .. device.section, 1, true) ~= nil, "stable encoding contains exact device identity")
+        gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "generated FightSpec v8 validates")
+    end
+    local first = generate_fixture(request(991, "rookie"), 4, snapshot)
+    local second = generate_fixture(request(991, "rookie"), 4, snapshot)
+    gamma_arena_test_assert.equals(first.value.actor.loadout.device.section, second.value.actor.loadout.device.section, "same fight replays the same device")
+end
+
+local function validator_rejects_forged_actor_devices()
+    local snapshot = catalogs()
+    local function generated(seed)
+        local result = generate_fixture(request(seed, "master"), seed % 17, snapshot)
+        gamma_arena_test_assert.is_true(result.ok, "device forgery fixture generates")
+        return result.value
+    end
+    local function rejected(spec, mutate, message)
+        mutate(spec)
+        local result = validate_fixture(spec, snapshot)
+        gamma_arena_test_assert.is_false(result.ok, message)
+        gamma_arena_test_assert.equals(result.error.code, "GA_LOADOUT_DEVICE_INVALID", message .. " code")
+    end
+    rejected(generated(1), function(spec) spec.actor.loadout.device = nil end, "missing actor device is rejected")
+    rejected(generated(2), function(spec) spec.actor.loadout.device.section = "device_torch_nv_3" end, "forged device section is rejected")
+    rejected(generated(3), function(spec) spec.actor.loadout.device.weight = 99 end, "forged device weight is rejected")
+    rejected(generated(4), function(spec) spec.actor.loadout.device.kind = "gen9" end, "forged device kind is rejected")
+    rejected(generated(5), function(spec) spec.actor.loadout.device.nv_effect = "nightvision_3" end, "forged device effect is rejected")
+    rejected(generated(6), function(spec) spec.opponents[1].loadout.device = spec.actor.loadout.device end, "opponent device is rejected")
+    rejected(generated(7), function(spec)
+        local replacement = spec.actor.loadout.device.catalog_id == "headlamp" and snapshot.devices.nv_gen1 or snapshot.devices.headlamp
+        spec.actor.loadout.device = { catalog_id=replacement.id, section=replacement.section, kind=replacement.kind, weight=replacement.weight, nv_effect=replacement.nv_effect }
+    end, "wrong deterministic actor device is rejected")
+end
+
+local function validator_copies_actor_device()
+    local snapshot = catalogs()
+    local generated = generate_fixture(request(441, "veteran"), 8, snapshot)
+    local validated = validate_fixture(generated.value, snapshot)
+    gamma_arena_test_assert.is_true(validated.ok, "device immutable-copy fixture validates")
+    local first = validated.value.actor()
+    local expected = first.loadout.device.section
+    first.loadout.device.section = "mutated_device"
+    gamma_arena_test_assert.equals(validated.value.actor().loadout.device.section, expected, "validated actor device is an immutable copy")
+end
+
 local function all_available_pairs()
     local weapons = { "w_pistol", "w_smg", "w_shotgun", "w_rifle", "w_sniper" }
     local armors = { "light", "medium", "scientific", "heavy", "powered_exo" }
@@ -1108,7 +1164,7 @@ local function generator_primary_pool_affordability_falls_back()
     gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
 end
 
-local function golden_fights_v7()
+local function golden_fights_v8()
     local snapshot = catalogs()
     for _, expected in ipairs({
         { seed = 0, difficulty = "rookie", fight = 0 },
@@ -1121,7 +1177,7 @@ local function golden_fights_v7()
         gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
         local encoded = gamma_arena_generator.stable_encode(first.value)
         gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
-        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=7", 1, true) ~= nil, "FightSpec v7 is encoded")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=8", 1, true) ~= nil, "FightSpec v8 is encoded")
         for _, opponent in ipairs(first.value.opponents) do
             gamma_arena_test_assert.equals(opponent.community, nil, "fallback FightSpec encoding remains byte-compatible without a synthetic source community")
         end
@@ -1413,6 +1469,9 @@ function run(run_case_fn)
         { name="device_catalog_and_probability_boundaries", fn=device_catalog_and_probability_boundaries },
         { name="device_generator_rejects_malformed_arguments", fn=device_generator_rejects_malformed_arguments },
         { name="device_catalog_rejects_effective_mismatch", fn=device_catalog_rejects_effective_mismatch },
+        { name="actor_device_is_difficulty_independent_and_stable", fn=actor_device_is_difficulty_independent_and_stable },
+        { name="validator_rejects_forged_actor_devices", fn=validator_rejects_forged_actor_devices },
+        { name="validator_copies_actor_device", fn=validator_copies_actor_device },
         { name="grenade_generator_rejects_malformed_arguments", fn=grenade_generator_rejects_malformed_arguments },
         { name="catalog_exposes_medical_pool_and_budgets", fn=catalog_exposes_medical_pool_and_budgets },
         { name="catalog_skips_optional_missing_medicine", fn=catalog_skips_optional_missing_medicine },
@@ -1448,7 +1507,7 @@ function run(run_case_fn)
         { name="validator_rejects_invalid_bonus_ammo", fn=validator_rejects_invalid_bonus_ammo },
         { name="validator_rejects_forged_final_actor_ammo", fn=validator_rejects_forged_final_actor_ammo },
         { name="finite_integer_guards", fn=finite_integer_guards },
-        { name="golden_fights_v7", fn=golden_fights_v7 }
+        { name="golden_fights_v8", fn=golden_fights_v8 }
     }
     for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed

@@ -54,13 +54,14 @@ foreach ($CaseName in @('device_catalog_and_probability_boundaries','device_gene
     if (-not $GeneratorTests.Contains($CaseName)) { throw "Actor device regression case is missing: $CaseName" }
 }
 
-if ($Generator.Contains('FightSpecV8')) {
-    foreach ($Marker in @('gamma_arena_device_generator.generate','schema_version = 8','device:')) {
-        if (-not $Generator.Contains($Marker)) { throw "FightSpec v8 actor device generator contract is missing: $Marker" }
-    }
-    foreach ($Marker in @('GA_LOADOUT_DEVICE_INVALID','gamma_arena_device_generator.generate','spec.schema_version ~= 8','copy_device')) {
-        if (-not $Validator.Contains($Marker)) { throw "FightSpec v8 actor device validator contract is missing: $Marker" }
-    }
+foreach ($Marker in @('gamma_arena_device_generator.generate','schema_version = 8','FightSpecV8','device:')) {
+    if (-not $Generator.Contains($Marker)) { throw "FightSpec v8 actor device generator contract is missing: $Marker" }
+}
+foreach ($Marker in @('GA_LOADOUT_DEVICE_INVALID','gamma_arena_device_generator.generate','spec.schema_version ~= 8','copy_device')) {
+    if (-not $Validator.Contains($Marker)) { throw "FightSpec v8 actor device validator contract is missing: $Marker" }
+}
+foreach ($CaseName in @('actor_device_is_difficulty_independent_and_stable','validator_rejects_forged_actor_devices','validator_copies_actor_device')) {
+    if (-not $GeneratorTests.Contains($CaseName)) { throw "FightSpec v8 actor device regression case is missing: $CaseName" }
 }
 
 if ($Bootstrap.Contains('GA_ACTOR_DEVICE_CHARGE_FAILED')) {
