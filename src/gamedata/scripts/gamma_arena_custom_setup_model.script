@@ -81,11 +81,13 @@ end
 
 local function commit(self, candidate)
     local validated = gamma_arena_custom_config.validate(candidate, { catalog = self.catalog, layout = self.layout })
+    local accepted = gamma_arena_custom_config.validate_draft(candidate, { catalog = self.catalog, layout = self.layout })
+    if not accepted.ok then return reject(self, accepted) end
     self.draft = candidate
     self.current_validation = validated
-    local accepted = gamma_arena_result.ok({ validation = deep_copy(validated) })
-    self.last_operation = deep_copy(accepted)
-    return accepted
+    local result = gamma_arena_result.ok({ validation = deep_copy(validated) })
+    self.last_operation = deep_copy(result)
+    return result
 end
 
 local function item_definition(self, section)
@@ -187,6 +189,11 @@ function Model:add_item(section, quantity, equipped_slot)
     elseif category == "knife" and category_count(self.draft, self.catalog, category) >= 1 then
         return reject(self, failure("GA_CUSTOM_KNIFE_REQUIRED", "Custom loadout supports exactly one knife", { section = section }))
     end
+    if (category == "outfit" or category == "helmet" or category == "knife") and equipped_slot == nil then
+        return reject(self, failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must be selected into its logical slot", {
+            section = section, slot = equipped_slot
+        }))
+    end
     if equipped_slot ~= nil then
         local expected = expected_slot(definition)
         if expected == nil or equipped_slot ~= expected or quantity ~= 1 then
@@ -205,6 +212,33 @@ function Model:add_item(section, quantity, equipped_slot)
         section = section, quantity = quantity, equipped_slot = equipped_slot
     }
     if equipped_slot == nil then candidate.actor_items[#candidate.actor_items].equipped_slot = nil end
+    return commit(self, candidate)
+end
+
+function Model:increment_item(section)
+    local index, entry = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED", "Custom item is not selected", { section = section }))
+    end
+    local quantity = entry.quantity + 1
+    if not finite_integer(quantity, 1) or quantity <= entry.quantity then
+        return reject(self, failure("GA_CUSTOM_QUANTITY_INVALID", "Custom item quantity exceeds the safe integer range", {
+            section = section, quantity = quantity
+        }))
+    end
+    local candidate = copy_config(self.draft)
+    candidate.actor_items[index].quantity = quantity
+    return commit(self, candidate)
+end
+
+function Model:decrement_item(section)
+    local index, entry = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED", "Custom item is not selected", { section = section }))
+    end
+    if entry.quantity == 1 then return self:remove_item(section) end
+    local candidate = copy_config(self.draft)
+    candidate.actor_items[index].quantity = entry.quantity - 1
     return commit(self, candidate)
 end
 

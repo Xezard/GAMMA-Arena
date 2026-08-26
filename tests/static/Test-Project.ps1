@@ -288,8 +288,8 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 }
 
 $Task9CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'x2', 'start_button:Enable') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable') }
 )
 foreach ($Contract in $Task9CustomContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
@@ -330,11 +330,11 @@ foreach ($Locale in @('eng','rus')) {
     }
 }
 $Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
-foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
+foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
     Assert-True ($Task9CustomTests -match [regex]::Escape($Name)) "Task 9 model tests must cover $Name"
 }
 $Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
-foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_composed_catalog_supports_first_custom_item_edit')) {
+foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_custom_ui_projects_rejected_operation_until_success','runtime_composed_catalog_supports_first_custom_item_edit')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
 }

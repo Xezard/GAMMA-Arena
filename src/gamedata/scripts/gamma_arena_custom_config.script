@@ -141,7 +141,7 @@ local function totals_internal(config, catalog)
     return gamma_arena_result.ok(totals)
 end
 
-local function validate_internal(value, context)
+local function validate_internal(value, context, editable)
     local field_error = exact_fields(value, CONFIG_FIELDS, "GA_CUSTOM_UNKNOWN_FIELD", "config")
     if field_error then return field_error end
     if value.schema_version ~= 1 then
@@ -164,9 +164,12 @@ local function validate_internal(value, context)
             expected = catalog.fingerprint, actual = value.catalog_fingerprint
         })
     end
-    local faction = text(value.faction) and catalog.factions[value.faction] or nil
-    if type(faction) ~= "table" or type(faction.ranks) ~= "table" then
-        return failure("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction is unknown", { faction = value.faction })
+    local faction = nil
+    if value.faction ~= nil or not editable then
+        faction = text(value.faction) and catalog.factions[value.faction] or nil
+        if type(faction) ~= "table" or type(faction.ranks) ~= "table" then
+            return failure("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction is unknown", { faction = value.faction })
+        end
     end
     local roster_count, roster_error = dense_length(value.roster, "GA_CUSTOM_ROSTER_INVALID", "roster")
     if roster_count == nil then return roster_error end
@@ -178,14 +181,15 @@ local function validate_internal(value, context)
     for index, entry in ipairs(value.roster) do
         local roster_field_error = exact_fields(entry, ROSTER_FIELDS, "GA_CUSTOM_ROSTER_INVALID", "roster[" .. tostring(index) .. "]")
         if roster_field_error then return roster_field_error end
-        if not text(entry.rank) or type(catalog.ranks[entry.rank]) ~= "table" or type(faction.ranks[entry.rank]) ~= "table" then
+        if not text(entry.rank) or type(catalog.ranks[entry.rank]) ~= "table"
+            or (faction ~= nil and type(faction.ranks[entry.rank]) ~= "table") then
             return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom rank is unavailable for the selected faction", { index = index, rank = entry.rank })
         end
     end
 
     local item_count, item_error = dense_length(value.actor_items, "GA_CUSTOM_ITEM_INVALID", "actor_items")
     if item_count == nil then return item_error end
-    if item_count < 1 or item_count > catalog.max_entries then
+    if item_count > catalog.max_entries or (not editable and item_count < 1) then
         return failure("GA_CUSTOM_ENTRY_LIMIT", "Custom actor inventory has too many distinct entries", { count = item_count, limit = catalog.max_entries })
     end
     local seen, categories, equipped_weapons, weapons, ammunition = {}, {}, {}, {}, {}
@@ -219,7 +223,9 @@ local function validate_internal(value, context)
             })
         end
         if category == "outfit" or category == "helmet" or category == "knife" then
-            if slot ~= category then return failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must use its logical slot", { section = entry.section, slot = slot }) end
+            if slot ~= category and not (editable and slot == nil) then
+                return failure("GA_CUSTOM_SLOT_INVALID", "Custom equipment must use its logical slot", { section = entry.section, slot = slot })
+            end
         elseif category == "weapon" then
             weapons[#weapons + 1] = definition
             if slot ~= nil then
@@ -237,10 +243,16 @@ local function validate_internal(value, context)
             if category == "ammo" then ammunition[#ammunition + 1] = definition end
         end
     end
-    if categories.outfit ~= 1 then return failure("GA_CUSTOM_OUTFIT_REQUIRED", "Custom loadout requires exactly one outfit") end
+    if (categories.outfit or 0) > 1 or (not editable and categories.outfit ~= 1) then
+        return failure("GA_CUSTOM_OUTFIT_REQUIRED", "Custom loadout requires exactly one outfit")
+    end
     if (categories.helmet or 0) > 1 then return failure("GA_CUSTOM_HELMET_LIMIT", "Custom loadout supports at most one helmet") end
-    if categories.knife ~= 1 then return failure("GA_CUSTOM_KNIFE_REQUIRED", "Custom loadout requires exactly one knife") end
-    if next(equipped_weapons) == nil then return failure("GA_CUSTOM_WEAPON_REQUIRED", "Custom loadout requires an equipped firearm") end
+    if (categories.knife or 0) > 1 or (not editable and categories.knife ~= 1) then
+        return failure("GA_CUSTOM_KNIFE_REQUIRED", "Custom loadout requires exactly one knife")
+    end
+    if not editable and next(equipped_weapons) == nil then
+        return failure("GA_CUSTOM_WEAPON_REQUIRED", "Custom loadout requires an equipped firearm")
+    end
     if (categories.helmet or 0) == 1 then
         for _, entry in ipairs(value.actor_items) do
             local definition = catalog.items[entry.section]
@@ -249,10 +261,12 @@ local function validate_internal(value, context)
             end
         end
     end
-    for _, weapon in ipairs(weapons) do
-        local compatible = false
-        for _, ammo in ipairs(ammunition) do if contains(weapon.ammo_sections, ammo.section) then compatible = true; break end end
-        if not compatible then return failure("GA_CUSTOM_AMMO_INCOMPATIBLE", "Selected weapon has no compatible ammunition", { section = weapon.section }) end
+    if not editable or #ammunition > 0 then
+        for _, weapon in ipairs(weapons) do
+            local compatible = false
+            for _, ammo in ipairs(ammunition) do if contains(weapon.ammo_sections, ammo.section) then compatible = true; break end end
+            if not compatible then return failure("GA_CUSTOM_AMMO_INCOMPATIBLE", "Selected weapon has no compatible ammunition", { section = weapon.section }) end
+        end
     end
     for _, ammo in ipairs(ammunition) do
         local compatible = false
@@ -264,7 +278,7 @@ local function validate_internal(value, context)
         local definition = catalog.items[entry.section]
         if definition.category == "medicine" and definition.healing == true then healing = true; break end
     end
-    if not healing then return failure("GA_CUSTOM_HEALING_REQUIRED", "Custom loadout requires healing medicine") end
+    if not editable and not healing then return failure("GA_CUSTOM_HEALING_REQUIRED", "Custom loadout requires healing medicine") end
     local normalized = copy_config(value)
     local budget_result = budget_internal(normalized.roster, catalog)
     if not budget_result.ok then return budget_result end
@@ -296,7 +310,13 @@ function totals(config, catalog)
 end
 
 function validate(value, context)
-    local succeeded, result = pcall(validate_internal, value, context)
+    local succeeded, result = pcall(validate_internal, value, context, false)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     return failure("GA_CUSTOM_INVALID", "CustomArenaConfig validation failed safely", { reason = tostring(result) })
+end
+
+function validate_draft(value, context)
+    local succeeded, result = pcall(validate_internal, value, context, true)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_INVALID", "Editable CustomArenaConfig validation failed safely", { reason = tostring(result) })
 end

@@ -23,6 +23,8 @@ local function projection_failure(code)
     return {
         launch_enabled = false,
         validation_code = code or "GA_CUSTOM_INVALID",
+        operation_error_code = nil,
+        summary_code = code or "GA_CUSTOM_INVALID",
         category = "weapon",
         category_ids = CATEGORY_IDS,
         catalog_cells = {}, selected_cells = {}, roster = {}, count = 0, capacity = 0,
@@ -73,9 +75,13 @@ function project(model, category)
         }
     end
     local validation_code = snapshot.validation and snapshot.validation.error and snapshot.validation.error.code or nil
+    local operation_error_code = snapshot.last_operation and snapshot.last_operation.error
+        and snapshot.last_operation.error.code or nil
     return {
         launch_enabled = snapshot.can_start == true,
         validation_code = validation_code,
+        operation_error_code = operation_error_code,
+        summary_code = operation_error_code or validation_code,
         category = category,
         category_ids = snapshot.category_ids,
         catalog_cells = catalog_cells,
@@ -281,6 +287,7 @@ local function rebuild_container(container, cells, selected)
             local view = by_section[cell.section]
             if view then
                 cell.flags.disabled = view.disabled == true
+                cell.flags.selected = view.selected == true
                 cell.flags.value = view.effective_price or view.base_price or 0
                 cell.flags.value_str = translated(view.name_key or view.section) .. " | "
                     .. tostring(view.price_text or view.effective_price or view.base_price or 0) .. " AP | "
@@ -303,7 +310,8 @@ function UICustom:Rebuild()
         view.validation_code = self.catalog_result.error.code
     end
     if self.submission_error and self.submission_error.error then
-        view.validation_code = self.submission_error.error.code
+        view.submission_error_code = self.submission_error.error.code
+        view.summary_code = view.submission_error_code
     end
     self.projection = view
     set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
@@ -319,8 +327,8 @@ function UICustom:Rebuild()
     self.remaining_text:SetText(tostring(view.remaining))
     self.weight_text:SetText(format_weight(view.weight_mg))
     self.weight_limit_text:SetText(format_weight(view.weight_limit_mg))
-    if view.validation_code then
-        self.validation_text:SetText(translated("st_gamma_arena_custom_invalid") .. " [" .. tostring(view.validation_code) .. "]")
+    if view.summary_code then
+        self.validation_text:SetText(translated("st_gamma_arena_custom_invalid") .. " [" .. tostring(view.summary_code) .. "]")
         self.validation_text:Show(true)
     else
         self.validation_text:SetText(translated("st_gamma_arena_custom_ready"))
@@ -377,14 +385,18 @@ function UICustom:On_CC_Mouse1(container_id, index)
     local cell = container and container.cell and container.cell[index] or nil
     if not cell or not cell.section or (cell.flags and cell.flags.disabled) then return end
     if container_id == "catalog" then
-        local added = self.model:add_item(cell.section, 1)
-        if added.ok then
+        if cell.flags and cell.flags.selected then
+            self.model:increment_item(cell.section)
+        else
             local definition = self.model.catalog.items[cell.section]
             local slot = definition and automatic_slot(definition) or nil
-            if slot then self.model:equip(cell.section, slot) end
+            local fixed = definition and (definition.category == "outfit" or definition.category == "helmet"
+                or definition.category == "knife")
+            local added = self.model:add_item(cell.section, 1, fixed and slot or nil)
+            if added.ok and slot and not fixed then self.model:equip(cell.section, slot) end
         end
     else
-        self.model:remove_item(cell.section)
+        self.model:decrement_item(cell.section)
     end
     self:Rebuild()
 end
