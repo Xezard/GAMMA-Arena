@@ -82,7 +82,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitign
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
-Assert-True ($AddonVersion -ceq '0.3.0') 'Active add-on version must be 0.3.0.'
+Assert-True ($AddonVersion -ceq '0.4.0') 'Active add-on version must be 0.4.0.'
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {

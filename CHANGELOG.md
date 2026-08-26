@@ -4,7 +4,13 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-27
+
 - Made the battle identity transparent, fight-first, and ASCII-separated.
+- Reset Arena-owned actor treatment, injury, alcohol, and visual-effect state between fights.
+- Locked player input immediately after choosing the next fight and delayed the countdown until the staged Arena was ready to start.
+- Fixed actor alcohol cleanup through the supported engine mutator.
+- Preserved the complete actor lighting-device loadout through runtime application, preventing `GA_ACTOR_LOADOUT_INVALID` during Arena startup.
 
 ## 0.3.0 - 2026-08-26
 
