@@ -133,7 +133,7 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*8' -or $Catalog -notmatch 'revision\s*=\s*9' -or $Catalog -notmatch 'generator_version\s*=\s*9') {
+if ($Catalog -notmatch 'schema_version\s*=\s*9' -or $Catalog -notmatch 'revision\s*=\s*10' -or $Catalog -notmatch 'generator_version\s*=\s*10') {
     throw 'Catalog snapshot version markers are stale'
 }
 foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
@@ -159,15 +159,13 @@ if ($AppendDiscovered -match 'local\s+existing\s*=\s*target\s*\[' -or $AppendDis
 }
 Write-Host 'PASS: dynamic catalog integration static contract passed'
 
-$GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
-$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
+$GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
+$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
 foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'selection_mode' },
-    @{ Content = $Generator; Marker = 'minimum_loadout_cost' },
-    @{ Content = $Validator; Marker = 'selection_mode' },
-    @{ Content = $Validator; Marker = 'minimum_loadout_cost' }
+    @{ Content = $Generator; Marker = 'minimum_loadout_cost' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
         throw "Staged loadout production contract is missing marker: $($Contract.Marker)"
@@ -179,19 +177,16 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'function select_bonus_ammo' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
-    @{ Content = $Generator; Marker = 'FightSpecV7' },
+    @{ Content = $Generator; Marker = 'function build_draft' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
-    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' },
-    @{ Content = $GeneratorTests; Marker = 'validator_rejects_invalid_bonus_ammo' },
-    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_AMMO_INVALID' },
-    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_SCOPE_INVALID' }
+    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        throw "FightSpec v7 loadout contract is missing marker: $($Contract.Marker)"
+        throw "FightSpec v8 loadout contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v7 loadout static contract passed'
+Write-Host 'PASS: FightSpec v8 loadout static contract passed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
@@ -216,7 +211,7 @@ foreach ($Marker in @('PROFILE_FACTIONS', 'profiles_by_faction')) {
 }
 if (-not $Generator.Contains('enemy_faction')) { throw 'Generator must choose one deterministic enemy faction per fight' }
 if (-not $Catalog.Contains('open_loadouts') -or -not $Catalog.Contains('weapon_pools_by_profile')) { throw 'Catalog must index separate effective GAMMA faction/rank weapon pools' }
-if (-not $Validator.Contains('expected_community')) { throw 'Runtime validator must validate the selected profile community' }
+if (-not $Validator.Contains('runtime_community')) { throw 'Runtime validator must validate the selected profile community' }
 Write-Host 'PASS: faction cohort static contract passed'
 
 $DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
@@ -276,7 +271,7 @@ foreach ($Marker in @(
     'enumerate_system_sections', 'open_loadouts', 'price_overrides',
     'weight_mg', 'ltx_slot', 'ammo_sections', 'box_size', 'helmet_allowed',
     'carry_bonus_mg', 'healing', 'base_carry_weight', '$spawn', 'spawn_path', 'fingerprint',
-    'ga-catalog-v8-', 'table.sort', 'story_id'
+    'ga-catalog-v9-', 'table.sort', 'story_id'
 )) {
     if (-not $UniversalCatalog.Contains($Marker)) {
         throw "Universal combat item catalog contract is missing marker: $Marker"

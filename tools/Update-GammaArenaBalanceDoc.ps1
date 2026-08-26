@@ -299,7 +299,7 @@ $TacticalPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_aren
 $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
-$GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
+$GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
 $GrenadeGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
 $EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
@@ -500,8 +500,8 @@ $ScaledAmmoStreamRule = Get-RequiredLuaMatch $GeneratorScriptPath '"actor_scaled
 $ScaledAmmoMagazineFloor = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+minimum_boxes\s*=\s*math\.ceil\(3\s*\*\s*actor_weapon\.magazine_size\s*/\s*standard_ammo\.box_size\)' 'three-magazine player ammo floor'
 $ScaledAmmoFinalRule = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+final_ammo_boxes\s*=\s*math\.max\(actor\.value\.ammo_boxes,\s*minimum_boxes\)\s*\+\s*scaled\.value' 'final player ammo formula'
 $RandomKnifeSelection = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+function\s+random_knife\(rng,\s*knives\).*?local\s+choice\s*=\s*rng:pick\(knives\)' 'random knife selection'
-$EnemyCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_count\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_count"\):next_int\(difficulty\.enemy_min,\s*maximum\)' 'enemy count formula'
-$EnemyFactionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_faction\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_faction"\):pick\(catalogs\.faction_ids\)' 'enemy faction formula'
+$EnemyCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_count\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalog,\s*"enemy_count"\):next_int\(difficulty\.enemy_min,\s*maximum\)' 'enemy count formula'
+$EnemyFactionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_faction\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalog,\s*"enemy_faction"\):pick\(catalog\.faction_ids\)' 'enemy faction formula'
 $PrimaryCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+primary_count\s*=\s*math\.ceil\(enemy_count\s*\*\s*difficulty\.primary_share_percent\s*/\s*100\)' 'primary count formula'
 $BudgetDivisionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+base,\s*remainder\s*=\s*math\.floor\(difficulty\.enemy_total_budget\s*/\s*enemy_count\),\s*difficulty\.enemy_total_budget\s*%\s*enemy_count' 'enemy budget division formula'
 $SlotBudgetFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+slot_budget\s*=\s*base\s*\+\s*\(index\s*<=\s*remainder\s+and\s+1\s+or\s+0\)' 'enemy slot budget formula'
@@ -517,8 +517,8 @@ if ($ActorDoubleDraw -ne 1 -or $ActorDoubleCount -ne 2 -or $ActorSingleUpper -ne
 $EnemyGrenadeRule = Get-RequiredLuaMatch $GrenadeGeneratorScriptPath 'if\s+draw\s*>\s*(\d+)\s+then\s+return\s+gamma_arena_result\.ok\(\{\s*sections\s*=\s*\{\}\s*\}\)\s+end' 'opponent grenade probability rule'
 $EnemyGrenadeChance = [int]$EnemyGrenadeRule.Groups[1].Value
 if ($EnemyGrenadeChance -ne 10) { throw 'Opponent grenade probability rule differs from 10 percent' }
-$ActorGrenadeDescriptor = Get-RequiredLuaMatch $BootstrapScriptPath 'loadout\.grenades[\s\S]{0,300}role\s*=\s*"grenade"' 'actor physical grenade descriptor'
-$NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'loadout\.grenades[\s\S]{0,300}role\s*=\s*"grenade"' 'opponent physical grenade descriptor'
+$ActorGrenadeDescriptor = Get-RequiredLuaMatch $BootstrapScriptPath 'gamma_arena_item_materializer\.descriptors\(selected,\s*catalog\)[\s\S]{0,900}definition\.category\s*==\s*"grenade"' 'actor universal grenade materialization'
+$NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'gamma_arena_item_materializer\.descriptors\(opponents\[index\]\.items,\s*catalog\)[\s\S]{0,700}role\s*=\s*descriptor\.category' 'opponent universal grenade materialization'
 if ((Get-Content -Raw -LiteralPath $BootstrapScriptPath) -match 'can_throw_grenades' -or (Get-Content -Raw -LiteralPath $EntityAdapterScriptPath) -match 'can_throw_grenades') { throw 'Arena runtime must not force native grenade throwing' }
 
 $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"powered_exo"' 'powered_exo classification'
@@ -919,7 +919,7 @@ $SourceLines.Add('|---|---|') | Out-Null
 $SourceLines.Add('| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |') | Out-Null
 $SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | Out-Null
 $SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
-$SourceLines.Add('| actor/opponent selection and budget allocation | `gamma_arena_generator.script` |') | Out-Null
+$SourceLines.Add('| actor/opponent random selection and budget allocation | `gamma_arena_random_generator.script` |') | Out-Null
 $SourceLines.Add('| actor and enemy medical allocation | `gamma_arena_medical_generator.script` |') | Out-Null
 $SourceLines.Add('| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |') | Out-Null
 $SourceLines.Add('| physical NPC medicine use | `gamma_arena_npc_medical.script` |') | Out-Null

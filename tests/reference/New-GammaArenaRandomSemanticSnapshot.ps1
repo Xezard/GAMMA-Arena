@@ -4,8 +4,7 @@ param([switch]$Verify, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 if ($Verify -and $Update) { throw 'Choose either -Verify or -Update.' }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$snapshotPath = Join-Path $repoRoot 'tests\fixtures\golden-random-selections-v7.txt'
-$v5Path = Join-Path $repoRoot 'tests\fixtures\golden-fights-v5.txt'
+$snapshotPath = Join-Path $repoRoot 'tests\fixtures\golden-random-selections-v8.txt'
 
 function Read-GaLtx([string]$Path) {
     $sections = @{}; $current = $null
@@ -28,10 +27,10 @@ function Read-GaLtx([string]$Path) {
 $catalog = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx')
 $difficultyLtx = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx')
 $layoutLtx = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx')
-if ([int]$catalog.meta.schema_version -ne 8 -or [int]$catalog.meta.revision -ne 9 -or [int]$catalog.meta.generator_version -ne 9 -or
+if ([int]$catalog.meta.schema_version -ne 9 -or [int]$catalog.meta.revision -ne 10 -or [int]$catalog.meta.generator_version -ne 10 -or
     [int]$difficultyLtx.meta.schema_version -ne 4 -or [int]$difficultyLtx.meta.revision -ne 5 -or
     [int]$layoutLtx.meta.schema_version -ne 2 -or [int]$layoutLtx.meta.revision -ne 2) {
-    throw 'Random semantic reference requires catalog schema/revision/generator 8/9/9, difficulty 5, and layout 2 LTX inputs.'
+    throw 'Random semantic reference requires catalog schema/revision/generator 9/10/10, difficulty 5, and layout 2 LTX inputs.'
 }
 
 $difficultyManifest = @{
@@ -138,14 +137,6 @@ function New-GaSemantic([int64]$Seed,[string]$DifficultyId,[int]$FightIndex){
     return "seed=$Seed,difficulty=$DifficultyId,fight=$FightIndex|actor=$($actor.Weapon),$($actor.Ammo),$($actor.AmmoBoxes),$($actor.Outfit),$actorKnife,medical:$($actorMedical-join'+'),bonus:$($actor.BonusSection):$($actor.BonusRequestedCategory):$($actor.BonusResolvedCategory):$($actor.BonusBoxes)|opponents=|$($opponents-join'|')"
 }
 
-function ConvertFrom-GaV5Projection([string]$Line){
-    if($Line-notmatch'^seed=([^,]+),difficulty=([^,]+),fight=([^,]+),stable_encode=(.*)$'){throw 'Malformed v5 fixture line.'};$seed=$Matches[1];$difficulty=$Matches[2];$fight=$Matches[3];$encoded=$Matches[4]
-    if($encoded-notmatch'\|actor=([^|]+)\|opponents=\|(.*)\|diagnostic='){throw 'Malformed v5 semantic payload.'};$actorFields=$Matches[1].Split(',');$opponentText=$Matches[2];$actor="$($actorFields[2]),$($actorFields[3]),$($actorFields[4]),$($actorFields[5]),$($actorFields[6]),$($actorFields[7]),$($actorFields[11])"
-    $projected=@();foreach($encodedOpponent in $opponentText.Split('|')){$fields=($encodedOpponent-replace'^\d+:','').Split(',');$profile=$fields[9];$cursor=10;$faction=$null;if($fields[$cursor]-notmatch'^\d+$'){$faction=$fields[$cursor];$cursor++};if($null-eq$faction){if($profile-notmatch'^gamma_arena_([^_]+)_'){throw 'v5 profile does not encode faction.'};$faction=$Matches[1]};$cursor++;$projected += "$($fields[0]):$faction,$profile,$($fields[$cursor]),$($fields[$cursor+1]),$($fields[$cursor+2]),$($fields[$cursor+3]),$($fields[$cursor+4]),$($fields[$cursor+5]),$($fields[1]),$($fields[7])"}
-    return "seed=$seed,difficulty=$difficulty,fight=$fight|actor=$actor|opponents=|$($projected-join'|')"
-}
-
 $requests=@(@([int64]0,'rookie',0),@([int64]1,'stalker',0),@([int64]3735928559,'veteran',7),@([int64]4294967295,'master',31))
 $expected=@($requests|ForEach-Object{New-GaSemantic $_[0] $_[1] $_[2]})
-if(Test-Path -LiteralPath $v5Path){$v5Projection=@(Get-Content -LiteralPath $v5Path|Where-Object{$_-and-not$_.StartsWith('#')}|ForEach-Object{ConvertFrom-GaV5Projection $_});if(@(Compare-Object $expected $v5Projection -SyncWindow 0).Count-ne0){throw 'Independent LTX semantics differ from the reviewed v5 projection.'}}
-if($Verify){if(-not(Test-Path -LiteralPath $snapshotPath)){throw 'Frozen random semantic snapshot is missing.'};$actual=@(Get-Content -LiteralPath $snapshotPath|Where-Object{$_-and-not$_.StartsWith('#')});if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Frozen random semantic snapshot differs from independent LTX semantics.'};Write-Host 'PASS: frozen random semantics match independent LTX reference'}elseif($Update){$lines=@('# Gamma Arena format-neutral random semantic selections v7.')+$expected;[IO.File]::WriteAllText($snapshotPath,($lines-join"`n")+"`n",(New-Object Text.UTF8Encoding($false)));Write-Host "Updated random semantic snapshot: $snapshotPath"}else{$expected}
+if($Verify){if(-not(Test-Path -LiteralPath $snapshotPath)){throw 'Frozen random semantic snapshot is missing.'};$actual=@(Get-Content -LiteralPath $snapshotPath|Where-Object{$_-and-not$_.StartsWith('#')});if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Frozen random semantic snapshot differs from independent LTX semantics.'};Write-Host 'PASS: frozen random semantics match independent LTX reference'}elseif($Update){$lines=@('# Gamma Arena format-neutral random semantic selections v8.')+$expected;[IO.File]::WriteAllText($snapshotPath,($lines-join"`n")+"`n",(New-Object Text.UTF8Encoding($false)));Write-Host "Updated random semantic snapshot: $snapshotPath"}else{$expected}

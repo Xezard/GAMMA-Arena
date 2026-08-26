@@ -6,12 +6,12 @@ local function clone(value)
 end
 
 local function identity()
-    return { session_seed = 12345, fight_index = 2, generator_version = 8, catalog_fingerprint = "ga-catalog-v8-1234abcd", layout_version = 2 }
+    return { session_seed = 12345, fight_index = 2, generator_version = 10, catalog_fingerprint = "ga-catalog-v9-1234abcd", layout_version = 2 }
 end
 
 local function catalog()
     return {
-        fingerprint = "ga-catalog-v8-1234abcd",
+        fingerprint = "ga-catalog-v9-1234abcd",
         max_physical_items_per_participant = 256,
         items = {
             stalker_outfit = { category = "outfit", helmet_allowed = true },
@@ -35,7 +35,8 @@ local function catalog()
                 ranks = {
                     master = {
                         id = "master", alias = "gamma_arena_stalker_master", profile_section = "sim_default_stalker_4",
-                        community = "stalker", minimum = 41000, maximum = 45000, threat = 800
+                        community = "stalker", runtime_community = "arena_enemy",
+                        minimum = 41000, maximum = 45000, threat = 800
                     }
                 }
             }
@@ -104,9 +105,9 @@ end
 local function canonicalizes_legacy_and_item_loadouts_equivalently()
     local first = gamma_arena_fight_spec.canonicalize(legacy_draft(), identity(), catalog(), layout())
     local second = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
-    gamma_arena_test_assert.is_true(first.ok and second.ok, "v6 canonicalization")
-    gamma_arena_test_assert.equals(first.value.schema_version, 6, "single schema")
-    gamma_arena_test_assert.equals(first.value.identity.fight_id, "ga6-" .. first.value.identity.content_hash, "content-derived id")
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "v8 canonicalization")
+    gamma_arena_test_assert.equals(first.value.schema_version, 8, "single schema")
+    gamma_arena_test_assert.equals(first.value.identity.fight_id, "ga8-" .. first.value.identity.content_hash, "content-derived id")
     gamma_arena_test_assert.equals(first.value.arena.layout_id, "rostok_arena_v1", "FightSpec copies the resolved layout id")
     gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first.value), gamma_arena_fight_spec.stable_encode(second.value), "legacy and item drafts encode identically")
     gamma_arena_test_assert.equals(first.value.actor.items[1].equipped_slot, "outfit", "equipped item sorting")
@@ -304,12 +305,12 @@ local function hash_encoding_and_copy_are_sensitive_and_stable()
     gamma_arena_test_assert.is_true(first.identity.fight_id ~= third.identity.fight_id, "fight id is sensitive to fight content")
     local copied = gamma_arena_fight_spec.copy(first); copied.actor.items[1].section = "medkit"
     gamma_arena_test_assert.equals(first.actor.items[1].section, "stalker_outfit", "copy isolation")
-    gamma_arena_test_assert.equals(gamma_arena_fight_spec.content_hash("abc"), "6079683a0ecee141", "hash uses the v6 domain-separated fixed vector")
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.content_hash("abc"), "5fd4e9a40e2a62ab", "hash uses the v8 domain-separated fixed vector")
 end
 
 local function valid_spec()
     local result = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
-    gamma_arena_test_assert.is_true(result.ok, "valid v6 fixture canonicalizes")
+    gamma_arena_test_assert.is_true(result.ok, "valid v8 fixture canonicalizes")
     return result.value
 end
 
@@ -323,7 +324,7 @@ local function two_opponent_spec()
     second.tactical_route = "route_2"
     draft.opponents[2] = second
     local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
-    gamma_arena_test_assert.is_true(result.ok, "two-opponent v6 fixture canonicalizes")
+    gamma_arena_test_assert.is_true(result.ok, "two-opponent v8 fixture canonicalizes")
     return result.value
 end
 
@@ -332,7 +333,7 @@ local function spec_with_vertex(field, value)
     draft.opponents[1].spawn[field] = value
     arena.opponent_spawn_slots[1][field] = value
     local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), arena)
-    gamma_arena_test_assert.is_true(result.ok, "vertex-boundary v6 fixture canonicalizes")
+    gamma_arena_test_assert.is_true(result.ok, "vertex-boundary v8 fixture canonicalizes")
     return result.value, arena
 end
 
@@ -342,10 +343,10 @@ local function remove_item(items, section)
     end
 end
 
-local function validator_accepts_valid_v6_and_returns_immutable_copy()
+local function validator_accepts_valid_v8_and_returns_immutable_copy()
     local source = valid_spec()
-    local result = gamma_arena_fight_validator_v6.validate(source, catalog(), layout())
-    gamma_arena_test_assert.is_true(result.ok, "strict v6 validator accepts canonical FightSpec")
+    local result = gamma_arena_fight_validator_v8.validate(source, catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "strict v8 validator accepts canonical FightSpec")
     gamma_arena_test_assert.equals(result.value.session_seed(), 12345, "immutable seed accessor")
     gamma_arena_test_assert.equals(result.value.fight_index(), 2, "immutable fight index accessor")
     gamma_arena_test_assert.equals(result.value.fight_id(), source.identity.fight_id, "immutable fight id accessor")
@@ -365,16 +366,16 @@ local function validator_accepts_valid_v6_and_returns_immutable_copy()
     local optional_helmet_metadata = catalog()
     optional_helmet_metadata.items.stalker_outfit.helmet_allowed = nil
     gamma_arena_test_assert.is_true(
-        gamma_arena_fight_validator_v6.validate(valid_spec(), optional_helmet_metadata, layout()).ok,
+        gamma_arena_fight_validator_v8.validate(valid_spec(), optional_helmet_metadata, layout()).ok,
         "outfit without helmet metadata remains valid when no helmet is selected")
 
     local runtime = { effective_profile = function() return { class = "AI_STL_S", community = "stalker" } end }
     gamma_arena_test_assert.is_true(
-        gamma_arena_fight_validator_v6.validate(valid_spec(), catalog(), layout(), runtime).ok,
+        gamma_arena_fight_validator_v8.validate(valid_spec(), catalog(), layout(), runtime).ok,
         "optional runtime confirms the exact effective profile community")
     runtime.effective_profile = function() return { class = "AI_STL_S", community = "bandit" } end
     gamma_arena_test_assert.is_false(
-        gamma_arena_fight_validator_v6.validate(valid_spec(), catalog(), layout(), runtime).ok,
+        gamma_arena_fight_validator_v8.validate(valid_spec(), catalog(), layout(), runtime).ok,
         "optional runtime rejects a mismatched effective profile community")
 end
 
@@ -386,13 +387,13 @@ local function validator_enforces_per_participant_physical_item_cap()
         local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
         gamma_arena_test_assert.is_true(canonical.ok, target .. " boundary fixture canonicalizes")
         gamma_arena_test_assert.is_true(
-            gamma_arena_fight_validator_v6.validate(canonical.value, catalog(), layout()).ok,
+            gamma_arena_fight_validator_v8.validate(canonical.value, catalog(), layout()).ok,
             target .. " total 256 validates")
 
         local forged = clone(canonical.value)
         local forged_ammo = item_by_section(target == "actor" and forged.actor.items or forged.opponents[1].items, "ammo_545")
         forged_ammo.quantity = forged_ammo.quantity + 1
-        local result = gamma_arena_fight_validator_v6.validate(forged, catalog(), layout())
+        local result = gamma_arena_fight_validator_v8.validate(forged, catalog(), layout())
         gamma_arena_test_assert.is_false(result.ok, target .. " total 257 is rejected independently")
         gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", target .. " strict cap error code")
     end
@@ -400,14 +401,14 @@ local function validator_enforces_per_participant_physical_item_cap()
     local huge = valid_spec()
     item_by_section(huge.actor.items, "ammo_545").quantity = 4294967296
     local called, result = pcall(function()
-        return gamma_arena_fight_validator_v6.validate(huge, catalog(), layout())
+        return gamma_arena_fight_validator_v8.validate(huge, catalog(), layout())
     end)
     gamma_arena_test_assert.is_true(called, "strict validator handles large safe integer without reconstruction")
     gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", "strict large integer fails by participant cap")
 
     local wrong_cap = catalog()
     wrong_cap.max_physical_items_per_participant = 255
-    result = gamma_arena_fight_validator_v6.validate(valid_spec(), wrong_cap, layout())
+    result = gamma_arena_fight_validator_v8.validate(valid_spec(), wrong_cap, layout())
     gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_CATALOG_INVALID", "strict validator requires authoritative cap")
 end
 
@@ -429,7 +430,7 @@ local function validator_rejects_unknown_keys_at_every_schema_level()
     for index, mutate in ipairs(locations) do
         local forged = valid_spec(); mutate(forged)
         gamma_arena_test_assert.is_false(
-            gamma_arena_fight_validator_v6.validate(forged, catalog(), layout()).ok,
+            gamma_arena_fight_validator_v8.validate(forged, catalog(), layout()).ok,
             "unknown key at schema level " .. tostring(index))
     end
 end
@@ -454,7 +455,7 @@ local function validator_rejects_generation_provenance_recursively()
         for index, mutate in ipairs(locations) do
             local forged = valid_spec(); mutate(forged, key)
             gamma_arena_test_assert.is_false(
-                gamma_arena_fight_validator_v6.validate(forged, catalog(), layout()).ok,
+                gamma_arena_fight_validator_v8.validate(forged, catalog(), layout()).ok,
                 "forbidden key " .. key .. " at schema level " .. tostring(index))
         end
     end
@@ -497,7 +498,7 @@ local function validator_rejects_mutation_matrix()
     for _, case in ipairs(cases) do
         local forged = valid_spec(); case.mutate(forged)
         gamma_arena_test_assert.is_false(
-            gamma_arena_fight_validator_v6.validate(forged, catalog(), layout()).ok,
+            gamma_arena_fight_validator_v8.validate(forged, catalog(), layout()).ok,
             "mutation must fail: " .. case.name)
     end
 end
@@ -507,22 +508,22 @@ local function validator_accepts_unique_nonsequential_logical_slots()
     draft.opponents[1].slot = 2
     local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
     gamma_arena_test_assert.is_true(canonical.ok, "Task 3 canonicalizer accepts a unique logical slot 2")
-    local result = gamma_arena_fight_validator_v6.validate(canonical.value, catalog(), layout())
-    gamma_arena_test_assert.is_true(result.ok, "v6 validator accepts a unique nonsequential logical slot")
+    local result = gamma_arena_fight_validator_v8.validate(canonical.value, catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "v8 validator accepts a unique nonsequential logical slot")
     gamma_arena_test_assert.equals(result.value.opponents()[1].slot, 2, "immutable view retains logical slot")
 end
 
 local function validator_distinguishes_duplicate_logical_and_physical_slots()
     local logical = two_opponent_spec()
     logical.opponents[2].slot = logical.opponents[1].slot
-    local logical_result = gamma_arena_fight_validator_v6.validate(logical, catalog(), layout())
+    local logical_result = gamma_arena_fight_validator_v8.validate(logical, catalog(), layout())
     gamma_arena_test_assert.is_false(logical_result.ok, "duplicate logical opponent slots fail")
     gamma_arena_test_assert.equals(logical_result.error.code, "GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE", "logical slot duplicate code")
 
     local physical = two_opponent_spec()
     physical.opponents[2].spawn_slot_id = physical.opponents[1].spawn_slot_id
     physical.opponents[2].spawn = clone(physical.opponents[1].spawn)
-    local physical_result = gamma_arena_fight_validator_v6.validate(physical, catalog(), layout())
+    local physical_result = gamma_arena_fight_validator_v8.validate(physical, catalog(), layout())
     gamma_arena_test_assert.is_false(physical_result.ok, "duplicate physical spawn slots fail")
     gamma_arena_test_assert.equals(physical_result.error.code, "GA_FIGHTSPEC_SPAWN_INVALID", "physical spawn duplicate remains distinct")
 end
@@ -536,7 +537,7 @@ local function validator_enforces_engine_vertex_uint32_boundaries()
     }) do
         local spec, arena = spec_with_vertex(case.field, case.value)
         gamma_arena_test_assert.is_true(
-            gamma_arena_fight_validator_v6.validate(spec, catalog(), arena).ok,
+            gamma_arena_fight_validator_v8.validate(spec, catalog(), arena).ok,
             "engine vertex boundary is valid: " .. case.field .. "=" .. tostring(case.value))
     end
 
@@ -548,7 +549,7 @@ local function validator_enforces_engine_vertex_uint32_boundaries()
     }) do
         local spec, arena = spec_with_vertex(case.field, case.value)
         gamma_arena_test_assert.is_false(
-            gamma_arena_fight_validator_v6.validate(spec, catalog(), arena).ok,
+            gamma_arena_fight_validator_v8.validate(spec, catalog(), arena).ok,
             "engine vertex boundary is rejected: " .. case.field .. "=" .. tostring(case.value))
     end
 end
@@ -567,12 +568,12 @@ local function validator_enforces_physical_participant_contracts()
     for _, case in ipairs(cases) do
         local forged = valid_spec(); case.mutate(forged)
         gamma_arena_test_assert.is_false(
-            gamma_arena_fight_validator_v6.validate(forged, catalog(), layout()).ok,
+            gamma_arena_fight_validator_v8.validate(forged, catalog(), layout()).ok,
             "participant contract must fail: " .. case.name)
     end
 
     local opponent = valid_spec(); remove_item(opponent.opponents[1].items, "wpn_knife")
-    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v6.validate(opponent, catalog(), layout()).ok, "opponents use the same physical item contract")
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v8.validate(opponent, catalog(), layout()).ok, "opponents use the same physical item contract")
 end
 
 local function validator_rejects_invalid_catalog_and_layout_without_mutation()
@@ -588,7 +589,7 @@ local function validator_rejects_invalid_catalog_and_layout_without_mutation()
     for _, case in ipairs(cases) do
         local cat, arena = catalog(), layout(); case.mutate(cat, arena)
         gamma_arena_test_assert.is_false(
-            gamma_arena_fight_validator_v6.validate(valid_spec(), cat, arena).ok,
+            gamma_arena_fight_validator_v8.validate(valid_spec(), cat, arena).ok,
             "invalid authoritative input must fail: " .. case.name)
     end
 end
@@ -605,16 +606,16 @@ function run(run_case_fn)
         { name = "fight_spec_rejects_invalid_resolved_layout_identity_fields", fn = fight_spec_rejects_invalid_resolved_layout_identity_fields },
         { name = "fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo", fn = fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo },
         { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable },
-        { name = "fight_validator_v6_accepts_valid_and_returns_immutable_copy", fn = validator_accepts_valid_v6_and_returns_immutable_copy },
-        { name = "fight_validator_v6_enforces_per_participant_physical_item_cap", fn = validator_enforces_per_participant_physical_item_cap },
-        { name = "fight_validator_v6_rejects_unknown_keys_at_every_schema_level", fn = validator_rejects_unknown_keys_at_every_schema_level },
-        { name = "fight_validator_v6_rejects_generation_provenance_recursively", fn = validator_rejects_generation_provenance_recursively },
-        { name = "fight_validator_v6_rejects_mutation_matrix", fn = validator_rejects_mutation_matrix },
-        { name = "fight_validator_v6_accepts_unique_nonsequential_logical_slots", fn = validator_accepts_unique_nonsequential_logical_slots },
-        { name = "fight_validator_v6_distinguishes_duplicate_logical_and_physical_slots", fn = validator_distinguishes_duplicate_logical_and_physical_slots },
-        { name = "fight_validator_v6_enforces_engine_vertex_uint32_boundaries", fn = validator_enforces_engine_vertex_uint32_boundaries },
-        { name = "fight_validator_v6_enforces_physical_participant_contracts", fn = validator_enforces_physical_participant_contracts },
-        { name = "fight_validator_v6_rejects_invalid_catalog_and_layout_without_mutation", fn = validator_rejects_invalid_catalog_and_layout_without_mutation }
+        { name = "fight_validator_v8_accepts_valid_and_returns_immutable_copy", fn = validator_accepts_valid_v8_and_returns_immutable_copy },
+        { name = "fight_validator_v8_enforces_per_participant_physical_item_cap", fn = validator_enforces_per_participant_physical_item_cap },
+        { name = "fight_validator_v8_rejects_unknown_keys_at_every_schema_level", fn = validator_rejects_unknown_keys_at_every_schema_level },
+        { name = "fight_validator_v8_rejects_generation_provenance_recursively", fn = validator_rejects_generation_provenance_recursively },
+        { name = "fight_validator_v8_rejects_mutation_matrix", fn = validator_rejects_mutation_matrix },
+        { name = "fight_validator_v8_accepts_unique_nonsequential_logical_slots", fn = validator_accepts_unique_nonsequential_logical_slots },
+        { name = "fight_validator_v8_distinguishes_duplicate_logical_and_physical_slots", fn = validator_distinguishes_duplicate_logical_and_physical_slots },
+        { name = "fight_validator_v8_enforces_engine_vertex_uint32_boundaries", fn = validator_enforces_engine_vertex_uint32_boundaries },
+        { name = "fight_validator_v8_enforces_physical_participant_contracts", fn = validator_enforces_physical_participant_contracts },
+        { name = "fight_validator_v8_rejects_invalid_catalog_and_layout_without_mutation", fn = validator_rejects_invalid_catalog_and_layout_without_mutation }
     }) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed
 end

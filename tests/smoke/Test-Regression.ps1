@@ -283,13 +283,13 @@ section = gamma_arena_bandit_veteran
 class = AI_STL_S
 community = bandit
 '@
-    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v2.txt' @'
-seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=2|session_seed=1|fight_index=0|diagnostic=FightSpecV2 rookie
-seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=2|session_seed=1|fight_index=0|diagnostic=FightSpecV2 stalker
-seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=2|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV2 veteran
-seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=2|session_seed=3|fight_index=31|diagnostic=FightSpecV2 master
+    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v8.txt' @'
+seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=8|session_seed=1|fight_index=0|diagnostic=FightSpecV8 rookie
+seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=8|session_seed=1|fight_index=0|diagnostic=FightSpecV8 stalker
+seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=8|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV8 veteran
+seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=8|session_seed=3|fight_index=31|diagnostic=FightSpecV8 master
 '@
-    Write-FixtureFile $Root 'schemas\fight-spec-v2.md' 'fixture'
+    Write-FixtureFile $Root 'schemas\fight-spec-v8.md' 'fixture'
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
 local function _snapshot_unchecked()
     local value = nil
@@ -756,6 +756,10 @@ function run() end
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_random_generator.script',
+        'src\gamedata\scripts\gamma_arena_fight_builder.script',
+        'src\gamedata\scripts\gamma_arena_fight_spec.script',
+        'src\gamedata\scripts\gamma_arena_fight_validator_v8.script',
         'src\gamedata\scripts\gamma_arena_validator.script',
         'src\gamedata\scripts\gamma_arena_layout_adapter.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
@@ -767,8 +771,8 @@ function run() end
         'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script',
         'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script',
         'dev\gamedata\scripts\gamma_arena_test_runtime.script',
-        'tests\fixtures\golden-fights-v4.txt',
-        'schemas\fight-spec-v4.md'
+        'tests\fixtures\golden-fights-v8.txt',
+        'schemas\fight-spec-v8.md'
     )
     foreach ($RelativePath in $CurrentContractFiles) {
         $SourcePath = Join-Path $RepoRoot $RelativePath
@@ -977,9 +981,9 @@ end
     Assert-True ($BootstrapEqualityResult.ExitCode -ne 0 -and $BootstrapEqualityResult.Output -match 'Bootstrap actor ownership must not compare native game_object values') 'Static policy must reject bootstrap game_object equality through its intended diagnostic.'
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
-    $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
+    $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_random_generator.script'
     $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, equipment_budget)')
-    Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script' $MaximumCostPlayer
+    Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_random_generator.script' $MaximumCostPlayer
     $MaximumCostPlayerResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MaximumCostPlayerFixture) -CaptureOutput
     Assert-True ($MaximumCostPlayerResult.ExitCode -ne 0 -and $MaximumCostPlayerResult.Output -match 'Player loadouts must use weighted class selection, not maximum-cost affordable-band selection') 'Static policy must reject maximum-cost player weapon selection through its intended policy failure.'
 

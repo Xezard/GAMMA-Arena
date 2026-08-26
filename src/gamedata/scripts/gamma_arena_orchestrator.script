@@ -882,24 +882,33 @@ function Orchestrator:prepare_fight()
         .. " spec=" .. encoded, { fight_id = fight_id })
     if not logged.ok then return logged end
     local actor = safe_value_call("GA_ENTITY_SPEC_INVALID", spec.actor)
-    if not actor.ok or type(actor.value) ~= "table" or type(actor.value.loadout) ~= "table" then
-        return actor.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated actor loadout is unavailable for diagnostics") or actor
+    if not actor.ok or type(actor.value) ~= "table" or type(actor.value.items) ~= "table" then
+        return actor.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated actor universal items are unavailable for diagnostics") or actor
     end
-    local weapon = actor.value.loadout.weapon
+    local weapon, ammo
+    for _, item in ipairs(actor.value.items) do
+        local definition = catalogs.value.items[item.section]
+        if type(definition) == "table" and definition.category == "weapon" and item.equipped_slot ~= nil then weapon = item.section end
+    end
+    local weapon_definition = weapon and catalogs.value.items[weapon] or nil
+    for _, compatible in ipairs(type(weapon_definition) == "table" and weapon_definition.ammo_sections or {}) do
+        for _, item in ipairs(actor.value.items) do if item.section == compatible then ammo = compatible break end end
+        if ammo ~= nil then break end
+    end
     local metadata = safe_result_call("GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED", self.deps.weapon_diagnostics, {
         session_id = self.session.session_id,
         fight_index = self.session.fight_index,
         fight_id = fight_id,
         phase = "selected",
         weapon_section = weapon,
-        ammo_section = actor.value.loadout.ammo
+        ammo_section = ammo
     })
     if not metadata.ok or type(metadata.value) ~= "table" then
         return metadata.ok and fail("GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED", "Selected actor weapon diagnostic snapshot is malformed") or metadata
     end
     logged = self:emit_log("GA_ACTOR_WEAPON_SELECTED", "weapon=" .. tostring(weapon), metadata.value)
     if not logged.ok then return logged end
-    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id)
+    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id, catalogs.value)
     if not applied.ok then return applied end
     self.catalog_snapshot = catalogs.value
     self.fight_spec = spec
@@ -1250,7 +1259,7 @@ function Orchestrator:drive_continuation()
         if next_index ~= self.session.fight_index or type(self.fight_spec) ~= "table" then
             return fail("GA_MODE_POLICY_FAILED", "Arena exact retry did not retain the current fight identity", { continuation = continuation_kind })
         end
-        local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id)
+        local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot)
         if not applied.ok then return applied end
         local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_DEFEAT)
         if not advanced.ok then return advanced end

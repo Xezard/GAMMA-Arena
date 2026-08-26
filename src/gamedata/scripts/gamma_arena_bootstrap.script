@@ -1173,6 +1173,44 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             return gamma_arena_result.ok(true)
         end
     })
+    local items = {}
+    function items:apply(actor, selected, catalog)
+        local preflight = gamma_arena_item_materializer.descriptors(selected, catalog)
+        if not preflight.ok then return preflight end
+        local value = { consumables = {}, grenades = {} }
+        local ammo_quantities = {}
+        for _, entry in ipairs(selected) do
+            local definition = catalog.items[entry.section]
+            if definition.category == "weapon" and entry.equipped_slot ~= nil then value.weapon = entry.section
+            elseif definition.category == "ammo" then ammo_quantities[entry.section] = entry.quantity
+            elseif definition.category == "outfit" and entry.equipped_slot == "outfit" then value.outfit = entry.section
+            elseif definition.category == "knife" and entry.equipped_slot == "knife" then value.knife = entry.section
+            elseif definition.category == "medicine" then
+                for _ = 1, entry.quantity do value.consumables[#value.consumables + 1] = entry.section end
+            elseif definition.category == "grenade" then
+                for _ = 1, entry.quantity do value.grenades[#value.grenades + 1] = entry.section end
+            end
+        end
+        local weapon = value.weapon and catalog.items[value.weapon] or nil
+        if type(weapon) ~= "table" then return gamma_arena_result.err("GA_ACTOR_ITEMS_INVALID", "Actor universal weapon is unavailable") end
+        for _, section in ipairs(weapon.ammo_sections or {}) do
+            if ammo_quantities[section] ~= nil then value.ammo = section break end
+        end
+        if value.ammo == nil then return gamma_arena_result.err("GA_ACTOR_ITEMS_INVALID", "Actor universal ammunition is unavailable") end
+        local bonus_section
+        for section in pairs(ammo_quantities) do if section ~= value.ammo then bonus_section = section break end end
+        bonus_section = bonus_section or value.ammo
+        local reserve = ammo_quantities[value.ammo]
+        if bonus_section == value.ammo then reserve = reserve - 1 end
+        if reserve < 1 then return gamma_arena_result.err("GA_ACTOR_ITEMS_INVALID", "Actor universal standard ammunition reserve is unavailable") end
+        value.ammo_boxes = reserve
+        value.bonus_ammo = { section = bonus_section, requested_category = "canonical", resolved_category = "canonical", boxes = 1 }
+        value.cost = 1
+        return loadout.apply(actor, value)
+    end
+    function items:update()
+        return loadout.update()
+    end
     return gamma_arena_actor_adapter.new({
         actor = function() return db and db.actor end,
         is_session_active = function() return active_instance() and active_instance():is_active() end,
@@ -1198,7 +1236,8 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
         end,
         input = input,
-        loadout = loadout
+        loadout = loadout,
+        items = items
     })
 end
 
@@ -2042,7 +2081,9 @@ function compose(overrides)
             return gamma_arena_generator.generate(session, fight_index, catalog_snapshot, resolved_layout)
         end,
         validator = overrides.validator or function(spec, catalog_snapshot, resolved_layout)
-            return gamma_arena_validator.validate(spec, catalog_snapshot, resolved_layout)
+            return gamma_arena_validator.validate_runtime(spec, catalog_snapshot, resolved_layout, {
+                effective_profile = entity_effective_profile
+            })
         end,
         clock = overrides.clock or function() return time_global() end,
         result_ui = overrides.result_ui or default_result_ui(),

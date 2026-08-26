@@ -1,5 +1,5 @@
 local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
-local CATEGORY_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon = 4, ammo = 5, consumable = 6 }
+local CATEGORY_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon = 4, ammo = 5, medicine = 6, grenade = 7 }
 local MAX_SAFE_INTEGER = 9007199254740991
 local FORBIDDEN = {
     mode_id = true, difficulty_id = true, budget = true, player_budget = true,
@@ -68,7 +68,7 @@ local function exact_identity(value, catalog, layout)
         end
     end
     if not unsigned_integer(value.session_seed) or value.session_seed ~= gamma_arena_rng.normalize_uint32(value.session_seed)
-        or not unsigned_integer(value.fight_index) or value.generator_version ~= 8
+        or not unsigned_integer(value.fight_index) or value.generator_version ~= 10
         or not text(value.catalog_fingerprint) or not unsigned_integer(value.layout_version, 1) then
         return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity has invalid values")
     end
@@ -183,6 +183,12 @@ local function legacy_items(loadout, catalog)
         result = add(loadout.consumables[index], 1)
         if result then return result end
     end
+    local grenade_count, grenade_invalid = dense_array(loadout.grenades or {}, "legacy_grenades")
+    if grenade_invalid then return grenade_invalid end
+    for index = 1, grenade_count do
+        result = add(loadout.grenades[index], 1)
+        if result then return result end
+    end
     local values = {}
     for _, entry in pairs(aggregate) do values[#values + 1] = entry end
     sort_items(values)
@@ -281,8 +287,8 @@ end
 
 function content_hash(payload)
     if type(payload) ~= "string" then payload = tostring(payload) end
-    local first = gamma_arena_rng.derive_seed({ "ga-fightspec-v6-a", payload })
-    local second = gamma_arena_rng.derive_seed({ "ga-fightspec-v6-b", payload })
+    local first = gamma_arena_rng.derive_seed({ "ga-fightspec-v8-a", payload })
+    local second = gamma_arena_rng.derive_seed({ "ga-fightspec-v8-b", payload })
     return string.format("%08x%08x", first, second)
 end
 
@@ -348,10 +354,10 @@ function canonicalize(draft, identity, catalog, layout)
         slots[opponent.value.slot] = true; opponents[#opponents + 1] = opponent.value
     end
     table.sort(opponents, function(left, right) return left.slot < right.slot end)
-    local result = { schema_version = 6, identity = { session_seed = identity.session_seed, fight_index = identity.fight_index, generator_version = identity.generator_version, catalog_fingerprint = identity.catalog_fingerprint, layout_version = identity.layout_version }, arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} }, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, items = actor_items.value }, opponents = opponents }
+    local result = { schema_version = 8, identity = { session_seed = identity.session_seed, fight_index = identity.fight_index, generator_version = 10, catalog_fingerprint = catalog.fingerprint, layout_version = layout.version }, arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} }, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, items = actor_items.value }, opponents = opponents }
     for index = 1, layout_count do result.arena.tactical_routes[index] = layout.tactical_routes[index] end
     local payload = encode_spec(result, false)
     result.identity.content_hash = content_hash(payload)
-    result.identity.fight_id = "ga6-" .. result.identity.content_hash
+    result.identity.fight_id = "ga8-" .. result.identity.content_hash
     return gamma_arena_result.ok(result)
 end

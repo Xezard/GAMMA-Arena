@@ -20,8 +20,8 @@ if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
 if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
     throw 'Arena balance document must contain exactly one Mermaid diagram'
 }
-if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v7"\]' -or $RepositoryDocument -match 'FightSpec v5') {
-    throw 'Arena balance generation diagram must identify FightSpec v7'
+if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v8"\]' -or $RepositoryDocument -match 'FightSpec v[1-7]') {
+    throw 'Arena balance generation diagram must identify only FightSpec v8'
 }
 $Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
 if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
@@ -43,6 +43,7 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_random_generator.script',
         'src\gamedata\scripts\gamma_arena_grenade_generator.script',
         'src\gamedata\scripts\gamma_arena_entity_adapter.script',
         'src\gamedata\scripts\gamma_arena_medical_generator.script',
@@ -137,7 +138,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $CatalogText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'))
     $LayoutText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'))
     $TacticalText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'))
-    $GeneratorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_generator.script'))
+    $GeneratorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'))
     $TacticalDirectorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'))
     $DifficultyIds = @('rookie', 'stalker', 'veteran', 'master')
     $WeaponClasses = @('w_pistol', 'w_smg', 'w_shotgun', 'w_rifle', 'w_sniper')
@@ -380,7 +381,7 @@ try {
     }
     & $ToolPath -RepoRoot $RepoRoot -Verify
     foreach ($Expected in @(
-        '| Catalog | schema 8 / revision 9 / generator 9 |',
+        '| Catalog | schema 9 / revision 10 / generator 10 |',
         '| Difficulties | schema 4 / revision 5 |',
         '| Layout | schema 2 / revision 2 |',
         '| Tactics | schema 1 / revision 1 |',
@@ -460,7 +461,7 @@ try {
 
     & $ToolPath -RepoRoot $Fixture -Verify
 
-    $Stale = $Second.Replace('Catalog | schema 8 /', 'Catalog | schema 999 /')
+    $Stale = $Second.Replace('Catalog | schema 9 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
     $StaleMessage = Get-ExpectedFailureMessage { & $ToolPath -RepoRoot $Fixture -Verify } 'Update-GammaArenaBalanceDoc\.ps1'
     if (-not $StaleMessage.Contains([IO.Path]::GetFullPath($Document)) -or
@@ -645,7 +646,7 @@ try {
 
     [IO.File]::WriteAllText($Bootstrap, $BootstrapOriginal, (New-Object Text.UTF8Encoding($false)))
     & $ToolPath -RepoRoot $Fixture
-    $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_generator.script'
+    $Generator = Join-Path $Fixture 'src\gamedata\scripts\gamma_arena_random_generator.script'
     $GeneratorText = [IO.File]::ReadAllText($Generator)
 
     $AmmoChanceChanged = $GeneratorText.Replace('w_pistol = 40', 'w_pistol = 41')

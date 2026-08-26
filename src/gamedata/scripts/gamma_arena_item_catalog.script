@@ -9,7 +9,7 @@ local CATEGORY_BY_KIND = {
     o_sci = "outfit", o_heavy = "outfit", o_helmet = "helmet"
 }
 
-local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine" }
+local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
 
 local PLAYABLE_LOADOUT_SECTIONS = {
     "shared", "stalker_loadout", "bandit_loadout", "ecolog_loadout",
@@ -197,10 +197,11 @@ local function valid_slot(category, slot)
     return true
 end
 
-local function physical_candidate(source, section, accepted_medicine)
+local function physical_candidate(source, section, accepted_medicine, accepted_grenades)
     local kind = system_string(source, section, "kind")
     local category = CATEGORY_BY_KIND[kind]
     if category == nil and accepted_medicine[section] ~= nil then category = "medicine" end
+    if accepted_grenades[section] == true then category = "grenade" end
     if category == nil then return nil end
 
     local spawn_ok, spawnable = guarded(source, "section_spawnable", section)
@@ -271,7 +272,7 @@ local function physical_candidate(source, section, accepted_medicine)
     return candidate
 end
 
-local function enumerate_physical_candidates(source, accepted_medicine)
+local function enumerate_physical_candidates(source, accepted_medicine, accepted_grenades)
     local ok, sections = guarded(source, "enumerate_system_sections")
     if not ok or type(sections) ~= "table" then
         return nil, failure("GA_ITEM_CATALOG_ENUMERATION_FAILED", "Effective system sections could not be enumerated")
@@ -279,7 +280,7 @@ local function enumerate_physical_candidates(source, accepted_medicine)
     sections = sorted_unique(sections)
     local candidates = {}
     for _, section in ipairs(sections) do
-        local candidate = physical_candidate(source, section, accepted_medicine)
+        local candidate = physical_candidate(source, section, accepted_medicine, accepted_grenades)
         if candidate ~= nil then candidates[section] = candidate end
     end
 
@@ -483,6 +484,9 @@ local function canonical_rank_parts(parts, rank_catalog)
     canonical_add(parts, "base_budget", rank_catalog.base_budget)
     canonical_add(parts, "max_entries", rank_catalog.max_entries)
     canonical_add(parts, "max_physical_items_per_participant", rank_catalog.max_physical_items_per_participant)
+    canonical_add(parts, "max_selected_grenades", rank_catalog.max_selected_grenades)
+    canonical_add(parts, "max_quantity_per_grenade", rank_catalog.max_quantity_per_grenade)
+    canonical_add(parts, "second_grenade_price_multiplier", rank_catalog.second_grenade_price_multiplier)
     for _, rank_id in ipairs(copy_sorted(rank_catalog.rank_ids)) do
         local rank = rank_catalog.ranks[rank_id]
         canonical_add(parts, "rank_id", rank_id)
@@ -500,6 +504,7 @@ local function canonical_rank_parts(parts, rank_catalog)
             canonical_add(parts, "alias", rank.alias)
             canonical_add(parts, "profile_section", rank.profile_section)
             canonical_add(parts, "community", rank.community)
+            canonical_add(parts, "runtime_community", rank.runtime_community)
             canonical_add(parts, "minimum", rank.minimum)
             canonical_add(parts, "maximum", rank.maximum)
             canonical_add(parts, "loadout_section", rank.loadout_section)
@@ -529,11 +534,11 @@ end
 
 local function fingerprint(item_ids, items, rank_catalog, base_carry_weight)
     local parts = {}
-    canonical_add(parts, "domain", "ga-catalog-v8")
+    canonical_add(parts, "domain", "ga-catalog-v9")
     canonical_add(parts, "base_carry_weight", base_carry_weight)
     canonical_item_parts(parts, item_ids, items)
     canonical_rank_parts(parts, rank_catalog)
-    return "ga-catalog-v8-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
+    return "ga-catalog-v9-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
 end
 
 local function valid_inputs(source, legacy_catalog, rank_catalog)
@@ -551,7 +556,9 @@ local function valid_inputs(source, legacy_catalog, rank_catalog)
     if type(rank_catalog) ~= "table" or type(rank_catalog.ranks) ~= "table" or type(rank_catalog.rank_ids) ~= "table"
         or type(rank_catalog.factions) ~= "table" or type(rank_catalog.faction_ids) ~= "table"
         or finite_integer(rank_catalog.base_budget, 0) == nil or finite_integer(rank_catalog.max_entries, 1) == nil
-        or finite_integer(rank_catalog.max_physical_items_per_participant, 1) == nil then
+        or finite_integer(rank_catalog.max_physical_items_per_participant, 1) == nil
+        or rank_catalog.max_selected_grenades ~= 2 or rank_catalog.max_quantity_per_grenade ~= 1
+        or rank_catalog.second_grenade_price_multiplier ~= 2 then
         return failure("GA_ITEM_CATALOG_RANK_INVALID", "Universal item catalog requires the exact rank catalog")
     end
     return gamma_arena_result.ok(true)
@@ -567,7 +574,11 @@ local function load_impl(source, legacy_catalog, rank_catalog)
         return failure("GA_ITEM_CATALOG_CARRY_INVALID", "Effective actor carry capacity must be positive")
     end
 
-    local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog))
+    local accepted_grenades = {}
+    for _, grenade in ipairs(legacy_catalog.actor_grenade_list or {}) do
+        if type(grenade) == "table" and type(grenade.section) == "string" then accepted_grenades[grenade.section] = true end
+    end
+    local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog), accepted_grenades)
     if candidates == nil then return candidate_error end
     local overrides, override_error = load_price_overrides(source)
     if overrides == nil then return override_error end
@@ -594,8 +605,16 @@ local function load_impl(source, legacy_catalog, rank_catalog)
     catalog.item_ids = item_ids
     catalog.categories = categories
     catalog.ranks = rank_catalog.ranks
+    catalog.rank_ids = rank_catalog.rank_ids
     catalog.factions = rank_catalog.factions
+    catalog.faction_ids = rank_catalog.faction_ids
     catalog.max_physical_items_per_participant = rank_catalog.max_physical_items_per_participant
+    catalog.max_selected_grenades = rank_catalog.max_selected_grenades
+    catalog.max_quantity_per_grenade = rank_catalog.max_quantity_per_grenade
+    catalog.second_grenade_price_multiplier = rank_catalog.second_grenade_price_multiplier
+    catalog.schema_version = 9
+    catalog.revision = 10
+    catalog.generator_version = 10
     catalog.base_carry_weight = base_carry_weight
     catalog.fingerprint = fingerprint(item_ids, items, rank_catalog, base_carry_weight)
     return gamma_arena_result.ok(catalog)

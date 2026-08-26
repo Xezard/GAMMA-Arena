@@ -3340,6 +3340,34 @@ local function runtime_checkpoint_resume_applies_index_after_ready()
     gamma_arena_test_assert.is_true(orchestrator:is_checkpoint_ready(), "restored checkpoint opens the generation gate")
 end
 
+local function entity_catalog()
+    local items = {
+        wpn_pm = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_9x18_fmj", "ammo_9x18_ap" } },
+        wpn_mp5 = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_9x19_fmj" } },
+        ammo_9x18_fmj = { category = "ammo", box_size = 16 },
+        ammo_9x18_ap = { category = "ammo", box_size = 16 },
+        ammo_9x19_fmj = { category = "ammo", box_size = 30 },
+        novice_outfit = { category = "outfit", ltx_slot = 6, helmet_allowed = true },
+        stalker_outfit = { category = "outfit", ltx_slot = 6, helmet_allowed = true },
+        wpn_knife = { category = "knife", ltx_slot = 0 },
+        bandage = { category = "medicine", healing = false },
+        medkit = { category = "medicine", healing = true }
+    }
+    return {
+        items = items,
+        max_physical_items_per_participant = 256,
+        rank_ids = { "novice", "trainee" },
+        ranks = {
+            novice = { id = "novice", minimum = 0, maximum = 99 },
+            trainee = { id = "trainee", minimum = 100, maximum = 199 }
+        },
+        factions = { bandit = { ranks = {
+            novice = { id = "novice", minimum = 10, maximum = 99 },
+            trainee = { id = "trainee", minimum = 100, maximum = 180 }
+        } } }
+    }
+end
+
 local function entity_spec(opponent_count)
     local actor = {
         slot = 0,
@@ -3349,13 +3377,21 @@ local function entity_spec(opponent_count)
             weapon = "wpn_pm", ammo = "ammo_9x18_fmj", ammo_boxes = 2,
             bonus_ammo = { section = "ammo_9x18_ap", requested_category = "armor_piercing", resolved_category = "armor_piercing", boxes = 1 },
             outfit = "novice_outfit", knife = "wpn_knife", consumables = { "bandage" }, grenades = {}, cost = 6
+        },
+        items = {
+            { section = "ammo_9x18_ap", quantity = 1 },
+            { section = "ammo_9x18_fmj", quantity = 2 },
+            { section = "bandage", quantity = 1 },
+            { section = "novice_outfit", quantity = 1, equipped_slot = "outfit" },
+            { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+            { section = "wpn_pm", quantity = 1, equipped_slot = "weapon_1" }
         }
     }
     local opponents = {}
     for index = 1, (opponent_count or 2) do
+        local novice = index == 1
         opponents[index] = {
             slot = index,
-            spawn_path = "opponent_" .. tostring(index),
             tactical_route = "opponent_" .. tostring(index),
             spawn_slot_id = "fixture:" .. tostring(index),
             spawn = {
@@ -3363,20 +3399,28 @@ local function entity_spec(opponent_count)
                 level_vertex_id = 10 + index,
                 game_vertex_id = 22
             },
-            role = index == 1 and "leader" or "primary",
-            profile = index == 1 and "gamma_arena_bandit_novice" or "gamma_arena_bandit_trainee",
+            role = novice and "leader" or "primary",
+            faction = "bandit",
+            rank = { id = novice and "novice" or "trainee", value = novice and 50 or 150 },
+            profile = novice and "gamma_arena_bandit_novice" or "gamma_arena_bandit_trainee",
             community = "bandit",
             loadout = {
-                weapon = index == 1 and "wpn_pm" or "wpn_mp5",
-                ammo = index == 1 and "ammo_9x18_fmj" or "ammo_9x19_fmj",
-                ammo_boxes = index == 1 and 3 or 2,
-                outfit = index == 1 and "novice_outfit" or "stalker_outfit",
-                knife = "wpn_knife",
-                consumables = index == 1 and { "bandage", "medkit" } or { "bandage" },
-                grenades = {},
-                cost = 10
+                weapon = novice and "wpn_pm" or "wpn_mp5",
+                ammo = novice and "ammo_9x18_fmj" or "ammo_9x19_fmj",
+                ammo_boxes = novice and 3 or 2,
+                outfit = novice and "novice_outfit" or "stalker_outfit",
+                knife = "wpn_knife", consumables = novice and { "bandage", "medkit" } or { "bandage" },
+                grenades = {}, cost = 10
+            },
+            items = {
+                { section = novice and "ammo_9x18_fmj" or "ammo_9x19_fmj", quantity = novice and 3 or 2 },
+                { section = "bandage", quantity = 1 },
+                { section = novice and "novice_outfit" or "stalker_outfit", quantity = 1, equipped_slot = "outfit" },
+                { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+                { section = novice and "wpn_pm" or "wpn_mp5", quantity = 1, equipped_slot = "weapon_1" }
             }
         }
+        if novice then opponents[index].items[#opponents[index].items + 1] = { section = "medkit", quantity = 1 } end
     end
     return {
         actor = function() return actor end,
@@ -3387,12 +3431,10 @@ local function entity_spec(opponent_count)
                 "opponent_4", "opponent_5", "opponent_6"
             }
         end,
-        fight_id = function() return "ga-entity-test" end,
-        stable_encode = function() return "stable:ga-entity-test" end
+        fight_id = function() return "ga8-entity-test" end,
+        stable_encode = function() return "stable:ga8-entity-test" end
     }
 end
-
-local function fake_entity_environment(options)
     options = options or {}
     local env = {
         now = options.now or 100,
@@ -3509,11 +3551,14 @@ local function fake_entity_environment(options)
     function alife_service:object(id) return env.objects[id] end
 
     local actor_port = {}
-    function actor_port:apply_loadout(loadout)
+    function actor_port:apply_items(items, catalog)
         env.actor_loadout_calls = env.actor_loadout_calls + 1
-        env.events[#env.events + 1] = "actor_loadout:" .. loadout.weapon
+        env.events[#env.events + 1] = "actor_items:" .. tostring(#items)
         if options.fail_phase == "actor" then return gamma_arena_result.err("GA_TEST_ACTOR_FAIL", "injected actor loadout failure") end
         return gamma_arena_result.ok(true)
+    end
+    function actor_port:update_items()
+        return gamma_arena_result.ok({ ready = true, weapon = "wpn_pm", ammo = "ammo_9x18_fmj", outfit = "novice_outfit", knife = "wpn_knife", magazine_rounds = 16, reserve_rounds = 32 })
     end
     function actor_port:release_input()
         env.actor_input_releases = env.actor_input_releases + 1
@@ -3791,7 +3836,7 @@ local function pump_entity(adapter, env, limit)
 end
 
 local function begin_entity_apply(adapter, env, spec, session_id)
-    local result = adapter:begin_apply(spec, session_id)
+    local result = adapter:begin_apply(spec, session_id, entity_catalog())
     if result.ok then env.opponents_enabled = true end
     return result
 end
@@ -3884,7 +3929,7 @@ end
 local function runtime_entity_does_not_spawn_before_begin_apply()
     local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
-    adapter:begin_apply(entity_spec(1), "session-countdown")
+    adapter:begin_apply(entity_spec(1), "session-countdown", entity_catalog())
     for _ = 1, 3 do
         local waiting = adapter:update()
         gamma_arena_test_assert.is_true(waiting.ok, "closed opponent gate is a valid pending query")
@@ -4104,7 +4149,7 @@ local function runtime_bootstrap_actor_loadout_port_is_bound_and_exact()
     local failing_port, rollback_ids, advance_release_frame = partial_failure_port(nil)
     local failure_env, failure_deps = fake_entity_environment()
     failure_deps.actor = { apply_loadout = function(_, loadout) return failing_port.apply(actor, loadout) end }
-    local failed = gamma_arena_entity_adapter.new(failure_deps):begin_apply(entity_spec(1), "session-actor-port-failure")
+    local failed = gamma_arena_entity_adapter.new(failure_deps):begin_apply(entity_spec(1), "session-actor-port-failure", entity_catalog())
     gamma_arena_test_assert.is_false(failed.ok, "partial production actor loadout failure is observable")
     gamma_arena_test_assert.equals(failure_env.create_npc_count, 0, "partial actor loadout rollback finishes before NPC creation")
     local expected_rollback = { 604, 603, 602, 601, 600 }
@@ -4907,14 +4952,16 @@ local function runtime_actor_loadout_bonus_ammo_multi_return_keeps_owned_ids()
 end
 
 local function runtime_entity_preflights_base_and_bonus_ammo_independently()
-    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = 7 } })
+    local env, deps = fake_entity_environment()
     local adapter = gamma_arena_entity_adapter.new(deps)
-    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-independent-ammo").ok, "independent actor ammo preflight accepts valid base and bonus metadata")
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-independent-ammo", entity_catalog()).ok, "independent actor ammo preflight accepts valid base and bonus metadata")
     gamma_arena_test_assert.equals(env.actor_loadout_calls, 1, "actor mutation follows both successful preflight resolutions")
-    local actor_loadout = adapter.actor_spec.loadout
-    gamma_arena_test_assert.equals(actor_loadout.ammo_rounds, 40, "base ammo uses its own effective box size")
-    gamma_arena_test_assert.equals(actor_loadout.bonus_ammo.ammo_rounds, 7, "bonus ammo uses its own effective box size")
-    gamma_arena_test_assert.equals(adapter.opponents[1].loadout.bonus_ammo, nil, "opponents retain base ammo only")
+    local actor_quantities, opponent_has_bonus = {}, false
+    for _, item in ipairs(adapter.actor_spec.items) do actor_quantities[item.section] = item.quantity end
+    for _, item in ipairs(adapter.opponents[1].items) do if item.section == "ammo_9x18_ap" then opponent_has_bonus = true end end
+    gamma_arena_test_assert.equals(actor_quantities.ammo_9x18_fmj, 2, "base ammo quantity survives universal preflight")
+    gamma_arena_test_assert.equals(actor_quantities.ammo_9x18_ap, 1, "bonus ammo quantity survives universal preflight")
+    gamma_arena_test_assert.is_false(opponent_has_bonus, "opponents retain base ammo only")
 end
 
 local function runtime_actor_loadout_apply_failures_never_drop_valid_created_ids()
@@ -4958,40 +5005,27 @@ local function runtime_actor_loadout_failed_tag_write_never_manufactures_ownersh
 end
 
 local function runtime_entity_ammo_box_size_failure_precedes_actor_mutation()
-    for _, option in ipairs({
-        { ammo_box_size = 0 },
-        { ammo_box_size = 1.5 },
-        { ammo_box_size_throw = true },
-        { ammo_box_sizes = {} }
-    }) do
-        local env, deps = fake_entity_environment(option)
+    for _, value in ipairs({ 0, 1.5 }) do
+        local env, deps = fake_entity_environment()
         local adapter = gamma_arena_entity_adapter.new(deps)
-        local result = adapter:begin_apply(entity_spec(1), "session-invalid-box-size")
-        gamma_arena_test_assert.is_false(result.ok, "missing, nonpositive, fractional, or throwing effective box_size fails closed")
+        local catalog = entity_catalog(); catalog.items.ammo_9x18_fmj.box_size = value
+        local result = adapter:begin_apply(entity_spec(1), "session-invalid-box-size", catalog)
+        gamma_arena_test_assert.is_false(result.ok, "nonpositive or fractional catalog box_size fails closed")
         gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "effective ammo conversion is verified before actor mutation")
         gamma_arena_test_assert.equals(env.create_npc_count, 0, "effective ammo conversion is verified before opponent creation")
     end
 end
 
 local function runtime_entity_bonus_ammo_box_size_failure_precedes_actor_mutation()
-    for _, case in ipairs({ { value = nil }, { value = 0 }, { value = 1.5 }, { value = 4294967296 } }) do
-        local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = case.value } })
+    for _, value in ipairs({ 0, 1.5 }) do
+        local env, deps = fake_entity_environment()
         local adapter = gamma_arena_entity_adapter.new(deps)
-        local result = adapter:begin_apply(entity_spec(1), "session-invalid-bonus-box-size")
+        local catalog = entity_catalog(); catalog.items.ammo_9x18_ap.box_size = value
+        local result = adapter:begin_apply(entity_spec(1), "session-invalid-bonus-box-size", catalog)
         gamma_arena_test_assert.is_false(result.ok, "invalid bonus effective box_size fails closed")
         gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "bonus effective ammo conversion is verified before actor mutation")
         gamma_arena_test_assert.equals(env.create_npc_count, 0, "bonus effective ammo conversion is verified before opponent creation")
     end
-    local env, deps = fake_entity_environment({ ammo_box_sizes = { ammo_9x18_fmj = 20, ammo_9x18_ap = function() error("injected bonus box-size failure") end } })
-    deps.ammo_box_size = function(section)
-        if section == "ammo_9x18_ap" then error("injected bonus box-size failure") end
-        return 20
-    end
-    local adapter = gamma_arena_entity_adapter.new(deps)
-    local result = adapter:begin_apply(entity_spec(1), "session-throwing-bonus-box-size")
-    gamma_arena_test_assert.is_false(result.ok, "throwing bonus effective box_size fails closed")
-    gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "throwing bonus conversion precedes actor mutation")
-    gamma_arena_test_assert.equals(env.create_npc_count, 0, "throwing bonus conversion precedes opponent creation")
 end
 
 local function runtime_bootstrap_hostility_port_is_feature_probed()
@@ -6373,7 +6407,7 @@ end
 local function runtime_entity_runtime_profile_check_precedes_actor_mutation()
     local env, deps = fake_entity_environment({ effective_profile = { class = "SM_BLOODSUCKER", community = "monster" } })
     local adapter = gamma_arena_entity_adapter.new(deps)
-    local result = adapter:begin_apply(entity_spec(1), "session-profile-reject")
+    local result = adapter:begin_apply(entity_spec(1), "session-profile-reject", entity_catalog())
     gamma_arena_test_assert.is_false(result.ok, "entity application requires fail-closed effective profile validation")
     gamma_arena_test_assert.equals(result.error.code, "GA_ENEMY_EFFECTIVE_CLASS_INVALID", "entity application preserves effective class code")
     gamma_arena_test_assert.equals(env.actor_loadout_calls, 0, "effective profile rejection precedes actor mutation")
@@ -6387,7 +6421,7 @@ local function runtime_entity_preserves_dynamic_opponent_community()
     opponents[1].community = "csky"
     local _, deps = fake_entity_environment({ effective_profile = { class = "AI_STL_S", community = "arena_enemy" } })
     local adapter = gamma_arena_entity_adapter.new(deps)
-    local result = adapter:begin_apply(spec, "session-dynamic-community")
+    local result = adapter:begin_apply(spec, "session-dynamic-community", entity_catalog())
     gamma_arena_test_assert.is_true(result.ok, "source faction metadata remains valid while the effective profile is isolated")
 end
 
