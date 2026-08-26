@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Made the battle identity transparent, fight-first, and ASCII-separated.
+
 ## 0.2.0 - 2026-08-26
 
 - Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1%, while each opponent independently has a 10% chance for one; both use the F1/RGD-5/GD-05 pool, smoke is excluded, and native AI remains responsible for throws.

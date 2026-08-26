@@ -700,7 +700,11 @@ if (Test-Path -LiteralPath $BattleUiXmlPath) {
             Assert-True ($null -ne $BattleUiXml.SelectSingleNode("//*[local-name()='$Id']")) "Battle identity HUD XML is missing control $Id"
         }
         $BattlePanel = $BattleUiXml.SelectSingleNode("//*[local-name()='panel']")
+        $BattleIdentity = $BattleUiXml.SelectSingleNode("//*[local-name()='identity']")
+        $BattleText = $BattleIdentity.SelectSingleNode("*[local-name()='text']")
         Assert-True ([int]$BattlePanel.x + [int]$BattlePanel.width -eq 994) 'Battle identity HUD must retain the approved right safe-area inset'
+        Assert-True ($null -eq $BattlePanel.SelectSingleNode("*[local-name()='texture']")) 'Battle identity HUD panel must be fully transparent'
+        Assert-True ($BattleText.r -eq '255' -and $BattleText.g -eq '255' -and $BattleText.b -eq '255') 'Battle identity HUD text must be pure white'
     } catch { Assert-True $false "Battle identity HUD XML must parse: $($_.Exception.Message)" }
 }
 foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
