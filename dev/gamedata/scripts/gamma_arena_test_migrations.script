@@ -276,7 +276,7 @@ local function defeat_intent_is_transactional_and_cross_vm_safe()
     config:corrupt("gamma_arena", "settings_schema_version", "1")
     config:corrupt("gamma_arena", "last_difficulty_id", "rookie")
     config:corrupt("gamma_arena", "last_seed_mode", "random")
-    config:corrupt("gamma_arena", "addon_version", "0.1.0")
+    config:corrupt("gamma_arena", "addon_version", "0.2.0")
     gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(config).ok, "migration preserves confirmed defeat handoff")
     gamma_arena_test_assert.equals(process_b:peek_defeat(config, { clock = function() return 1600 end }).value.session_id, context.session_id, "confirmed defeat crosses VM boundary")
     gamma_arena_test_assert.equals(process_b:peek_defeat(config, { clock = function() return 1601 end }).value, false, "defeat expires after 600 seconds")
@@ -400,7 +400,7 @@ local function schema_v1_without_addon_version_is_incompatible()
     local config = versioned_v1_config(nil)
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "unversioned v1 settings are adopted fail-closed")
-    gamma_arena_test_assert.equals(config.data.addon_version, "0.1.0", "unversioned v1 records current addon")
+    gamma_arena_test_assert.equals(config.data.addon_version, "0.2.0", "unversioned v1 records current addon")
     gamma_arena_test_assert.equals(config.save_count, 1, "unversioned v1 writes exactly once")
     assert_keys_absent(config, launch_keys, "unversioned v1 clears launch intent")
     assert_keys_absent(config, resume_keys, "unversioned v1 clears resume intent")
@@ -409,7 +409,7 @@ local function schema_v1_without_addon_version_is_incompatible()
 end
 
 local function schema_v1_current_addon_preserves_transient_intents()
-    local config = versioned_v1_config("0.1.0")
+    local config = versioned_v1_config("0.2.0")
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "current v1 settings are idempotent")
     gamma_arena_test_assert.equals(config.save_count, 0, "current v1 does not save")
@@ -422,7 +422,7 @@ local function schema_v1_different_addon_clears_transient_intents()
     local config = versioned_v1_config("0.0.9")
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "different addon version migrates")
-    gamma_arena_test_assert.equals(config.data.addon_version, "0.1.0", "different addon records current version")
+    gamma_arena_test_assert.equals(config.data.addon_version, "0.2.0", "different addon records current version")
     gamma_arena_test_assert.equals(config.save_count, 1, "different addon writes exactly once")
     assert_keys_absent(config, launch_keys, "different addon clears launch intent")
     assert_keys_absent(config, resume_keys, "different addon clears resume intent")
@@ -1181,14 +1181,18 @@ end
 local function dxml_fixture(options)
     options = options or {}
     local menu = { kids = {} }
+    local pause = { kids = {} }
     local names = options.without_new_game
         and { "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
         or { "btn_newgame", "btn_load", "btn_lastsave", "btn_options", "btn_mcm", "btn_originals", "btn_quit" }
     for _, name in ipairs(names) do
         menu.kids[#menu.kids + 1] = { name = name, parent = menu }
     end
+    for _, name in ipairs({ "btn_ret", "btn_lastsave", "btn_load", "btn_save", "btn_options", "btn_mcm", "btn_quit_to_mm", "btn_quit" }) do
+        pause.kids[#pause.kids + 1] = { name = name, parent = pause }
+    end
 
-    local xml = { insertions = 0, menu = menu }
+    local xml = { insertions = 0, menu = menu, pause = pause }
     function xml:query(selector)
         if selector == "menu_main btn[name=btn_gamma_arena]" then
             for _, child in ipairs(self.menu.kids) do
@@ -1208,6 +1212,19 @@ local function dxml_fixture(options)
             end
             return {}
         end
+        if selector == "menu_main_single btn[name=btn_gamma_arena_restart]" then
+            for _, child in ipairs(self.pause.kids) do
+                if child.name == "btn_gamma_arena_restart" then return { child } end
+            end
+            return {}
+        end
+        if selector == "menu_main_single" then return { self.pause } end
+        if selector == "menu_main_single > btn[name=btn_ret]" then
+            for _, child in ipairs(self.pause.kids) do
+                if child.name == "btn_ret" then return { child } end
+            end
+            return {}
+        end
         return {}
     end
     if not options.without_position_api then
@@ -1218,8 +1235,9 @@ local function dxml_fixture(options)
             end
         end
     end
-    function xml:insertFromXMLString(_, parent, position)
-        table.insert(parent.kids, position, { name = "btn_gamma_arena", parent = parent })
+    function xml:insertFromXMLString(value, parent, position)
+        local name = string.find(value, "btn_gamma_arena_restart", 1, true) and "btn_gamma_arena_restart" or "btn_gamma_arena"
+        table.insert(parent.kids, position, { name = name, parent = parent })
         self.insertions = self.insertions + 1
     end
     return xml
@@ -1228,15 +1246,15 @@ end
 local function dxml_accepts_canonical_callback_path()
     local canonical = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("ui\\ui_mm_main.xml", canonical).ok, "canonical DXML callback path is accepted")
-    gamma_arena_test_assert.equals(canonical.insertions, 1, "canonical callback inserts Arena once")
+    gamma_arena_test_assert.equals(canonical.insertions, 2, "canonical callback inserts both Arena entries once")
 
     local normalized = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("UI/UI_MM_MAIN.XML", normalized).ok, "case and slash normalization is accepted")
-    gamma_arena_test_assert.equals(normalized.insertions, 1, "normalized canonical callback inserts Arena once")
+    gamma_arena_test_assert.equals(normalized.insertions, 2, "normalized canonical callback inserts both Arena entries once")
 
     local gamma_widescreen = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", gamma_widescreen).ok, "effective GAMMA 16:9 DXML callback path is accepted")
-    gamma_arena_test_assert.equals(gamma_widescreen.insertions, 1, "effective GAMMA 16:9 callback inserts Arena once")
+    gamma_arena_test_assert.equals(gamma_widescreen.insertions, 2, "effective GAMMA 16:9 callback inserts both Arena entries once")
 
     local unrelated = dxml_fixture()
     gamma_arena_test_assert.is_true(modxml_gamma_arena.apply("other/ui_mm_main.xml", unrelated).ok, "unrelated DXML callback is ignored without error")
@@ -1249,7 +1267,7 @@ local function dxml_accepts_canonical_callback_path()
     gamma_arena_test_assert.equals(modxml_gamma_arena.apply("ui_mm_main_16.xml", unrelated_widescreen).value, false, "bare 16:9 basename alias is rejected")
 end
 
-local function dxml_registers_first_main_menu_click()
+local function dxml_registers_both_arena_menu_clicks()
     local callbacks = {}
     local result = modxml_gamma_arena.register(function(name, callback)
         callbacks[name] = callback
@@ -1258,13 +1276,55 @@ local function dxml_registers_first_main_menu_click()
     gamma_arena_test_assert.is_true(type(callbacks.on_xml_read) == "function", "XML callback is registered early")
     gamma_arena_test_assert.is_true(type(callbacks.main_menu_on_init) == "function", "first main-menu callback is registered early")
 
-    local bound_name = nil
+    local bound = {}
     local menu = {}
-    function menu:AddCallback(name)
-        bound_name = name
+    function menu:AddCallback(name, event, callback, owner)
+        bound[name] = { event = event, callback = callback, owner = owner }
     end
     callbacks.main_menu_on_init(menu)
-    gamma_arena_test_assert.equals(bound_name, "btn_gamma_arena", "first main menu binds Arena click")
+    gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena.callback) == "function", "first main menu binds Arena click")
+    gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena_restart.callback) == "function", "first in-game menu binds Arena restart click")
+    gamma_arena_test_assert.equals(bound.btn_gamma_arena.owner, menu, "Arena click retains the menu owner")
+    gamma_arena_test_assert.equals(bound.btn_gamma_arena_restart.owner, menu, "Arena restart retains the menu owner")
+end
+
+local function main_menu_restart_is_acceptance_gated()
+    local function menu_fixture()
+        local menu = { returned = 0 }
+        function menu:OnButton_return_game() self.returned = self.returned + 1 end
+        return menu
+    end
+
+    local accepted_menu = menu_fixture()
+    local accepted = gamma_arena_main_menu.request_restart(accepted_menu, {
+        request_restart = function() return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(accepted.ok and accepted.value == true, "accepted restart closes the pause menu")
+    gamma_arena_test_assert.equals(accepted_menu.returned, 1, "accepted restart resumes frame updates")
+
+    local inert_menu = menu_fixture()
+    local inert = gamma_arena_main_menu.request_restart(inert_menu, {
+        request_restart = function() return gamma_arena_result.ok(false) end
+    })
+    gamma_arena_test_assert.is_true(inert.ok and inert.value == false, "inactive Arena restart is inert")
+    gamma_arena_test_assert.equals(inert_menu.returned, 0, "inactive Arena leaves the pause menu open")
+
+    for _, callback in ipairs({
+        function() return gamma_arena_result.err("GA_TEST_RESTART", "injected restart failure") end,
+        function() return nil end,
+        function() error("injected restart exception") end
+    }) do
+        local failed_menu = menu_fixture()
+        local failed = gamma_arena_main_menu.request_restart(failed_menu, { request_restart = callback })
+        gamma_arena_test_assert.is_false(failed.ok, "restart dependency failure remains structured")
+        gamma_arena_test_assert.equals(failed_menu.returned, 0, "failed restart leaves the pause menu open")
+    end
+
+    local close_failed = gamma_arena_main_menu.request_restart({}, {
+        request_restart = function() return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_false(close_failed.ok, "missing stock return action fails closed")
+    gamma_arena_test_assert.equals(close_failed.error.code, "GA_ARENA_RESTART_MENU_CLOSE_FAILED", "menu close failure code is stable")
 end
 
 local function dxml_registration_failures_are_structured()
@@ -1289,8 +1349,22 @@ local function dxml_places_arena_after_new_game()
 
     local duplicate = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
     gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "second DXML pass is a no-op")
-    gamma_arena_test_assert.equals(ordered.insertions, 1, "Arena is inserted exactly once")
+    gamma_arena_test_assert.equals(ordered.insertions, 2, "both Arena entries are inserted exactly once")
     gamma_arena_test_assert.equals(#ordered.menu.kids, 8, "duplicate pass does not grow the menu")
+end
+
+local function dxml_places_restart_after_return()
+    local ordered = dxml_fixture()
+    local inserted = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(inserted.ok and inserted.value == true, "in-game Arena restart is inserted")
+    gamma_arena_test_assert.equals(ordered.pause.kids[1].name, "btn_ret", "Return to Game remains first")
+    gamma_arena_test_assert.equals(ordered.pause.kids[2].name, "btn_gamma_arena_restart", "Restart Arena is directly below Return to Game")
+    gamma_arena_test_assert.equals(ordered.pause.kids[3].name, "btn_lastsave", "former second in-game item follows Restart Arena")
+
+    local duplicate = modxml_gamma_arena.apply("ui\\ui_mm_main_16.xml", ordered)
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "second restart DXML pass is a no-op")
+    gamma_arena_test_assert.equals(ordered.insertions, 2, "duplicate pass inserts neither Arena entry twice")
+    gamma_arena_test_assert.equals(#ordered.pause.kids, 9, "duplicate pass does not grow the in-game menu")
 end
 
 local function dxml_placement_failures_are_structured()
@@ -1789,9 +1863,11 @@ local cases = {
     { name = "present_empty_config_snapshot", fn = present_empty_config_values_snapshot_as_empty_strings },
     { name = "stale_conflict_faults", fn = stale_cleanup_and_conflict_faults_are_safe },
     { name = "dxml_callback_path", fn = dxml_accepts_canonical_callback_path },
-    { name = "dxml_cold_start_registration", fn = dxml_registers_first_main_menu_click },
+    { name = "dxml_cold_start_registration", fn = dxml_registers_both_arena_menu_clicks },
+    { name = "main_menu_restart_acceptance", fn = main_menu_restart_is_acceptance_gated },
     { name = "dxml_registration_failures", fn = dxml_registration_failures_are_structured },
     { name = "dxml_menu_order", fn = dxml_places_arena_after_new_game },
+    { name = "dxml_restart_menu_order", fn = dxml_places_restart_after_return },
     { name = "dxml_placement_failures", fn = dxml_placement_failures_are_structured },
     { name = "character_creation_bridge", fn = character_creation_bridge_is_exact },
     { name = "character_creation_bridge_fresh_store_restore", fn = character_creation_bridge_restores_exactly_from_fresh_store },

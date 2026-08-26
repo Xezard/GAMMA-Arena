@@ -35,6 +35,15 @@ local function safe_result_call(code, fn, ...)
     return result
 end
 
+local function safe_value_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Arena dependency is unavailable") end
+    local ok, value = pcall(fn, ...)
+    if not ok then return fail(code, "Arena dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then return fail(code, "Arena dependency reported failure") end
+    return gamma_arena_result.ok(value)
+end
+
 local function call_method(code, object, method_name, ...)
     local ok, method = pcall(function() return object and object[method_name] end)
     if not ok or type(method) ~= "function" then
@@ -214,6 +223,36 @@ function Orchestrator:diagnostic(code, message, context)
     return true
 end
 
+function Orchestrator:audio_context(extra)
+    local fight_id = nil
+    local called, value = pcall(function()
+        return self.fight_spec and self.fight_spec.fight_id and self.fight_spec.fight_id()
+    end)
+    if called and type(value) == "string" then fight_id = value end
+    local context = {
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil,
+        fight_id = fight_id,
+        stage = self.runtime_stage
+    }
+    if type(extra) == "table" then
+        for key, item in pairs(extra) do context[key] = item end
+    end
+    return context
+end
+
+function Orchestrator:audio_event(method_name, context)
+    local audio = self.deps.audio
+    if audio == nil or audio == false then return gamma_arena_result.ok(false) end
+    local result = call_method("GA_AUDIO_EVENT_FAILED", audio, method_name, context or self:audio_context())
+    if result.ok then return result end
+    self:diagnostic("GA_AUDIO_EVENT_FAILED", "method=" .. tostring(method_name), {
+        method = method_name,
+        code = result.error and result.error.code or "GA_AUDIO_EVENT_FAILED"
+    })
+    return gamma_arena_result.ok(false)
+end
+
 function Orchestrator:checkpoint(code, context)
     local diagnostics = self.deps.diagnostics
     local lookup_ok, writer = pcall(function() return diagnostics and diagnostics.checkpoint end)
@@ -267,6 +306,7 @@ function Orchestrator:set_runtime_stage(stage)
 end
 
 function Orchestrator:clear_runtime_ui()
+    self:clear_battle_identity("runtime_cleanup")
     local ui = self.deps.result_ui
     if ui == nil then return gamma_arena_result.ok(false) end
     local errors = {}
@@ -280,6 +320,60 @@ function Orchestrator:clear_runtime_ui()
     self.countdown_value = nil
     if #errors > 0 then return fail("GA_RUNTIME_UI_CLEAR_FAILED", "Arena runtime UI could not be removed safely", { errors = errors }) end
     return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:battle_identity_model()
+    local spec = self.fight_spec
+    local session = self.session
+    local seed = safe_value_call("GA_BATTLE_IDENTITY_MISMATCH", spec and spec.session_seed)
+    if not seed.ok then return seed end
+    local index = safe_value_call("GA_BATTLE_IDENTITY_MISMATCH", spec and spec.fight_index)
+    if not index.ok then return index end
+    if type(session) ~= "table"
+        or type(seed.value) ~= "number" or seed.value ~= math.floor(seed.value)
+        or seed.value < 1 or seed.value >= 2147483647
+        or type(index.value) ~= "number" or index.value ~= math.floor(index.value)
+        or index.value < 0 or index.value >= UINT32_MOD
+        or seed.value ~= session.session_seed or index.value ~= session.fight_index then
+        return fail("GA_BATTLE_IDENTITY_MISMATCH", "Validated FightSpec identity does not match the active Arena session", {
+            spec_seed = seed.value,
+            spec_fight_index = index.value,
+            session_seed = session and session.session_seed or nil,
+            session_fight_index = session and session.fight_index or nil
+        })
+    end
+    return gamma_arena_result.ok({ session_seed = seed.value, fight_index = index.value })
+end
+
+function Orchestrator:record_battle_ui_failure(action, result, reason)
+    local code = action == "show" and "GA_BATTLE_UI_SHOW_FAILED" or "GA_BATTLE_UI_CLEAR_FAILED"
+    local cause = type(result) == "table" and result.error or nil
+    local context = {
+        action = action,
+        reason = reason,
+        cause = cause and cause.code or "unavailable",
+        stage = self.runtime_stage,
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil
+    }
+    self:diagnostic(code, "Battle identity HUD " .. tostring(action) .. " failed safely", context)
+    self:checkpoint(code, context)
+    return gamma_arena_result.ok(false)
+end
+
+function Orchestrator:show_battle_identity()
+    local model = self:battle_identity_model()
+    if not model.ok then return model end
+    local shown = call_method("GA_BATTLE_UI_SHOW_FAILED", self.deps.battle_ui, "show_identity", model.value)
+    if not shown.ok then return self:record_battle_ui_failure("show", shown, "active") end
+    return shown
+end
+
+function Orchestrator:clear_battle_identity(reason)
+    if self.deps.battle_ui == nil then return gamma_arena_result.ok(false) end
+    local cleared = call_method("GA_BATTLE_UI_CLEAR_FAILED", self.deps.battle_ui, "clear_identity")
+    if not cleared.ok then return self:record_battle_ui_failure("clear", cleared, reason or "cleanup") end
+    return cleared
 end
 
 function Orchestrator:living_opponent_count()
@@ -314,6 +408,7 @@ function Orchestrator:teardown_once(reason, preserve_session)
         session_id = self.session and self.session.session_id or nil,
         fight_index = self.session and self.session.fight_index or nil
     })
+    self:audio_event("stop_all", self:audio_context({ reason = reason or "teardown" }))
     local medical = self:stop_npc_medical(reason or "teardown")
     if not medical.ok then return medical end
     if type(self.deps.teardown) ~= "function" then
@@ -485,7 +580,7 @@ function Orchestrator:on_callback_error(callback_name, reason)
         pcall(gamma_arena_log.error, failure.error.code, failure.error.message, failure.error.context)
         return failure
     end
-    if callback_name == "npc_on_death_callback" and self:is_active() then
+    if (callback_name == "npc_on_death_callback" or callback_name == "npc_on_net_spawn") and self:is_active() then
         if self.pending_callback_error == nil then self.pending_callback_error = failure end
         return failure
     end
@@ -507,7 +602,7 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
         pcall(gamma_arena_log.error, detail.code or "GA_CALLBACK_FAILED", detail.message or "Arena actor death callback failed safely", detail.context)
         return result
     end
-    if callback_name == "npc_on_death_callback" and was_active == true then
+    if (callback_name == "npc_on_death_callback" or callback_name == "npc_on_net_spawn") and was_active == true then
         if self.pending_callback_error == nil then self.pending_callback_error = result end
         return result
     end
@@ -519,6 +614,7 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
 end
 
 function Orchestrator:on_game_load()
+    self:audio_event("stop_all", self:audio_context({ reason = "game_load" }))
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
     self.game_load_seen = true
@@ -785,6 +881,24 @@ function Orchestrator:prepare_fight()
         .. " fight=" .. tostring(self.session.fight_index) .. " seed=" .. tostring(self.session.session_seed)
         .. " spec=" .. encoded, { fight_id = fight_id })
     if not logged.ok then return logged end
+    local actor = safe_value_call("GA_ENTITY_SPEC_INVALID", spec.actor)
+    if not actor.ok or type(actor.value) ~= "table" or type(actor.value.loadout) ~= "table" then
+        return actor.ok and fail("GA_ENTITY_SPEC_INVALID", "Validated actor loadout is unavailable for diagnostics") or actor
+    end
+    local weapon = actor.value.loadout.weapon
+    local metadata = safe_result_call("GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED", self.deps.weapon_diagnostics, {
+        session_id = self.session.session_id,
+        fight_index = self.session.fight_index,
+        fight_id = fight_id,
+        phase = "selected",
+        weapon_section = weapon,
+        ammo_section = actor.value.loadout.ammo
+    })
+    if not metadata.ok or type(metadata.value) ~= "table" then
+        return metadata.ok and fail("GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED", "Selected actor weapon diagnostic snapshot is malformed") or metadata
+    end
+    logged = self:emit_log("GA_ACTOR_WEAPON_SELECTED", "weapon=" .. tostring(weapon), metadata.value)
+    if not logged.ok then return logged end
     local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id)
     if not applied.ok then return applied end
     self.catalog_snapshot = catalogs.value
@@ -848,6 +962,8 @@ function Orchestrator:observe_entity_activation()
     local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
     if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity registry snapshot failed safely") end
     if snapshot.state ~= "ACTIVE" then return gamma_arena_result.ok({ stage = "SPAWNING", entity = snapshot.state }) end
+    local identity = self:battle_identity_model()
+    if not identity.ok then return identity end
     local released = call_method("GA_ACTOR_INPUT_ENABLE_FAILED", self.deps.actor, "release_input")
     if not released.ok then return released end
     local now = self:clock_now()
@@ -861,6 +977,7 @@ function Orchestrator:observe_entity_activation()
     self.result_action_locked = false
     local medical = self:start_npc_medical()
     if not medical.ok then return medical end
+    self:audio_event("begin_fight", self:audio_context())
     local opponents_ok, opponents = pcall(function() return self.fight_spec and self.fight_spec.opponents and self.fight_spec.opponents() end)
     local expected = opponents_ok and type(opponents) == "table" and #opponents or nil
     self:diagnostic("GA_OPPONENTS_ACTIVATED", "expected=" .. tostring(expected) .. " active=" .. tostring(#(snapshot.npcs or {})), {
@@ -878,6 +995,8 @@ function Orchestrator:observe_entity_activation()
             registry_npcs = #(snapshot.npcs or {}), registry_items = #(snapshot.items or {})
         })
     if not logged.ok then return logged end
+    local shown = self:show_battle_identity()
+    if not shown.ok then return shown end
     return gamma_arena_result.ok({ stage = "ACTIVE" })
 end
 
@@ -900,6 +1019,8 @@ function Orchestrator:show_victory()
     self.result_action_locked = false
     self.pending_next_fight_index = nil
     self:set_runtime_stage("RESULT")
+    self:clear_battle_identity("victory")
+    self:audio_event("victory", self:audio_context({ duration_ms = duration }))
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration)
         .. " dead=" .. tostring(terminal_summary.defeated_dead or 0)
         .. " wounded=" .. tostring(terminal_summary.defeated_wounded or 0)
@@ -973,8 +1094,10 @@ function Orchestrator:queue_integrity_retry(fault)
         })
     end
     local attempt = self.integrity_retry_count + 1
+    self:audio_event("stop_all", self:audio_context({ reason = "integrity_retry" }))
     local medical = self:stop_npc_medical("integrity_retry")
     if not medical.ok then return medical end
+    self:clear_battle_identity("integrity_retry")
     local logged = self:emit_log("GA_FIGHT_INTEGRITY_RETRY", "attempt=" .. tostring(attempt)
         .. " cause=" .. tostring(fault and fault.cause), {
             attempt = attempt,
@@ -1038,6 +1161,29 @@ function Orchestrator:victory_next_action()
     self.result_action_locked = true
     local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
     if not cleared.ok then self.result_action_locked = false; return cleared end
+    self:audio_event("stop_all", self:audio_context({ reason = "victory_next" }))
+    self.next_cleanup_started = false
+    self.pending_next_fight_index = next_index.value
+    self.pending_continuation_kind = "victory_next"
+    self:set_runtime_stage("NEXT_CLEANUP")
+    return gamma_arena_result.ok(true)
+end
+
+function Orchestrator:restart_arena_action()
+    if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.result_action_locked then
+        return gamma_arena_result.ok(false)
+    end
+    local next_index = self:resolve_next_fight_index("victory")
+    if not next_index.ok then return next_index end
+    local medical = self:stop_npc_medical("manual_restart")
+    if not medical.ok then return medical end
+    local advanced = self:advance(gamma_arena_state_machine.events.RESTART)
+    if not advanced.ok then return advanced end
+    self:clear_battle_identity("manual_restart")
+    self:audio_event("stop_all", self:audio_context({ reason = "manual_restart" }))
+    self.result_action_locked = true
+    self.pending_victory = false
+    self.result_kind = nil
     self.next_cleanup_started = false
     self.pending_next_fight_index = next_index.value
     self.pending_continuation_kind = "victory_next"
@@ -1208,6 +1354,9 @@ function Orchestrator:update_runtime()
     if not integrity.ok then return integrity end
     local reconciled = self:reconcile_active_victory()
     if not reconciled.ok then return reconciled end
+    if self:is_active() and self.runtime_stage == "ACTIVE" then
+        self:audio_event("update", self:audio_context())
+    end
     return runtime
 end
 
@@ -1233,10 +1382,12 @@ function Orchestrator:actor_on_before_death(...)
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.death_latched then
         return gamma_arena_result.ok(false)
     end
+    self:clear_battle_identity("actor_before_death")
     local medical = self:stop_npc_medical("actor_before_death")
     if not medical.ok then return medical end
     self.death_latched = true
     self.pending_victory = false
+    self:audio_event("defeat", self:audio_context())
     local armed = call_method("GA_DEFEAT_ARM_FAILED", self.deps.store, "arm_defeat", self.deps.config, {
         schema_version = 1,
         session_id = self.session.session_id,
@@ -1304,6 +1455,12 @@ function Orchestrator:npc_on_before_hit(npc, hit, bone_id, flags)
     return captured
 end
 
+function Orchestrator:npc_on_net_spawn(npc)
+    if not self:is_active() then return gamma_arena_result.ok(false) end
+    if self.deps.entities == nil then return gamma_arena_result.ok(false) end
+    return call_method("GA_ENTITY_RUNTIME_COMMUNITY_FAILED", self.deps.entities, "on_npc_net_spawn", npc)
+end
+
 function Orchestrator:npc_on_hit_callback(npc, amount, direction, who, bone_id)
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
     if self.deps.entities == nil then return gamma_arena_result.ok(false) end
@@ -1321,6 +1478,11 @@ function Orchestrator:npc_on_death_callback(victim, killer)
     if entities == nil or self.runtime_stage ~= "ACTIVE" then return gamma_arena_result.ok(false) end
     local accepted = call_method("GA_ENTITY_DEATH_CALLBACK_FAILED", entities, "on_npc_death", victim, killer)
     if not accepted.ok or accepted.value ~= true then return accepted end
+    local victim_id = nil
+    pcall(function()
+        if type(victim) == "table" and type(victim.id) == "function" then victim_id = victim:id() end
+    end)
+    self:audio_event("opponent_defeated", self:audio_context({ npc_id = victim_id }))
     local integrity = self:active_integrity_fault()
     if not integrity.ok then return integrity end
     if integrity.value ~= false then return gamma_arena_result.ok(true) end

@@ -31,11 +31,12 @@ local function item_exists(values, section)
     for _, value in pairs(values) do if type(value) == "table" and value.section == section then return value end end
 end
 
-local function loadout_combination_exists(loadout, combinations, legacy_bandage_cost)
+local function loadout_combination_exists(loadout, combinations, legacy_bandage_cost, private_ammo_boxes)
     if type(combinations) ~= "table" then return false end
+    local ammo_boxes = private_ammo_boxes or loadout.ammo_boxes
     for _, combination in ipairs(combinations) do
         if type(combination) == "table" and combination.weapon == loadout.weapon and combination.ammo == loadout.ammo
-            and combination.ammo_boxes == loadout.ammo_boxes and combination.outfit == loadout.outfit
+            and combination.ammo_boxes == ammo_boxes and combination.outfit == loadout.outfit
             and combination.cost - legacy_bandage_cost == loadout.gear_cost then return true end
     end
     return false
@@ -73,25 +74,109 @@ local function validate_bonus_ammo(loadout, weapon, actor)
     return gamma_arena_result.ok(true)
 end
 
-local function validate_loadout(loadout, catalogs, difficulty, gear_budget, medical_budget, actor)
+local function grenade_stream(identity, tag)
+    return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ identity.mode_id, identity.difficulty_id, identity.session_seed, identity.fight_index, 6, identity.layout_version, tag }))
+end
+
+local function validate_grenades(loadout, catalogs, actor, context)
+    local count = array_length(loadout.grenades)
+    local maximum = actor and 2 or 1
+    if count == nil or count > maximum or type(context) ~= "table" or type(context.spec) ~= "table" then
+        return failure("GA_LOADOUT_GRENADE_INVALID", "Loadout grenades must be a dense bounded array", {})
+    end
+    local pool = actor and catalogs.actor_grenade_list or catalogs.npc_grenade_list
+    for _, section in ipairs(loadout.grenades) do
+        if type(section) ~= "string" or not item_exists(pool, section) then
+            return failure("GA_LOADOUT_GRENADE_INVALID", "Loadout contains a grenade outside its participant pool", { section = section })
+        end
+    end
+    local identity = context.spec
+    local expected
+    if actor then
+        expected = gamma_arena_grenade_generator.generate_actor(catalogs, {
+            count = grenade_stream(identity, "actor_grenade_count"),
+            sections = {
+                grenade_stream(identity, "actor_grenade_section:1"),
+                grenade_stream(identity, "actor_grenade_section:2")
+            }
+        })
+    else
+        if not positive_integer(context.slot) then return failure("GA_LOADOUT_GRENADE_INVALID", "Opponent grenade validation requires a logical slot", {}) end
+        expected = gamma_arena_grenade_generator.generate_enemy(catalogs, {
+            presence = grenade_stream(identity, "enemy_grenade_presence:" .. context.slot),
+            section = grenade_stream(identity, "enemy_grenade_section:" .. context.slot)
+        })
+    end
+    if not expected.ok or #expected.value.sections ~= count then
+        return failure("GA_LOADOUT_GRENADE_INVALID", "Loadout grenade presence differs from deterministic generation", { actual = count })
+    end
+    for index = 1, count do
+        if loadout.grenades[index] ~= expected.value.sections[index] then
+            return failure("GA_LOADOUT_GRENADE_INVALID", "Loadout grenade section differs from deterministic generation", { index = index, expected = expected.value.sections[index], actual = loadout.grenades[index] })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_loadout(loadout, catalogs, difficulty, gear_budget, medical_budget, actor, actor_context)
     if type(loadout) ~= "table" or type(loadout.weapon) ~= "string" or loadout.weapon == "" or type(loadout.ammo) ~= "string" or loadout.ammo == "" or type(loadout.outfit) ~= "string" or loadout.outfit == "" or type(loadout.knife) ~= "string" or loadout.knife == "" or not positive_integer(loadout.ammo_boxes) or not positive_integer(loadout.gear_cost) or not non_negative_integer(loadout.medical_cost) or not positive_integer(loadout.cost) then
         return failure("GA_LOADOUT_TYPE_INVALID", "Loadout fields have invalid types", {})
     end
     local consumable_count = array_length(loadout.consumables)
     if consumable_count == nil then return failure("GA_LOADOUT_TYPE_INVALID", "Loadout consumables must be an array", {}) end
     if actor and consumable_count == 0 then return failure("GA_LOADOUT_COMBINATION_INVALID", "Actor loadout must contain medicine", {}) end
+    local grenade_result = validate_grenades(loadout, catalogs, actor, actor_context)
+    if not grenade_result.ok then return grenade_result end
     local weapon = item_exists(catalogs.weapons, loadout.weapon)
     local ammo = item_exists(catalogs.ammo, loadout.ammo)
     local outfit = item_exists(catalogs.outfits, loadout.outfit)
     local knife = item_exists(catalogs.knives, loadout.knife)
     if not knife then return failure("GA_LOADOUT_KNIFE_INVALID", "Loadout knife is not cataloged", { section = loadout.knife }) end
+    if actor and weapon and not item_exists(catalogs.actor_weapon_list, loadout.weapon) then
+        return failure("GA_ACTOR_WEAPON_QUARANTINED", "Actor weapon is excluded by the exact-section quarantine", { section = loadout.weapon })
+    end
     if not weapon or not ammo or not outfit or weapon.ammo ~= loadout.ammo then return failure("GA_LOADOUT_AMMO_INVALID", "Loadout weapon and ammo are incompatible", {}) end
     local bonus_result = validate_bonus_ammo(loadout, weapon, actor)
     if not bonus_result.ok then return bonus_result end
     if not valid_armor_class(outfit.armor_class) then return failure("GA_LOADOUT_OUTFIT_INVALID", "Loadout outfit has no valid armor class", { section = outfit.section }) end
-    if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
-    local gear_cost = weapon.cost + ammo.cost * loadout.ammo_boxes + outfit.cost
-    if gear_cost ~= loadout.gear_cost or gear_cost > gear_budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout gear cost exceeds its dedicated budget", { cost = gear_cost, budget = gear_budget }) end
+    local gear_cost, private_ammo_boxes
+    if actor then
+        if type(actor_context) ~= "table" or type(actor_context.spec) ~= "table" or not positive_integer(actor_context.opponent_count)
+            or not positive_integer(ammo.cost) or not positive_integer(weapon.cost) or not positive_integer(outfit.cost) then
+            return failure("GA_PLAYER_AMMO_SCALE_INVALID", "Actor ammo scaling context or catalog costs are invalid", {})
+        end
+        local budgeted_numerator = loadout.gear_cost - weapon.cost - outfit.cost
+        if budgeted_numerator < 0 or budgeted_numerator % ammo.cost ~= 0 then
+            return failure("GA_LOADOUT_COST_INVALID", "Actor gear cost cannot recover a budgeted ammo count", {})
+        end
+        local budgeted_boxes = budgeted_numerator / ammo.cost
+        if not positive_integer(budgeted_boxes) or budgeted_boxes < weapon.ammo_box_min or budgeted_boxes > weapon.ammo_box_max then
+            return failure("GA_LOADOUT_COST_INVALID", "Actor budgeted ammo count is outside the catalog range", {})
+        end
+        gear_cost = weapon.cost + ammo.cost * budgeted_boxes + outfit.cost
+        if gear_cost ~= loadout.gear_cost or gear_cost > gear_budget then return failure("GA_LOADOUT_COST_INVALID", "Actor gear cost exceeds its dedicated budget", { cost = gear_cost, budget = gear_budget }) end
+
+        local standard_ammo = type(weapon.ammo_variants) == "table" and weapon.ammo_variants[1] or nil
+        if type(standard_ammo) ~= "table" or standard_ammo.section ~= weapon.ammo or standard_ammo.category ~= "standard"
+            or not positive_integer(weapon.magazine_size) or weapon.magazine_size >= 4294967296
+            or not positive_integer(standard_ammo.box_size) or standard_ammo.box_size >= 4294967296 then
+            return failure("GA_PLAYER_AMMO_SCALE_INVALID", "Actor weapon magazine or standard-ammo capacity is invalid", {})
+        end
+        local identity = actor_context.spec
+        local scaled = gamma_arena_generator.scaled_ammo_boxes(function(index)
+            return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ identity.mode_id, identity.difficulty_id, identity.session_seed, identity.fight_index, 6, identity.layout_version, "actor_scaled_ammo:" .. tostring(index) }))
+        end, weapon.kind, actor_context.opponent_count)
+        if not scaled.ok then return scaled end
+        local minimum_boxes = math.ceil(3 * weapon.magazine_size / standard_ammo.box_size)
+        local expected_boxes = math.max(budgeted_boxes, minimum_boxes) + scaled.value
+        if not positive_integer(expected_boxes) or expected_boxes >= 4294967296 then return failure("GA_PLAYER_AMMO_SCALE_INVALID", "Expected actor ammo exceeds engine integer safety", { ammo_boxes = expected_boxes }) end
+        if loadout.ammo_boxes ~= expected_boxes then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Actor final ammo box count does not match deterministic generation", { expected = expected_boxes, actual = loadout.ammo_boxes }) end
+        private_ammo_boxes = budgeted_boxes
+    else
+        if loadout.ammo_boxes < weapon.ammo_box_min or loadout.ammo_boxes > weapon.ammo_box_max then return failure("GA_LOADOUT_AMMO_RANGE_INVALID", "Ammo box count is invalid", {}) end
+        gear_cost = weapon.cost + ammo.cost * loadout.ammo_boxes + outfit.cost
+        if gear_cost ~= loadout.gear_cost or gear_cost > gear_budget then return failure("GA_LOADOUT_COST_INVALID", "Loadout gear cost exceeds its dedicated budget", { cost = gear_cost, budget = gear_budget }) end
+    end
     local medical_cost, section_counts, category_counts, healing_capable = 0, {}, {}, false
     if actor and (consumable_count > 5 or loadout.consumables[1] ~= "bandage") then return failure("GA_LOADOUT_MEDICAL_INVALID", "Actor medicine must begin with bandage and contain at most five items", {}) end
     if not actor and consumable_count > 2 then return failure("GA_LOADOUT_MEDICAL_INVALID", "Opponent medicine cannot exceed medkit plus bandage", {}) end
@@ -114,7 +199,7 @@ local function validate_loadout(loadout, catalogs, difficulty, gear_budget, medi
     local legacy_bandage = catalogs.consumables and catalogs.consumables.bandage
     if catalogs.selection_mode == "staged" then
         if not positive_integer(catalogs.minimum_loadout_cost) then return failure("GA_LOADOUT_COMBINATION_INVALID", "Dynamic catalog minimum loadout cost is invalid", {}) end
-    elseif type(legacy_bandage) ~= "table" or not loadout_combination_exists(loadout, catalogs.combinations, legacy_bandage.cost) then
+    elseif type(legacy_bandage) ~= "table" or not loadout_combination_exists(loadout, catalogs.combinations, legacy_bandage.cost, private_ammo_boxes) then
         return failure("GA_LOADOUT_COMBINATION_INVALID", "Loadout must match a catalog combination", {})
     end
     return gamma_arena_result.ok(weapon)
@@ -129,7 +214,8 @@ end
 
 local function copy_loadout(loadout)
     local consumables = {}; for index, section in ipairs(loadout.consumables) do consumables[index] = section end
-    local copy = { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, knife = loadout.knife, consumables = consumables, gear_cost = loadout.gear_cost, medical_cost = loadout.medical_cost, cost = loadout.cost }
+    local grenades = {}; for index, section in ipairs(loadout.grenades) do grenades[index] = section end
+    local copy = { weapon = loadout.weapon, ammo = loadout.ammo, ammo_boxes = loadout.ammo_boxes, outfit = loadout.outfit, knife = loadout.knife, consumables = consumables, grenades = grenades, gear_cost = loadout.gear_cost, medical_cost = loadout.medical_cost, cost = loadout.cost }
     if type(loadout.bonus_ammo) == "table" then copy.bonus_ammo = { section = loadout.bonus_ammo.section, requested_category = loadout.bonus_ammo.requested_category, resolved_category = loadout.bonus_ammo.resolved_category, boxes = loadout.bonus_ammo.boxes } end
     return copy
 end
@@ -156,7 +242,7 @@ function validate_effective_profile(section, slot, runtime, expected_community)
     if type(value) == "table" and type(value.ok) == "boolean" then if not value.ok then return value end; value = value.value end
     if type(value) ~= "table" then return failure("GA_ENEMY_EFFECTIVE_PROFILE_INVALID", "Effective NPC profile must contain class and community", { slot = slot, section = section }) end
     if value.class ~= "AI_STL_S" then return failure("GA_ENEMY_EFFECTIVE_CLASS_INVALID", "Effective Arena opponent class must be human AI_STL_S", { slot = slot, section = section, class = value.class }) end
-    expected_community = normalized_community(expected_community) or "bandit"
+    expected_community = normalized_community(expected_community) or "arena_enemy"
     if normalized_community(value.community) ~= expected_community then return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Effective Arena opponent community does not match FightSpec", { slot = slot, section = section, community = value.community, expected_community = expected_community }) end
     return gamma_arena_result.ok(true)
 end
@@ -192,7 +278,7 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
     if type(spec.difficulty_id) ~= "string" or type(catalogs.difficulties[spec.difficulty_id]) ~= "table" then return failure("GA_DIFFICULTY_UNKNOWN", "FightSpec difficulty is unknown", { difficulty_id = spec.difficulty_id }) end
     local layout, difficulty = catalogs.layouts[spec.layout_id], catalogs.difficulties[spec.difficulty_id]
     local resolved, resolved_error = resolved_layout_index(resolved_layout, layout); if not resolved then return resolved_error end
-    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 5 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
+    if not gamma_arena_number.is_integer(spec.schema_version) or not gamma_arena_number.is_integer(spec.generator_version) or not gamma_arena_number.is_integer(spec.catalog_revision) or spec.schema_version ~= 7 or spec.generator_version ~= catalogs.generator_version or spec.catalog_revision ~= catalogs.revision then return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema or catalog version is invalid", {}) end
     if not gamma_arena_number.is_integer(spec.layout_version) or spec.layout_version ~= resolved_layout.version then return failure("GA_LAYOUT_VERSION_INVALID", "FightSpec layout version is invalid", { layout_version = spec.layout_version }) end
     if spec.level ~= resolved_layout.level then return failure("GA_LEVEL_INVALID", "FightSpec level does not match layout", { level = spec.level }) end
     if type(spec.diagnostic) ~= "string" or spec.diagnostic == "" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec diagnostic must be a non-empty string", {}) end
@@ -201,10 +287,10 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
     if spec.fight_id ~= expected_fight_id then return failure("GA_FIGHT_ID_INVALID", "Fight id does not match FightSpec generation inputs", { expected = expected_fight_id, actual = spec.fight_id }) end
     if type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec actor and loadout must be tables", {}) end
     if spec.actor.spawn_path ~= resolved_layout.actor_spawn_path or spec.actor.look_path ~= resolved_layout.actor_look_path then return failure("GA_ACTOR_PATH_INVALID", "Actor paths do not match the selected layout", {}) end
-    local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty, difficulty.player_gear_budget, difficulty.player_medical_budget, true); if not actor_result.ok then return actor_result end
     local opponent_count = array_length(spec.opponents)
     if opponent_count == nil then return failure("GA_FIGHTSPEC_TYPE_INVALID", "FightSpec opponents must be a dense array", {}) end
     if opponent_count < difficulty.enemy_min or opponent_count > math.min(difficulty.enemy_max, resolved.capacity) then return failure("GA_OPPONENT_COUNT_INVALID", "Opponent count is outside envelope", {}) end
+    local actor_result = validate_loadout(spec.actor.loadout, catalogs, difficulty, difficulty.player_gear_budget, difficulty.player_medical_budget, true, { spec = spec, opponent_count = opponent_count }); if not actor_result.ok then return actor_result end
     local slot_base = math.floor(difficulty.enemy_total_budget / opponent_count)
     local slot_remainder = difficulty.enemy_total_budget % opponent_count
     local seen, spent, primary_count, sniper_count, enemy_medical_cost, enemy_medkits, enemy_bandages = {}, 0, 0, 0, 0, 0, 0
@@ -224,9 +310,16 @@ local function validate_impl(spec, catalogs, resolved_layout, runtime)
         if not profile then return failure("GA_ENEMY_NOT_HUMAN", "Opponent profile is not an allowlisted human", { slot = index }) end
         local expected_community = normalized_community(profile.community) or "bandit"
         if catalogs.selection_mode == "staged" and normalized_community(opponent.community) ~= expected_community then return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "FightSpec opponent community does not match catalog profile", { slot = index, section = opponent.profile, community = opponent.community, expected_community = expected_community }) end
-        if runtime ~= nil then local effective = validate_effective_profile(opponent.profile, index, runtime, expected_community); if not effective.ok then return effective end end
+        if runtime ~= nil then
+            local expected_runtime_community = normalized_community(profile.runtime_community)
+            if expected_runtime_community == nil then
+                return failure("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "Catalog profile runtime community is unavailable", { slot = index, section = opponent.profile })
+            end
+            local effective = validate_effective_profile(opponent.profile, index, runtime, expected_runtime_community)
+            if not effective.ok then return effective end
+        end
         local slot_budget = slot_base + (index <= slot_remainder and 1 or 0)
-        local gear_result = validate_loadout(opponent.loadout, catalogs, difficulty, slot_budget - profile.cost - 1, nil, false); if not gear_result.ok then return gear_result end
+        local gear_result = validate_loadout(opponent.loadout, catalogs, difficulty, slot_budget - profile.cost - 1, nil, false, { spec = spec, slot = index }); if not gear_result.ok then return gear_result end
         local weapon = gear_result.value
         local is_primary = weapon.kind ~= "w_pistol"
         if opponent.role == "secondary" and is_primary then return failure("GA_ENEMY_ROLE_INVALID", "Secondary role received a primary firearm", { slot = index }) end

@@ -4,14 +4,24 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
-- Restored the main-menu Arena Start callback by removing a diagnostic level-state query that is invalid before the new-game engine context exists.
+## 0.2.0 - 2026-08-26
+
+- Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1%, while each opponent independently has a 10% chance for one; both use the F1/RGD-5/GD-05 pool, smoke is excluded, and native AI remains responsible for throws.
+- Added a non-modal top-right combat HUD showing the validated Arena seed and one-based fight number, hidden with the main HUD and removed on every terminal path.
+- Added independently configurable original Rostok Arena commentator and crowd reactions, with live MCM toggles, automatic compatibility with add-on 474's winning VFS resources, deterministic clip rotation, and fail-soft owned-channel cleanup.
+- Added a localized in-game `Restart Arena` action that reuses the authoritative next-fight cleanup, advances `fight_index` once, and regenerates the fight without reloading the level.
+- Quarantined only the broken actor HUD section `wpn_eft_mts_255_uh2`, preserving the base MTS-255, sibling optic variants, and NPC catalog eligibility.
+- Quarantined only the confirmed actor section `wpn_dtmdr` while preserving its attachment variants and NPC eligibility; added effective HUD metadata logs plus a flushed pre-activation breadcrumb before the native weapon-animation boundary.
+- Scaled the actor's ordinary ammunition for every firearm class with opponent count: one guaranteed box plus deterministic per-opponent chances (40% pistol, 25% SMG/shotgun, 20% rifle, 10% sniper), outside the gear budget and without a gameplay ceiling.
+- Isolated every Arena-owned human NPC behind the engine-native `arena_enemy` community while retaining its generated source faction for presentation and loadout selection; added ownership-bounded net-spawn enforcement and activation readback without overriding any foreign mod.
+- Restored the main-menu Arena Start callback by removing diagnostic level-state and file-I/O probes that are invalid before the new-game engine context exists.
 - Restored the Arena Start handoff by deferring the global save-command guard until the new-game runtime accepts Arena launch ownership, while still arming suppression before any Arena activation or `fake_start` deferral.
 - Suppressed every Lua `save` command and the known GAMMA new-game autosave event for Arena-owned launches while leaving campaign saves unchanged; added flushed crash checkpoints and passive bounded hit/state evidence for unexplained early NPC deaths.
 - Bounded every native Gamma Arena log write and compacted routine opponent-state diagnostics to prevent CRT access violations from oversized formatted output.
 - Adopted and safely released temporary ammo or magazine entities materialized under Arena opponents during combat, preventing `CLEANUP_FAILED` after unloading enemy weapons.
 - Added deterministic budgeted medical loadouts for the actor and opponents, with a curated 16-item combat pool and separate gear/medical costs in FightSpec v5.
 - Added physical opponent use of assigned bandages and medkits with rank-based reaction delays, bounded healing, ownership-safe consumption, and stock-AI conflict detection.
-- Published catalog/difficulty identities 6/7/7 and 4/5, generated medical balance tables, and the independent FightSpec v5 golden oracle.
+- Published catalog/difficulty identities 8/9/9 and 4/5, generated grenade/medical/actor-ammunition balance tables, and the independent FightSpec v7 golden oracle.
 - Replaced native actor and inventory-owner equality with protected numeric ID checks to avoid unsupported X-Ray `game_object.__eq` calls.
 - Initialized the Arena callback runtime from the main-menu preflight before the engine new-game handoff.
 - Fixed actor-adapter parsing for Arena start configuration.

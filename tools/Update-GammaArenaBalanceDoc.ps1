@@ -300,6 +300,8 @@ $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_cat
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
+$GrenadeGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
+$EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
 $NpcMedicalScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
 $TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
@@ -463,9 +465,28 @@ foreach ($Id in $KnifeIds) {
     $KnifeSections[$Section] = $true
     $FallbackKnives.Add([pscustomobject]@{ id = $Id; section = $Section }) | Out-Null
 }
+$ActorGrenadeIds = @(Get-LtxCsv $Catalog 'grenades' 'ids' $CatalogPath)
+$NpcGrenadeIds = @(Get-LtxCsv $Catalog 'grenades' 'npc_ids' $CatalogPath)
+$ActorGrenadeSections = @($ActorGrenadeIds | ForEach-Object { Get-RequiredLtxValue $Catalog ('grenade_' + $_) 'section' $CatalogPath })
+$NpcGrenadeSections = @($NpcGrenadeIds | ForEach-Object { Get-RequiredLtxValue $Catalog ('grenade_' + $_) 'section' $CatalogPath })
+if (($ActorGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Actor grenade pool differs from the approved ordered pool' }
+if (($NpcGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Opponent grenade pool differs from the approved ordered pool' }
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'
 $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"([^"]+)"'
+$PlayerAmmoChance = Get-RequiredLuaTable $GeneratorScriptPath 'PLAYER_AMMO_CHANCE' '(\d+)'
+if ($PlayerAmmoChance.Count -ne $WeaponWeightKeys.Count) {
+    throw 'PLAYER_AMMO_CHANCE must contain every player weapon class exactly once'
+}
+foreach ($Kind in $WeaponWeightKeys.Keys) {
+    if (-not $PlayerAmmoChance.Contains($Kind)) {
+        throw "PLAYER_AMMO_CHANCE is missing player weapon class '$Kind'"
+    }
+    $Chance = [int]$PlayerAmmoChance[$Kind]
+    if ($Chance -lt 1 -or $Chance -gt 100) {
+        throw "PLAYER_AMMO_CHANCE must use percentages from 1 through 100: $Kind"
+    }
+}
 $PrimaryBandPercent = Get-RequiredLuaInt $GeneratorScriptPath 'PRIMARY_BAND_PERCENT'
 $BandThresholdFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+threshold\s*=\s*math\.ceil\(maximum\s*\*\s*PRIMARY_BAND_PERCENT\s*/\s*100\)' 'affordable band formula'
 $BandFallbackRule = Get-RequiredLuaMatch $GeneratorScriptPath 'if\s+#band\s*==\s*0\s+then.*?value\.cost\s*==\s*highest' 'affordable band fallback'
@@ -473,6 +494,11 @@ $ActorPairWeightFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+wei
 $ActorWeaponPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+weapon\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_weapon"\):pick\(weapons\)' 'actor weapon pick'
 $ActorAmmoPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+ammo_boxes\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_ammo_boxes"\):pick\(boxes\)' 'actor ammo-box pick'
 $ActorOutfitPick = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+outfit\s*=\s*stream\(request,\s*fight_index,\s*catalogs,\s*"actor_outfit"\):pick\(outfits\)' 'actor outfit pick'
+$ScaledAmmoBaseRule = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+boxes\s*=\s*1\s*\r?\n\s*for\s+index\s*=\s*1,\s*opponent_count\s+do' 'scaled player ammo guaranteed box and opponent loop'
+$ScaledAmmoDrawRule = Get-RequiredLuaMatch $GeneratorScriptPath 'rng:next_int\(1,\s*100\).*?if\s+draw\s*<=\s*chance\s+then\s+boxes\s*=\s*boxes\s*\+\s*1\s+end' 'scaled player ammo Bernoulli draw'
+$ScaledAmmoStreamRule = Get-RequiredLuaMatch $GeneratorScriptPath '"actor_scaled_ammo:"\s*\.\.\s*tostring\(index\)' 'indexed scaled player ammo stream'
+$ScaledAmmoMagazineFloor = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+minimum_boxes\s*=\s*math\.ceil\(3\s*\*\s*actor_weapon\.magazine_size\s*/\s*standard_ammo\.box_size\)' 'three-magazine player ammo floor'
+$ScaledAmmoFinalRule = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+final_ammo_boxes\s*=\s*math\.max\(actor\.value\.ammo_boxes,\s*minimum_boxes\)\s*\+\s*scaled\.value' 'final player ammo formula'
 $RandomKnifeSelection = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+function\s+random_knife\(rng,\s*knives\).*?local\s+choice\s*=\s*rng:pick\(knives\)' 'random knife selection'
 $EnemyCountFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_count\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_count"\):next_int\(difficulty\.enemy_min,\s*maximum\)' 'enemy count formula'
 $EnemyFactionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+enemy_faction\s*=\s*stream\(normalized_request,\s*fight_index,\s*catalogs,\s*"enemy_faction"\):pick\(catalogs\.faction_ids\)' 'enemy faction formula'
@@ -481,6 +507,19 @@ $BudgetDivisionFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+base
 $SlotBudgetFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+slot_budget\s*=\s*base\s*\+\s*\(index\s*<=\s*remainder\s+and\s+1\s+or\s+0\)' 'enemy slot budget formula'
 $OpponentRoleFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+role\s*=\s*index\s*==\s*1\s+and\s+"leader"\s+or\s*\(index\s*<=\s*primary_count\s+and\s+"primary"\s+or\s+"secondary"\)' 'opponent role formula'
 $WeaponRoleFormula = Get-RequiredLuaMatch $GeneratorScriptPath 'local\s+weapon_role\s*=\s*role\s*==\s*"secondary"\s+and\s+"secondary"\s+or\s+"primary"' 'opponent weapon-role formula'
+$ActorGrenadeRule = Get-RequiredLuaMatch $GrenadeGeneratorScriptPath 'local\s+count\s*=\s*draw\s*==\s*(\d+)\s+and\s*(\d+)\s+or\s*\(draw\s*<=\s*(\d+)\s+and\s*(\d+)\s+or\s*(\d+)\)' 'actor grenade probability rule'
+$ActorDoubleDraw = [int]$ActorGrenadeRule.Groups[1].Value
+$ActorDoubleCount = [int]$ActorGrenadeRule.Groups[2].Value
+$ActorSingleUpper = [int]$ActorGrenadeRule.Groups[3].Value
+$ActorSingleCount = [int]$ActorGrenadeRule.Groups[4].Value
+$ActorZeroCount = [int]$ActorGrenadeRule.Groups[5].Value
+if ($ActorDoubleDraw -ne 1 -or $ActorDoubleCount -ne 2 -or $ActorSingleUpper -ne 6 -or $ActorSingleCount -ne 1 -or $ActorZeroCount -ne 0) { throw 'Actor grenade probability rule differs from 94/5/1' }
+$EnemyGrenadeRule = Get-RequiredLuaMatch $GrenadeGeneratorScriptPath 'if\s+draw\s*>\s*(\d+)\s+then\s+return\s+gamma_arena_result\.ok\(\{\s*sections\s*=\s*\{\}\s*\}\)\s+end' 'opponent grenade probability rule'
+$EnemyGrenadeChance = [int]$EnemyGrenadeRule.Groups[1].Value
+if ($EnemyGrenadeChance -ne 10) { throw 'Opponent grenade probability rule differs from 10 percent' }
+$ActorGrenadeDescriptor = Get-RequiredLuaMatch $BootstrapScriptPath 'loadout\.grenades[\s\S]{0,300}role\s*=\s*"grenade"' 'actor physical grenade descriptor'
+$NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'loadout\.grenades[\s\S]{0,300}role\s*=\s*"grenade"' 'opponent physical grenade descriptor'
+if ((Get-Content -Raw -LiteralPath $BootstrapScriptPath) -match 'can_throw_grenades' -or (Get-Content -Raw -LiteralPath $EntityAdapterScriptPath) -match 'can_throw_grenades') { throw 'Arena runtime must not force native grenade throwing' }
 
 $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"powered_exo"' 'powered_exo classification'
 $DynamicAmmoCostMatch = Get-RequiredLuaMatch $DiscoveryScriptPath 'local\s+record\s*=\s*\{\s*id\s*=\s*(?<ammo_ref>ammo_section|variant\.section)\s*,\s*section\s*=\s*\k<ammo_ref>\s*,\s*cost\s*=\s*(\d+)\s*\}' 'dynamic ammo cost'
@@ -588,6 +627,24 @@ foreach ($Item in $MedicalItems) {
 }
 $Blocks['medical-loadouts'] = Join-MarkdownLines $MedicalLines
 
+$GrenadeLines = New-Object System.Collections.Generic.List[string]
+$GrenadeLines.Add('| participant | count | probability |') | Out-Null
+$GrenadeLines.Add('|---|---|---:|') | Out-Null
+$GrenadeLines.Add('| actor | none | 94% |') | Out-Null
+$GrenadeLines.Add('| actor | exactly 1 | 5% |') | Out-Null
+$GrenadeLines.Add('| actor | exactly 2 | 1% |') | Out-Null
+$GrenadeLines.Add('| each opponent | none | 90% |') | Out-Null
+$GrenadeLines.Add('| each opponent | exactly 1 | 10% |') | Out-Null
+$GrenadeLines.Add('') | Out-Null
+$GrenadeLines.Add('| policy | value |') | Out-Null
+$GrenadeLines.Add('|---|---|') | Out-Null
+$GrenadeLines.Add("| actor_pool | $($ActorGrenadeSections -join ', ') |") | Out-Null
+$GrenadeLines.Add("| opponent_pool | $($NpcGrenadeSections -join ', ') |") | Out-Null
+$GrenadeLines.Add('| two_actor_picks | independent; duplicates allowed |') | Out-Null
+$GrenadeLines.Add('| budget_cost | 0; outside gear and medical budgets |') | Out-Null
+$GrenadeLines.Add('| NPC use | physical possession required; native AI decides whether to throw |') | Out-Null
+$Blocks['grenade-loadouts'] = Join-MarkdownLines $GrenadeLines
+
 $NpcMedicalLines = New-Object System.Collections.Generic.List[string]
 $NpcMedicalLines.Add('| runtime policy | value |') | Out-Null
 $NpcMedicalLines.Add('|---|---|') | Out-Null
@@ -612,7 +669,20 @@ foreach ($Profile in @('novice', 'trainee', 'experienced', 'veteran')) {
 $Blocks['npc-medical-runtime'] = Join-MarkdownLines $NpcMedicalLines
 
 $ActorLines = New-Object System.Collections.Generic.List[string]
-$ActorLines.Add('`gear_cost = weapon + ammo_cost * ammo_boxes + outfit`; medicine uses its own budget') | Out-Null
+$ActorLines.Add('`gear_cost = weapon + ammo_cost * budgeted_boxes + outfit`; scaled ordinary boxes and medicine are outside this budget') | Out-Null
+$ActorLines.Add('`scaled_boxes = 1 + independent success per opponent`; deterministic stream `actor_scaled_ammo:<index>`, range `1..N+1`, no balance ceiling') | Out-Null
+$ActorLines.Add('`final ammo_boxes = max(budgeted_boxes, ceil(3 * magazine_size / box_size)) + scaled_boxes`; FightSpec stores only this final value') | Out-Null
+$ActorLines.Add('') | Out-Null
+$ActorLines.Add('| player weapon kind | per-opponent chance | guaranteed scaled boxes | scaled range | E[N=1] | E[N=5] | E[N=20] | E[N=100] |') | Out-Null
+$ActorLines.Add('|---|---:|---:|---|---:|---:|---:|---:|') | Out-Null
+foreach ($Kind in $WeaponWeightKeys.Keys) {
+    $Chance = [int]$PlayerAmmoChance[$Kind]
+    $Expected = New-Object System.Collections.Generic.List[string]
+    foreach ($OpponentCount in @(1, 5, 20, 100)) {
+        $Expected.Add((1 + $OpponentCount * $Chance / 100.0).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture)) | Out-Null
+    }
+    $ActorLines.Add("| $Kind | $Chance% | 1 | 1..N+1 | $($Expected[0]) | $($Expected[1]) | $($Expected[2]) | $($Expected[3]) |") | Out-Null
+}
 $ActorLines.Add('') | Out-Null
 $ActorLines.Add('| installed weapon kind | Arena cost |') | Out-Null
 $ActorLines.Add('|---|---:|') | Out-Null
@@ -851,6 +921,7 @@ $SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | 
 $SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
 $SourceLines.Add('| actor/opponent selection and budget allocation | `gamma_arena_generator.script` |') | Out-Null
 $SourceLines.Add('| actor and enemy medical allocation | `gamma_arena_medical_generator.script` |') | Out-Null
+$SourceLines.Add('| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |') | Out-Null
 $SourceLines.Add('| physical NPC medicine use | `gamma_arena_npc_medical.script` |') | Out-Null
 $SourceLines.Add('| faction profiles and effective weapon pools | `gamma_arena_catalog.script` |') | Out-Null
 $SourceLines.Add('| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |') | Out-Null

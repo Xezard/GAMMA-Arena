@@ -13,6 +13,7 @@ local callback_names = {
     "actor_on_update",
     "actor_on_before_death",
     "actor_on_death",
+    "npc_on_net_spawn",
     "npc_on_before_hit",
     "npc_on_hit_callback",
     "npc_on_death_callback",
@@ -27,6 +28,7 @@ local callback_names = {
 local guarded_callbacks = {
     actor_on_before_death = true,
     actor_on_death = true,
+    npc_on_net_spawn = true,
     npc_on_before_hit = true,
     npc_on_hit_callback = true,
     npc_on_death_callback = true,
@@ -124,6 +126,27 @@ end
 
 local function default_result_ui()
     return gamma_arena_ui_result.new()
+end
+
+local function default_battle_ui(diagnostics)
+    return gamma_arena_ui_battle.new({
+        report_visibility_error = function(result)
+            local cause = result and result.error or {}
+            local context = {
+                cause_code = cause.code or "unknown",
+                cause_context = cause.context or {}
+            }
+            gamma_arena_log.warn(
+                "GA_BATTLE_UI_VISIBILITY_UPDATE_FAILED",
+                cause.message or "Battle identity visibility update failed safely",
+                context
+            )
+            if diagnostics ~= nil and type(diagnostics.checkpoint) == "function" then
+                pcall(diagnostics.checkpoint, diagnostics, "GA_BATTLE_UI_VISIBILITY_UPDATE_FAILED", context)
+            end
+            return gamma_arena_result.ok(true)
+        end
+    })
 end
 
 local function default_disconnect()
@@ -415,6 +438,17 @@ local runtime_actor_item_exists = new_runtime_entity_exists_port(function() retu
 local runtime_arena_entity_exists = new_runtime_entity_exists_port(function() return type(alife) == "function" and alife() or nil end, "GA_ENTITY_EXISTENCE_FAILED")
 local ACTOR_LOADOUT_OWNER_KEY = "gamma_arena_actor_owner"
 
+local function dense_section_array(values)
+    if type(values) ~= "table" then return false end
+    local count, maximum = 0, 0
+    for key, section in pairs(values) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 or type(section) ~= "string" or section == "" then return false end
+        count = count + 1
+        maximum = math.max(maximum, key)
+    end
+    return count == maximum
+end
+
 local function actor_loadout_failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
 end
@@ -519,7 +553,7 @@ function new_actor_loadout_port(ports)
         if type(ownership.value) ~= "string" or ownership.value == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Arena actor loadout requires a non-empty session ownership token")
         end
-        if type(loadout) ~= "table" or type(loadout.consumables) ~= "table" or type(loadout.knife) ~= "string" or loadout.knife == "" then
+        if type(loadout) ~= "table" or not dense_section_array(loadout.consumables) or not dense_section_array(loadout.grenades) or type(loadout.knife) ~= "string" or loadout.knife == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed")
         end
         local started = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
@@ -555,22 +589,6 @@ function new_actor_loadout_port(ports)
         if bonus_ammo_rounds ~= math.floor(bonus_ammo_rounds) or bonus_ammo_rounds < 1 or bonus_ammo_rounds >= UINT32_MOD then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor bonus ammo boxes cannot be translated to a bounded exact round count", { section = loadout.bonus_ammo.section, ammo_boxes = loadout.bonus_ammo.boxes, box_size = bonus_box_size.value, role = "bonus_ammo" })
         end
-        if ports.reserve_magazines ~= nil then
-            if type(ports.reserve_magazines) ~= "number" or ports.reserve_magazines ~= math.floor(ports.reserve_magazines)
-                or ports.reserve_magazines < 1 or ports.reserve_magazines >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazine policy must be a positive bounded integer")
-            end
-            local capacity = actor_loadout_call("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", ports.magazine_capacity, loadout.weapon)
-            if not capacity.ok then return capacity end
-            if type(capacity.value) ~= "number" or capacity.value ~= math.floor(capacity.value) or capacity.value < 1 or capacity.value >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_MAGAZINE_INVALID", "Weapon ammo_mag_size must be a positive bounded integer", { section = loadout.weapon })
-            end
-            local reserve_rounds = ports.reserve_magazines * capacity.value
-            if reserve_rounds ~= math.floor(reserve_rounds) or reserve_rounds < 1 or reserve_rounds >= UINT32_MOD then
-                return actor_loadout_failure("GA_ACTOR_LOADOUT_AMMO_ROUNDS_INVALID", "Actor reserve magazines cannot be translated to a bounded exact round count", { section = loadout.weapon })
-            end
-            ammo_rounds = math.max(ammo_rounds, reserve_rounds)
-        end
         local descriptors = {
             { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
             { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo", box_size = box_size.value },
@@ -579,6 +597,7 @@ function new_actor_loadout_port(ports)
             { section = loadout.knife, count = 1, ammo = false, role = "knife" }
         }
         for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "consumable" } end
+        for index, section in ipairs(loadout.grenades) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "grenade", ordinal = index } end
         local created, seen = {}, {}
         for _, descriptor in ipairs(descriptors) do
             if type(descriptor.section) ~= "string" or descriptor.section == "" or type(descriptor.count) ~= "number" or descriptor.count ~= math.floor(descriptor.count) or descriptor.count < 1 then
@@ -634,6 +653,7 @@ function new_actor_loadout_port(ports)
             started_at = started.value,
             last_progress_at = started.value,
             timeout_ms = timeout_ms,
+            ammo_section = loadout.ammo,
             reserve_rounds = ammo_rounds,
             bonus_ammo_rounds = bonus_ammo_rounds,
             summary = nil
@@ -839,6 +859,42 @@ function new_actor_loadout_port(ports)
         end
 
         if equipment.phase == "SUBMIT_ACTIVE" then
+            local diagnostic = actor_loadout_call(
+                "GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED",
+                ports.weapon_diagnostic,
+                "pre_activate",
+                actor,
+                weapon.value.object,
+                weapon.value.record,
+                equipment.ammo_section
+            )
+            if not diagnostic.ok or type(diagnostic.value) ~= "table" then
+                local cause = diagnostic.ok
+                    and actor_loadout_failure("GA_ACTOR_WEAPON_DIAGNOSTIC_FAILED", "Actor weapon diagnostic snapshot is malformed")
+                    or diagnostic
+                return rollback(owned_records, cause)
+            end
+            local checkpoint = actor_loadout_call(
+                "GA_ACTOR_WEAPON_CHECKPOINT_FAILED",
+                ports.checkpoint,
+                "GA_ACTOR_WEAPON_PRE_ACTIVATE",
+                diagnostic.value
+            )
+            if not checkpoint.ok or checkpoint.value ~= true then
+                return rollback(owned_records, actor_loadout_failure(
+                    "GA_ACTOR_WEAPON_CHECKPOINT_FAILED",
+                    "Actor weapon pre-activation checkpoint could not be written completely",
+                    { cause = checkpoint.error and checkpoint.error.code or "unavailable", weapon_section = weapon.value.record.section }
+                ))
+            end
+            if type(ports.log_info) == "function" then
+                pcall(
+                    ports.log_info,
+                    "GA_ACTOR_WEAPON_PRE_ACTIVATE",
+                    "weapon=" .. tostring(weapon.value.record.section) .. " item_id=" .. tostring(weapon.value.record.id),
+                    diagnostic.value
+                )
+            end
             local activated = actor_loadout_call("GA_ACTOR_LOADOUT_ACTIVE_FAILED", ports.make_item_active, actor, weapon.value.object)
             if not activated.ok then return rollback(owned_records, activated) end
             equipment.phase = "WAIT_ACTIVE_VERIFY"
@@ -969,7 +1025,17 @@ local function reset_gamma_body_health(actor)
     return gamma_arena_result.ok(true)
 end
 
-local function default_actor_adapter(active_instance)
+local function runtime_weapon_diagnostic(context)
+    return gamma_arena_weapon_diagnostics.snapshot({
+        read_string = function(section, key)
+            local ini = system_ini()
+            return ini:r_string_ex(section, key)
+        end,
+        object_id = runtime_object_id
+    }, context)
+end
+
+local function default_actor_adapter(active_instance, diagnostics, weapon_diagnostics)
     local effects = {}
     function effects.disable_effects_timer(duration)
         if actor_effects and type(actor_effects.disable_effects_timer) == "function" then
@@ -994,7 +1060,6 @@ local function default_actor_adapter(active_instance)
     local loadout = new_actor_loadout_port({
         clock = function() return time_global() end,
         timeout_ms = 5000,
-        reserve_magazines = 3,
         actor_id = runtime_object_id,
         ownership_token = function()
             local instance = active_instance()
@@ -1004,6 +1069,35 @@ local function default_actor_adapter(active_instance)
                 return gamma_arena_result.err("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Active Arena session identity is unavailable for actor item ownership")
             end
             return session.session_id .. ":" .. session.session_nonce
+        end,
+        weapon_diagnostic = function(phase, actor, item, record, ammo_section)
+            local instance = active_instance()
+            local session = instance and instance:session_snapshot() or nil
+            local fight_id = nil
+            local id_called, id_value = pcall(function()
+                return instance and instance.fight_spec and instance.fight_spec.fight_id and instance.fight_spec.fight_id()
+            end)
+            if id_called then fight_id = id_value end
+            return weapon_diagnostics({
+                session_id = session and session.session_id or nil,
+                fight_index = session and session.fight_index or nil,
+                fight_id = fight_id,
+                phase = phase,
+                weapon_section = record and record.section or nil,
+                ammo_section = ammo_section,
+                actor = actor,
+                item = item
+            })
+        end,
+        checkpoint = function(code, fields)
+            if diagnostics == nil or type(diagnostics.checkpoint) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_WEAPON_CHECKPOINT_FAILED", "Actor weapon diagnostics journal is unavailable")
+            end
+            return diagnostics:checkpoint(code, fields)
+        end,
+        log_info = function(code, message, fields)
+            gamma_arena_log.info(code, message, fields)
+            return gamma_arena_result.ok(true)
         end,
         ammo_box_size = effective_ammo_box_size,
         create_item = function(section, actor, count, is_ammo)
@@ -1550,6 +1644,32 @@ local function default_entity_adapter(actor_adapter, active_instance, diagnostic
         ammo_box_size = effective_ammo_box_size,
         profile_runtime = { effective_profile = entity_effective_profile },
         actor_object = function() return db and db.actor end,
+        set_runtime_community = function(npc, community)
+            local lookup_ok, method = pcall(function() return npc and npc.set_character_community end)
+            if not lookup_ok or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_SET_FAILED", "game_object.set_character_community is unavailable")
+            end
+            local called, value = pcall(method, npc, community, 0, 0)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_SET_FAILED", "Opponent runtime community assignment failed safely", {
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        runtime_community = function(npc)
+            local lookup_ok, method = pcall(function() return npc and npc.character_community end)
+            if not lookup_ok or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_READ_FAILED", "game_object.character_community is unavailable")
+            end
+            local called, value = pcall(method, npc)
+            if not called or type(value) ~= "string" or value == "" then
+                return gamma_arena_result.err("GA_ENTITY_RUNTIME_COMMUNITY_READ_FAILED", "Opponent runtime community readback failed safely", {
+                    reason = called and nil or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(value)
+        end,
         clear_enemy = function(npc)
             local called, value = pcall(function() return npc:set_enemy(nil) end)
             if not called or value == false then
@@ -1642,6 +1762,123 @@ local function default_npc_medical_controller(entity_adapter)
     })
 end
 
+local function default_audio_controller(layout_port)
+    local sounds = {}
+    local active = {}
+    local anchor = nil
+
+    local function resolve_anchor()
+        if anchor ~= nil then return gamma_arena_result.ok(anchor) end
+        local resolved = layout_port("rostok_arena_v1")
+        if type(resolved) ~= "table" or type(resolved.ok) ~= "boolean" then
+            return gamma_arena_result.err("GA_AUDIO_LAYOUT_FAILED", "Arena audio layout port returned an invalid Result")
+        end
+        if not resolved.ok then return resolved end
+        local path = resolved.value and resolved.value.actor_spawn_path or nil
+        if type(path) ~= "string" or path == "" then
+            return gamma_arena_result.err("GA_AUDIO_ANCHOR_FAILED", "Arena audio anchor path is unavailable")
+        end
+        local called, position = pcall(function()
+            local path_object = patrol(path)
+            if path_object == nil then return nil end
+            return path_object:point(0)
+        end)
+        if not called or position == nil then
+            return gamma_arena_result.err("GA_AUDIO_ANCHOR_FAILED", "Arena audio anchor could not be resolved safely", {
+                path = path,
+                reason = called and nil or tostring(position)
+            })
+        end
+        anchor = position
+        return gamma_arena_result.ok(anchor)
+    end
+
+    local function stop_channel(channel)
+        local handle = active[channel]
+        if handle == nil then return gamma_arena_result.ok(false) end
+        local called, value = pcall(function() return handle:stop() end)
+        if not called or value == false then
+            return gamma_arena_result.err("GA_AUDIO_STOP_PORT_FAILED", "Owned Arena sound could not be stopped safely", {
+                channel = channel,
+                reason = called and "explicit false" or tostring(value)
+            })
+        end
+        active[channel] = nil
+        return gamma_arena_result.ok(true)
+    end
+
+    local function sound_for(path)
+        if sounds[path] ~= nil then return gamma_arena_result.ok(sounds[path]) end
+        local called, handle = pcall(function() return sound_object(path) end)
+        if not called or handle == nil then
+            return gamma_arena_result.err("GA_AUDIO_RESOURCE_FAILED", "Arena sound resource could not be created safely", {
+                path = path,
+                reason = called and nil or tostring(handle)
+            })
+        end
+        sounds[path] = handle
+        return gamma_arena_result.ok(handle)
+    end
+
+    local controller = gamma_arena_audio.new({
+        settings = function()
+            local called, value = pcall(gamma_arena_mcm.snapshot)
+            if not called or type(value) ~= "table" then
+                return gamma_arena_result.err("GA_AUDIO_MCM_FAILED", "Arena audio settings could not be read safely", {
+                    reason = called and nil or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(value)
+        end,
+        play = function(channel, path, position)
+            local stopped = stop_channel(channel)
+            if not stopped.ok then return stopped end
+            local actor = db and db.actor or nil
+            if actor == nil then return gamma_arena_result.err("GA_AUDIO_ACTOR_FAILED", "Arena audio requires the current actor") end
+            local selected_position = position
+            if selected_position == nil then
+                local resolved = resolve_anchor()
+                if not resolved.ok then return resolved end
+                selected_position = resolved.value
+            end
+            local sound = sound_for(path)
+            if not sound.ok then return sound end
+            local mode_ok, mode = pcall(function() return sound_object.s3d end)
+            if not mode_ok or mode == nil then
+                return gamma_arena_result.err("GA_AUDIO_MODE_FAILED", "3D Arena sound mode is unavailable")
+            end
+            local called, value = pcall(function()
+                return sound.value:play_at_pos(actor, selected_position, 0, mode)
+            end)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_AUDIO_PLAY_PORT_FAILED", "Owned Arena sound could not be played safely", {
+                    channel = channel,
+                    path = path,
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            active[channel] = sound.value
+            return gamma_arena_result.ok(true)
+        end,
+        playing = function(channel)
+            local handle = active[channel]
+            if handle == nil then return gamma_arena_result.ok(false) end
+            local called, value = pcall(function() return handle:playing() end)
+            if not called then
+                return gamma_arena_result.err("GA_AUDIO_PLAYING_PORT_FAILED", "Owned Arena sound state could not be read safely", {
+                    channel = channel,
+                    reason = tostring(value)
+                })
+            end
+            local playing = value == true
+            if not playing then active[channel] = nil end
+            return gamma_arena_result.ok(playing)
+        end,
+        stop = stop_channel
+    })
+    return controller
+end
+
 local function default_diagnostics()
     local path = nil
     local resolved, value = pcall(function()
@@ -1657,7 +1894,11 @@ local function default_diagnostics()
         open = function(file_path, mode) return io.open(file_path, mode) end,
         clock = function() return time_global() end,
         level = function()
-            if level == nil or type(level.name) ~= "function" then return "unavailable" end
+            if level == nil or type(level.present) ~= "function" or type(level.name) ~= "function" then
+                return "unavailable"
+            end
+            local present_called, present = pcall(level.present)
+            if not present_called or present ~= true then return "unavailable" end
             local called, current = pcall(level.name)
             return called and current or "unavailable"
         end,
@@ -1692,7 +1933,12 @@ function compose(overrides)
     local store = overrides.store or gamma_arena_session_store.new_store()
     local config = overrides.config or current_config()
     local diagnostics = overrides.diagnostics or default_diagnostics()
-    local actor_adapter = overrides.actor or default_actor_adapter(active_instance)
+    local weapon_diagnostics = overrides.weapon_diagnostics or function(context)
+        context = type(context) == "table" and context or {}
+        if context.actor == nil then context.actor = db and db.actor or nil end
+        return runtime_weapon_diagnostic(context)
+    end
+    local actor_adapter = overrides.actor or default_actor_adapter(active_instance, diagnostics, weapon_diagnostics)
     local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance, diagnostics)
     local npc_medical = overrides.npc_medical or default_npc_medical_controller(entity_adapter)
     local save_guard = overrides.save_guard or default_save_guard(diagnostics)
@@ -1720,6 +1966,8 @@ function compose(overrides)
         if not resolved.ok then return resolved end
         return gamma_arena_result.ok(true)
     end
+    local audio = overrides.audio
+    if audio == nil then audio = default_audio_controller(layout_port) end
     local teardown_clock = overrides.teardown_clock or function() return time_global() end
     local teardown_timeout_ms = overrides.teardown_timeout_ms or 10000
     local teardown_max_updates = overrides.teardown_max_updates or 64
@@ -1783,7 +2031,9 @@ function compose(overrides)
         actor = actor_adapter,
         entities = entity_adapter,
         npc_medical = npc_medical,
+        audio = audio,
         diagnostics = diagnostics,
+        weapon_diagnostics = weapon_diagnostics,
         save_guard = save_guard,
         layout = layout_port,
         mode_policy = overrides.mode_policy or gamma_arena_mode_skirmish,
@@ -1796,14 +2046,10 @@ function compose(overrides)
         end,
         clock = overrides.clock or function() return time_global() end,
         result_ui = overrides.result_ui or default_result_ui(),
+        battle_ui = overrides.battle_ui or default_battle_ui(diagnostics),
         log = overrides.log or gamma_arena_log
     }
     instance = gamma_arena_orchestrator.new(deps)
-    pcall(function()
-        diagnostics:checkpoint("GA_VM_BOOTSTRAP_READY", {
-            save_guard_installed = false
-        })
-    end)
     return instance
 end
 
@@ -2029,6 +2275,13 @@ function ensure_initialized()
         pcall(gamma_arena_log.error, result.error.code, result.error.message, result.error.context)
     end
     return result
+end
+
+function request_restart()
+    if runtime_orchestrator == nil then return gamma_arena_result.ok(false) end
+    return invoke_callback(runtime_orchestrator, "manual_restart", function()
+        return call_instance(runtime_orchestrator, "restart_arena_action")
+    end)
 end
 
 function on_game_start()

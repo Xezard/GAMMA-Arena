@@ -7,6 +7,18 @@ local difficulty_string_ids = {
 }
 local fatal_dialog = nil
 
+local function debug_trace(code, message, context)
+    pcall(gamma_arena_log.info, code, message, context or {})
+end
+
+local function debug_result_context(result)
+    return {
+        ok = type(result) == "table" and result.ok == true,
+        result_type = type(result),
+        code = type(result) == "table" and type(result.error) == "table" and result.error.code or nil
+    }
+end
+
 local function translated(string_id)
     if game and type(game.translate_string) == "function" then
         local ok, value = pcall(game.translate_string, string_id)
@@ -97,6 +109,10 @@ function UIStart:InitCallbacks()
     self:AddCallback("start", ui_events.BUTTON_CLICKED, self.OnStart, self)
     self:AddCallback("back", ui_events.BUTTON_CLICKED, self.OnBack, self)
     self:AddCallback("fatal_main_menu", ui_events.BUTTON_CLICKED, self.OnFatalMainMenu, self)
+    debug_trace("GA_DEBUG_START_BOUND", "Arena Start callback registration completed", {
+        callback_type = type(self.OnStart),
+        control_type = type(self.start_button)
+    })
 end
 
 function UIStart:SetDifficulty(difficulty_id)
@@ -216,15 +232,30 @@ function preflight_runtime(ports)
     ports = ports or {}
     local runtime_status = ports.runtime_status
     if runtime_status == nil then
+        debug_trace("GA_DEBUG_START_BOOTSTRAP_LOOKUP_BEGIN", "Arena runtime bootstrap lookup began")
         local namespace_ok, bootstrap = pcall(function() return gamma_arena_bootstrap end)
+        debug_trace("GA_DEBUG_START_BOOTSTRAP_LOOKUP_RESULT", "Arena runtime bootstrap lookup returned", {
+            ok = namespace_ok,
+            bootstrap_type = type(bootstrap)
+        })
         if not namespace_ok or type(bootstrap) ~= "table" then
             return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime bootstrap is unavailable")
         end
+        debug_trace("GA_DEBUG_START_INITIALIZER_LOOKUP_BEGIN", "Arena runtime initializer lookup began")
         local initializer_ok, initializer = pcall(function() return bootstrap.ensure_initialized end)
+        debug_trace("GA_DEBUG_START_INITIALIZER_LOOKUP_RESULT", "Arena runtime initializer lookup returned", {
+            ok = initializer_ok,
+            initializer_type = type(initializer)
+        })
         if not initializer_ok or type(initializer) ~= "function" then
             return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime initializer is unavailable")
         end
+        debug_trace("GA_DEBUG_START_INITIALIZER_CALL_BEGIN", "Arena runtime initializer call began")
         local initialized_ok, initialized = pcall(initializer)
+        debug_trace("GA_DEBUG_START_INITIALIZER_CALL_RESULT", "Arena runtime initializer call returned", {
+            call_ok = initialized_ok,
+            result = debug_result_context(initialized)
+        })
         if not initialized_ok then
             return gamma_arena_result.err("GA_START_RUNTIME_STATUS_FAILED", "Arena runtime initialization failed", { detail = tostring(initialized) })
         end
@@ -232,7 +263,12 @@ function preflight_runtime(ports)
             return gamma_arena_result.err("GA_START_RUNTIME_STATUS_INVALID", "Arena runtime initialization returned an invalid Result")
         end
         if initialized.ok == false then return initialized end
+        debug_trace("GA_DEBUG_START_STATUS_LOOKUP_BEGIN", "Arena runtime status lookup began")
         local method_ok, method = pcall(function() return bootstrap.runtime_status end)
+        debug_trace("GA_DEBUG_START_STATUS_LOOKUP_RESULT", "Arena runtime status lookup returned", {
+            ok = method_ok,
+            method_type = type(method)
+        })
         if not method_ok or type(method) ~= "function" then
             return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime readiness check is unavailable")
         end
@@ -241,7 +277,12 @@ function preflight_runtime(ports)
     if type(runtime_status) ~= "function" then
         return gamma_arena_result.err("GA_START_RUNTIME_UNAVAILABLE", "Arena runtime readiness check is unavailable")
     end
+    debug_trace("GA_DEBUG_START_STATUS_CALL_BEGIN", "Arena runtime readiness call began")
     local called, status = pcall(runtime_status)
+    debug_trace("GA_DEBUG_START_STATUS_CALL_RESULT", "Arena runtime readiness call returned", {
+        call_ok = called,
+        result = debug_result_context(status)
+    })
     if not called then
         return gamma_arena_result.err("GA_START_RUNTIME_STATUS_FAILED", "Arena runtime readiness check failed", { detail = tostring(status) })
     end
@@ -259,33 +300,52 @@ end
 
 function begin_start(owner, config, request, ports)
     ports = ports or {}
+    debug_trace("GA_DEBUG_START_PREFLIGHT_BEGIN", "Arena Start runtime preflight began")
     local runtime = preflight_runtime(ports)
+    debug_trace("GA_DEBUG_START_PREFLIGHT_RESULT", "Arena Start runtime preflight returned", debug_result_context(runtime))
     if not runtime.ok then return runtime end
 
     local save_preferences = ports.save_preferences or gamma_arena_session_store.save_preferences
+    debug_trace("GA_DEBUG_START_PREFERENCES_BEGIN", "Arena Start preference persistence began")
     local preferences = save_preferences(config, request.difficulty_id, request.seed_mode)
+    debug_trace("GA_DEBUG_START_PREFERENCES_RESULT", "Arena Start preference persistence returned", debug_result_context(preferences))
     if not preferences.ok then return preferences end
 
+    debug_trace("GA_DEBUG_START_INTENT_BEGIN", "Arena Start launch intent began")
     local launch = issue_launch_with_defeat_recovery(config, request, ports)
+    debug_trace("GA_DEBUG_START_INTENT_RESULT", "Arena Start launch intent returned", debug_result_context(launch))
     if not launch.ok then return launch end
 
     local write_character_creation = ports.write_character_creation or gamma_arena_session_store.write_character_creation
+    debug_trace("GA_DEBUG_START_BRIDGE_BEGIN", "Arena Start character-creation bridge began")
     local bridge = write_character_creation(config)
+    debug_trace("GA_DEBUG_START_BRIDGE_RESULT", "Arena Start character-creation bridge returned", debug_result_context(bridge))
     if not bridge.ok then
         local clear_transient = ports.clear_transient or gamma_arena_session_store.clear_transient
         clear_transient(config)
         return bridge
     end
 
+    debug_trace("GA_DEBUG_START_HANDOFF_BEGIN", "Arena Start engine handoff began")
     local handoff = (ports.handoff_start_game or handoff_start_game)(owner, config)
+    debug_trace("GA_DEBUG_START_HANDOFF_RESULT", "Arena Start engine handoff returned", debug_result_context(handoff))
     if not handoff.ok then return handoff end
     return handoff
 end
 
 function UIStart:OnStart()
+    debug_trace("GA_DEBUG_START_CLICK", "Arena Start callback entered")
     local seed_text = self.seed_edit:GetText()
+    local difficulty_id = self:GetDifficulty()
+    debug_trace("GA_DEBUG_START_INPUT", "Arena Start input captured", {
+        difficulty_id = difficulty_id,
+        difficulty_text = self.difficulty_combo:GetText(),
+        seed_mode = self.seed_mode,
+        seed_text = seed_text
+    })
     local seed_result = gamma_arena_session_store.parse_manual_seed(seed_text)
     if not seed_result.ok then
+        debug_trace("GA_DEBUG_START_VALIDATION_FAILED", "Arena Start seed validation failed", debug_result_context(seed_result))
         self:ShowValidation(seed_result)
         return
     end
@@ -296,16 +356,23 @@ function UIStart:OnStart()
     local request = gamma_arena_session_store.validate_start_request({
         schema_version = 1,
         mode_id = "skirmish",
-        difficulty_id = self:GetDifficulty(),
+        difficulty_id = difficulty_id,
         seed_mode = seed_mode,
         session_seed = seed_result.value
     })
     if not request.ok then
+        debug_trace("GA_DEBUG_START_VALIDATION_FAILED", "Arena Start request validation failed", debug_result_context(request))
         self:ShowValidation(request)
         return
     end
+    debug_trace("GA_DEBUG_START_VALIDATED", "Arena Start request validation passed", {
+        difficulty_id = request.value.difficulty_id,
+        seed_mode = request.value.seed_mode,
+        session_seed = request.value.session_seed
+    })
     self.validation:Show(false)
     local started = begin_start(self.owner, axr_main.config, request.value, self.ports)
+    debug_trace("GA_DEBUG_START_RESULT", "Arena Start pipeline returned", debug_result_context(started))
     if not started.ok then self:ShowFatal({ started }) end
 end
 

@@ -1,0 +1,295 @@
+local UINT32_MAX = 4294967295
+local PARK_MILLER_MAX = 2147483646
+local SEPARATOR = " " .. string.char(194, 183) .. " "
+
+local function default_translate(string_id)
+    if game and type(game.translate_string) == "function" then
+        local called, value = pcall(game.translate_string, string_id)
+        if called and type(value) == "string" and value ~= "" then return value end
+    end
+    return string_id
+end
+
+local function default_hud()
+    if type(get_hud) ~= "function" then return nil end
+    return get_hud()
+end
+
+function format_identity(model, translate)
+    if type(model) ~= "table"
+        or type(model.session_seed) ~= "number" or model.session_seed ~= math.floor(model.session_seed)
+        or model.session_seed < 1 or model.session_seed > PARK_MILLER_MAX
+        or type(model.fight_index) ~= "number" or model.fight_index ~= math.floor(model.fight_index)
+        or model.fight_index < 0 or model.fight_index > UINT32_MAX then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_MODEL_INVALID",
+            "Battle identity requires a normalized seed and uint32 fight index"
+        )
+    end
+    if type(translate) ~= "function" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_TRANSLATION_FAILED",
+            "Battle identity translation port is unavailable"
+        )
+    end
+    local seed_ok, seed_label = pcall(translate, "st_gamma_arena_battle_seed")
+    local fight_ok, fight_label = pcall(translate, "st_gamma_arena_battle_fight")
+    if not seed_ok or not fight_ok or type(seed_label) ~= "string" or seed_label == ""
+        or type(fight_label) ~= "string" or fight_label == "" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_TRANSLATION_FAILED",
+            "Battle identity labels are unavailable"
+        )
+    end
+    return gamma_arena_result.ok(
+        seed_label .. ": " .. tostring(model.session_seed)
+            .. SEPARATOR .. fight_label .. ": " .. tostring(model.fight_index + 1)
+    )
+end
+
+local function read_main_hud_visibility(port)
+    if type(port) ~= "function" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_PORT_FAILED",
+            "Main HUD visibility port is unavailable"
+        )
+    end
+    local called, value = pcall(port)
+    if not called or type(value) ~= "boolean" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_PORT_FAILED",
+            "Main HUD visibility could not be read",
+            { reason = called and "non_boolean" or tostring(value) }
+        )
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function main_hud_visible(port)
+    local visible = read_main_hud_visibility(port)
+    return visible.ok and visible.value == true
+end
+
+function sync_visibility(root, port)
+    local method_ok, method = pcall(function() return root and root.Show end)
+    if not method_ok or type(method) ~= "function" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_FAILED",
+            "Battle identity root visibility method is unavailable"
+        )
+    end
+    local visible = read_main_hud_visibility(port)
+    local called, reason = pcall(method, root, visible.ok and visible.value or false)
+    if not called then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_FAILED",
+            "Battle identity visibility could not be synchronized",
+            { reason = tostring(reason) }
+        )
+    end
+    if not visible.ok then return visible end
+    return gamma_arena_result.ok(visible.value)
+end
+
+function report_visibility_failure_once(owner, result, reporter)
+    if type(owner) ~= "table" or type(result) ~= "table" or type(result.ok) ~= "boolean" then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_REPORT_FAILED",
+            "Battle identity visibility report state is invalid"
+        )
+    end
+    if result.ok then
+        owner.last_visibility_error = nil
+        return gamma_arena_result.ok(false)
+    end
+    local code = result.error and result.error.code or "GA_BATTLE_UI_VISIBILITY_FAILED"
+    if owner.last_visibility_error == code then return gamma_arena_result.ok(false) end
+    owner.last_visibility_error = code
+    if type(reporter) ~= "function" then return gamma_arena_result.ok(false) end
+    local called, reason = pcall(reporter, result)
+    if not called then
+        return gamma_arena_result.err(
+            "GA_BATTLE_UI_VISIBILITY_REPORT_FAILED",
+            "Battle identity visibility failure could not be reported",
+            { reason = tostring(reason), cause_code = code }
+        )
+    end
+    return gamma_arena_result.ok(true)
+end
+
+class "UIBattleIdentity" (CUIScriptWnd)
+
+function UIBattleIdentity:__init(text, visibility_error_reporter) super()
+    self:SetWndRect(Frect():set(0, 0, 1024, 768))
+    local xml = CScriptXmlInit()
+    xml:ParseFile("gamma_arena_battle.xml")
+    self.root = xml:InitStatic("gamma_arena_battle", self)
+    self.panel = xml:InitStatic("gamma_arena_battle:panel", self.root)
+    self.identity = xml:InitTextWnd("gamma_arena_battle:panel:identity", self.panel)
+    self.visibility_error_reporter = visibility_error_reporter
+    self.initialization_result = self:SetIdentity(text)
+    self.visibility_result = sync_visibility(self.root, main_hud_shown)
+    self.visibility_report_result = report_visibility_failure_once(
+        self,
+        self.visibility_result,
+        self.visibility_error_reporter
+    )
+end
+
+function UIBattleIdentity:__finalize()
+end
+
+function UIBattleIdentity:SetIdentity(text)
+    if type(text) ~= "string" or text == "" or self.identity == nil then
+        return gamma_arena_result.err("GA_BATTLE_UI_TEXT_INVALID", "Battle identity text is unavailable")
+    end
+    local called, reason = pcall(function() self.identity:SetText(text) end)
+    if not called then
+        return gamma_arena_result.err("GA_BATTLE_UI_TEXT_FAILED", "Battle identity text could not be updated", {
+            reason = tostring(reason)
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function UIBattleIdentity:Update()
+    self.visibility_result = sync_visibility(self.root, main_hud_shown)
+    self.visibility_report_result = report_visibility_failure_once(
+        self,
+        self.visibility_result,
+        self.visibility_error_reporter
+    )
+    CUIScriptWnd.Update(self)
+end
+
+local function call_method(code, object, method_name, ...)
+    local method_ok, method = pcall(function() return object and object[method_name] end)
+    if not method_ok or type(method) ~= "function" then
+        return gamma_arena_result.err(code, "Battle identity HUD method is unavailable", { method = method_name })
+    end
+    local called, value = pcall(method, object, ...)
+    if not called then
+        return gamma_arena_result.err(code, "Battle identity HUD method failed safely", {
+            method = method_name,
+            reason = tostring(value)
+        })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    if value == false then
+        return gamma_arena_result.err(code, "Battle identity HUD method reported failure", { method = method_name })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function call_port(code, port)
+    if type(port) ~= "function" then
+        return gamma_arena_result.err(code, "Battle identity HUD port is unavailable")
+    end
+    local called, value = pcall(port)
+    if not called or value == nil then
+        return gamma_arena_result.err(code, "Battle identity HUD port failed safely", {
+            reason = called and nil or tostring(value)
+        })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+function new(ports)
+    ports = ports or {}
+    local visibility_error_reporter = ports.report_visibility_error
+    local adapter = {
+        translate = ports.translate or default_translate,
+        hud = ports.hud or default_hud,
+        create_window = ports.create_window or function(text)
+            return UIBattleIdentity(text, visibility_error_reporter)
+        end,
+        owned_hud = nil,
+        owned_window = nil,
+        owned_text = nil,
+        registration_confirmed = false,
+        cleanup_pending = false
+    }
+
+    function adapter:show_identity(model)
+        local formatted = format_identity(model, self.translate)
+        if not formatted.ok then return formatted end
+        if self.cleanup_pending then
+            local cleaned = self:rollback_partial_add()
+            if not cleaned.ok then return cleaned end
+        end
+        if self.owned_window ~= nil then
+            if not self.registration_confirmed then
+                return gamma_arena_result.err(
+                    "GA_BATTLE_UI_REGISTRATION_UNKNOWN",
+                    "Battle identity registration state is unresolved"
+                )
+            end
+            local updated = call_method("GA_BATTLE_UI_TEXT_FAILED", self.owned_window, "SetIdentity", formatted.value)
+            if updated.ok then self.owned_text = formatted.value end
+            return updated
+        end
+
+        local created = call_port("GA_BATTLE_UI_CREATE_FAILED", function()
+            return self.create_window(formatted.value)
+        end)
+        if not created.ok then return created end
+        local initialization = created.value and created.value.initialization_result
+        if initialization ~= nil then
+            if type(initialization) ~= "table" or type(initialization.ok) ~= "boolean" then
+                return gamma_arena_result.err(
+                    "GA_BATTLE_UI_CREATE_FAILED",
+                    "Battle identity initialization result is invalid"
+                )
+            end
+            if not initialization.ok then return initialization end
+        end
+        local hud = call_port("GA_BATTLE_UI_HUD_FAILED", self.hud)
+        if not hud.ok then return hud end
+
+        self.owned_hud = hud.value
+        self.owned_window = created.value
+        self.owned_text = formatted.value
+        self.registration_confirmed = false
+        self.cleanup_pending = true
+        local added = call_method("GA_BATTLE_UI_ADD_FAILED", hud.value, "AddDialogToRender", created.value)
+        if not added.ok then
+            local rollback = self:rollback_partial_add()
+            if not rollback.ok and added.error and added.error.context then
+                added.error.context.rollback_error = rollback.error and rollback.error.code or "unknown"
+            end
+            return added
+        end
+        self.registration_confirmed = true
+        self.cleanup_pending = false
+        return gamma_arena_result.ok(true)
+    end
+
+    function adapter:rollback_partial_add()
+        if self.owned_window == nil then
+            self.registration_confirmed = false
+            self.cleanup_pending = false
+            return gamma_arena_result.ok(false)
+        end
+        self.registration_confirmed = false
+        self.cleanup_pending = true
+        local removed = call_method(
+            "GA_BATTLE_UI_REMOVE_FAILED",
+            self.owned_hud,
+            "RemoveDialogToRender",
+            self.owned_window
+        )
+        if not removed.ok then return removed end
+        self.owned_hud = nil
+        self.owned_window = nil
+        self.owned_text = nil
+        self.cleanup_pending = false
+        return gamma_arena_result.ok(true)
+    end
+
+    function adapter:clear_identity()
+        return self:rollback_partial_add()
+    end
+
+    return adapter
+end

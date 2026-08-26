@@ -1,6 +1,34 @@
 local PRIMARY_BAND_PERCENT = 70
 local CORE_RNG_EPOCH = 6
 local MEDICAL_RNG_EPOCH = 1
+local PLAYER_AMMO_CHANCE = {
+    w_pistol = 40,
+    w_smg = 25,
+    w_shotgun = 25,
+    w_rifle = 20,
+    w_sniper = 10
+}
+
+function scaled_ammo_boxes(rng_factory, weapon_kind, opponent_count)
+    local chance = PLAYER_AMMO_CHANCE[weapon_kind]
+    if type(rng_factory) ~= "function" or chance == nil
+        or not gamma_arena_number.is_positive_integer(opponent_count) or opponent_count >= 4294967295 then
+        return gamma_arena_result.err("GA_PLAYER_AMMO_SCALE_INVALID", "Player ammo scaling inputs are invalid", {})
+    end
+    local boxes = 1
+    for index = 1, opponent_count do
+        local factory_ok, rng = pcall(rng_factory, index)
+        if not factory_ok or type(rng) ~= "table" or type(rng.next_int) ~= "function" then
+            return gamma_arena_result.err("GA_PLAYER_AMMO_SCALE_INVALID", "Player ammo scaling RNG is unavailable", { index = index })
+        end
+        local draw_ok, draw = pcall(function() return rng:next_int(1, 100) end)
+        if not draw_ok or not gamma_arena_number.is_integer(draw) or draw < 1 or draw > 100 then
+            return gamma_arena_result.err("GA_PLAYER_AMMO_SCALE_INVALID", "Player ammo scaling RNG returned an invalid draw", { index = index })
+        end
+        if draw <= chance then boxes = boxes + 1 end
+    end
+    return gamma_arena_result.ok(boxes)
+end
 
 local function stream(request, fight_index, catalogs, epoch_or_tag, explicit_tag)
     local epoch = explicit_tag ~= nil and epoch_or_tag or CORE_RNG_EPOCH
@@ -189,7 +217,7 @@ end
 local function player_pair_has_completion(catalogs, budget, weapon_class, armor_class)
     local bandage = catalogs.consumables and catalogs.consumables.bandage
     if type(bandage) ~= "table" then return false end
-    for _, weapon in ipairs(catalogs.weapon_list or {}) do
+    for _, weapon in ipairs(catalogs.actor_weapon_list or {}) do
         local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
         if weapon.kind == weapon_class and type(ammo) == "table" then
             for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
@@ -257,7 +285,7 @@ function player_loadout(request, fight_index, catalogs, difficulty)
     if not selected_pair.ok then return selected_pair end
     local pair = selected_pair.value
     local weapons = {}
-    for _, weapon in ipairs(sorted_by_section(catalogs.weapon_list)) do
+    for _, weapon in ipairs(sorted_by_section(catalogs.actor_weapon_list)) do
         local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
         local available = false
         if weapon.kind == pair.weapon_class and type(ammo) == "table" then
@@ -417,10 +445,35 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
     actor.value.knife = actor_knife.value
     local actor_weapon
     for _, weapon in ipairs(catalogs.weapon_list or {}) do if weapon.section == actor.value.weapon then actor_weapon = weapon; break end end
+    local standard_ammo = type(actor_weapon) == "table" and type(actor_weapon.ammo_variants) == "table" and actor_weapon.ammo_variants[1] or nil
+    if type(standard_ammo) ~= "table" or standard_ammo.section ~= actor.value.ammo
+        or not gamma_arena_number.is_positive_integer(actor_weapon.magazine_size)
+        or not gamma_arena_number.is_positive_integer(standard_ammo.box_size) then
+        return gamma_arena_result.err("GA_PLAYER_AMMO_SCALE_INVALID", "Selected player weapon has invalid magazine or standard-ammo capacity", {})
+    end
+    local minimum_boxes = math.ceil(3 * actor_weapon.magazine_size / standard_ammo.box_size)
+    local scaled = scaled_ammo_boxes(function(index)
+        return stream(normalized_request, fight_index, catalogs, "actor_scaled_ammo:" .. tostring(index))
+    end, actor_weapon.kind, enemy_count)
+    if not scaled.ok then return scaled end
+    local final_ammo_boxes = math.max(actor.value.ammo_boxes, minimum_boxes) + scaled.value
+    if not gamma_arena_number.is_positive_integer(final_ammo_boxes) or final_ammo_boxes >= 4294967296 then
+        return gamma_arena_result.err("GA_PLAYER_AMMO_SCALE_INVALID", "Final player ammo box count exceeds engine integer safety", { ammo_boxes = final_ammo_boxes })
+    end
+    actor.value.ammo_boxes = final_ammo_boxes
     local bonus = select_bonus_ammo(stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_category"), stream(normalized_request, fight_index, catalogs, "actor_bonus_ammo_section"), actor_weapon)
     if bonus == nil then return gamma_arena_result.err("GA_NO_VALID_PLAYER_BONUS_AMMO", "Selected player weapon has no valid bonus ammo", {}) end
     actor.value.bonus_ammo = bonus
-    local spec = { schema_version = 5, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV5 skirmish " .. difficulty.id .. " #" .. fight_index }
+    local actor_grenades = gamma_arena_grenade_generator.generate_actor(catalogs, {
+        count = stream(normalized_request, fight_index, catalogs, "actor_grenade_count"),
+        sections = {
+            stream(normalized_request, fight_index, catalogs, "actor_grenade_section:1"),
+            stream(normalized_request, fight_index, catalogs, "actor_grenade_section:2")
+        }
+    })
+    if not actor_grenades.ok then return actor_grenades end
+    actor.value.grenades = actor_grenades.value.sections
+    local spec = { schema_version = 7, generator_version = catalogs.generator_version, catalog_revision = catalogs.revision, layout_version = resolved_layout.version, session_seed = normalized_seed, fight_index = fight_index, fight_id = "ga-" .. normalized_seed .. "-" .. fight_index .. "-g" .. catalogs.generator_version .. "-c" .. catalogs.revision .. "-l" .. resolved_layout.version, mode_id = "skirmish", difficulty_id = difficulty.id, layout_id = layout.id, level = resolved_layout.level, actor = { spawn_path = resolved_layout.actor_spawn_path, look_path = resolved_layout.actor_look_path, loadout = actor.value }, opponents = {}, diagnostic = "FightSpecV7 skirmish " .. difficulty.id .. " #" .. fight_index }
     local profile_pool = catalogs.profile_list
     if catalogs.selection_mode == "staged" and type(catalogs.faction_ids) == "table" and #catalogs.faction_ids > 0 then
         local enemy_faction = stream(normalized_request, fight_index, catalogs, "enemy_faction"):pick(catalogs.faction_ids)
@@ -443,6 +496,12 @@ function generate(start_request, fight_index, catalogs, resolved_layout)
         if selected_weapon and selected_weapon.kind == "w_sniper" then sniper_used = true end
         local knife = random_knife(stream(normalized_request, fight_index, catalogs, "enemy_knife:" .. index), catalogs.knife_list); if not knife.ok then return knife end
         gear.value.knife = knife.value
+        local enemy_grenades = gamma_arena_grenade_generator.generate_enemy(catalogs, {
+            presence = stream(normalized_request, fight_index, catalogs, "enemy_grenade_presence:" .. index),
+            section = stream(normalized_request, fight_index, catalogs, "enemy_grenade_section:" .. index)
+        })
+        if not enemy_grenades.ok then return enemy_grenades end
+        gear.value.grenades = enemy_grenades.value.sections
         local physical = spawn_slots[index]
         spec.opponents[index] = {
             slot = index,
@@ -470,7 +529,7 @@ end
 function stable_encode(spec)
     if type(spec) ~= "table" or type(spec.actor) ~= "table" or type(spec.actor.loadout) ~= "table" then return "invalid" end
     local function gear(value, actor)
-        local encoded = value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. ",medical:" .. table.concat(value.consumables, "+") .. "," .. value.gear_cost .. "," .. value.medical_cost .. "," .. value.cost
+        local encoded = value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. ",medical:" .. table.concat(value.consumables, "+") .. ",grenades:" .. table.concat(value.grenades, "+") .. "," .. value.gear_cost .. "," .. value.medical_cost .. "," .. value.cost
         if actor and type(value.bonus_ammo) == "table" then
             local bonus = value.bonus_ammo
             encoded = encoded .. ",bonus:" .. bonus.section .. ":" .. bonus.requested_category .. ":" .. bonus.resolved_category .. ":" .. bonus.boxes

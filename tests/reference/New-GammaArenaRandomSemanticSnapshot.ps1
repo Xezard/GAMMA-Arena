@@ -28,10 +28,10 @@ function Read-GaLtx([string]$Path) {
 $catalog = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx')
 $difficultyLtx = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx')
 $layoutLtx = Read-GaLtx (Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx')
-if ([int]$catalog.meta.schema_version -ne 6 -or [int]$catalog.meta.revision -ne 7 -or [int]$catalog.meta.generator_version -ne 7 -or
+if ([int]$catalog.meta.schema_version -ne 8 -or [int]$catalog.meta.revision -ne 9 -or [int]$catalog.meta.generator_version -ne 9 -or
     [int]$difficultyLtx.meta.schema_version -ne 4 -or [int]$difficultyLtx.meta.revision -ne 5 -or
     [int]$layoutLtx.meta.schema_version -ne 2 -or [int]$layoutLtx.meta.revision -ne 2) {
-    throw 'Random semantic reference requires catalog 7, difficulty 5, and layout 2 LTX inputs.'
+    throw 'Random semantic reference requires catalog schema/revision/generator 8/9/9, difficulty 5, and layout 2 LTX inputs.'
 }
 
 $difficultyManifest = @{
