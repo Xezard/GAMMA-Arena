@@ -8,7 +8,7 @@ The JSON root is an object with exactly these fields in this order:
 
 | Field | JSON type | v1 value / rule |
 | --- | --- | --- |
-| `addon_version` | string | `"0.2.0"`; must equal the repository `VERSION` used for the build |
+| `addon_version` | string | `"0.3.0"`; must equal the repository `VERSION` used for the build |
 | `state_schema_version` | integer | `1`; durable UI preference schema |
 | `session_schema_version` | integer | `1`; `ArenaSession` and resume-intent schema |
 | `fight_spec_schema_version` | integer | `1`; validated `FightSpec` schema |

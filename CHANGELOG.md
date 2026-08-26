@@ -6,6 +6,12 @@ All notable changes to Gamma Arena are documented in this file.
 
 - Made the battle identity transparent, fight-first, and ASCII-separated.
 
+## 0.3.0 - 2026-08-26
+
+- Added one deterministic actor lighting device per fight: headlamp 50%, Gen 1 NVG 25%, Gen 2 NVG 18%, or Gen 3 NVG 7%, with chances independent of difficulty and outside all budgets.
+- Equipped the selected slot-10 device fully charged but switched off, preserving manual control, and added ownership-safe cleanup that disables active Beef's NVG or torch state before removal.
+- Published catalog identity 9/10/10, FightSpec v8, an independent v8 golden oracle, and generated device-balance documentation.
+
 ## 0.2.0 - 2026-08-26
 
 - Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1%, while each opponent independently has a 10% chance for one; both use the F1/RGD-5/GD-05 pool, smoke is excluded, and native AI remains responsible for throws.
