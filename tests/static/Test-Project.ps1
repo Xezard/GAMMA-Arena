@@ -690,6 +690,8 @@ if (Test-Path -LiteralPath $BattleUiScriptPath) {
     Assert-True ($BattleUiContent -notmatch 'initialization_result\s*=\s*sync_visibility') 'Battle identity visibility failure must not overwrite successful text initialization'
     Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
     Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
+    Assert-True ($BattleUiContent -match 'local\s+SEPARATOR\s*=\s*" \| "') 'Battle identity must use an ASCII pipe separator'
+    Assert-True ($BattleUiContent -notmatch 'string\.char\(194,\s*183\)') 'Battle identity must not emit a UTF-8 middle-dot separator'
 }
 if (Test-Path -LiteralPath $BattleUiXmlPath) {
     try {
