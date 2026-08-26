@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Made the battle identity transparent, fight-first, and ASCII-separated.
+
 ## 0.3.0 - 2026-08-26
 
 - Added one deterministic actor lighting device per fight: headlamp 50%, Gen 1 NVG 25%, Gen 2 NVG 18%, or Gen 3 NVG 7%, with chances independent of difficulty and outside all budgets.

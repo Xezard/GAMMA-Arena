@@ -691,6 +691,8 @@ if (Test-Path -LiteralPath $BattleUiScriptPath) {
     Assert-True ($BattleUiContent -notmatch 'initialization_result\s*=\s*sync_visibility') 'Battle identity visibility failure must not overwrite successful text initialization'
     Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
     Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
+    Assert-True ($BattleUiContent -match 'local\s+SEPARATOR\s*=\s*" \| "') 'Battle identity must use an ASCII pipe separator'
+    Assert-True ($BattleUiContent -notmatch 'string\.char\(194,\s*183\)') 'Battle identity must not emit a UTF-8 middle-dot separator'
 }
 if (Test-Path -LiteralPath $BattleUiXmlPath) {
     try {
@@ -699,7 +701,11 @@ if (Test-Path -LiteralPath $BattleUiXmlPath) {
             Assert-True ($null -ne $BattleUiXml.SelectSingleNode("//*[local-name()='$Id']")) "Battle identity HUD XML is missing control $Id"
         }
         $BattlePanel = $BattleUiXml.SelectSingleNode("//*[local-name()='panel']")
+        $BattleIdentity = $BattleUiXml.SelectSingleNode("//*[local-name()='identity']")
+        $BattleText = $BattleIdentity.SelectSingleNode("*[local-name()='text']")
         Assert-True ([int]$BattlePanel.x + [int]$BattlePanel.width -eq 994) 'Battle identity HUD must retain the approved right safe-area inset'
+        Assert-True ($null -eq $BattlePanel.SelectSingleNode("*[local-name()='texture']")) 'Battle identity HUD panel must be fully transparent'
+        Assert-True ($BattleText.r -eq '255' -and $BattleText.g -eq '255' -and $BattleText.b -eq '255') 'Battle identity HUD text must be pure white'
     } catch { Assert-True $false "Battle identity HUD XML must parse: $($_.Exception.Message)" }
 }
 foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
@@ -715,6 +721,7 @@ $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
 foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
+Assert-True ($BattleRuntimeTests -match [regex]::Escape('gamma_arena_test_assert.equals(env.added.text, "Fight: 2 | Seed: 42", "existing battle identity window refreshes")')) 'Battle identity refresh fixture must require fight-first ASCII text'
 $BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
 $BattleBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $BattleOrchestratorContent = Get-Content -LiteralPath $BattleOrchestratorPath -Raw
