@@ -720,6 +720,7 @@ $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
 foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
+Assert-True ($BattleRuntimeTests -match [regex]::Escape('gamma_arena_test_assert.equals(env.added.text, "Fight: 2 | Seed: 42", "existing battle identity window refreshes")')) 'Battle identity refresh fixture must require fight-first ASCII text'
 $BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
 $BattleBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $BattleOrchestratorContent = Get-Content -LiteralPath $BattleOrchestratorPath -Raw
