@@ -845,6 +845,8 @@ function Orchestrator:activate_once()
         local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
         if not advanced.ok then return self:enter_fatal(advanced, true) end
         self.session = session.value
+        local prepared = self:preflight_fight()
+        if not prepared.ok then return self:enter_fatal(prepared, true) end
         self.active = true
         self:checkpoint("GA_ARENA_SESSION_CREATED", {
             session_id = self.session.session_id,
@@ -862,7 +864,13 @@ function Orchestrator:layout_snapshot()
     return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id)
 end
 
-function Orchestrator:prepare_fight()
+function Orchestrator:preflight_fight()
+    if self.fight_spec ~= nil or self.catalog_snapshot ~= nil then
+        if type(self.fight_spec) == "table" and type(self.catalog_snapshot) == "table" then
+            return gamma_arena_result.ok({ spec = self.fight_spec, catalog = self.catalog_snapshot })
+        end
+        return fail("GA_FIGHT_VALIDATE_FAILED", "Fight preflight cache is incomplete")
+    end
     local catalogs = safe_result_call("GA_CATALOG_LOAD_FAILED", self.deps.catalogs)
     if not catalogs.ok then return catalogs end
     local layout = self:layout_snapshot()
@@ -908,10 +916,16 @@ function Orchestrator:prepare_fight()
     end
     logged = self:emit_log("GA_ACTOR_WEAPON_SELECTED", "weapon=" .. tostring(weapon), metadata.value)
     if not logged.ok then return logged end
-    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", spec, self.session.session_id, catalogs.value)
-    if not applied.ok then return applied end
     self.catalog_snapshot = catalogs.value
     self.fight_spec = spec
+    return gamma_arena_result.ok({ spec = spec, catalog = catalogs.value })
+end
+
+function Orchestrator:prepare_fight()
+    local prepared = self:preflight_fight()
+    if not prepared.ok then return prepared end
+    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot)
+    if not applied.ok then return applied end
     self.countdown_value = nil
     self.pending_victory = false
     self.integrity_retry_count = 0
@@ -1237,28 +1251,39 @@ function Orchestrator:drive_continuation()
         self:set_runtime_stage("NEXT_RESET")
         return gamma_arena_result.ok({ stage = "NEXT_RESET" })
     end
+    local continuation_kind = self.pending_continuation_kind
+    local next_index = self.pending_next_fight_index
+    if continuation_kind == "victory_next" then
+        if type(next_index) ~= "number" or next_index ~= math.floor(next_index) or next_index < 0 or next_index >= UINT32_MOD
+            or (next_index ~= self.session.fight_index and next_index ~= self.session.fight_index + 1) then
+            return fail("GA_MODE_POLICY_FAILED", "Arena victory continuation was not retained exactly across cleanup")
+        end
+        if self.session.fight_index ~= next_index then
+            self.session.fight_index = next_index
+            local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_VICTORY)
+            if not advanced.ok then return advanced end
+            self.fight_spec = nil
+            self.catalog_snapshot = nil
+            local prepared = self:preflight_fight()
+            if not prepared.ok then return prepared end
+        elseif type(self.fight_spec) ~= "table" or type(self.catalog_snapshot) ~= "table" then
+            return fail("GA_MODE_POLICY_FAILED", "Arena victory continuation lost its preflight cache")
+        end
+    elseif continuation_kind == "integrity_retry" then
+        if next_index ~= self.session.fight_index or type(self.fight_spec) ~= "table" then
+            return fail("GA_MODE_POLICY_FAILED", "Arena exact retry did not retain the current fight identity", { continuation = continuation_kind })
+        end
+    else
+        return fail("GA_MODE_POLICY_FAILED", "Arena continuation kind is missing or invalid")
+    end
     local layout = self:layout_snapshot()
     if not layout.ok then return layout end
     local reset = call_method("GA_ACTOR_RESET_FAILED", self.deps.actor, "reset_for_rematch", layout.value)
     if not reset.ok then return reset end
     if type(reset.value) == "table" and reset.value.pending == true then return gamma_arena_result.ok({ stage = "NEXT_RESET", pending = true }) end
-    local continuation_kind = self.pending_continuation_kind
-    local next_index = self.pending_next_fight_index
     if continuation_kind == "victory_next" then
-        if type(next_index) ~= "number" or next_index ~= math.floor(next_index)
-            or next_index ~= self.session.fight_index + 1 or next_index < 0 or next_index >= UINT32_MOD then
-            return fail("GA_MODE_POLICY_FAILED", "Arena victory continuation was not retained exactly across cleanup")
-        end
-        self.session.fight_index = next_index
-        local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_VICTORY)
-        if not advanced.ok then return advanced end
-        self.fight_spec = nil
-        self.catalog_snapshot = nil
         self:set_runtime_stage("PREPARING")
-    elseif continuation_kind == "integrity_retry" then
-        if next_index ~= self.session.fight_index or type(self.fight_spec) ~= "table" then
-            return fail("GA_MODE_POLICY_FAILED", "Arena exact retry did not retain the current fight identity", { continuation = continuation_kind })
-        end
+    else
         local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot)
         if not applied.ok then return applied end
         local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_DEFEAT)
@@ -1267,8 +1292,6 @@ function Orchestrator:drive_continuation()
         self.pending_victory = false
         self.result_kind = nil
         self:set_runtime_stage("EQUIPPING")
-    else
-        return fail("GA_MODE_POLICY_FAILED", "Arena continuation kind is missing or invalid")
     end
     self.next_cleanup_started = false
     self.pending_next_fight_index = nil

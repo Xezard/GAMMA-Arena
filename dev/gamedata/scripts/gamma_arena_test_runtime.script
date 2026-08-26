@@ -703,7 +703,34 @@ local function fake_orchestrator_deps(store)
         _save_guard = save_guard,
         _diagnostics = diagnostics,
         checkpoint = checkpoint_adapter,
-        layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end
+        layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end,
+        catalogs = function()
+            return gamma_arena_result.ok({
+                items = {
+                    wpn_test = { category = "weapon", ammo_sections = { "ammo_test" } },
+                    ammo_test = { category = "ammo" }
+                }
+            })
+        end,
+        generator = function(_, fight_index) return gamma_arena_result.ok({ fight_index = fight_index }) end,
+        validator = function(spec)
+            local fight_id = "ga-preflight-" .. tostring(spec.fight_index)
+            return gamma_arena_result.ok({
+                session_seed = function() return 42 end,
+                fight_index = function() return spec.fight_index end,
+                fight_id = function() return fight_id end,
+                actor = function()
+                    return { items = {
+                        { section = "wpn_test", quantity = 1, equipped_slot = "weapon_2" },
+                        { section = "ammo_test", quantity = 1 }
+                    } }
+                end,
+                opponents = function() return {} end,
+                stable_encode = function() return "stable:" .. fight_id end
+            })
+        end,
+        weapon_diagnostics = function(context) return gamma_arena_result.ok(clone(context)) end,
+        log = { info = function() return gamma_arena_result.ok(true) end }
     }
     return deps
 end
@@ -3319,6 +3346,57 @@ local function runtime_dedicated_start_reaches_preparing_without_checkpoint()
     gamma_arena_test_assert.equals(checkpoint.create_count, 0, "dedicated startup never creates a checkpoint")
     gamma_arena_test_assert.equals(checkpoint.updates, 0, "dedicated startup never polls a checkpoint")
     gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "PREPARING", "inventory readiness advances directly to FightSpec preparation")
+end
+
+local function runtime_fightspec_preflight_failure_precedes_actor_normalization()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local actor_mutations = 0
+    deps.actor.normalize_for_arena = function()
+        actor_mutations = actor_mutations + 1
+        return gamma_arena_result.ok(true)
+    end
+    deps.catalogs = function()
+        return gamma_arena_result.err("GA_TEST_FIGHT_PREFLIGHT", "injected FightSpec preflight failure")
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "FightSpec preflight failure is observable during launch")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_FIGHT_PREFLIGHT", "FightSpec preflight preserves its exact failure")
+    gamma_arena_test_assert.equals(actor_mutations, 0, "FightSpec preflight failure precedes every actor normalization mutation")
+end
+
+local function runtime_fightspec_preflight_caches_before_normalization_and_applies_after_purge()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local events, applied = {}, 0
+    local catalogs, generator, validator = deps.catalogs, deps.generator, deps.validator
+    deps.catalogs = function(...) events[#events + 1] = "catalogs"; return catalogs(...) end
+    deps.generator = function(...) events[#events + 1] = "generate"; return generator(...) end
+    deps.validator = function(...) events[#events + 1] = "validate"; return validator(...) end
+    deps.actor.normalize_for_arena = function() events[#events + 1] = "normalize"; return gamma_arena_result.ok(true) end
+    deps.actor.verify_inventory_empty = function() events[#events + 1] = "purge_verified"; return gamma_arena_result.ok(true) end
+    deps.entities = {
+        begin_apply = function()
+            events[#events + 1] = "apply"
+            applied = applied + 1
+            return gamma_arena_result.ok({ state = "COUNTDOWN" })
+        end,
+        update = function() return gamma_arena_result.ok(true) end,
+        registry_snapshot = function() return { state = "COUNTDOWN", actor_loadout = { ready = false } } end
+    }
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "valid FightSpec preflight and normalization succeed")
+    gamma_arena_test_assert.equals(table.concat(events, ","), "catalogs,generate,validate,normalize", "immutable FightSpec is cached before actor normalization")
+    gamma_arena_test_assert.is_true(type(orchestrator.fight_spec) == "table" and type(orchestrator.catalog_snapshot) == "table", "validated FightSpec and catalog are cached before world mutation")
+    gamma_arena_test_assert.equals(applied, 0, "entity application cannot begin during normalization")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "inventory purge verification succeeds")
+    gamma_arena_test_assert.equals(applied, 0, "entity application remains blocked until after purge verification")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "prepared FightSpec begins entity application")
+    gamma_arena_test_assert.equals(table.concat(events, ","), "catalogs,generate,validate,normalize,purge_verified,apply", "entity application follows pure preflight, normalization, and purge")
+    gamma_arena_test_assert.equals(applied, 1, "prepared FightSpec applies exactly once")
 end
 
 local function runtime_checkpoint_resume_applies_index_after_ready()
@@ -7097,6 +7175,28 @@ local function runtime_task8_victory_next_cleans_heals_and_increments_once()
     gamma_arena_test_assert.is_true(env.orchestrator.fight_spec:fight_id() ~= first_fight_id, "next fight has a distinct fight_id")
 end
 
+local function runtime_victory_continuation_preflights_before_actor_reset()
+    local env = task8_environment(); task8_pump_to_active(env)
+    local reset_for_rematch = env.deps.actor.reset_for_rematch
+    env.deps.actor.reset_for_rematch = function(...)
+        env.events[#env.events + 1] = "reset"
+        return reset_for_rematch(...)
+    end
+    env.events = {}
+    local applied_before = env.applied
+    gamma_arena_test_assert.is_true(env.orchestrator:restart_arena_action().ok, "continuation-order fixture starts manual restart")
+    for _ = 1, 3 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "continuation cleanup and reset remain frame-driven") end
+    local generated_index, reset_index
+    for index, event in ipairs(env.events) do
+        if event == "generate" then generated_index = generated_index or index end
+        if event == "reset" then reset_index = reset_index or index end
+    end
+    gamma_arena_test_assert.is_true(generated_index ~= nil and reset_index ~= nil and generated_index < reset_index, "next immutable FightSpec preflight precedes actor reset mutation")
+    gamma_arena_test_assert.equals(env.applied, applied_before, "next entity application remains blocked until actor reset completes")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "post-reset prepared FightSpec applies")
+    gamma_arena_test_assert.equals(env.events[#env.events], "apply", "entity application remains after continuation reset")
+end
+
 local function runtime_manual_restart_reuses_next_fight_once()
     local env = task8_environment(); task8_pump_to_active(env)
     local seed = env.orchestrator.session.session_seed
@@ -9367,6 +9467,8 @@ local cases = {
     ,{ name = "runtime_actor_future_seams_are_injected_and_total", fn = runtime_actor_future_seams_are_injected_and_total }
     ,{ name = "runtime_failed_teardown_retries_then_latches_success", fn = runtime_failed_teardown_retries_then_latches_success }
     ,{ name = "runtime_dedicated_start_reaches_preparing_without_checkpoint", fn = runtime_dedicated_start_reaches_preparing_without_checkpoint }
+    ,{ name = "runtime_fightspec_preflight_failure_precedes_actor_normalization", fn = runtime_fightspec_preflight_failure_precedes_actor_normalization }
+    ,{ name = "runtime_fightspec_preflight_caches_before_normalization_and_applies_after_purge", fn = runtime_fightspec_preflight_caches_before_normalization_and_applies_after_purge }
     ,{ name = "runtime_entity_does_not_spawn_before_begin_apply", fn = runtime_entity_does_not_spawn_before_begin_apply }
     ,{ name = "runtime_entity_consumes_owned_medical_item_once", fn = runtime_entity_consumes_owned_medical_item_once }
     ,{ name = "runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items", fn = runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items }
@@ -9486,6 +9588,7 @@ local cases = {
     ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
+    ,{ name = "runtime_victory_continuation_preflights_before_actor_reset", fn = runtime_victory_continuation_preflights_before_actor_reset }
     ,{ name = "runtime_manual_restart_reuses_next_fight_once", fn = runtime_manual_restart_reuses_next_fight_once }
     ,{ name = "runtime_manual_restart_inactive_and_exhausted_are_inert", fn = runtime_manual_restart_inactive_and_exhausted_are_inert }
     ,{ name = "runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent", fn = runtime_task8_main_menu_exit_cleans_registry_checkpoint_and_intent }

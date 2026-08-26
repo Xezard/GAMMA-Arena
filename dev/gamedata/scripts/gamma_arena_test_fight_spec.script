@@ -11,6 +11,9 @@ end
 
 local function catalog()
     return {
+        schema_version = 9,
+        revision = 10,
+        generator_version = 10,
         fingerprint = "ga-catalog-v9-1234abcd",
         max_physical_items_per_participant = 256,
         items = {
@@ -314,6 +317,29 @@ local function valid_spec()
     return result.value
 end
 
+local function catalog_identity_is_authoritative_for_canonicalization_and_validation()
+    local cases = {
+        { name = "schema version", mutate = function(cat) cat.schema_version = 8 end },
+        { name = "revision", mutate = function(cat) cat.revision = 9 end },
+        { name = "generator version", mutate = function(cat) cat.generator_version = 9 end },
+        { name = "fingerprint domain", mutate = function(cat) cat.fingerprint = "foreign-catalog-1234abcd" end }
+    }
+    for _, case in ipairs(cases) do
+        local cat, id = catalog(), identity()
+        case.mutate(cat)
+        id.catalog_fingerprint = cat.fingerprint
+        local canonical = gamma_arena_fight_spec.canonicalize(item_draft(), id, cat, layout())
+        gamma_arena_test_assert.is_false(canonical.ok, "canonicalization rejects wrong catalog " .. case.name)
+        gamma_arena_test_assert.equals(canonical.error.code, "GA_FIGHT_SPEC_CATALOG", "canonicalization classifies wrong catalog " .. case.name)
+
+        local source = valid_spec()
+        source.identity.catalog_fingerprint = cat.fingerprint
+        local validated = gamma_arena_fight_validator_v8.validate(source, cat, layout())
+        gamma_arena_test_assert.is_false(validated.ok, "strict validation rejects wrong catalog " .. case.name .. " beyond fingerprint self-equality")
+        gamma_arena_test_assert.equals(validated.error.code, "GA_FIGHTSPEC_CATALOG_INVALID", "strict validation classifies wrong catalog " .. case.name)
+    end
+end
+
 local function two_opponent_spec()
     local draft = item_draft()
     local second = clone(draft.opponents[1])
@@ -369,14 +395,14 @@ local function validator_accepts_valid_v8_and_returns_immutable_copy()
         gamma_arena_fight_validator_v8.validate(valid_spec(), optional_helmet_metadata, layout()).ok,
         "outfit without helmet metadata remains valid when no helmet is selected")
 
-    local runtime = { effective_profile = function() return { class = "AI_STL_S", community = "stalker" } end }
+    local runtime = { effective_profile = function() return { class = "AI_STL_S", community = "arena_enemy" } end }
     gamma_arena_test_assert.is_true(
         gamma_arena_fight_validator_v8.validate(valid_spec(), catalog(), layout(), runtime).ok,
-        "optional runtime confirms the exact effective profile community")
-    runtime.effective_profile = function() return { class = "AI_STL_S", community = "bandit" } end
+        "optional runtime confirms the isolated effective profile community")
+    runtime.effective_profile = function() return { class = "AI_STL_S", community = "stalker" } end
     gamma_arena_test_assert.is_false(
         gamma_arena_fight_validator_v8.validate(valid_spec(), catalog(), layout(), runtime).ok,
-        "optional runtime rejects a mismatched effective profile community")
+        "optional runtime rejects the source faction as an effective community")
 end
 
 local function validator_enforces_per_participant_physical_item_cap()
@@ -605,6 +631,7 @@ function run(run_case_fn)
         { name = "fight_spec_binds_identity_layout_and_dense_arrays", fn = fight_spec_binds_identity_layout_and_dense_arrays },
         { name = "fight_spec_rejects_invalid_resolved_layout_identity_fields", fn = fight_spec_rejects_invalid_resolved_layout_identity_fields },
         { name = "fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo", fn = fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo },
+        { name = "fight_spec_catalog_identity_is_authoritative_for_canonicalization_and_validation", fn = catalog_identity_is_authoritative_for_canonicalization_and_validation },
         { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable },
         { name = "fight_validator_v8_accepts_valid_and_returns_immutable_copy", fn = validator_accepts_valid_v8_and_returns_immutable_copy },
         { name = "fight_validator_v8_enforces_per_participant_physical_item_cap", fn = validator_enforces_per_participant_physical_item_cap },
