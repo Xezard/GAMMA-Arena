@@ -8,6 +8,7 @@ $fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v8.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
+$customCatalogPath = Join-Path $repoRoot 'tests\fixtures\custom-catalog-v1.json'
 
 function Read-GaSimpleLtx {
     param([string]$Path)
@@ -32,6 +33,7 @@ function Read-GaSimpleLtx {
 $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
+$customCatalog = Get-Content -LiteralPath $customCatalogPath -Raw | ConvertFrom-Json
 if ([int]$catalog.meta.schema_version -ne 9 -or [int]$catalog.meta.revision -ne 10 -or [int]$catalog.meta.generator_version -ne 10 -or
     [int]$difficulties.meta.schema_version -ne 4 -or [int]$difficulties.meta.revision -ne 5 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2) {
@@ -378,6 +380,10 @@ function Get-GaContentHash([string]$Payload) {
 }
 $catalogFingerprint='ga-catalog-v9-'+('{0:x8}' -f (Get-GaDerivedSeed @('ga-catalog-v9',[int]$catalog.meta.schema_version,[int]$catalog.meta.revision,[int]$catalog.meta.generator_version)))
 $rankBands=@{novice=@(0,9999);trainee=@(10000,19999);experienced=@(20000,29999);veteran=@(40000,49999)}
+if ([int]$customCatalog.schema_version -ne 1 -or $customCatalog.catalog_fingerprint -cne $catalogFingerprint -or
+    $customCatalog.layout_id -cne 'rostok_arena_v1' -or $customCatalog.faction.runtime_community -cne 'arena_enemy') {
+    throw 'Custom reference catalog identity differs from the universal v8 oracle.'
+}
 
 function ConvertTo-GaFightEncoding($Fight,[bool]$IncludeChecksum) {
     $identity=$Fight.Identity
@@ -439,6 +445,153 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
     return ConvertTo-GaFightEncoding $fight $true
 }
 
+function New-GaCustomStream([int64]$SessionSeed,[int]$FightIndex,[int]$Slot,[string]$RankId,[string]$Domain) {
+    return New-GaRng @('custom-v1',$SessionSeed,$FightIndex,$customCatalog.catalog_fingerprint,$customCatalog.faction.id,$Slot,$RankId,$Domain)
+}
+
+function Get-GaCustomActorCase([string]$Name) {
+    $property = $customCatalog.actor_cases.PSObject.Properties[$Name]
+    if ($null -eq $property) { throw "Unknown custom actor oracle case $Name." }
+    return @($property.Value)
+}
+
+function Get-GaCustomItem([string]$Section) {
+    $property = $customCatalog.items.PSObject.Properties[$Section]
+    if ($null -eq $property) { throw "Unknown custom oracle item $Section." }
+    return $property.Value
+}
+
+function Test-GaCustomConfig([array]$RankIds,[array]$ActorEntries) {
+    if ($RankIds.Count -lt 1 -or $RankIds.Count -gt 10 -or $ActorEntries.Count -lt 1 -or $ActorEntries.Count -gt 64) {
+        throw 'Custom oracle config exceeds roster or entry bounds.'
+    }
+    $budget = 600
+    foreach ($rankId in $RankIds) {
+        $rank = $customCatalog.ranks.PSObject.Properties[$rankId].Value
+        if ($null -eq $rank) { throw "Unknown custom oracle rank $rankId." }
+        $budget += [int]$rank.threat
+    }
+    $points = 0; $weight = 0; $physical = 0; $grenadeOrdinal = 0; $carryLimit = [int]$customCatalog.base_carry_weight_mg
+    $seen = @{}; $slots = @{}; $weapons = @(); $ammo = @{}; $healing = $false
+    foreach ($entry in $ActorEntries) {
+        if ($seen.ContainsKey($entry.section) -or [int]$entry.quantity -lt 1) { throw 'Custom oracle actor entries must be distinct positive quantities.' }
+        $seen[$entry.section] = $true
+        $item = Get-GaCustomItem $entry.section
+        $quantity = [int]$entry.quantity
+        $points += [int]$item.price * $quantity
+        $weight += [int]$item.weight_mg * $quantity
+        $physical += $quantity
+        if ($item.category -eq 'outfit') { $carryLimit += [int]$item.carry_bonus_mg }
+        if ($item.category -eq 'grenade') {
+            $grenadeOrdinal++
+            if ($quantity -ne 1 -or $grenadeOrdinal -gt 2) { throw 'Custom oracle grenade selection is invalid.' }
+            if ($grenadeOrdinal -eq 2) { $points += [int]$item.price }
+        }
+        if ($entry.equipped_slot) {
+            if ($slots.ContainsKey($entry.equipped_slot)) { throw 'Custom oracle equipped slot is duplicated.' }
+            $slots[$entry.equipped_slot] = $entry.section
+        }
+        if ($item.category -eq 'weapon') { $weapons += $item }
+        if ($item.category -eq 'ammo') { $ammo[$entry.section] = $true }
+        if ($item.category -eq 'medicine' -and $item.healing) { $healing = $true }
+    }
+    if ($physical -gt 256 -or $points -gt $budget -or $weight -gt $carryLimit -or -not $healing -or
+        -not $slots.ContainsKey('outfit') -or -not $slots.ContainsKey('knife') -or
+        (-not $slots.ContainsKey('weapon_1') -and -not $slots.ContainsKey('weapon_2'))) {
+        throw 'Custom oracle actor budget, weight, physical, healing, or equipment validation failed.'
+    }
+    foreach ($weapon in $weapons) {
+        if (@($weapon.ammo_sections | Where-Object { $ammo.ContainsKey($_) }).Count -eq 0) { throw 'Custom oracle weapon lacks compatible selected ammunition.' }
+    }
+    return [pscustomobject]@{Budget=$budget;Points=$points;Weight=$weight;CarryLimit=$carryLimit}
+}
+
+function Get-GaCustomEquipment([int64]$SessionSeed,[int]$FightIndex,[int]$Slot,[string]$RankId) {
+    $rank = $customCatalog.ranks.PSObject.Properties[$RankId].Value
+    $budget = [math]::Max(7,[math]::Ceiling([int]$rank.threat / 20.0))
+    $poolProperty = $customCatalog.equipment.equipment_pools.PSObject.Properties[$RankId]
+    if ($null -eq $poolProperty) { throw "Missing exact custom equipment pool for $RankId." }
+    $pool = $poolProperty.Value
+    $allowed = @{}; foreach ($section in @($pool.primary_weapons)+@($pool.secondary_weapons)) { $allowed[$section]=$true }
+    $candidates = @()
+    foreach ($weapon in $customCatalog.equipment.weapons) {
+        if (-not $allowed.ContainsKey($weapon.section)) { continue }
+        $ammoCost = [int]$customCatalog.equipment.ammo_costs.PSObject.Properties[$weapon.ammo].Value
+        foreach ($outfit in $customCatalog.equipment.outfits) {
+            foreach ($boxes in ([int]$weapon.ammo_box_min)..([int]$weapon.ammo_box_max)) {
+                $cost = [int]$weapon.cost + $ammoCost * $boxes + [int]$outfit.cost
+                if ($cost -le $budget) {
+                    foreach ($knife in $customCatalog.equipment.knives) {
+                        $candidates += [pscustomobject]@{Cost=$cost;Weapon=$weapon.section;WeaponSlot=[int]$weapon.slot;Ammo=$weapon.ammo;AmmoBoxes=$boxes;Outfit=$outfit.section;Knife=$knife}
+                    }
+                }
+            }
+        }
+    }
+    $candidates = @($candidates | Sort-Object Cost,Weapon,Outfit,AmmoBoxes,Knife)
+    if ($candidates.Count -eq 0) { throw "No exact custom equipment completion for $RankId." }
+    return Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $Slot $RankId 'equipment') $candidates
+}
+
+function Add-GaCustomMedical([int64]$SessionSeed,[int]$FightIndex,[array]$Ranks,[array]$Records) {
+    $streams = @(); for ($zero=0; $zero -lt $Ranks.Count; $zero++) { $streams += New-GaCustomStream $SessionSeed $FightIndex ($zero+1) $Ranks[$zero] 'medicine' }
+    $allocations = @(); for ($zero=0; $zero -lt $Ranks.Count; $zero++) { $allocations += [pscustomobject]@{Sections=[Collections.Generic.List[string]]::new()} }
+    if ($Ranks.Count -eq 1) {
+        $allocations[0].Sections.Add($(if ((Get-GaNextInt $streams[0] 1 2) -eq 1) {'bandage'} else {'medkit'}))
+        return $allocations
+    }
+    $medkitCap = [math]::Min([math]::Floor($Ranks.Count/2),[math]::Ceiling($Ranks.Count/4))
+    $medkitCount = Get-GaNextInt $streams[0] 1 $medkitCap
+    $bandageCount = $Ranks.Count - 2*$medkitCount
+    foreach ($pair in @([pscustomobject]@{Section='medkit';Count=$medkitCount},[pscustomobject]@{Section='bandage';Count=$bandageCount})) {
+        for ($itemIndex=1; $itemIndex -le $pair.Count; $itemIndex++) {
+            $eligible=@();$total=0
+            for ($zero=0; $zero -lt $Records.Count; $zero++) {
+                if ($allocations[$zero].Sections -contains $pair.Section) { continue }
+                $weight=$(if($Records[$zero].Role-eq'leader'){4}elseif($Records[$zero].Role-eq'primary'){2}else{1})
+                $total += $weight;$eligible += [pscustomobject]@{Index=$zero;Weight=$weight}
+            }
+            $rng=$streams[(($itemIndex-1)%$streams.Count)]
+            $draw=Get-GaNextInt $rng 1 $total;$cumulative=0;$recipient=-1
+            foreach($candidate in $eligible){$cumulative+=$candidate.Weight;if($draw-le$cumulative){$recipient=$candidate.Index;break}}
+            if($recipient-lt0){throw 'Custom oracle medicine recipient draw exhausted its range.'}
+            $allocations[$recipient].Sections.Add($pair.Section)
+        }
+    }
+    return $allocations
+}
+
+function New-GaCustomEncodedFight([int64]$SessionSeed,[int]$FightIndex,[array]$RankIds,[string]$ActorCase) {
+    $actorEntries = Get-GaCustomActorCase $ActorCase
+    $null = Test-GaCustomConfig $RankIds $actorEntries
+    $available = [Collections.Generic.List[object]]::new(); foreach($slot in $resolvedSlots){$available.Add($slot)}
+    $records=@()
+    for($zero=0;$zero-lt$RankIds.Count;$zero++){
+        $slot=$zero+1;$rankId=$RankIds[$zero];$rank=$customCatalog.ranks.PSObject.Properties[$rankId].Value
+        $profile=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'profile') @($customCatalog.profiles.PSObject.Properties[$rankId].Value)
+        $rankValue=Get-GaNextInt (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'numeric_rank') ([int]$rank.minimum) ([int]$rank.maximum)
+        $gear=Get-GaCustomEquipment $SessionSeed $FightIndex $slot $rankId
+        $physical=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'spawn') @($available)
+        $null=$available.Remove($physical)
+        $route=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'route') $routes
+        $grenades=@();if((Get-GaNextInt (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'enemy_grenade_presence') 1 100)-le10){$grenades+=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'enemy_grenade_section') @($customCatalog.npc_grenades)}
+        $records += [pscustomobject]@{Slot=$slot;RankId=$rankId;RankValue=$rankValue;Profile=$profile;Role=$(if($slot-eq1){'leader'}else{'primary'});Gear=$gear;Physical=$physical;Route=$route;Grenades=$grenades}
+    }
+    $medical=Add-GaCustomMedical $SessionSeed $FightIndex $RankIds $records
+    $opponents=@()
+    for($zero=0;$zero-lt$records.Count;$zero++){
+        $record=$records[$zero];$items=@{}
+        Add-GaCanonicalItem $items $record.Gear.Outfit 1 'outfit' 'outfit';Add-GaCanonicalItem $items $record.Gear.Knife 1 'knife' 'knife';Add-GaCanonicalItem $items $record.Gear.Weapon 1 "weapon_$($record.Gear.WeaponSlot)" 'weapon';Add-GaCanonicalItem $items $record.Gear.Ammo $record.Gear.AmmoBoxes $null 'ammo'
+        foreach($section in $medical[$zero].Sections){Add-GaCanonicalItem $items $section 1 $null 'medicine'};foreach($section in $record.Grenades){Add-GaCanonicalItem $items $section 1 $null 'grenade'}
+        $opponents += [pscustomobject]@{Slot=$record.Slot;Faction=$customCatalog.faction.community;RankId=$record.RankId;RankValue=$record.RankValue;Profile=$record.Profile;Role=$record.Role;Physical=$record.Physical;Route=$record.Route;Items=Get-GaCanonicalItems $items}
+    }
+    $actorItems=@{}
+    foreach($entry in $actorEntries){$definition=Get-GaCustomItem $entry.section;Add-GaCanonicalItem $actorItems $entry.section ([int]$entry.quantity) $entry.equipped_slot $definition.category}
+    $fight=[pscustomobject]@{Identity=[pscustomobject]@{SessionSeed=$SessionSeed;FightIndex=$FightIndex;ContentHash=$null;FightId=$null};ActorItems=Get-GaCanonicalItems $actorItems;Opponents=$opponents}
+    $payload=ConvertTo-GaFightEncoding $fight $false;$fight.Identity.ContentHash=Get-GaContentHash $payload;$fight.Identity.FightId='ga8-'+$fight.Identity.ContentHash
+    return ConvertTo-GaFightEncoding $fight $true
+}
+
 for($seed=0;$seed-lt 10000;$seed++){
     $id=@('rookie','stalker','veteran','master')[$seed%4];$difficulty=$difficultyCatalog[$id]
     $request=[pscustomobject]@{SessionSeed=(ConvertTo-GaNormalizedSeed $seed);ModeId='skirmish';DifficultyId=$id;LayoutId='rostok_arena_v1'}
@@ -454,13 +607,25 @@ $requests=@(
     [pscustomobject]@{Seed=[int64]4294967295;Difficulty='master';Fight=31}
 )
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
+$customRequests=@(
+    [pscustomobject]@{Name='one_novice';Seed=[int64]101;Fight=0;Ranks=@('novice');ActorCase='one_grenade'},
+    [pscustomobject]@{Name='mixed_eight';Seed=[int64]202;Fight=7;Ranks=@('novice','trainee','experienced','professional','veteran','expert','master','legend');ActorCase='arsenal'},
+    [pscustomobject]@{Name='ten_legends_forward';Seed=[int64]303;Fight=31;Ranks=@('legend')*10;ActorCase='two_grenades_forward'},
+    [pscustomobject]@{Name='ten_legends_reverse';Seed=[int64]303;Fight=31;Ranks=@('legend')*10;ActorCase='two_grenades_reverse'}
+)
+$customEncodings=@{}
+foreach($request in $customRequests){$encoding=New-GaCustomEncodedFight $request.Seed $request.Fight $request.Ranks $request.ActorCase;$customEncodings[$request.Name]=$encoding;$expected+="recipe=custom,case=$($request.Name),seed=$($request.Seed),fight=$($request.Fight),stable_encode=$encoding"}
+$tenLegends=@('legend')*10
+$forwardTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_forward')
+$reverseTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_reverse')
+if($forwardTotals.Points-eq$reverseTotals.Points-or$customEncodings.ten_legends_forward-cne$customEncodings.ten_legends_reverse){throw 'Grenade order must affect pre-canonical points but not equal physical FightSpec bytes.'}
 if($Verify){
     if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v8 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
     if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v8 reference oracle.'}
     Write-Host 'PASS: golden reference oracle matches fixture'
 }elseif($Update){
-    $lines = @('# Gamma Arena FightSpec v8 deterministic golden encodings.') + $expected
+    $lines = @('# Gamma Arena FightSpec v8 deterministic random and custom golden encodings.') + $expected
     [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
     Write-Host "Updated golden fixture: $fixturePath"
 }else{$expected}

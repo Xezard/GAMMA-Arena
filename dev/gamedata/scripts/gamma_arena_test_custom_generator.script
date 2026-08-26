@@ -1,0 +1,334 @@
+local RANK_IDS = {
+    "novice", "trainee", "experienced", "professional",
+    "veteran", "expert", "master", "legend"
+}
+local THREATS = { 100, 120, 150, 180, 220, 270, 330, 400 }
+
+local function clone(value)
+    if type(value) ~= "table" then return value end
+    local copied = {}
+    for key, child in pairs(value) do copied[key] = clone(child) end
+    return copied
+end
+
+local function item(section, category, price, weight_mg, extra)
+    local value = {
+        section = section, category = category, price = price, weight_mg = weight_mg,
+        ammo_sections = {}, healing = false, helmet_allowed = true, carry_bonus_mg = 0
+    }
+    for key, child in pairs(extra or {}) do value[key] = child end
+    return value
+end
+
+local function catalog()
+    local values = {
+        schema_version = 9, revision = 10, generator_version = 10,
+        fingerprint = "ga-catalog-v9-customgen1", selection_mode = "staged",
+        base_budget = 600, max_entries = 64, max_physical_items_per_participant = 256,
+        max_selected_grenades = 2, max_quantity_per_grenade = 1,
+        second_grenade_price_multiplier = 2, base_carry_weight = 50000,
+        rank_ids = clone(RANK_IDS), ranks = {}, faction_ids = { "stalker" }, factions = {},
+        layouts = { rostok_arena_v1 = { id = "rostok_arena_v1", version = 2, level = "l05_bar", virtual_capacity = 10 } },
+        items = {}, ammo = {}, weapon_list = {}, primary_weapon_list = {}, secondary_weapon_list = {},
+        outfit_list = {}, knife_list = {}, medical_items = {}, medical_item_list = {},
+        npc_grenade_list = {}, actor_grenade_list = {}, consumables = {},
+        difficulties = {
+            stalker = {
+                tier = 2, enemy_min = 2, enemy_max = 2, enemy_total_budget = 30,
+                player_gear_budget = 10, player_medical_budget = 5, primary_share_percent = 50,
+                player_weapon_weights = { w_pistol = 50, w_smg = 0, w_shotgun = 20, w_rifle = 30, w_sniper = 0 },
+                player_armor_weights = { light = 100, medium = 0, scientific = 0, heavy = 0, powered_exo = 0 },
+                medical_weights = { bleed = 20, health = 80, boost = 0, rare = 0 }
+            }
+        },
+        difficulty_ids = { "stalker" }
+    }
+    local weapon_defs = {
+        { section = "wpn_pm", ammo = "ammo_9x18", cost = 2, kind = "w_pistol", slot = 1, magazine_size = 8 },
+        { section = "wpn_rifle", ammo = "ammo_545", cost = 4, kind = "w_rifle", slot = 2, magazine_size = 30 },
+        { section = "wpn_shotgun", ammo = "ammo_12", cost = 5, kind = "w_shotgun", slot = 2, magazine_size = 8 }
+    }
+    for _, definition in ipairs(weapon_defs) do
+        definition.ammo_box_min, definition.ammo_box_max = 1, 2
+        definition.ammo_variants = { { section = definition.ammo, category = "standard", box_size = 20 } }
+        values.weapon_list[#values.weapon_list + 1] = definition
+        local target = definition.slot == 1 and values.secondary_weapon_list or values.primary_weapon_list
+        target[#target + 1] = definition
+        values.items[definition.section] = item(definition.section, "weapon", 30, 3000, {
+            ltx_slot = definition.slot, ammo_sections = { definition.ammo }
+        })
+    end
+    for _, section in ipairs({ "ammo_9x18", "ammo_545", "ammo_12" }) do
+        values.ammo[section] = { section = section, cost = 1 }
+        values.items[section] = item(section, "ammo", 5, 100, { box_size = 20 })
+    end
+    for _, definition in ipairs({
+        { section = "outfit_light", cost = 1, armor_class = "light" },
+        { section = "outfit_field", cost = 2, armor_class = "light" }
+    }) do
+        values.outfit_list[#values.outfit_list + 1] = definition
+        values.items[definition.section] = item(definition.section, "outfit", 20, 5000, { carry_bonus_mg = 10000 })
+    end
+    values.items.helmet_open = item("helmet_open", "helmet", 10, 1000)
+    for _, section in ipairs({ "wpn_knife", "wpn_knife2" }) do
+        values.knife_list[#values.knife_list + 1] = { section = section }
+        values.items[section] = item(section, "knife", 5, 500)
+    end
+    for _, definition in ipairs({
+        { section = "bandage", category = "bleed", actor_cost = 1, npc_cost = 1, min_tier = 1, max_count = 2 },
+        { section = "medkit", category = "health", actor_cost = 2, npc_cost = 2, min_tier = 1, max_count = 1 }
+    }) do
+        values.medical_items[definition.section] = definition
+        values.medical_item_list[#values.medical_item_list + 1] = definition
+        values.items[definition.section] = item(definition.section, "medicine", 10, 100, { healing = definition.section == "medkit" })
+    end
+    values.consumables.bandage = { section = "bandage", cost = 1 }
+    values.consumables.medkit = { section = "medkit", cost = 2 }
+    for _, section in ipairs({ "grenade_f1", "grenade_rgd5", "grenade_gd05" }) do
+        local definition = { section = section }
+        values.npc_grenade_list[#values.npc_grenade_list + 1] = definition
+        values.actor_grenade_list[#values.actor_grenade_list + 1] = definition
+        values.items[section] = item(section, "grenade", 10, 400)
+    end
+    local faction = { id = "stalker", community = "stalker", ranks = {} }
+    values.factions.stalker = faction
+    values.profile_list, values.profiles_by_faction = {}, { stalker = {} }
+    for index, rank_id in ipairs(RANK_IDS) do
+        local minimum, maximum = (index - 1) * 100, index * 100 - 1
+        local pool_index = ((index - 1) % 3) + 1
+        local primary_weapons = pool_index == 2 and { "wpn_rifle" }
+            or (pool_index == 3 and { "wpn_shotgun" } or {})
+        local secondary_weapons = pool_index == 1 and { "wpn_pm" } or {}
+        values.ranks[rank_id] = { id = rank_id, minimum = minimum, maximum = maximum, threat = THREATS[index] }
+        local record = {
+            id = rank_id, alias = "gamma_arena_stalker_" .. rank_id,
+            profile_section = "sim_default_stalker_" .. tostring(index - 1),
+            community = "stalker", runtime_community = "arena_enemy",
+            minimum = minimum, maximum = maximum, threat = THREATS[index],
+            loadout_section = "stalker_" .. rank_id,
+            primary_weapons = primary_weapons, secondary_weapons = secondary_weapons
+        }
+        faction.ranks[rank_id] = record
+        local profile = {
+            section = record.alias, cost = 1, faction = "stalker", community = "stalker",
+            runtime_community = "arena_enemy", rank = rank_id
+        }
+        values.profile_list[#values.profile_list + 1] = profile
+        values.profiles_by_faction.stalker[#values.profiles_by_faction.stalker + 1] = profile
+    end
+    return values
+end
+
+local function layout(capacity)
+    local routes = { "route_1", "route_2", "route_3", "route_4" }
+    local value = {
+        id = "rostok_arena_v1", version = 2, level = "l05_bar",
+        actor_spawn_path = "actor_spawn", actor_look_path = "actor_look",
+        tactical_routes = routes, capacity = capacity or 10, opponent_spawn_slots = {}
+    }
+    for index = 1, value.capacity do
+        local route = routes[((index - 1) % #routes) + 1]
+        value.opponent_spawn_slots[index] = {
+            id = "slot_" .. tostring(index), base_route = route, native = index <= 4,
+            position = { x = index * 3, y = 0, z = index % 2 == 0 and 2 or -2 },
+            level_vertex_id = 100 + index, game_vertex_id = 200 + index
+        }
+    end
+    return value
+end
+
+local function actor_items()
+    return {
+        { section = "outfit_field", quantity = 1, equipped_slot = "outfit" },
+        { section = "helmet_open", quantity = 1, equipped_slot = "helmet" },
+        { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+        { section = "wpn_pm", quantity = 1, equipped_slot = "weapon_1" },
+        { section = "wpn_rifle", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "wpn_shotgun", quantity = 1 },
+        { section = "ammo_9x18", quantity = 2 },
+        { section = "ammo_545", quantity = 3 },
+        { section = "ammo_12", quantity = 2 },
+        { section = "medkit", quantity = 1 },
+        { section = "grenade_f1", quantity = 1 },
+        { section = "grenade_rgd5", quantity = 1 }
+    }
+end
+
+local function session(rank_ids, seed)
+    local roster = {}
+    for index, rank_id in ipairs(rank_ids) do roster[index] = { rank = rank_id } end
+    return {
+        schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+        session_seed = seed or 12345, catalog_fingerprint = "ga-catalog-v9-customgen1",
+        custom_config = {
+            schema_version = 1, faction = "stalker", roster = roster,
+            actor_items = actor_items(), catalog_fingerprint = "ga-catalog-v9-customgen1"
+        }
+    }
+end
+
+local function stable_draft(value)
+    local parts = { value.arena.layout_id, value.actor.spawn_path }
+    for _, entry in ipairs(value.actor.loadout.items) do
+        parts[#parts + 1] = table.concat({ entry.section, entry.quantity, entry.equipped_slot or "" }, ":")
+    end
+    for _, opponent in ipairs(value.opponents) do
+        parts[#parts + 1] = table.concat({ opponent.slot, opponent.faction, opponent.rank.id,
+            opponent.rank.value, opponent.profile, opponent.spawn_slot_id, opponent.tactical_route }, ":")
+        for _, entry in ipairs(opponent.loadout.items) do
+            parts[#parts + 1] = table.concat({ entry.section, entry.quantity, entry.equipped_slot or "" }, ":")
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+local function key_set(value)
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys)
+    return table.concat(keys, ",")
+end
+
+local function find_item(items, section)
+    for _, entry in ipairs(items) do if entry.section == section then return entry end end
+end
+
+local function item_signature(items, categories)
+    local parts = {}
+    for _, entry in ipairs(items) do
+        if categories[entry.section] then
+            parts[#parts + 1] = table.concat({ entry.section, entry.quantity, entry.equipped_slot or "" }, ":")
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+local function ordered_items_signature(items)
+    local parts = {}
+    for _, entry in ipairs(items) do
+        parts[#parts + 1] = table.concat({ entry.section, entry.quantity, entry.equipped_slot or "" }, ":")
+    end
+    return table.concat(parts, "|")
+end
+
+local function contains(values, expected)
+    for _, value in ipairs(values or {}) do if value == expected then return true end end
+    return false
+end
+
+local function custom_generation_is_deterministic_and_exact()
+    local snapshot, arena = catalog(), layout()
+    local current = session({ "expert", "master", "legend" })
+    local first = gamma_arena_custom_generator.build_draft(current, 7, snapshot, arena)
+    local second = gamma_arena_custom_generator.build_draft(current, 7, snapshot, arena)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "same custom inputs generate")
+    gamma_arena_test_assert.equals(stable_draft(first.value), stable_draft(second.value), "same custom inputs produce identical drafts")
+    for index, rank_id in ipairs({ "expert", "master", "legend" }) do
+        local opponent = first.value.opponents[index]
+        gamma_arena_test_assert.equals(opponent.faction, "stalker", "source faction is retained")
+        gamma_arena_test_assert.equals(opponent.rank.id, rank_id, "exact named rank is retained")
+        gamma_arena_test_assert.equals(opponent.profile, snapshot.factions.stalker.ranks[rank_id].alias, "exact profile alias")
+        gamma_arena_test_assert.is_true(opponent.rank.value >= snapshot.ranks[rank_id].minimum and opponent.rank.value <= snapshot.ranks[rank_id].maximum, "numeric rank is in the exact band")
+        gamma_arena_test_assert.equals(snapshot.factions.stalker.ranks[rank_id].runtime_community, "arena_enemy", "runtime community remains isolated")
+        local rank_pool = snapshot.factions.stalker.ranks[rank_id]
+        for _, entry in ipairs(opponent.loadout.items) do
+            if snapshot.items[entry.section].category == "weapon" then
+                gamma_arena_test_assert.is_true(
+                    contains(rank_pool.primary_weapons, entry.section) or contains(rank_pool.secondary_weapons, entry.section),
+                    "enemy weapon comes from exact faction-rank pool")
+            end
+        end
+    end
+    gamma_arena_test_assert.equals(#first.value.actor.loadout.items, #current.custom_config.actor_items, "actor item count is exact")
+    current.custom_config.actor_items[1].section = "corrupted_after_generation"
+    gamma_arena_test_assert.equals(first.value.actor.loadout.items[1].section, "outfit_field", "actor template is deep copied")
+end
+
+local function fight_index_rerolls_only_enemy_random_fields()
+    local snapshot, arena = catalog(), layout()
+    local current = session(RANK_IDS, 987654)
+    local changed = { rank = false, equipment = false, medicine = false, grenade = false, spawn = false, route = false }
+    local baseline = gamma_arena_custom_generator.build_draft(current, 0, snapshot, arena)
+    gamma_arena_test_assert.is_true(baseline.ok, "baseline custom draft")
+    local actor_signature = ordered_items_signature(baseline.value.actor.loadout.items)
+    for fight_index = 1, 64 do
+        local generated = gamma_arena_custom_generator.build_draft(current, fight_index, snapshot, arena)
+        gamma_arena_test_assert.is_true(generated.ok, "reroll custom draft")
+        gamma_arena_test_assert.equals(ordered_items_signature(generated.value.actor.loadout.items), actor_signature, "complete ordered actor template never rerolls")
+        for index, opponent in ipairs(generated.value.opponents) do
+            local prior = baseline.value.opponents[index]
+            gamma_arena_test_assert.equals(opponent.faction, prior.faction, "faction never rerolls")
+            gamma_arena_test_assert.equals(opponent.rank.id, prior.rank.id, "named rank never rerolls")
+            if opponent.rank.value ~= prior.rank.value then changed.rank = true end
+            local equipment_sections = {
+                outfit_light = true, outfit_field = true, wpn_knife = true, wpn_knife2 = true,
+                wpn_pm = true, wpn_rifle = true, wpn_shotgun = true,
+                ammo_9x18 = true, ammo_545 = true, ammo_12 = true
+            }
+            if item_signature(opponent.loadout.items, equipment_sections) ~= item_signature(prior.loadout.items, equipment_sections) then changed.equipment = true end
+            local bandage_now = find_item(opponent.loadout.items, "bandage") ~= nil
+            local bandage_prior = find_item(prior.loadout.items, "bandage") ~= nil
+            local medkit_now = find_item(opponent.loadout.items, "medkit") ~= nil
+            local medkit_prior = find_item(prior.loadout.items, "medkit") ~= nil
+            if bandage_now ~= bandage_prior or medkit_now ~= medkit_prior then changed.medicine = true end
+            local grenade_now = find_item(opponent.loadout.items, "grenade_f1") or find_item(opponent.loadout.items, "grenade_rgd5") or find_item(opponent.loadout.items, "grenade_gd05")
+            local grenade_prior = find_item(prior.loadout.items, "grenade_f1") or find_item(prior.loadout.items, "grenade_rgd5") or find_item(prior.loadout.items, "grenade_gd05")
+            if (grenade_now and grenade_now.section or "") ~= (grenade_prior and grenade_prior.section or "") then changed.grenade = true end
+            if opponent.spawn_slot_id ~= prior.spawn_slot_id then changed.spawn = true end
+            if opponent.tactical_route ~= prior.tactical_route then changed.route = true end
+        end
+    end
+    for field, observed in pairs(changed) do gamma_arena_test_assert.is_true(observed, "fight index rerolls enemy " .. field) end
+end
+
+local function builder_erases_recipe_provenance_and_accepts_carried_weapons()
+    local snapshot, arena = catalog(), layout()
+    local custom = gamma_arena_fight_builder.generate(session({ "legend" }, 321), 2, snapshot, arena)
+    gamma_arena_test_assert.is_true(custom.ok, "custom builder emits strict v8")
+    gamma_arena_test_assert.equals(key_set(custom.value), "actor,arena,identity,opponents,schema_version", "custom root keys are universal")
+    gamma_arena_test_assert.equals(key_set(custom.value.actor), "items,look_path,spawn_path", "custom actor keys are universal")
+    gamma_arena_test_assert.equals(key_set(custom.value.opponents[1]), "faction,items,profile,rank,role,slot,spawn,spawn_slot_id,tactical_route", "custom opponent keys are universal")
+    gamma_arena_test_assert.is_true(find_item(custom.value.actor.items, "wpn_shotgun") ~= nil, "carried weapon survives canonicalization")
+    for _, forbidden in ipairs({ "mode_id", "difficulty_id", "price", "budget", "custom_config", "generation_recipe" }) do
+        gamma_arena_test_assert.equals(custom.value[forbidden], nil, "custom FightSpec erases " .. forbidden)
+    end
+
+    local random = gamma_arena_fight_builder.generate({
+        session_seed = 321, mode_id = "skirmish", difficulty_id = "stalker",
+        layout_id = "rostok_arena_v1", generation_recipe = "random"
+    }, 2, snapshot, arena)
+    gamma_arena_test_assert.is_true(random.ok, "random builder still emits v8")
+    gamma_arena_test_assert.equals(key_set(random.value), key_set(custom.value), "random and custom root key sets match")
+    gamma_arena_test_assert.equals(key_set(random.value.actor), key_set(custom.value.actor), "random and custom actor key sets match")
+    gamma_arena_test_assert.equals(key_set(random.value.opponents[1]), key_set(custom.value.opponents[1]), "random and custom opponent key sets match")
+end
+
+local function custom_generation_fails_closed_for_capacity_and_corruption()
+    local snapshot = catalog()
+    local over_capacity = gamma_arena_custom_generator.build_draft(session({ "novice", "legend" }), 0, snapshot, layout(1))
+    gamma_arena_test_assert.is_false(over_capacity.ok, "custom roster cannot exceed resolved capacity")
+
+    local corrupted = session({ "novice" })
+    corrupted.custom_config.actor_items[1].quantity = 257
+    local invalid = gamma_arena_custom_generator.build_draft(corrupted, 0, snapshot, layout())
+    gamma_arena_test_assert.is_false(invalid.ok, "corrupted actor template fails closed")
+
+    local missing_pool = catalog()
+    missing_pool.factions.stalker.ranks.novice.primary_weapons = {}
+    missing_pool.factions.stalker.ranks.novice.secondary_weapons = {}
+    invalid = gamma_arena_custom_generator.build_draft(session({ "novice" }), 0, missing_pool, layout())
+    gamma_arena_test_assert.is_false(invalid.ok, "empty exact rank equipment pool fails closed")
+end
+
+local cases = {
+    { name = "custom_generation_is_deterministic_and_exact", fn = custom_generation_is_deterministic_and_exact },
+    { name = "custom_fight_index_rerolls_only_enemy_random_fields", fn = fight_index_rerolls_only_enemy_random_fields },
+    { name = "custom_builder_erases_recipe_provenance_and_accepts_carried_weapons", fn = builder_erases_recipe_provenance_and_accepts_carried_weapons },
+    { name = "custom_generation_fails_closed_for_capacity_and_corruption", fn = custom_generation_fails_closed_for_capacity_and_corruption }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end

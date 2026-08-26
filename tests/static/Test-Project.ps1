@@ -342,6 +342,58 @@ $Task9ItemCatalog = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\
 foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.max_entries = rank_catalog.max_entries')) {
     Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate custom rule field: $Marker"
 }
+
+$Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
+if ($Task10ArtifactsPresent) {
+$Task10CustomContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
+    [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v1.json'; Required = @('"schema_version"\s*:\s*1', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
+)
+foreach ($Contract in $Task10CustomContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Task 10 custom generator contract is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        if ($Contract.Namespace) {
+            $NamespacePattern = [regex]::Escape($Contract.Namespace)
+            Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Task 10 script must not create a self-named namespace table: $($Contract.Path)"
+        }
+        foreach ($Pattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $Pattern) "Task 10 marker is missing from $($Contract.Path): $Pattern"
+        }
+    }
+}
+$Task10Builder = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_builder.script') -Raw
+foreach ($Marker in @('gamma_arena_custom_generator.build_draft','generation_recipe','gamma_arena_fight_validator_v8.validate')) {
+    Assert-True ($Task10Builder -match [regex]::Escape($Marker)) "Task 10 builder dispatch is missing: $Marker"
+}
+$Task10Medical = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script') -Raw
+Assert-True ($Task10Medical -match '(?m)^function\s+allocate_custom_enemies\s*\(') 'Task 10 custom enemy medicine allocator is missing.'
+$Task10Domain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($Task10Domain -match 'gamma_arena_test_custom_generator\.run\s*\(\s*run_case_fn\s*\)') 'Task 10 custom generator tests must run from the Dev domain suite.'
+$Task10Oracle = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1') -Raw
+foreach ($Marker in @('custom-catalog-v1.json','New-GaCustomStream','Test-GaCustomConfig','Get-GaCustomEquipment','equipment_pools','Add-GaCustomMedical','New-GaCustomEncodedFight','one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
+    Assert-True ($Task10Oracle -match [regex]::Escape($Marker)) "Task 10 independent oracle is missing: $Marker"
+}
+Assert-True ($Task10Oracle -notmatch 'gamma_arena_(?:custom_)?generator\.script') 'Task 10 reference oracle must not read Lua generator source.'
+$Task10GoldenRows = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v8.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
+$Task10RandomRows = @($Task10GoldenRows | Where-Object { $_ -match '^seed=' })
+$Task10CustomRows = @($Task10GoldenRows | Where-Object { $_ -match '^recipe=custom,' })
+Assert-True ($Task10RandomRows.Count -eq 4) 'Task 10 sole v8 fixture must preserve exactly four random golden rows.'
+Assert-True ($Task10CustomRows.Count -eq 4) 'Task 10 sole v8 fixture must add exactly four custom golden rows.'
+foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
+    Assert-True (@($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') }).Count -eq 1) "Task 10 custom golden case is missing: $Name"
+}
+$Task10Forward = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_forward,' })[0]
+$Task10Reverse = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_reverse,' })[0]
+$Task10ForwardEncoding = $Task10Forward.Substring($Task10Forward.IndexOf('stable_encode=') + 14)
+$Task10ReverseEncoding = $Task10Reverse.Substring($Task10Reverse.IndexOf('stable_encode=') + 14)
+Assert-True ($Task10ForwardEncoding -ceq $Task10ReverseEncoding) 'Task 10 reversed two-grenade selections must canonicalize to identical physical v8 bytes.'
+foreach ($Forbidden in @('mode_id=','difficulty_id=','budget=','price=','custom_config=','generation_recipe=')) {
+    Assert-True (@($Task10GoldenRows | Where-Object { $_.Substring($_.IndexOf('stable_encode=') + 14).Contains($Forbidden) }).Count -eq 0) "Task 10 v8 golden encodings must erase $Forbidden"
+}
+}
 foreach ($Path in $Task7CurrentArtifacts) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"
 }
