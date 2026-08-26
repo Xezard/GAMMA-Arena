@@ -899,6 +899,7 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_transient_state') 'Actor adapter must expose one authoritative transient reset boundary'
     Assert-True ($Task6ActorContent -match 'interrupt_item_use[\s\S]{0,900}acquire_input') 'Item-use interruption must precede Arena input acquisition in the rematch boundary'
     Assert-True ($Task6ActorContent -match 'reset_transient_state[\s\S]{0,1500}loadout\.cleanup') 'Transient cleanup must precede rematch loadout cleanup'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:normalize_for_arena[\s\S]{0,1300}if\s+acquired\.value\s*==\s*true\s+then[\s\S]{0,220}release_input') 'Normalization rollback may release only an input lease acquired by that invocation'
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
     Assert-True ($Task6ActorContent.Contains('reset_transient_state')) 'Actor adapter must reset GAMMA transient state between rounds'
@@ -939,7 +940,7 @@ foreach ($Marker in @('lam2.abort','ClearWounds','ClearAllBoosters','WoundForEac
     Assert-True ($Task6BootstrapContent.Contains($Marker)) "Round transient reset integration is missing marker: $Marker"
 }
 $RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
-foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_transient_readback_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact')) {
+foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_preowned_input_survives_normalize_failure','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_transient_readback_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact','runtime_entity_ready_revalidates_items_before_hostility')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
 }
 foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
@@ -1123,6 +1124,7 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'ARENA_RUNTIME_COMMUNITY\s*=\s*"arena_enemy"') 'Entity adapter must define the isolated Arena runtime community'
     Assert-True ($Task7EntityContent -match 'validate_effective_profile\([^\r\n]+ARENA_RUNTIME_COMMUNITY') 'Entity pre-spawn validation must require the isolated runtime community'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready') 'Entity adapter must split fully staged READY from hostile activation'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready[\s\S]{0,700}verify_item_ownership[\s\S]{0,3000}set_actor_hostile') 'READY activation must revalidate assigned item ownership before applying hostility'
     Assert-True ($Task7EntityContent -match 'WAIT_ACTOR_LOADOUT[\s\S]{0,700}set_state\("SPAWNING"\)') 'Actor loadout readiness must start spawning before countdown'
     Assert-True ($Task7EntityContent -match 'self\.state_value\s*==\s*"READY"[\s\S]{0,350}opponent_gate_open') 'Closed activation gate must hold a fully staged READY transaction'
     Assert-True ($Task7EntityContent -notmatch 'set_state\("COUNTDOWN"\)') 'Entity adapter must not own the visible countdown state'

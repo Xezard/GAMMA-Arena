@@ -1868,6 +1868,8 @@ local function fake_actor_adapter_env()
         interrupt_calls = 0,
         transient_reset_calls = 0,
         interrupt_failure = false,
+        interrupt_throw = false,
+        input_failure = false,
         transient_reset_failure = false,
         effect_calls = 0,
         body_health_reset_calls = 0,
@@ -1997,6 +1999,7 @@ local function fake_actor_adapter_env()
         interrupt_item_use = function()
             env.interrupt_calls = env.interrupt_calls + 1
             env.ordered_calls[#env.ordered_calls + 1] = "interrupt"
+            if env.interrupt_throw then error("injected item-use interrupt exception") end
             if env.interrupt_failure then return gamma_arena_result.err("GA_TEST_INTERRUPT", "injected item-use interrupt failure") end
             return gamma_arena_result.ok(true)
         end,
@@ -2016,6 +2019,7 @@ local function fake_actor_adapter_env()
             acquire = function()
                 env.input_acquires = env.input_acquires + 1
                 env.ordered_calls[#env.ordered_calls + 1] = "input"
+                if env.input_failure then return gamma_arena_result.err("GA_TEST_INPUT", "injected input acquisition failure") end
                 return gamma_arena_result.ok(true)
             end,
             release = function() env.input_releases = env.input_releases + 1; return gamma_arena_result.ok(true) end
@@ -2041,6 +2045,31 @@ local function runtime_actor_rematch_boundary_failure_never_acquires_input()
     gamma_arena_test_assert.is_false(result.ok, "throwing/present item integration fails the boundary")
     gamma_arena_test_assert.equals(result.error.code, "GA_TEST_INTERRUPT", "boundary preserves the structured integration failure")
     gamma_arena_test_assert.equals(env.input_acquires, 0, "failed interruption cannot acquire the Arena input lease")
+
+    local throwing_env, throwing = fake_actor_adapter_env()
+    throwing_env.interrupt_throw = true
+    local thrown = throwing:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(thrown.ok, "throwing item integration fails safely")
+    gamma_arena_test_assert.equals(thrown.error.code, "GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "throwing interruption is classified")
+    gamma_arena_test_assert.equals(throwing_env.input_acquires, 0, "throwing interruption cannot acquire input")
+
+    local input_env, input = fake_actor_adapter_env()
+    input_env.input_failure = true
+    local rejected = input:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(rejected.ok, "failed required input acquisition rejects rematch boundary")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_TEST_INPUT", "input acquisition failure identity is preserved")
+    gamma_arena_test_assert.equals(input_env.input_releases, 0, "failed acquisition owns no lease to release")
+end
+
+local function runtime_actor_preowned_input_survives_normalize_failure()
+    local env, adapter = fake_actor_adapter_env()
+    gamma_arena_test_assert.is_true(adapter:begin_rematch_boundary().ok, "fixture pre-acquires the rematch input lease")
+    env.actor.money = function() error("injected money read failure") end
+    local failed = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }, true)
+    gamma_arena_test_assert.is_false(failed.ok, "normalization failure remains observable")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "normalization reuses the pre-owned rematch lease")
+    gamma_arena_test_assert.equals(env.input_releases, 0, "normalization cannot release a lease owned before this invocation")
+    gamma_arena_test_assert.is_true(adapter.input_owned, "pre-owned rematch input remains held for fatal teardown")
 end
 
 local function runtime_actor_rematch_transients_clear_once_before_loadout_cleanup()
@@ -4129,6 +4158,32 @@ local function runtime_entity_npcs_are_offline_until_atomic_activation()
     gamma_arena_test_assert.is_true(first_request ~= nil and first_hold ~= nil and first_equip ~= nil and first_hostile ~= nil
         and first_request < first_hold and first_hold < first_equip and last_equip < first_hostile,
         "each asynchronously online NPC is held friendly before fallible equip and no hostility starts until all weapons are ready")
+end
+
+local function runtime_entity_ready_revalidates_items_before_hostility()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    gamma_arena_test_assert.is_true(adapter:begin_apply(entity_spec(1), "session-ready-item-recheck").ok, "item recheck fixture begins")
+    local snapshot
+    for _ = 1, 100 do
+        local advanced = adapter:update()
+        gamma_arena_test_assert.is_true(advanced.ok, "item recheck fixture stages safely")
+        snapshot = adapter:registry_snapshot()
+        if snapshot.state == "READY" then break end
+        env:advance(1)
+    end
+    gamma_arena_test_assert.equals(snapshot.state, "READY", "fixture reaches fully staged READY")
+    local assigned_id = nil
+    for _, record in ipairs(snapshot.items) do
+        if record.source == "assigned" and not record.released then assigned_id = record.id; break end
+    end
+    gamma_arena_test_assert.is_true(assigned_id ~= nil, "READY fixture owns an assigned opponent item")
+    env:remove_entity(assigned_id)
+    env.opponents_enabled = true
+    local result, terminal = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_false(result.ok, "missing READY item fails the activation transaction")
+    gamma_arena_test_assert.equals(terminal.error.code, "GA_ENTITY_ITEM_MISSING", "READY item recheck preserves the missing-item cause")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "item loss is rejected before any opponent hostility")
 end
 
 local function runtime_entity_online_wait_is_bounded_and_wrap_safe()
@@ -9417,6 +9472,7 @@ local cases = {
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_rematch_boundary_aborts_before_input_lock", fn = runtime_actor_rematch_boundary_aborts_before_input_lock }
     ,{ name = "runtime_actor_rematch_boundary_failure_never_acquires_input", fn = runtime_actor_rematch_boundary_failure_never_acquires_input }
+    ,{ name = "runtime_actor_preowned_input_survives_normalize_failure", fn = runtime_actor_preowned_input_survives_normalize_failure }
     ,{ name = "runtime_actor_rematch_transients_clear_once_before_loadout_cleanup", fn = runtime_actor_rematch_transients_clear_once_before_loadout_cleanup }
     ,{ name = "runtime_actor_transient_failure_prevents_loadout_cleanup", fn = runtime_actor_transient_failure_prevents_loadout_cleanup }
     ,{ name = "runtime_bootstrap_engine_transients_clear_and_verify", fn = runtime_bootstrap_engine_transients_clear_and_verify }
@@ -9443,6 +9499,7 @@ local cases = {
     ,{ name = "runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults", fn = runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults }
     ,{ name = "runtime_entity_activation_rejects_runtime_community_drift", fn = runtime_entity_activation_rejects_runtime_community_drift }
     ,{ name = "runtime_entity_npcs_are_offline_until_atomic_activation", fn = runtime_entity_npcs_are_offline_until_atomic_activation }
+    ,{ name = "runtime_entity_ready_revalidates_items_before_hostility", fn = runtime_entity_ready_revalidates_items_before_hostility }
     ,{ name = "runtime_entity_online_wait_is_bounded_and_wrap_safe", fn = runtime_entity_online_wait_is_bounded_and_wrap_safe }
     ,{ name = "runtime_entity_active_defers_input_release_to_task8", fn = runtime_entity_active_defers_input_release_to_task8 }
     ,{ name = "runtime_bootstrap_actor_loadout_port_is_bound_and_exact", fn = runtime_bootstrap_actor_loadout_port_is_bound_and_exact }
