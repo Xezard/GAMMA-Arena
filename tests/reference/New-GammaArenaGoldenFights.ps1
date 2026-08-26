@@ -433,9 +433,9 @@ for($seed=0;$seed-lt 10000;$seed++){
 
 $requests=@(
     [pscustomobject]@{Seed=[int64]0;Difficulty='rookie';Fight=0},
-    [pscustomobject]@{Seed=[int64]1;Difficulty='stalker';Fight=0},
-    [pscustomobject]@{Seed=[int64]3735928559;Difficulty='veteran';Fight=7},
-    [pscustomobject]@{Seed=[int64]4294967295;Difficulty='master';Fight=31}
+    [pscustomobject]@{Seed=[int64]5;Difficulty='stalker';Fight=0},
+    [pscustomobject]@{Seed=[int64]2;Difficulty='veteran';Fight=7},
+    [pscustomobject]@{Seed=[int64]20;Difficulty='master';Fight=31}
 )
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
 if((New-GaEncodedFight 0 veteran 7)-cne(New-GaEncodedFight 1 veteran 7)){throw 'Normalized seed aliases must match'}

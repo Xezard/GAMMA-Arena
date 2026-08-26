@@ -973,14 +973,15 @@ function new_actor_loadout_port(ports)
         return gamma_arena_result.ok(equipment.summary)
     end
     local function neutralize_device(record)
-        if record.role ~= "device" or record.device_neutralized == true then return gamma_arena_result.ok(true) end
+        if record.role ~= "device" then return gamma_arena_result.ok(true) end
         if record.equipped ~= true then record.device_neutralized = true; return gamma_arena_result.ok(true) end
         local online = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.online_item, loadout_actor, record.id)
         if not online.ok then return online end
-        if online.value == nil then return gamma_arena_result.ok(false) end
-        local online_id = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.entity_id, online.value)
-        if not online_id.ok then return online_id end
-        if online_id.value ~= record.id then return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Online actor device identity changed before shutdown", { id = record.id, actual_id = online_id.value }) end
+        if online.value ~= nil then
+            local online_id = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.entity_id, online.value)
+            if not online_id.ok then return online_id end
+            if online_id.value ~= record.id then return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Online actor device identity changed before shutdown", { id = record.id, actual_id = online_id.value }) end
+        end
         local stopped = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.shutdown_device, online.value, record.id, record.section)
         if not stopped.ok then return stopped end
         if stopped.value ~= true then return gamma_arena_result.ok(false) end
@@ -998,7 +999,15 @@ function new_actor_loadout_port(ports)
                 errors[#errors + 1] = resolved.error
                 table.insert(remaining, 1, record)
             elseif resolved.value == nil then
-                -- The authoritative current-id lookup proves the owned entity is gone.
+                local neutralized = neutralize_device(record)
+                if not neutralized.ok then
+                    errors[#errors + 1] = neutralized.error
+                    table.insert(remaining, 1, record)
+                elseif neutralized.value ~= true then
+                    table.insert(remaining, 1, record)
+                end
+                -- The authoritative current-id lookup proves the owned entity is
+                -- gone, but Beef's device state is global and must be cleared too.
             else
                 -- Cleanup may only consume durable ownership proof written during
                 -- creation. It must never manufacture ownership for a current
@@ -1194,9 +1203,15 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             end
             if item_device.is_nv_active() then item_device.set_nightvision(section, false) end
             if item_device.is_nv_active() then return gamma_arena_result.ok(false) end
-            if item_device.is_torch_active() == id then item_device.toggle_torch() end
-            item:enable_torch(false)
-            if item_device.is_torch_active() == id then return gamma_arena_result.ok(false) end
+            if item_device.is_torch_active() == id then
+                item_device.toggle_torch()
+                -- toggle_torch derives its next state from the current slot-10
+                -- object. If that object changed during teardown, clear the state
+                -- it just selected instead of reporting a foreign torch as safe.
+                if item_device.is_torch_active() then item_device.toggle_torch() end
+            end
+            if item ~= nil then item:enable_torch(false) end
+            if item_device.is_torch_active() then return gamma_arena_result.ok(false) end
             return gamma_arena_result.ok(true)
         end,
         set_ammo_elapsed = function(weapon, count) return weapon:set_ammo_elapsed(count) end,

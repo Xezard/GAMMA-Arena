@@ -70,8 +70,20 @@ foreach ($Marker in @('GA_ACTOR_DEVICE_CHARGE_FAILED','"outfit", "knife", "devic
 foreach ($Marker in @('item_device.is_nv_active','item_device.set_nightvision','item_device.is_torch_active','item_device.toggle_torch','game_object.set_condition','game_object.enable_torch')) {
     if (-not $Compat.Contains($Marker) -and -not $Bootstrap.Contains($Marker)) { throw "Actor device compatibility contract is missing: $Marker" }
 }
-foreach ($CaseName in @('actor_device_is_equipped_and_fully_charged','actor_device_charge_failure_rolls_back','actor_device_cleanup_neutralizes_active_effects','actor_device_cleanup_retains_unconfirmed_effect')) {
+foreach ($CaseName in @('actor_device_is_equipped_and_fully_charged','actor_device_charge_failure_rolls_back','actor_device_cleanup_neutralizes_active_effects','actor_device_cleanup_retains_unconfirmed_effect','actor_device_cleanup_neutralizes_absent_and_offline_state','actor_device_cleanup_reprobes_deferred_release')) {
     if (-not $RuntimeTests.Contains($CaseName)) { throw "Actor device runtime regression case is missing: $CaseName" }
+}
+if ($Bootstrap -notmatch '(?s)elseif\s+resolved\.value\s*==\s*nil\s+then\s+local\s+neutralized\s*=\s*neutralize_device\(record\)') {
+    throw 'Absent actor devices must clear global Beef device state before record retirement'
+}
+if ($Bootstrap -match 'record\.device_neutralized\s*==\s*true\s+then\s+return') {
+    throw 'Pending actor device release must re-probe global state on every cleanup pass'
+}
+if ($Bootstrap -notmatch '(?s)shutdown_device\s*=\s*function\(item,\s*id,\s*section\).*?if\s+item\s*~=\s*nil\s+then\s+item:enable_torch\(false\)\s+end') {
+    throw 'Actor device shutdown must support global-only cleanup when the item is absent or offline'
+}
+if ($Bootstrap -notmatch 'if\s+item_device\.is_torch_active\(\)\s+then\s+return\s+gamma_arena_result\.ok\(false\)\s+end') {
+    throw 'Actor device shutdown must confirm that global torch state is fully inactive'
 }
 
 Write-Host 'PASS: actor lighting device static contract passed'
