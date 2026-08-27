@@ -42,6 +42,7 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
+        'src\gamedata\scripts\gamma_arena_item_materializer.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
         'src\gamedata\scripts\gamma_arena_random_generator.script',
         'src\gamedata\scripts\gamma_arena_grenade_generator.script',
@@ -151,7 +152,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         'grenade-loadouts' = 14
         'npc-medical-runtime' = 20
         'actor-equipment' = 73
-        'opponent-budgets' = 28
+        'opponent-budgets' = 31
         'arena-tactics' = 33
         'balance-diagnostics' = 21
         'source-map' = 14
@@ -434,6 +435,9 @@ try {
         '| selection_band_threshold | ceil(maximum * 70 / 100) |',
         '| max_snipers_per_fight | 1 |',
         '| supported_factions | army, bandit, csky, dolg, ecolog, freedom, killer, monolith, stalker |',
+        '| appearance_reproducibility | deferred; X-Ray `specific_character` is not seeded or stored in FightSpec v8 |',
+        '| appearance_gameplay_effect | none; faction, rank, equipment, budget, and combat rules remain authoritative |',
+        '| deterministic_appearance_follow_up | cataloged appearance aliases + fingerprint/validator membership + catalog identity advance |',
         '| native_opponent_paths | 6 |',
         '| virtual_capacity | 10 |',
         '| virtual_radii | 1.5, 2.5 m |',

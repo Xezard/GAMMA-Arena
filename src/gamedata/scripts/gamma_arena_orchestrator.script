@@ -25,20 +25,63 @@ local function validate_session_catalog_identity(source, catalog)
     return gamma_arena_result.ok(true)
 end
 
+local function plain_table_shape(value)
+    local string_keys, array_keys, maximum = 0, 0, 0
+    for key in pairs(value) do
+        local key_type = type(key)
+        if key_type == "string" then
+            string_keys = string_keys + 1
+        elseif key_type == "number" and key == key and key ~= math.huge and key ~= -math.huge
+            and key == math.floor(key) and key >= 1 then
+            array_keys = array_keys + 1
+            if key > maximum then maximum = key end
+        else
+            error("hostile ArenaSession table key: " .. key_type)
+        end
+    end
+    if string_keys > 0 and array_keys > 0 then error("mixed ArenaSession table shape") end
+    if array_keys > 0 then
+        if maximum ~= array_keys then error("ArenaSession array is not dense positive-integer data") end
+        return "array", array_keys
+    end
+    return "record", string_keys
+end
+
 local function copy_plain(value, seen)
     local value_type = type(value)
-    if value_type == "nil" or value_type == "string" or value_type == "boolean" or value_type == "number" then return value end
+    if value_type == "nil" or value_type == "string" or value_type == "boolean" then return value end
+    if value_type == "number" then
+        if value ~= value or value == math.huge or value == -math.huge then error("non-finite ArenaSession number") end
+        return value
+    end
     if value_type ~= "table" then error("non-plain ArenaSession value: " .. value_type) end
     seen = seen or {}
     if seen[value] then error("cyclic ArenaSession value") end
     local copy = {}
     seen[value] = true
-    for key, item in pairs(value) do
-        if type(key) ~= "string" then error("non-string ArenaSession key") end
-        copy[key] = copy_plain(item, seen)
+    local shape, count = plain_table_shape(value)
+    if shape == "array" then
+        for index = 1, count do copy[index] = copy_plain(value[index], seen) end
+    else
+        for key, item in pairs(value) do copy[key] = copy_plain(item, seen) end
     end
     seen[value] = nil
     return copy
+end
+
+local function merge_launch_options(options, catalog, layout)
+    if options ~= nil and type(options) ~= "table" then
+        return fail("GA_LAUNCH_OPTIONS_INVALID", "Arena launch options must be a table")
+    end
+    local merged = {}
+    for key, value in pairs(options or {}) do
+        if type(key) ~= "string" then
+            return fail("GA_LAUNCH_OPTIONS_INVALID", "Arena launch options contain a non-string key")
+        end
+        merged[key] = value
+    end
+    merged.custom_context = { catalog = catalog, layout = layout }
+    return gamma_arena_result.ok(merged)
 end
 
 local function safe_result_call(code, fn, ...)
@@ -796,6 +839,7 @@ function Orchestrator:activate_once()
 
     local activation_catalog = nil
     local activation_layout = nil
+    local activation_launch_options = nil
     if state.launch_pending then
         if self.loaded_session ~= nil then
             return self:enter_fatal(fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch intent is valid only for a distinct new game"))
@@ -806,6 +850,9 @@ function Orchestrator:activate_once()
         local layout = safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, "rostok_arena_v1", activation_catalog)
         if not layout.ok then return self:enter_fatal(layout) end
         activation_layout = layout.value
+        local launch_options = merge_launch_options(self.deps.launch_options, activation_catalog, activation_layout)
+        if not launch_options.ok then return self:enter_fatal(launch_options) end
+        activation_launch_options = launch_options.value
         local expected = type(layout.value) == "table" and layout.value.level or nil
         if type(expected) ~= "string" or expected == "" then
             return self:enter_fatal(fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no target level"))
@@ -818,7 +865,7 @@ function Orchestrator:activate_once()
             expected_level = expected
         })
         if not activation.ok then return self:enter_fatal(activation) end
-        local ownership = call_method("GA_LAUNCH_OWNERSHIP_INVALID", self.deps.store, "validate_launch_ownership", self.deps.config, self.deps.launch_options)
+        local ownership = call_method("GA_LAUNCH_OWNERSHIP_INVALID", self.deps.store, "validate_launch_ownership", self.deps.config, activation_launch_options)
         if not ownership.ok then return self:enter_fatal(ownership) end
         local armed = self:arm_save_guard({
             current_level = current.value,
@@ -855,7 +902,7 @@ function Orchestrator:activate_once()
     if not started.ok then return self:enter_fatal(started) end
 
     if state.launch_pending then
-        local consumed = call_method("GA_LAUNCH_CONSUME_FAILED", self.deps.store, "consume_launch", self.deps.config, self.deps.launch_options)
+        local consumed = call_method("GA_LAUNCH_CONSUME_FAILED", self.deps.store, "consume_launch", self.deps.config, activation_launch_options)
         if not consumed.ok then return self:enter_fatal(consumed, true) end
         local handoff = type(consumed.value) == "table" and consumed.value.launch_handoff or nil
         self:diagnostic("GA_LAUNCH_HANDOFF_ACCEPTED", "route=" .. tostring(handoff and handoff.route or "validated") .. " level=l05_bar", {

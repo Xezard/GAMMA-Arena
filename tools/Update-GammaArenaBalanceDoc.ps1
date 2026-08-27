@@ -299,6 +299,7 @@ $TacticalPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_aren
 $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+$ItemMaterializerScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
 $GrenadeGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
 $EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
@@ -517,7 +518,8 @@ if ($ActorDoubleDraw -ne 1 -or $ActorDoubleCount -ne 2 -or $ActorSingleUpper -ne
 $EnemyGrenadeRule = Get-RequiredLuaMatch $GrenadeGeneratorScriptPath 'if\s+draw\s*>\s*(\d+)\s+then\s+return\s+gamma_arena_result\.ok\(\{\s*sections\s*=\s*\{\}\s*\}\)\s+end' 'opponent grenade probability rule'
 $EnemyGrenadeChance = [int]$EnemyGrenadeRule.Groups[1].Value
 if ($EnemyGrenadeChance -ne 10) { throw 'Opponent grenade probability rule differs from 10 percent' }
-$ActorGrenadeDescriptor = Get-RequiredLuaMatch $BootstrapScriptPath 'gamma_arena_item_materializer\.descriptors\(selected,\s*catalog\)[\s\S]{0,900}definition\.category\s*==\s*"grenade"' 'actor universal grenade materialization'
+$ActorUniversalMaterializer = Get-RequiredLuaMatch $BootstrapScriptPath 'function\s+new_actor_item_port\s*\([\s\S]+?gamma_arena_item_materializer\.new\s*\([\s\S]+?local\s+items\s*=\s*new_actor_item_port\(production_item_ports\)' 'actor universal materializer binding'
+$ActorGrenadeDescriptor = Get-RequiredLuaMatch $ItemMaterializerScriptPath 'CATEGORIES\s*=\s*\{[^\r\n]+grenade\s*=\s*true[\s\S]+?for\s+copy_index\s*=\s*1\s*,\s*item\.quantity' 'actor universal grenade materialization'
 $NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'gamma_arena_item_materializer\.descriptors\(opponents\[index\]\.items,\s*catalog\)[\s\S]{0,700}role\s*=\s*descriptor\.category' 'opponent universal grenade materialization'
 if ((Get-Content -Raw -LiteralPath $BootstrapScriptPath) -match 'can_throw_grenades' -or (Get-Content -Raw -LiteralPath $EntityAdapterScriptPath) -match 'can_throw_grenades') { throw 'Arena runtime must not force native grenade throwing' }
 
@@ -797,6 +799,9 @@ $OpponentLines.Add("| selection_band_threshold | ceil(maximum * $PrimaryBandPerc
 $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
 $OpponentLines.Add("| supported_factions | $(@($ProfileFactions) -join ', ') |") | Out-Null
+$OpponentLines.Add('| appearance_reproducibility | deferred; X-Ray `specific_character` is not seeded or stored in FightSpec v8 |') | Out-Null
+$OpponentLines.Add('| appearance_gameplay_effect | none; faction, rank, equipment, budget, and combat rules remain authoritative |') | Out-Null
+$OpponentLines.Add('| deterministic_appearance_follow_up | cataloged appearance aliases + fingerprint/validator membership + catalog identity advance |') | Out-Null
 $OpponentLines.Add('| opponent_total_cost | profile + gear + assigned medicine |') | Out-Null
 $Blocks['opponent-budgets'] = Join-MarkdownLines $OpponentLines
 

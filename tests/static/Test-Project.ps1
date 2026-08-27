@@ -417,7 +417,12 @@ foreach ($Forbidden in @('mode_id=','difficulty_id=','budget=','price=','custom_
 $Task11Runtime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 foreach ($Name in @(
     'runtime_custom_session_creation_copies_validated_recipe',
+    'runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership',
     'runtime_custom_stale_catalog_rejects_before_actor_mutation',
+    'runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store',
+    'runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type',
+    'runtime_composed_actor_tag_failures_rollback_provisional_items_exactly',
+    'runtime_composed_default_actor_materializes_universal_inventory_and_restores_template',
     'runtime_custom_defeat_opens_fresh_default_setup_without_loadout'
 )) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
@@ -428,6 +433,7 @@ Assert-True ($Task11Session -match 'arena_session_keys\s*=\s*\{[\s\S]{0,700}gene
 Assert-True ($Task11Session -match 'session\.generator_version\s*~=\s*10' -and $Task11Session -match 'session\.catalog_revision\s*~=\s*10') 'Task 11 ArenaSession must bind catalog/generator identity 10/10.'
 Assert-True ($Task11Session -match 'gamma_arena_custom_config\.validate\s*\(\s*session\.custom_config') 'Task 11 ArenaSession must independently validate and copy custom config.'
 $Task11Orchestrator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+$Task11Bootstrap = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 Assert-True ($Task11Orchestrator -match 'function\s+Orchestrator:create_session\s*\(\s*request\s*,\s*catalog\s*,\s*layout\s*\)') 'Task 11 session creation must consume the active catalog and layout.'
 Assert-True ($Task11Orchestrator -match 'catalog_fingerprint\s*=\s*catalog\.fingerprint') 'Task 11 session creation must bind the loaded catalog fingerprint.'
 Assert-True ($Task11Orchestrator -match 'local\s+layout\s*=\s*self:layout_snapshot\(self\.catalog_snapshot\)') 'Task 11 continuation actor reset must resolve layout from the same validated catalog snapshot as its FightSpec.'
@@ -435,6 +441,30 @@ Assert-True (([regex]::Matches($Task11Orchestrator, 'self:layout_snapshot\(self\
 $Task11IdentityIndex = $Task11Orchestrator.IndexOf('validate_session_catalog_identity')
 $Task11GenerateIndex = $Task11Orchestrator.IndexOf('self.deps.generator')
 Assert-True ($Task11IdentityIndex -ge 0 -and $Task11GenerateIndex -gt $Task11IdentityIndex) 'Task 11 catalog identity validation must precede fight generation and actor mutation.'
+Assert-True ($Task11Orchestrator -match 'local function\s+plain_table_shape' -and $Task11Orchestrator -match 'dense positive-integer') 'Task 11 ArenaSession copy must distinguish dense arrays from string-key records.'
+Assert-True ($Task11Bootstrap -match 'function\s+new_actor_item_port\s*\(' -and $Task11Bootstrap -match 'gamma_arena_item_materializer\.new\s*\(') 'Task 11 production actor path must construct the universal item materializer.'
+Assert-True ($Task11Bootstrap -notmatch 'local value = \{ consumables = \{\}, grenades = \{\} \}') 'Task 11 production actor path must not flatten universal items into a legacy single-weapon loadout.'
+Assert-True ($Task11Bootstrap -match 'weapon:set_ammo_type\s*\(' -and $Task11Bootstrap -match 'weapon:get_ammo_type\s*\(') 'Task 11 production actor path must set and verify the real engine ammunition type.'
+Assert-True ($Task11Bootstrap -notmatch 'magazine_ammo\s*\[\s*id\s*\]\s*=\s*ammo_section') 'Task 11 production actor path must not verify ammunition against a locally asserted expected value.'
+$Task11Compat = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script') -Raw
+Assert-True ($Task11Compat.Contains('game_object.set_ammo_type') -and $Task11Compat.Contains('game_object.get_ammo_type')) 'Task 11 compatibility preflight must require real weapon ammunition type APIs.'
+Assert-True ($Task11Bootstrap -match 'provisional_by_entity' -and $Task11Bootstrap -match 'exact_provisional_record') 'Task 11 production actor rollback must own exact transaction-local provisional records.'
+$Task11ActivateStart = $Task11Orchestrator.IndexOf('function Orchestrator:activate_once')
+$Task11ActivateEnd = if ($Task11ActivateStart -ge 0) { $Task11Orchestrator.IndexOf('function Orchestrator:layout_snapshot', $Task11ActivateStart) } else { -1 }
+Assert-True ($Task11ActivateStart -ge 0 -and $Task11ActivateEnd -gt $Task11ActivateStart) 'Task 11 activation boundary must remain structurally testable.'
+if ($Task11ActivateStart -ge 0 -and $Task11ActivateEnd -gt $Task11ActivateStart) {
+    $Task11Activate = $Task11Orchestrator.Substring($Task11ActivateStart, $Task11ActivateEnd - $Task11ActivateStart)
+    Assert-True ($Task11Activate -match 'merge_launch_options\s*\(\s*self\.deps\.launch_options\s*,\s*activation_catalog\s*,\s*activation_layout\s*\)' -and $Task11Activate -match 'activation_launch_options\s*=\s*launch_options\.value') 'Task 11 activation must create one non-mutating launch-options snapshot.'
+    Assert-True (([regex]::Matches($Task11Activate, 'self\.deps\.config\s*,\s*activation_launch_options')).Count -eq 2) 'Task 11 Store ownership validation and consumption must share the exact activation options object.'
+}
+$Task11DefeatStart = $Task11Runtime.IndexOf('local function runtime_custom_defeat_opens_fresh_default_setup_without_loadout')
+$Task11DefeatEnd = if ($Task11DefeatStart -ge 0) { $Task11Runtime.IndexOf('local function task11_item_signature', $Task11DefeatStart) } else { -1 }
+Assert-True ($Task11DefeatStart -ge 0 -and $Task11DefeatEnd -gt $Task11DefeatStart) 'Task 11 custom defeat regression must remain structurally testable.'
+if ($Task11DefeatStart -ge 0 -and $Task11DefeatEnd -gt $Task11DefeatStart) {
+    $Task11Defeat = $Task11Runtime.Substring($Task11DefeatStart, $Task11DefeatEnd - $Task11DefeatStart)
+    Assert-True ($Task11Defeat -match 'gamma_arena_session_store\.new_store\s*\(' -and $Task11Defeat -match ':arm_defeat\s*\(' -and $Task11Defeat -match ':confirm_defeat\s*\(' -and $Task11Defeat -match ':peek_defeat\s*\(' -and $Task11Defeat -match ':consume_defeat\s*\(') 'Task 11 custom defeat regression must exercise the real Store round trip.'
+    Assert-True ($Task11Defeat -match 'gad1:1000:custom' -and $Task11Defeat -notmatch 'gad2:') 'Task 11 custom defeat regression must use the production schema/token grammar.'
+}
 $Task11MainMenu = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script') -Raw
 Assert-True ($Task11Session -match 'defeat_generation_recipe') 'Task 11 defeat handoff must retain recipe provenance.'
 Assert-True ($Task11Session -notmatch 'defeat_custom_(?:config|item|roster)') 'Task 11 defeat handoff must never persist the defeated custom loadout.'

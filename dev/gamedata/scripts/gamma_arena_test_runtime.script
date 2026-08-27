@@ -168,7 +168,17 @@ local function valid_preflight_probes()
             enable_input = function() return true end
         },
         db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
-        game_object = { friend = 1, enemy = 2, name = function() return "test_npc" end, change_health = function() return true end },
+        game_object = {
+            friend = 1,
+            enemy = 2,
+            set_ammo_elapsed = function() return true end,
+            get_ammo_in_magazine = function() return 0 end,
+            set_ammo_type = function() return true end,
+            get_ammo_type = function() return 0 end,
+            critically_wounded = function() return false end,
+            name = function() return "test_npc" end,
+            change_health = function() return true end
+        },
         xr_logic = {
             configure_schemes = function() return true end,
             activate_by_section = function() return true end,
@@ -338,6 +348,8 @@ local function preflight_requires_task7_entity_ports_and_ammo_metadata()
         { capability = "level.object_by_id", mutate = function(probes) probes.level.object_by_id = nil end },
         { capability = "game_object.friend", mutate = function(probes) probes.game_object.friend = nil end },
         { capability = "game_object.enemy", mutate = function(probes) probes.game_object.enemy = nil end },
+        { capability = "game_object.set_ammo_type", mutate = function(probes) probes.game_object.set_ammo_type = nil end },
+        { capability = "game_object.get_ammo_type", mutate = function(probes) probes.game_object.get_ammo_type = nil end },
         { capability = "system_ini.r_u32", mutate = function(probes) probes.system_ini().r_u32 = nil end }
     }
     for _, case in ipairs(cases) do
@@ -9523,6 +9535,42 @@ local function task11_custom_request(catalog)
     }
 end
 
+local function task11_memory_config()
+    local values = {}
+    local config = {
+        cache = {},
+        gamma_arena_boolean_returns = true
+    }
+    function config:line_exist(section, key)
+        return (section == "gamma_arena" or section == "character_creation") and values[key] ~= nil
+    end
+    function config:r_string_ex(section, key)
+        if section ~= "gamma_arena" and section ~= "character_creation" then return nil end
+        return values[key]
+    end
+    function config:r_value(section, key, _, default)
+        local value = values[key]
+        if value == nil then return default end
+        return value
+    end
+    function config:w_value(section, key, value)
+        values[key] = tostring(value)
+        return true
+    end
+    function config:remove_line(section, key)
+        values[key] = nil
+        return true
+    end
+    function config:save() return true end
+    config.ini = {
+        gamma_arena_boolean_returns = true,
+        w_string = function(_, section, key, value) values[key] = tostring(value); return true end,
+        remove_line = function(_, section, key) values[key] = nil; return true end
+    }
+    config.values = values
+    return config
+end
+
 local function runtime_custom_session_creation_copies_validated_recipe()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     local layout = gamma_arena_test_custom_config.make_context(catalog).layout
@@ -9541,6 +9589,43 @@ local function runtime_custom_session_creation_copies_validated_recipe()
     request.custom_config.actor_items[1].section = "forged_after_creation"
     gamma_arena_test_assert.equals(created.value.custom_config.roster[1].rank, "novice", "later roster edits cannot change active session")
     gamma_arena_test_assert.equals(created.value.custom_config.actor_items[1].section, "outfit_field", "later item edits cannot change active session")
+end
+
+local function runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.actor = nil
+    local orchestrator = gamma_arena_bootstrap.compose(deps)
+    local created = orchestrator:create_session(task11_custom_request(catalog), catalog, layout)
+    gamma_arena_test_assert.is_true(created.ok, "composed snapshot fixture creates a validated custom session")
+    orchestrator.session = created.value
+
+    local snapshot = orchestrator:session_snapshot()
+    gamma_arena_test_assert.is_true(type(snapshot) == "table", "custom ArenaSession with arrays remains snapshot-readable")
+    gamma_arena_test_assert.equals(#snapshot.custom_config.roster, #created.value.custom_config.roster, "dense roster survives snapshot copy")
+    gamma_arena_test_assert.equals(#snapshot.custom_config.actor_items, #created.value.custom_config.actor_items, "dense actor items survive snapshot copy")
+    snapshot.custom_config.roster[1].rank = "legend"
+    gamma_arena_test_assert.equals(orchestrator.session.custom_config.roster[1].rank, "novice", "snapshot arrays are deep copies")
+
+    local ownership_probe = orchestrator.deps.actor.deps.loadout.apply({ id = function() return 700 end }, {})
+    gamma_arena_test_assert.is_false(ownership_probe.ok, "malformed loadout remains rejected after composed ownership lookup")
+    gamma_arena_test_assert.equals(ownership_probe.error.code, "GA_ACTOR_LOADOUT_INVALID", "composed default actor resolves custom session ownership before loadout validation")
+
+    local hostile = {
+        { label = "sparse", value = { [1] = "a", [3] = "b" } },
+        { label = "mixed", value = { [1] = "a", future = "b" } },
+        { label = "zero index", value = { [0] = "a" } },
+        { label = "fractional index", value = { [1.5] = "a" } },
+        { label = "table key", value = { [{}] = "a" } },
+        { label = "function value", value = { future = function() end } }
+    }
+    local cyclic = {}; cyclic.self = cyclic
+    hostile[#hostile + 1] = { label = "cycle", value = cyclic }
+    for _, case in ipairs(hostile) do
+        orchestrator.session = { schema_version = 2, payload = case.value }
+        gamma_arena_test_assert.equals(orchestrator:session_snapshot(), nil, "hostile snapshot shape is rejected: " .. case.label)
+    end
 end
 
 local function runtime_custom_stale_catalog_rejects_before_actor_mutation()
@@ -9567,34 +9652,352 @@ local function runtime_custom_stale_catalog_rejects_before_actor_mutation()
     gamma_arena_test_assert.equals(normalized, 0, "catalog drift rejects before actor normalization")
 end
 
+local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local issue_options = {
+        clock = function() return 1000 end,
+        nonce = function() return "task11_launch" end,
+        custom_context = { catalog = catalog, layout = layout }
+    }
+    local issued = store:issue_launch(config, task11_custom_request(catalog), issue_options)
+    gamma_arena_test_assert.is_true(issued.ok, "real Store persists the custom launch fixture")
+
+    local validated_options, consumed_options = nil, nil
+    local validate_launch_ownership = store.validate_launch_ownership
+    local consume_launch = store.consume_launch
+    function store:validate_launch_ownership(active_config, options)
+        validated_options = options
+        return validate_launch_ownership(self, active_config, options)
+    end
+    function store:consume_launch(active_config, options)
+        consumed_options = options
+        return consume_launch(self, active_config, options)
+    end
+
+    local deps = fake_orchestrator_deps(store)
+    local catalog_loads, actor_mutations = 0, 0
+    local sentinel = {}
+    local injected_options = { clock = function() return 1001 end, sentinel = sentinel }
+    deps.config = config
+    deps.launch_options = injected_options
+    deps.catalogs = function()
+        catalog_loads = catalog_loads + 1
+        return gamma_arena_result.ok(catalog)
+    end
+    deps.layout = function(layout_id, received_catalog)
+        gamma_arena_test_assert.equals(layout_id, "rostok_arena_v1", "activation resolves the exact Arena layout")
+        gamma_arena_test_assert.is_true(received_catalog == catalog, "layout receives the activation catalog object")
+        return gamma_arena_result.ok(layout)
+    end
+    deps.validator = function()
+        return gamma_arena_result.err("GA_TEST_AFTER_STORE_SNAPSHOT", "stop after real Store consume")
+    end
+    deps.actor.normalize_for_arena = function()
+        actor_mutations = actor_mutations + 1
+        return gamma_arena_result.ok(true)
+    end
+
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok, "real Store launch observes game-load boundary")
+    local stopped = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(stopped.ok, "fixture stops after Store ownership and consumption")
+    gamma_arena_test_assert.equals(stopped.error.code, "GA_TEST_AFTER_STORE_SNAPSHOT", "post-Store stop proves both real operations succeeded")
+    gamma_arena_test_assert.equals(catalog_loads, 1, "activation catalog is loaded exactly once")
+    gamma_arena_test_assert.is_true(validated_options == consumed_options, "Store ownership and consume receive the same merged options object")
+    gamma_arena_test_assert.is_true(validated_options ~= injected_options, "merged launch options do not alias the injected table")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.catalog == catalog, "real Store validates against the activation catalog object")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.layout == layout, "real Store validates against the activation layout object")
+    gamma_arena_test_assert.equals(injected_options.custom_context, nil, "injected launch options are not mutated")
+    gamma_arena_test_assert.is_true(injected_options.sentinel == sentinel and validated_options.sentinel == sentinel, "unrelated injected option identity is preserved")
+    gamma_arena_test_assert.equals(actor_mutations, 0, "Store snapshot verification and later failure precede actor mutation")
+end
+
+local function task11_production_item_ports(options)
+    options = options or {}
+    local env = {
+        next_id = 1200,
+        created = {},
+        by_id = {},
+        tags = {},
+        slots = {},
+        magazines = {},
+        releases = {},
+        active_slot = nil,
+        tag_writes = 0,
+        tag_reads = 0
+    }
+    local ports = {
+        actor_id = function(actor) return actor:id() end,
+        ownership_token = function() return "ga_task11_custom_session:ga_task11_custom_nonce" end,
+        create_item = function(section, owner, create_options)
+            local entity = {
+                runtime_id = env.next_id,
+                parent_runtime_id = owner:id(),
+                section_value = section,
+                create_options = clone(create_options),
+                ammo_type = 0,
+                ammo_type_sets = {},
+                ammo_elapsed = 0
+            }
+            function entity:id() return self.runtime_id end
+            function entity:section_name() return self.section_value end
+            function entity:set_ammo_type(index)
+                self.ammo_type_sets[#self.ammo_type_sets + 1] = index
+                if options.ammo_type_mismatch ~= true then self.ammo_type = index end
+                return true
+            end
+            function entity:get_ammo_type() return self.ammo_type end
+            function entity:set_ammo_elapsed(count) self.ammo_elapsed = count; return true end
+            function entity:get_ammo_in_magazine() return self.ammo_elapsed end
+            env.next_id = env.next_id + 1
+            env.created[#env.created + 1] = entity
+            env.by_id[entity.runtime_id] = entity
+            return entity
+        end,
+        entity_id = function(entity) return entity and entity.runtime_id end,
+        entity_parent_id = function(entity) return entity and entity.parent_runtime_id end,
+        entity_section = function(entity) return entity and entity.section_value end,
+        save_owner_tag = function(id, token)
+            env.tag_writes = env.tag_writes + 1
+            if options.fail_tag_write_at == env.tag_writes then
+                return gamma_arena_result.err("GA_TEST_TAG_WRITE", "injected ownership tag write failure", { id = id })
+            end
+            env.tags[id] = token
+            return true
+        end,
+        load_owner_tag = function(id)
+            env.tag_reads = env.tag_reads + 1
+            if options.fail_tag_read_at == env.tag_reads then
+                return gamma_arena_result.err("GA_TEST_TAG_READ", "injected ownership tag read failure", { id = id })
+            end
+            if options.mismatch_tag_read_at == env.tag_reads then return "ga_task11_wrong_owner" end
+            return env.tags[id]
+        end,
+        resolve_item = function(entity) return env.by_id[entity.runtime_id] end,
+        move_to_slot = function(owner, item, slot)
+            if options.fail_slot == slot then
+                return gamma_arena_result.err("GA_TEST_UNIVERSAL_EQUIP", "injected composed equip failure", { slot = slot })
+            end
+            env.slots[slot] = item
+            return true
+        end,
+        item_in_slot = function(owner, slot) return env.slots[slot] end,
+        fill_magazine = function(weapon, ammo_section)
+            env.magazines[weapon.runtime_id] = ammo_section
+            return true
+        end,
+        magazine_ammo = function(weapon) return env.magazines[weapon.runtime_id] end,
+        activate_slot = function(owner, slot) env.active_slot = slot; return true end,
+        resolve_entity = function(id) return env.by_id[id] end,
+        release_item = function(id)
+            env.releases[#env.releases + 1] = id
+            env.by_id[id] = nil
+            return true
+        end
+    }
+    return env, ports
+end
+
+local function runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type()
+    local original_system_ini = system_ini
+    local called, reason = pcall(function()
+        system_ini = function()
+            return {
+                line_exist = function(_, section, key) return section == "rifle" and key == "ammo_mag_size" end,
+                r_u32 = function(_, section, key)
+                    if section ~= "rifle" or key ~= "ammo_mag_size" then error("unexpected effective metadata read") end
+                    return 30
+                end
+            }
+        end
+        local owner = { id = function() return 77 end }
+        local selected = {
+            { section = "rifle", quantity = 1, equipped_slot = "weapon_2" },
+            { section = "ammo_b", quantity = 1 }
+        }
+        local function composed_items(options)
+            local env, item_ports = task11_production_item_ports(options)
+            item_ports.fill_magazine = nil
+            item_ports.magazine_ammo = nil
+            local deps = fake_orchestrator_deps(fake_store())
+            deps.actor = nil
+            deps.actor_item_ports = item_ports
+            local orchestrator = gamma_arena_bootstrap.compose(deps)
+            orchestrator.session = {
+                schema_version = 2,
+                session_id = "ga_task11_custom_session",
+                session_nonce = "ga_task11_custom_nonce",
+                custom_config = { roster = { { rank = "novice" } }, actor_items = clone(selected) }
+            }
+            return env, orchestrator.deps.actor.deps.items
+        end
+
+        local env, items = composed_items()
+        local applied = items:apply(owner, selected, universal_catalog())
+        gamma_arena_test_assert.is_true(applied.ok, "production magazine path accepts a selected non-first ammunition type")
+        local weapon = env.created[1]
+        gamma_arena_test_assert.equals(#weapon.ammo_type_sets, 1, "production magazine path invokes the real ammo-type setter once")
+        gamma_arena_test_assert.equals(weapon.ammo_type_sets[1], 1, "second FightSpec ammo section maps to the engine's zero-based ammo type")
+        gamma_arena_test_assert.equals(weapon:get_ammo_type(), 1, "production magazine path verifies the real ammo-type getter")
+        gamma_arena_test_assert.equals(weapon:get_ammo_in_magazine(), 30, "production magazine path fills the real magazine after selecting ammo type")
+
+        local mismatched_env, mismatched_items = composed_items({ ammo_type_mismatch = true })
+        local mismatched = mismatched_items:apply(owner, selected, universal_catalog())
+        gamma_arena_test_assert.is_false(mismatched.ok, "ammo-type setter/getter mismatch rejects materialization")
+        gamma_arena_test_assert.equals(mismatched.error.code, "GA_ACTOR_ITEMS_AMMO_TYPE_VERIFY_FAILED", "ammo-type mismatch remains exact")
+        gamma_arena_test_assert.equals(#mismatched_env.releases, #mismatched_env.created, "ammo-type mismatch rolls back every created entity")
+    end)
+    system_ini = original_system_ini
+    if not called then error(reason) end
+end
+
+local function runtime_composed_actor_tag_failures_rollback_provisional_items_exactly()
+    local owner = { id = function() return 77 end }
+    local selected = { { section = "medkit", quantity = 3 } }
+    local cases = {
+        { name = "write", options = { fail_tag_write_at = 3 }, code = "GA_TEST_TAG_WRITE" },
+        { name = "read", options = { fail_tag_read_at = 3 }, code = "GA_TEST_TAG_READ" },
+        { name = "mismatch", options = { mismatch_tag_read_at = 3 }, code = "GA_ACTOR_ITEMS_TAG_VERIFY_FAILED" }
+    }
+    for _, case in ipairs(cases) do
+        local env, item_ports = task11_production_item_ports(case.options)
+        local deps = fake_orchestrator_deps(fake_store())
+        deps.actor = nil
+        deps.actor_item_ports = item_ports
+        local orchestrator = gamma_arena_bootstrap.compose(deps)
+        orchestrator.session = {
+            schema_version = 2,
+            session_id = "ga_task11_custom_session",
+            session_nonce = "ga_task11_custom_nonce",
+            custom_config = { roster = { { rank = "novice" } }, actor_items = clone(selected) }
+        }
+        local items = orchestrator.deps.actor.deps.items
+        local failed = items:apply(owner, selected, universal_catalog())
+        gamma_arena_test_assert.is_false(failed.ok, case.name .. " tag failure is surfaced")
+        gamma_arena_test_assert.equals(failed.error.code, case.code, case.name .. " tag failure preserves the original cause after rollback")
+        gamma_arena_test_assert.equals(#env.created, 3, case.name .. " failure occurs after the third physical item is created")
+        gamma_arena_test_assert.equals(#env.releases, 3, case.name .. " failure releases every transaction-owned item")
+        for index, id in ipairs(env.releases) do
+            gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, case.name .. " rollback remains reverse creation order")
+            local occurrences = 0
+            for _, released_id in ipairs(env.releases) do if released_id == id then occurrences = occurrences + 1 end end
+            gamma_arena_test_assert.equals(occurrences, 1, case.name .. " rollback releases each exact item once")
+            gamma_arena_test_assert.equals(env.by_id[id], nil, case.name .. " rollback removes the released item")
+        end
+        gamma_arena_test_assert.is_true(items:cleanup().ok, case.name .. " cleanup retires absence-proven provisional records")
+        gamma_arena_test_assert.is_true(items:cleanup().ok, case.name .. " cleanup remains idempotent")
+        gamma_arena_test_assert.equals(#items.records_snapshot(), 0, case.name .. " registry is eventually empty")
+    end
+end
+
+local function runtime_composed_default_actor_materializes_universal_inventory_and_restores_template()
+    local catalog = universal_catalog()
+    catalog.items.grenade_f1 = { category = "grenade" }
+    catalog.items.grenade_rgd5 = { category = "grenade" }
+    local selected = universal_items()
+    selected[#selected + 1] = { section = "grenade_f1", quantity = 1 }
+    selected[#selected + 1] = { section = "grenade_rgd5", quantity = 1 }
+    local owner = { id = function() return 77 end }
+    local env, item_ports = task11_production_item_ports()
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.actor = nil
+    deps.actor_item_ports = item_ports
+    local orchestrator = gamma_arena_bootstrap.compose(deps)
+    orchestrator.session = {
+        schema_version = 2,
+        session_id = "ga_task11_custom_session",
+        session_nonce = "ga_task11_custom_nonce",
+        custom_config = { roster = { { rank = "novice" } }, actor_items = clone(selected) }
+    }
+    local items = orchestrator.deps.actor.deps.items
+    gamma_arena_test_assert.equals(items.kind, "universal_materializer", "composed default actor exposes the production universal materializer")
+    local applied = items:apply(owner, selected, catalog)
+    gamma_arena_test_assert.is_true(applied.ok, "composed default actor materializes the universal inventory")
+    local ready = items:update(owner)
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "synchronous universal materialization reports exact readiness")
+    gamma_arena_test_assert.equals(#env.created, 14, "all equipped, carried, ammo, medicine, and grenade quantities become physical entities")
+    local expected = "outfit|helmet|knife|pistol|rifle|carried|ammo_a|ammo_a|ammo_b|medkit|medkit|medkit|grenade_f1|grenade_rgd5"
+    local created_sections = {}
+    for index, entity in ipairs(env.created) do
+        created_sections[index] = entity.section_value
+        gamma_arena_test_assert.is_true(type(env.tags[entity.runtime_id]) == "string", "every physical actor entity has a durable ownership tag")
+    end
+    gamma_arena_test_assert.equals(table.concat(created_sections, "|"), expected, "production materializer preserves exact universal item order and quantities")
+    gamma_arena_test_assert.equals(env.slots.outfit.section_value, "outfit", "outfit occupies its exact logical slot")
+    gamma_arena_test_assert.equals(env.slots.helmet.section_value, "helmet", "helmet occupies its exact logical slot")
+    gamma_arena_test_assert.equals(env.slots.knife.section_value, "knife", "knife occupies its exact logical slot")
+    gamma_arena_test_assert.equals(env.slots.weapon_1.section_value, "pistol", "weapon_1 remains equipped")
+    gamma_arena_test_assert.equals(env.slots.weapon_2.section_value, "rifle", "weapon_2 remains equipped")
+    gamma_arena_test_assert.equals(env.active_slot, "weapon_2", "weapon_2 remains the active universal slot")
+    gamma_arena_test_assert.equals(env.magazines[env.slots.weapon_1.runtime_id], "ammo_b", "weapon_1 retains its compatible selected ammo")
+    gamma_arena_test_assert.equals(env.magazines[env.slots.weapon_2.runtime_id], "ammo_a", "weapon_2 retains its compatible selected ammo")
+
+    local cleanup = items:cleanup()
+    gamma_arena_test_assert.is_true(cleanup.ok and cleanup.value.pending == true, "victory cleanup submits every owned item release")
+    gamma_arena_test_assert.is_true(items:cleanup().ok, "victory cleanup proves exact absence on the next poll")
+    local restored = items:apply(owner, selected, catalog)
+    gamma_arena_test_assert.is_true(restored.ok, "victory reset reapplies the immutable actor template")
+    local restored_sections = {}
+    for index = 15, #env.created do restored_sections[#restored_sections + 1] = env.created[index].section_value end
+    gamma_arena_test_assert.equals(table.concat(restored_sections, "|"), expected, "post-victory physical inventory exactly matches the original template")
+
+    local failed_env, failed_ports = task11_production_item_ports({ fail_slot = "weapon_2" })
+    local failed_deps = fake_orchestrator_deps(fake_store())
+    failed_deps.actor = nil
+    failed_deps.actor_item_ports = failed_ports
+    local failed_orchestrator = gamma_arena_bootstrap.compose(failed_deps)
+    failed_orchestrator.session = orchestrator.session
+    local failed_items = failed_orchestrator.deps.actor.deps.items
+    gamma_arena_test_assert.equals(failed_items.kind, "universal_materializer", "rollback trace also uses the composed production materializer")
+    local failed = failed_items:apply(owner, selected, catalog)
+    gamma_arena_test_assert.is_false(failed.ok, "late universal equip failure is surfaced")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_UNIVERSAL_EQUIP", "rollback retains the original materializer failure")
+    gamma_arena_test_assert.equals(#failed_env.releases, #failed_env.created, "rollback releases every created universal entity")
+    for index, id in ipairs(failed_env.releases) do
+        gamma_arena_test_assert.equals(id, failed_env.created[#failed_env.created - index + 1].runtime_id, "rollback releases universal entities in reverse creation order")
+    end
+end
+
 local function runtime_custom_defeat_opens_fresh_default_setup_without_loadout()
     local shown_model = nil
-    local consumed = 0
     local opened = 0
     local promoted = 0
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local armed = store:arm_defeat(config, {
+        schema_version = 1,
+        session_id = "ga_custom_defeat",
+        session_nonce = "ga_custom_nonce",
+        mode_id = "skirmish",
+        generation_recipe = "custom"
+    }, { clock = function() return 1000 end, nonce = function() return "custom" end })
+    gamma_arena_test_assert.is_true(armed.ok, "real Store arms a custom defeat")
+    gamma_arena_test_assert.equals(armed.value.token, "gad1:1000:custom", "real Store uses the production defeat token grammar")
+    gamma_arena_test_assert.is_true(store:confirm_defeat(config, armed.value.token, { clock = function() return 1001 end }).ok, "real Store confirms the custom defeat")
+    local persisted = store:peek_defeat(config, { clock = function() return 1002 end })
+    gamma_arena_test_assert.is_true(persisted.ok and type(persisted.value) == "table", "real Store exposes the confirmed custom defeat")
+    gamma_arena_test_assert.equals(persisted.value.schema_version, 1, "persisted defeat remains production schema v1")
+    gamma_arena_test_assert.equals(persisted.value.generation_recipe, "custom", "persisted defeat retains only the custom recipe")
+    gamma_arena_test_assert.equals(persisted.value.difficulty_id, nil, "custom defeat persists no random difficulty")
+    gamma_arena_test_assert.equals(persisted.value.custom_config, nil, "custom defeat persists no loadout")
     local menu = {
         HideDialog = function() end,
         ShowDialog = function() end,
         Show = function() end
     }
     local result = gamma_arena_main_menu.show_confirmed_defeat(menu, {
-        config = {},
+        config = config,
         peek_defeat = function()
-            return gamma_arena_result.ok({
-                token = "gad2:1000:custom",
-                schema_version = 2,
-                session_id = "ga_custom_defeat",
-                session_nonce = "ga_custom_nonce",
-                mode_id = "skirmish",
-                generation_recipe = "custom"
-            })
+            return store:peek_defeat(config, { clock = function() return 1002 end })
         end,
         show_result = function(model) shown_model = model; return gamma_arena_result.ok(true) end,
         clear_result = function() return gamma_arena_result.ok(true) end,
         consume_defeat = function(_, token)
-            gamma_arena_test_assert.equals(token, "gad2:1000:custom", "custom defeat consumes its exact token")
-            consumed = consumed + 1
-            return gamma_arena_result.ok(true)
+            gamma_arena_test_assert.equals(token, "gad1:1000:custom", "custom defeat consumes its exact production token")
+            return store:consume_defeat(config, token)
         end,
         open_custom_setup = function(owner, defeated)
             gamma_arena_test_assert.is_true(owner == menu, "fresh custom setup retains main-menu owner")
@@ -9608,7 +10011,7 @@ local function runtime_custom_defeat_opens_fresh_default_setup_without_loadout()
     gamma_arena_test_assert.equals(shown_model.next_title_key, "st_gamma_arena_result_new_fight", "custom defeat retains the established new-fight action label")
     local next_result = shown_model.on_next()
     gamma_arena_test_assert.is_true(next_result.ok, "custom defeat opens a fresh selector")
-    gamma_arena_test_assert.equals(consumed, 1, "custom defeat intent is cleared once")
+    gamma_arena_test_assert.equals(store:peek_defeat(config, { clock = function() return 1003 end }).value, false, "custom defeat intent is consumed once")
     gamma_arena_test_assert.equals(opened, 1, "custom defeat opens one default custom setup")
     gamma_arena_test_assert.equals(promoted, 0, "custom defeat never auto-promotes the defeated loadout")
 end
@@ -9796,7 +10199,12 @@ end
 
 local cases = {
     { name = "runtime_custom_session_creation_copies_validated_recipe", fn = runtime_custom_session_creation_copies_validated_recipe },
+    { name = "runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership", fn = runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership },
     { name = "runtime_custom_stale_catalog_rejects_before_actor_mutation", fn = runtime_custom_stale_catalog_rejects_before_actor_mutation },
+    { name = "runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store", fn = runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store },
+    { name = "runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type", fn = runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type },
+    { name = "runtime_composed_actor_tag_failures_rollback_provisional_items_exactly", fn = runtime_composed_actor_tag_failures_rollback_provisional_items_exactly },
+    { name = "runtime_composed_default_actor_materializes_universal_inventory_and_restores_template", fn = runtime_composed_default_actor_materializes_universal_inventory_and_restores_template },
     { name = "runtime_custom_defeat_opens_fresh_default_setup_without_loadout", fn = runtime_custom_defeat_opens_fresh_default_setup_without_loadout },
     { name = "runtime_custom_first_fight_preserves_shared_roster_actor_hud_and_audio", fn = runtime_custom_first_fight_preserves_shared_roster_actor_hud_and_audio },
     { name = "runtime_custom_victory_rerolls_enemy_only_with_immutable_template", fn = runtime_custom_victory_rerolls_enemy_only_with_immutable_template },
