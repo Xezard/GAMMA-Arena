@@ -1983,8 +1983,8 @@ function compose(overrides)
     local save_guard = overrides.save_guard or default_save_guard(diagnostics)
     local catalogs_port = overrides.catalogs or function() return gamma_arena_catalog.load() end
     local layout_adapter = overrides.layout_adapter or default_runtime_layout_adapter()
-    local layout_port = overrides.layout or function(layout_id)
-        local catalogs = catalogs_port()
+    local layout_port = overrides.layout or function(layout_id, catalog_snapshot)
+        local catalogs = catalog_snapshot and gamma_arena_result.ok(catalog_snapshot) or catalogs_port()
         if not catalogs.ok then return catalogs end
         local layouts = catalogs.value and catalogs.value.layouts
         local layout = type(layouts) == "table" and layouts[layout_id or "rostok_arena_v1"] or nil
@@ -1996,12 +1996,13 @@ function compose(overrides)
         end
         return layout_adapter:resolve(layout)
     end
-    local preflight_port = overrides.preflight or function()
-        local catalogs = catalogs_port()
+    local preflight_port = overrides.preflight or function(catalog_snapshot)
+        local catalogs = catalog_snapshot and gamma_arena_result.ok(catalog_snapshot) or catalogs_port()
         if not catalogs.ok then return catalogs end
-        local compatible = gamma_arena_compat.preflight(runtime_probes(catalogs.value))
+        catalog_snapshot = catalogs.value
+        local compatible = gamma_arena_compat.preflight(runtime_probes(catalog_snapshot))
         if not compatible.ok then return compatible end
-        local resolved = layout_port("rostok_arena_v1")
+        local resolved = layout_port("rostok_arena_v1", catalog_snapshot)
         if not resolved.ok then return resolved end
         return gamma_arena_result.ok(true)
     end
@@ -2078,7 +2079,7 @@ function compose(overrides)
         mode_policy = overrides.mode_policy or gamma_arena_mode_skirmish,
         catalogs = catalogs_port,
         generator = overrides.generator or function(session, fight_index, catalog_snapshot, resolved_layout)
-            return gamma_arena_generator.generate(session, fight_index, catalog_snapshot, resolved_layout)
+            return gamma_arena_fight_builder.generate(session, fight_index, catalog_snapshot, resolved_layout)
         end,
         validator = overrides.validator or function(spec, catalog_snapshot, resolved_layout)
             return gamma_arena_validator.validate_runtime(spec, catalog_snapshot, resolved_layout, {

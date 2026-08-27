@@ -413,6 +413,51 @@ foreach ($Forbidden in @('mode_id=','difficulty_id=','budget=','price=','custom_
     Assert-True (@($Task10GoldenRows | Where-Object { $_.Substring($_.IndexOf('stable_encode=') + 14).Contains($Forbidden) }).Count -eq 0) "Task 10 v8 golden encodings must erase $Forbidden"
 }
 }
+
+$Task11Runtime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Name in @(
+    'runtime_custom_session_creation_copies_validated_recipe',
+    'runtime_custom_stale_catalog_rejects_before_actor_mutation',
+    'runtime_custom_defeat_opens_fresh_default_setup_without_loadout'
+)) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($Task11Runtime, $Registration)).Count -eq 1) "Task 11 runtime case must be registered exactly: $Name"
+}
+$Task11Session = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
+Assert-True ($Task11Session -match 'arena_session_keys\s*=\s*\{[\s\S]{0,700}generation_recipe\s*=\s*true[\s\S]{0,400}catalog_fingerprint\s*=\s*true[\s\S]{0,400}custom_config\s*=\s*true') 'Task 11 ArenaSession must own recipe, catalog fingerprint, and custom config provenance.'
+Assert-True ($Task11Session -match 'session\.generator_version\s*~=\s*10' -and $Task11Session -match 'session\.catalog_revision\s*~=\s*10') 'Task 11 ArenaSession must bind catalog/generator identity 10/10.'
+Assert-True ($Task11Session -match 'gamma_arena_custom_config\.validate\s*\(\s*session\.custom_config') 'Task 11 ArenaSession must independently validate and copy custom config.'
+$Task11Orchestrator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+Assert-True ($Task11Orchestrator -match 'function\s+Orchestrator:create_session\s*\(\s*request\s*,\s*catalog\s*,\s*layout\s*\)') 'Task 11 session creation must consume the active catalog and layout.'
+Assert-True ($Task11Orchestrator -match 'catalog_fingerprint\s*=\s*catalog\.fingerprint') 'Task 11 session creation must bind the loaded catalog fingerprint.'
+Assert-True ($Task11Orchestrator -match 'local\s+layout\s*=\s*self:layout_snapshot\(self\.catalog_snapshot\)') 'Task 11 continuation actor reset must resolve layout from the same validated catalog snapshot as its FightSpec.'
+Assert-True (([regex]::Matches($Task11Orchestrator, 'self:layout_snapshot\(self\.catalog_snapshot\)')).Count -ge 2) 'Task 11 initial normalization and continuation reset must both retain the FightSpec catalog snapshot.'
+$Task11IdentityIndex = $Task11Orchestrator.IndexOf('validate_session_catalog_identity')
+$Task11GenerateIndex = $Task11Orchestrator.IndexOf('self.deps.generator')
+Assert-True ($Task11IdentityIndex -ge 0 -and $Task11GenerateIndex -gt $Task11IdentityIndex) 'Task 11 catalog identity validation must precede fight generation and actor mutation.'
+$Task11MainMenu = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script') -Raw
+Assert-True ($Task11Session -match 'defeat_generation_recipe') 'Task 11 defeat handoff must retain recipe provenance.'
+Assert-True ($Task11Session -notmatch 'defeat_custom_(?:config|item|roster)') 'Task 11 defeat handoff must never persist the defeated custom loadout.'
+Assert-True ($Task11MainMenu -match 'function\s+open_default_custom_setup\s*\(' -and $Task11MainMenu -match 'generation_recipe\s*==\s*"custom"') 'Task 11 custom defeat must open a fresh default custom setup.'
+$Task11Migrations = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script') -Raw
+Assert-True ($Task11Migrations -match [regex]::Escape('defeat_generation_recipe')) 'Task 11 migration cleanup must own the defeat recipe key.'
+$Task11Bootstrap = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+Assert-True ($Task11Bootstrap -match 'local\s+layout_port\s*=\s*overrides\.layout\s+or\s+function\s*\(\s*layout_id\s*,\s*catalog_snapshot\s*\)' -and $Task11Bootstrap -match 'catalog_snapshot\s+and\s+gamma_arena_result\.ok\(catalog_snapshot\)') 'Task 11 bootstrap layout resolution must reuse the supplied universal catalog snapshot.'
+Assert-True ($Task11Bootstrap -match 'local\s+preflight_port\s*=\s*overrides\.preflight\s+or\s+function\s*\(\s*catalog_snapshot\s*\)' -and $Task11Bootstrap -match 'runtime_probes\(catalog_snapshot\)') 'Task 11 bootstrap compatibility preflight must reuse the supplied universal catalog snapshot.'
+Assert-True ($Task11Bootstrap -match 'gamma_arena_fight_builder\.generate\(session,\s*fight_index,\s*catalog_snapshot,\s*resolved_layout\)') 'Task 11 bootstrap must dispatch both recipes through the universal fight builder.'
+$Task11RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Marker in @(
+    'runtime_custom_first_fight_preserves_shared_roster_actor_hud_and_audio',
+    'runtime_custom_victory_rerolls_enemy_only_with_immutable_template',
+    'runtime_custom_integrity_retry_is_object_identical_and_restart_preserves_policy',
+    'runtime_custom_recipe_failures_are_exact_before_world_mutation',
+    'runtime_random_recipe_session_remains_difficulty_only'
+)) {
+    Assert-True ($Task11RuntimeTests -match [regex]::Escape($Marker)) "Task 11 runtime lifecycle tests must cover $Marker"
+}
+$Task11CustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+Assert-True ($Task11CustomUi -match 'DIK_keys\.DIK_ESCAPE[\s\S]{0,80}self:OnBack\(\)') 'Task 11 custom setup Escape must return through the non-launching back path.'
+
 foreach ($Path in $Task7CurrentArtifacts) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"
 }
@@ -1114,7 +1159,10 @@ if (Test-Path -LiteralPath $Task6MainMenuPath) {
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+result\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Every ordinary deferred-display failure must fail open through complete recovery'
     Assert-True ($Task6MainMenuContent -match 'if\s+not\s+peeked\.ok\s+then[\s\S]{0,260}recover_unexpected_deferred_failure') 'Scheduling-time defeat read failures must fail open through complete recovery'
     Assert-True ($Task6MainMenuContent -match 'clear_result[\s\S]{0,400}clear_fatal[\s\S]{0,400}clear_defeat[\s\S]{0,400}restore_main_menu') 'Deferred recovery must dismiss every Arena modal, clear defeat state, and restore the stock menu'
-    Assert-True ($Task6MainMenuContent -match 'model\.on_next\s*=\s*function\(\)[\s\S]{0,500}local\s+runtime_preflight\s*=\s*port_or_default\(ports,\s*"runtime_preflight",\s*gamma_arena_ui_start\.preflight_runtime\)[\s\S]{0,500}if\s+not\s+runtime\.ok\s+then\s+return\s+recover_from_fresh_failure\(menu,\s*ports,\s*config,\s*runtime,\s*false\)\s+end[\s\S]{0,500}random_session_seed') 'Confirmed-defeat rematches must preflight before seed generation and preserve transient launch state on readiness failure'
+    $Task6RandomPreflightIndex = $Task6MainMenuContent.IndexOf('local runtime_preflight = port_or_default(ports, "runtime_preflight", gamma_arena_ui_start.preflight_runtime)')
+    $Task6RandomPreflightRecoveryIndex = $Task6MainMenuContent.IndexOf('if not runtime.ok then return recover_from_fresh_failure(menu, ports, config, runtime, false) end', $Task6RandomPreflightIndex + 1)
+    $Task6RandomSeedIndex = $Task6MainMenuContent.IndexOf('local random_session_seed = port_or_default(ports, "random_session_seed", gamma_arena_session_store.random_session_seed)', $Task6RandomPreflightRecoveryIndex + 1)
+    Assert-True ($Task6RandomPreflightIndex -ge 0 -and $Task6RandomPreflightRecoveryIndex -gt $Task6RandomPreflightIndex -and $Task6RandomSeedIndex -gt $Task6RandomPreflightRecoveryIndex) 'Confirmed-defeat random rematches must preflight before seed generation and preserve transient launch state on readiness failure'
     Assert-True ($Task6MainMenuContent -match 'local\s+function\s+recover_from_fresh_failure\s*\([^\)]*clear_transient[^\)]*\)[\s\S]{0,500}if\s+clear_transient\s+then[\s\S]{0,500}end') 'Fresh-fight recovery must make transient clearing explicit for preflight failures'
     $Task6BindIndex = $Task6MainMenuContent.IndexOf('bind(menu)')
     $Task6DefeatIndex = $Task6MainMenuContent.IndexOf('defer_confirmed_defeat(menu', $Task6BindIndex + 1)
@@ -1974,7 +2022,7 @@ Assert-True ($Task12BootstrapContent -match 'gamma_arena_layout_adapter\.new') '
 foreach ($Task12Marker in @('level.vertex_in_direction', 'level.vertex_position', 'vector()', 'GA_LAYOUT_BASE_ANCHOR_INVALID')) {
     Assert-True ($Task12BootstrapContent.Contains($Task12Marker)) "Bootstrap resolved-layout port is missing marker: $Task12Marker"
 }
-Assert-True ($Task12BootstrapContent -match 'gamma_arena_generator\.generate\(session,\s*fight_index,\s*catalog_snapshot,\s*resolved_layout\)') 'Bootstrap generator port must receive the resolved physical layout'
+Assert-True ($Task12BootstrapContent -match 'gamma_arena_fight_builder\.generate\(session,\s*fight_index,\s*catalog_snapshot,\s*resolved_layout\)') 'Bootstrap universal builder port must receive the resolved physical layout'
 Assert-True ($Task12BootstrapContent -match 'gamma_arena_validator\.validate_runtime\(spec,\s*catalog_snapshot,\s*resolved_layout') 'Bootstrap validator port must receive the same resolved physical layout and runtime profile resolver'
 Assert-True ($Task12BootstrapContent.Contains('set_character_community') -and $Task12BootstrapContent.Contains('character_community')) 'Bootstrap must bind runtime-community mutation and readback ports'
 Assert-True ($Task12OrchestratorContent -match 'function\s+Orchestrator:npc_on_net_spawn\s*\(' -and $Task12OrchestratorContent.Contains('on_npc_net_spawn')) 'Orchestrator must delegate the owned NPC net-spawn boundary'

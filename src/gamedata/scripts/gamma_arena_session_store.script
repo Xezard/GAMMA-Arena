@@ -77,6 +77,7 @@ local defeat_keys = {
     "defeat_session_id",
     "defeat_session_nonce",
     "defeat_mode_id",
+    "defeat_generation_recipe",
     "defeat_difficulty_id",
     "defeat_issued_at"
 }
@@ -99,10 +100,13 @@ local arena_session_keys = {
     session_nonce = true,
     mode_id = true,
     difficulty_id = true,
+    generation_recipe = true,
     session_seed = true,
     fight_index = true,
     generator_version = true,
     catalog_revision = true,
+    catalog_fingerprint = true,
+    custom_config = true,
     layout_id = true,
     checkpoint_name = true,
     phase = true
@@ -457,6 +461,7 @@ local function validate_defeat_context(context)
         session_id = true,
         session_nonce = true,
         mode_id = true,
+        generation_recipe = true,
         difficulty_id = true
     }
     for key in pairs(context) do
@@ -471,14 +476,22 @@ local function validate_defeat_context(context)
     if context.mode_id ~= "skirmish" then
         return fail("GA_DEFEAT_MODE_INVALID", "Defeat context mode is incompatible", { value = context.mode_id })
     end
-    if not valid_difficulties[context.difficulty_id] then
-        return fail("GA_DEFEAT_DIFFICULTY_INVALID", "Defeat context difficulty is unknown", { value = context.difficulty_id })
+    if context.generation_recipe ~= "random" and context.generation_recipe ~= "custom" then
+        return fail("GA_DEFEAT_RECIPE_INVALID", "Defeat context generation recipe is invalid", { value = context.generation_recipe })
+    end
+    if context.generation_recipe == "random" then
+        if not valid_difficulties[context.difficulty_id] then
+            return fail("GA_DEFEAT_DIFFICULTY_INVALID", "Random defeat context difficulty is unknown", { value = context.difficulty_id })
+        end
+    elseif context.difficulty_id ~= nil then
+        return fail("GA_DEFEAT_RECIPE_INVALID", "Custom defeat context cannot retain a random difficulty")
     end
     return gamma_arena_result.ok({
         schema_version = 1,
         session_id = session_id.value,
         session_nonce = session_nonce.value,
         mode_id = "skirmish",
+        generation_recipe = context.generation_recipe,
         difficulty_id = context.difficulty_id
     })
 end
@@ -489,6 +502,7 @@ local function same_defeat_context(left, right)
         and left.session_id == right.session_id
         and left.session_nonce == right.session_nonce
         and left.mode_id == right.mode_id
+        and left.generation_recipe == right.generation_recipe
         and left.difficulty_id == right.difficulty_id
 end
 
@@ -524,7 +538,7 @@ local function same_resume_intent(left, right)
         and left.checkpoint_name == right.checkpoint_name
 end
 
-local function validate_expected_session(session)
+local function validate_expected_session(session, context)
     if type(session) ~= "table" then
         return fail("GA_SESSION_INVALID", "Expected ArenaSession must be a table")
     end
@@ -533,17 +547,20 @@ local function validate_expected_session(session)
             return fail("GA_SESSION_UNKNOWN_FIELD", "ArenaSession contains an unknown field", { field = tostring(key) })
         end
     end
-    if session.schema_version ~= 1 then
-        return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v1", { value = session.schema_version })
+    if session.schema_version ~= 2 then
+        return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v2", { value = session.schema_version })
     end
     if session.checkpoint_name ~= CHECKPOINT_NAME then
         return fail("GA_RESUME_CHECKPOINT_MISMATCH", "ArenaSession checkpoint name is not the reserved checkpoint", { value = session.checkpoint_name })
     end
-    if session.generator_version ~= 2 then
+    if session.generator_version ~= 10 then
         return fail("GA_SESSION_GENERATOR_VERSION_INVALID", "ArenaSession generator version is incompatible", { value = session.generator_version })
     end
-    if session.catalog_revision ~= 2 then
+    if session.catalog_revision ~= 10 then
         return fail("GA_SESSION_CATALOG_REVISION_INVALID", "ArenaSession catalog revision is incompatible", { value = session.catalog_revision })
+    end
+    if type(session.catalog_fingerprint) ~= "string" or session.catalog_fingerprint == "" then
+        return fail("GA_SESSION_CATALOG_FINGERPRINT_INVALID", "ArenaSession catalog fingerprint is invalid")
     end
     if session.layout_id ~= "rostok_arena_v1" then
         return fail("GA_SESSION_LAYOUT_INVALID", "ArenaSession layout is incompatible", { value = session.layout_id })
@@ -551,8 +568,8 @@ local function validate_expected_session(session)
     if session.mode_id ~= "skirmish" then
         return fail("GA_SESSION_MODE_INVALID", "ArenaSession mode is incompatible", { value = session.mode_id })
     end
-    if not valid_difficulties[session.difficulty_id] then
-        return fail("GA_SESSION_DIFFICULTY_INVALID", "ArenaSession difficulty is unknown", { value = session.difficulty_id })
+    if session.generation_recipe ~= "random" and session.generation_recipe ~= "custom" then
+        return fail("GA_SESSION_RECIPE_INVALID", "ArenaSession generation recipe is invalid", { value = session.generation_recipe })
     end
     if not finite_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > UINT32_MAX then
         return fail("GA_SESSION_SEED_INVALID", "ArenaSession seed must be uint32")
@@ -567,16 +584,47 @@ local function validate_expected_session(session)
     if type(session.phase) ~= "string" or #session.phase < 1 then
         return fail("GA_SESSION_PHASE_INVALID", "ArenaSession phase is missing")
     end
+    local effective_context = type(context) == "table" and custom_context_from(context) or nil
+    local catalog = effective_context and effective_context.catalog
+    if type(catalog) == "table" then
+        if catalog.generator_version ~= session.generator_version or catalog.revision ~= session.catalog_revision
+            or catalog.fingerprint ~= session.catalog_fingerprint then
+            return fail("GA_START_CATALOG_STALE", "ArenaSession catalog identity is stale", {
+                generator_version = session.generator_version,
+                catalog_revision = session.catalog_revision,
+                catalog_fingerprint = session.catalog_fingerprint
+            })
+        end
+    end
+    local custom_config = nil
+    if session.generation_recipe == "random" then
+        if not valid_difficulties[session.difficulty_id] or session.custom_config ~= nil then
+            return fail("GA_SESSION_RECIPE_INVALID", "Random ArenaSession requires only a difficulty recipe")
+        end
+    else
+        if session.difficulty_id ~= nil or session.custom_config == nil then
+            return fail("GA_SESSION_RECIPE_INVALID", "Custom ArenaSession requires only a custom configuration")
+        end
+        if type(effective_context) ~= "table" then
+            return fail("GA_START_CATALOG_UNAVAILABLE", "Custom ArenaSession requires the active catalog and layout")
+        end
+        local normalized = gamma_arena_custom_config.validate(session.custom_config, effective_context)
+        if not normalized.ok then return normalized end
+        custom_config = normalized.value
+    end
     return gamma_arena_result.ok({
-        schema_version = 1,
+        schema_version = 2,
         session_id = session_id.value,
         session_nonce = session_nonce.value,
         mode_id = session.mode_id,
         difficulty_id = session.difficulty_id,
+        generation_recipe = session.generation_recipe,
         session_seed = session.session_seed,
         fight_index = session.fight_index,
-        generator_version = 2,
-        catalog_revision = 2,
+        generator_version = session.generator_version,
+        catalog_revision = session.catalog_revision,
+        catalog_fingerprint = session.catalog_fingerprint,
+        custom_config = custom_config,
         layout_id = "rostok_arena_v1",
         checkpoint_name = CHECKPOINT_NAME,
         phase = session.phase
@@ -794,6 +842,7 @@ function Store:read_defeat(config, now, require_confirmed)
         session_id = values.defeat_session_id,
         session_nonce = values.defeat_session_nonce,
         mode_id = values.defeat_mode_id,
+        generation_recipe = values.defeat_generation_recipe,
         difficulty_id = values.defeat_difficulty_id
     })
     if not context.ok then return self:clear_defeat_and_return(config, context) end
@@ -863,17 +912,23 @@ function Store:arm_defeat(config, context, options)
     local token = "gad1:" .. tostring(now.value) .. ":" .. nonce.value
 
     local value = validated.value
-    local written = self:transaction(config, SECTION, operations_for_writes({
+    local operations = operations_for_writes({
         { "defeat_token", token },
         { "defeat_schema_version", value.schema_version },
         { "defeat_stage", "armed" },
         { "defeat_session_id", value.session_id },
         { "defeat_session_nonce", value.session_nonce },
         { "defeat_mode_id", value.mode_id },
-        { "defeat_difficulty_id", value.difficulty_id },
+        { "defeat_generation_recipe", value.generation_recipe },
         { "defeat_issued_at", now.value },
         { "defeat_pending", true }
-    }), {
+    })
+    if value.difficulty_id == nil then
+        operations[#operations + 1] = { action = "remove", key = "defeat_difficulty_id" }
+    else
+        operations[#operations + 1] = { action = "write", key = "defeat_difficulty_id", value = value.difficulty_id }
+    end
+    local written = self:transaction(config, SECTION, operations, {
         commit_write_keys = { "defeat_pending" },
         fail_closed_keys = defeat_keys,
         error_code = "GA_DEFEAT_ARM_FAILED"
@@ -960,7 +1015,8 @@ function Store:issue_launch_from_defeat(config, token, request, options)
     local other = self:ensure_defeat_has_no_other_intent(config)
     if not other.ok then return other end
     if token ~= defeat.value.token then return fail("GA_DEFEAT_TOKEN_MISMATCH", "Defeat token does not match the pending intent") end
-    if validated.value.mode_id ~= defeat.value.context.mode_id or validated.value.difficulty_id ~= defeat.value.context.difficulty_id then
+    if defeat.value.context.generation_recipe ~= "random" or validated.value.mode_id ~= defeat.value.context.mode_id
+        or validated.value.difficulty_id ~= defeat.value.context.difficulty_id then
         return fail("GA_DEFEAT_REQUEST_MISMATCH", "Defeat retry request must match the defeated mode and difficulty")
     end
     local nonce = self:nonce_value(options, now.value)
@@ -1563,8 +1619,8 @@ local default_store = new_store_impl()
 function new_store() return new_store_impl() end
 function parse_manual_seed(text) return parse_manual_seed_impl(text) end
 function validate_start_request(request, context) return validate_start_request_impl(request, context) end
-function validate_arena_session(session)
-    local succeeded, result = pcall(validate_expected_session, session)
+function validate_arena_session(session, context)
+    local succeeded, result = pcall(validate_expected_session, session, context)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     return fail("GA_SESSION_INVALID", "ArenaSession validation failed safely", { reason = tostring(result) })
 end

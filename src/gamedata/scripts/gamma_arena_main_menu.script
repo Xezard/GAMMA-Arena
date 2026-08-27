@@ -57,6 +57,30 @@ local function call_result_port(name, callback)
     return result
 end
 
+function open_default_custom_setup(menu, ports, defeated)
+    local injected = type(ports) == "table" and ports.open_custom_setup or nil
+    if injected ~= nil then
+        return call_result_port("open_custom_setup", function() return injected(menu, defeated) end)
+    end
+    local opened, reason = pcall(function()
+        if menu.gamma_arena_dialog == nil then
+            menu.gamma_arena_dialog = gamma_arena_ui_start.create(menu)
+        end
+        local start = menu.gamma_arena_dialog
+        start:ShowDialog(true)
+        menu:HideDialog()
+        menu:Show(false)
+        start:OnCustom()
+        if start.custom_dialog == nil then error("custom dialog was not created") end
+    end)
+    if not opened then
+        return gamma_arena_result.err("GA_CUSTOM_UI_OPEN_FAILED", "Fresh custom Arena setup could not be opened", {
+            reason = tostring(reason)
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
 function request_restart(menu, ports)
     ports = ports or {}
     local restart = ports.request_restart
@@ -267,6 +291,20 @@ function show_confirmed_defeat(menu, ports)
         next_title_key = "st_gamma_arena_result_new_fight"
     }
     model.on_next = function()
+        if defeat.generation_recipe == "custom" then
+            if not defeat_consumed then
+                local consume_defeat = port_or_default(ports, "consume_defeat", gamma_arena_session_store.consume_defeat)
+                local consumed = call_result_port("consume_defeat", function() return consume_defeat(config, defeat.token) end)
+                if not consumed.ok then return consumed end
+                defeat_consumed = true
+            end
+            local clear_result = port_or_default(ports, "clear_result", gamma_arena_ui_result.clear_result)
+            local cleared = call_result_port("clear_result", function() return clear_result() end)
+            if not cleared.ok then return recover_from_fresh_failure(menu, ports, config, cleared, false) end
+            local opened = open_default_custom_setup(menu, ports, defeat)
+            if not opened.ok then return recover_from_fresh_failure(menu, ports, config, opened, false) end
+            return opened
+        end
         local runtime_preflight = port_or_default(ports, "runtime_preflight", gamma_arena_ui_start.preflight_runtime)
         local runtime = call_result_port("runtime_preflight", function() return runtime_preflight() end)
         if not runtime.ok then return recover_from_fresh_failure(menu, ports, config, runtime, false) end

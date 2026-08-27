@@ -9,6 +9,22 @@ local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
 end
 
+local function validate_session_catalog_identity(source, catalog)
+    if type(catalog) ~= "table" or catalog.generator_version ~= 10 or catalog.revision ~= 10
+        or type(catalog.fingerprint) ~= "string" or catalog.fingerprint == "" then
+        return fail("GA_CATALOG_LOAD_FAILED", "Active Arena catalog identity is invalid")
+    end
+    if type(source) ~= "table" or source.generator_version ~= catalog.generator_version
+        or source.catalog_revision ~= catalog.revision or source.catalog_fingerprint ~= catalog.fingerprint then
+        return fail("GA_START_CATALOG_STALE", "Arena session catalog identity is stale", {
+            generator_version = source and source.generator_version or nil,
+            catalog_revision = source and source.catalog_revision or nil,
+            catalog_fingerprint = source and source.catalog_fingerprint or nil
+        })
+    end
+    return gamma_arena_result.ok(true)
+end
+
 local function copy_plain(value, seen)
     local value_type = type(value)
     if value_type == "nil" or value_type == "string" or value_type == "boolean" or value_type == "number" then return value end
@@ -710,32 +726,40 @@ function Orchestrator:save_state(mdata)
     return gamma_arena_result.ok(false)
 end
 
-function Orchestrator:create_session(request)
+function Orchestrator:create_session(request, catalog, layout)
+    if type(request) ~= "table" then return fail("GA_SESSION_INVALID", "Arena launch request is unavailable") end
+    if request.schema_version == 2 then
+        local bound = validate_session_catalog_identity(request, catalog)
+        if not bound.ok then return bound end
+    end
     local identity = safe_result_call("GA_SESSION_IDENTITY_FAILED", self.deps.identity, request)
     if not identity.ok then return identity end
     local value = identity.value
     if type(value) ~= "table" then return fail("GA_SESSION_IDENTITY_FAILED", "Session identity must be a table") end
     return gamma_arena_session_store.validate_arena_session({
-        schema_version = 1,
+        schema_version = 2,
         session_id = value.session_id,
         session_nonce = value.session_nonce,
         mode_id = request.mode_id,
         difficulty_id = request.difficulty_id,
+        generation_recipe = request.generation_recipe or "random",
         session_seed = request.session_seed,
         fight_index = 0,
-        generator_version = 2,
-        catalog_revision = 2,
-        layout_id = "rostok_arena_v1",
+        generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision,
+        catalog_fingerprint = catalog.fingerprint,
+        custom_config = request.custom_config,
+        layout_id = type(layout) == "table" and layout.id or "rostok_arena_v1",
         checkpoint_name = "_gamma_arena_checkpoint",
         phase = gamma_arena_state_machine.states.PREPARING
-    })
+    }, { catalog = catalog, layout = layout })
 end
 
-function Orchestrator:run_preflight()
+function Orchestrator:run_preflight(catalog)
     local compat = self.deps.compat
     local lookup_ok, preflight = pcall(function() return compat and compat.preflight end)
-    if lookup_ok and type(preflight) == "function" then return safe_result_call("GA_PREFLIGHT_FAILED", preflight) end
-    return safe_result_call("GA_PREFLIGHT_FAILED", self.deps.preflight)
+    if lookup_ok and type(preflight) == "function" then return safe_result_call("GA_PREFLIGHT_FAILED", preflight, catalog) end
+    return safe_result_call("GA_PREFLIGHT_FAILED", self.deps.preflight, catalog)
 end
 
 function Orchestrator:activate_once()
@@ -770,12 +794,18 @@ function Orchestrator:activate_once()
         return self:enter_fatal(self.load_state_error)
     end
 
+    local activation_catalog = nil
+    local activation_layout = nil
     if state.launch_pending then
         if self.loaded_session ~= nil then
             return self:enter_fatal(fail("GA_LAUNCH_REQUIRES_NEW_GAME", "Arena launch intent is valid only for a distinct new game"))
         end
-        local layout = safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout)
+        local catalogs = safe_result_call("GA_CATALOG_LOAD_FAILED", self.deps.catalogs)
+        if not catalogs.ok then return self:enter_fatal(catalogs) end
+        activation_catalog = catalogs.value
+        local layout = safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, "rostok_arena_v1", activation_catalog)
         if not layout.ok then return self:enter_fatal(layout) end
+        activation_layout = layout.value
         local expected = type(layout.value) == "table" and layout.value.level or nil
         if type(expected) ~= "string" or expected == "" then
             return self:enter_fatal(fail("GA_ACTOR_LAYOUT_INVALID", "Arena layout has no target level"))
@@ -838,14 +868,14 @@ function Orchestrator:activate_once()
             route = handoff and handoff.route or "validated",
             level = "l05_bar"
         })
-        local preflight = self:run_preflight()
+        local preflight = self:run_preflight(activation_catalog)
         if not preflight.ok then return self:enter_fatal(preflight, true) end
-        local session = self:create_session(consumed.value)
+        local session = self:create_session(consumed.value, activation_catalog, activation_layout)
         if not session.ok then return self:enter_fatal(session, true) end
         local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
         if not advanced.ok then return self:enter_fatal(advanced, true) end
         self.session = session.value
-        local prepared = self:preflight_fight()
+        local prepared = self:preflight_fight(activation_catalog, activation_layout)
         if not prepared.ok then return self:enter_fatal(prepared, true) end
         self.active = true
         self:checkpoint("GA_ARENA_SESSION_CREATED", {
@@ -860,20 +890,24 @@ function Orchestrator:activate_once()
     return self:enter_fatal(fail("GA_LAUNCH_INTENT_REQUIRED", "Arena activation requires a launch intent"))
 end
 
-function Orchestrator:layout_snapshot()
-    return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id)
+function Orchestrator:layout_snapshot(catalog)
+    return safe_result_call("GA_ACTOR_LAYOUT_INVALID", self.deps.layout, self.session and self.session.layout_id, catalog)
 end
 
-function Orchestrator:preflight_fight()
+function Orchestrator:preflight_fight(catalog, resolved_layout)
     if self.fight_spec ~= nil or self.catalog_snapshot ~= nil then
         if type(self.fight_spec) == "table" and type(self.catalog_snapshot) == "table" then
             return gamma_arena_result.ok({ spec = self.fight_spec, catalog = self.catalog_snapshot })
         end
         return fail("GA_FIGHT_VALIDATE_FAILED", "Fight preflight cache is incomplete")
     end
-    local catalogs = safe_result_call("GA_CATALOG_LOAD_FAILED", self.deps.catalogs)
+    local catalogs = catalog and gamma_arena_result.ok(catalog)
+        or safe_result_call("GA_CATALOG_LOAD_FAILED", self.deps.catalogs)
     if not catalogs.ok then return catalogs end
-    local layout = self:layout_snapshot()
+    local identity = validate_session_catalog_identity(self.session, catalogs.value)
+    if not identity.ok then return identity end
+    local layout = resolved_layout and gamma_arena_result.ok(resolved_layout)
+        or self:layout_snapshot(catalogs.value)
     if not layout.ok then return layout end
     local generated = safe_result_call("GA_FIGHT_GENERATE_FAILED", self.deps.generator, self.session, self.session.fight_index, catalogs.value, layout.value)
     if not generated.ok then return generated end
@@ -1276,7 +1310,7 @@ function Orchestrator:drive_continuation()
     else
         return fail("GA_MODE_POLICY_FAILED", "Arena continuation kind is missing or invalid")
     end
-    local layout = self:layout_snapshot()
+    local layout = self:layout_snapshot(self.catalog_snapshot)
     if not layout.ok then return layout end
     local reset = call_method("GA_ACTOR_RESET_FAILED", self.deps.actor, "reset_for_rematch", layout.value)
     if not reset.ok then return reset end
@@ -1332,7 +1366,7 @@ function Orchestrator:drive_runtime()
     end
 
     if self.runtime_stage == "NORMALIZING" then
-        local layout = self:layout_snapshot()
+        local layout = self:layout_snapshot(self.catalog_snapshot)
         if not layout.ok then return layout end
         local normalized = call_method("GA_ACTOR_NORMALIZE_FAILED", self.deps.actor, "normalize_for_arena", layout.value)
         if not normalized.ok then return normalized end
@@ -1425,6 +1459,7 @@ function Orchestrator:actor_on_before_death(...)
         session_id = self.session.session_id,
         session_nonce = self.session.session_nonce,
         mode_id = self.session.mode_id,
+        generation_recipe = self.session.generation_recipe,
         difficulty_id = self.session.difficulty_id
     })
     if not armed.ok then return armed end
