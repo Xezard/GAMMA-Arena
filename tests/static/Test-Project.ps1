@@ -346,8 +346,8 @@ foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.
 $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'validate_exact_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'custom_golden_sessions_match_sole_v8_fixture', 'CUSTOM_GOLDEN_V8_BEGIN', 'CUSTOM_GOLDEN_V8_END', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
     [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v1.json'; Required = @('"schema_version"\s*:\s*1', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
 )
 foreach ($Contract in $Task10CustomContracts) {
@@ -377,6 +377,10 @@ foreach ($Marker in @('custom-catalog-v1.json','New-GaCustomStream','Test-GaCust
     Assert-True ($Task10Oracle -match [regex]::Escape($Marker)) "Task 10 independent oracle is missing: $Marker"
 }
 Assert-True ($Task10Oracle -notmatch 'gamma_arena_(?:custom_)?generator\.script') 'Task 10 reference oracle must not read Lua generator source.'
+$Task10CustomGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_generator.script') -Raw
+Assert-True ($Task10CustomGenerator -notmatch 'slot_stream\s*\([^\)]*,\s*"profile"\s*\)') 'Task 10 fixed exact profile alias must not consume a meaningless RNG stream.'
+Assert-True ($Task10CustomGenerator -match 'profile\.alias\s*~=\s*"gamma_arena_"\s*\.\.\s*faction\.community\s*\.\.\s*"_"\s*\.\.\s*roster_entry\.rank') 'Task 10 generator must reject a noncanonical fixed faction-rank alias before RNG.'
+Assert-True ($Task10Oracle -notmatch "New-GaCustomStream[^\r\n]*'profile'") 'Task 10 independent oracle must bind the fixed exact profile alias without RNG.'
 $Task10GoldenRows = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v8.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
 $Task10RandomRows = @($Task10GoldenRows | Where-Object { $_ -match '^seed=' })
 $Task10CustomRows = @($Task10GoldenRows | Where-Object { $_ -match '^recipe=custom,' })
@@ -384,6 +388,21 @@ Assert-True ($Task10RandomRows.Count -eq 4) 'Task 10 sole v8 fixture must preser
 Assert-True ($Task10CustomRows.Count -eq 4) 'Task 10 sole v8 fixture must add exactly four custom golden rows.'
 foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
     Assert-True (@($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') }).Count -eq 1) "Task 10 custom golden case is missing: $Name"
+}
+$Task10DevCustom = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
+$Task10BridgeMatches = [regex]::Matches($Task10DevCustom, '(?ms)\["(?<name>one_novice|mixed_eight|ten_legends_forward|ten_legends_reverse)"\]\s*=\s*\{\s*fight_id\s*=\s*"(?<fight_id>[^"]+)"\s*,\s*stable_encode\s*=\s*\[===\[(?<encoding>.*?)\]===\]\s*\}')
+Assert-True ($Task10BridgeMatches.Count -eq 4) 'Task 10 Dev Lua bridge must embed exactly four synchronized custom expectations.'
+foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
+    $GoldenRow = @($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') })[0]
+    $GoldenEncoding = $GoldenRow.Substring($GoldenRow.IndexOf('stable_encode=') + 14)
+    $GoldenFightId = [regex]::Match($GoldenEncoding, 'fight_id=20:(?<fight_id>[^|]+)').Groups['fight_id'].Value
+    $Bridge = @($Task10BridgeMatches | Where-Object { $_.Groups['name'].Value -eq $Name })[0]
+    $BridgeMatchesGolden = $null -ne $Bridge
+    if ($null -ne $Bridge) {
+        $BridgeMatchesGolden = (($Bridge.Groups['fight_id'].Value -ceq $GoldenFightId) -and
+            ($Bridge.Groups['encoding'].Value -ceq $GoldenEncoding))
+    }
+    Assert-True $BridgeMatchesGolden "Task 10 Dev Lua bridge differs from sole v8 fixture: $Name"
 }
 $Task10Forward = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_forward,' })[0]
 $Task10Reverse = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_reverse,' })[0]

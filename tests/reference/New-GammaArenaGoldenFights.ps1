@@ -9,6 +9,7 @@ $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
 $customCatalogPath = Join-Path $repoRoot 'tests\fixtures\custom-catalog-v1.json'
+$devCustomTestPath = Join-Path $repoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'
 
 function Read-GaSimpleLtx {
     param([string]$Path)
@@ -568,7 +569,7 @@ function New-GaCustomEncodedFight([int64]$SessionSeed,[int]$FightIndex,[array]$R
     $records=@()
     for($zero=0;$zero-lt$RankIds.Count;$zero++){
         $slot=$zero+1;$rankId=$RankIds[$zero];$rank=$customCatalog.ranks.PSObject.Properties[$rankId].Value
-        $profile=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'profile') @($customCatalog.profiles.PSObject.Properties[$rankId].Value)
+        $profile=$customCatalog.profiles.PSObject.Properties[$rankId].Value
         $rankValue=Get-GaNextInt (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'numeric_rank') ([int]$rank.minimum) ([int]$rank.maximum)
         $gear=Get-GaCustomEquipment $SessionSeed $FightIndex $slot $rankId
         $physical=Select-GaPick (New-GaCustomStream $SessionSeed $FightIndex $slot $rankId 'spawn') @($available)
@@ -615,6 +616,22 @@ $customRequests=@(
 )
 $customEncodings=@{}
 foreach($request in $customRequests){$encoding=New-GaCustomEncodedFight $request.Seed $request.Fight $request.Ranks $request.ActorCase;$customEncodings[$request.Name]=$encoding;$expected+="recipe=custom,case=$($request.Name),seed=$($request.Seed),fight=$($request.Fight),stable_encode=$encoding"}
+$bridgeLines = [Collections.Generic.List[string]]::new()
+$bridgeLines.Add('-- CUSTOM_GOLDEN_V8_BEGIN')
+$bridgeLines.Add('local CUSTOM_GOLDEN_V8 = {')
+for($index=0;$index-lt$customRequests.Count;$index++){
+    $request=$customRequests[$index];$encoding=$customEncodings[$request.Name]
+    $fightId=[regex]::Match($encoding,'fight_id=20:(?<fight_id>[^|]+)').Groups['fight_id'].Value
+    if(-not$fightId){throw "Custom oracle encoding lacks fight_id for $($request.Name)."}
+    $bridgeLines.Add("    [`"$($request.Name)`"] = {")
+    $bridgeLines.Add("        fight_id = `"$fightId`",")
+    $bridgeLines.Add("        stable_encode = [===[$encoding]===]")
+    $bridgeLines.Add($(if($index-lt$customRequests.Count-1){'    },'}else{'    }'}))
+}
+$bridgeLines.Add('}')
+$bridgeLines.Add('-- CUSTOM_GOLDEN_V8_END')
+$bridgeBlock=$bridgeLines -join "`n"
+$bridgePattern='(?ms)^-- CUSTOM_GOLDEN_V8_BEGIN\r?\n.*?^-- CUSTOM_GOLDEN_V8_END'
 $tenLegends=@('legend')*10
 $forwardTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_forward')
 $reverseTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_reverse')
@@ -623,9 +640,17 @@ if($Verify){
     if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v8 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
     if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v8 reference oracle.'}
-    Write-Host 'PASS: golden reference oracle matches fixture'
+    $devCustomTest=Get-Content -LiteralPath $devCustomTestPath -Raw
+    $bridgeMatch=[regex]::Match($devCustomTest,$bridgePattern)
+    if(-not$bridgeMatch.Success-or(($bridgeMatch.Value-replace"`r`n","`n")-cne$bridgeBlock)){throw 'Dev Lua custom golden bridge differs from the independent oracle.'}
+    Write-Host 'PASS: golden reference oracle matches fixture and Dev Lua bridge'
 }elseif($Update){
     $lines = @('# Gamma Arena FightSpec v8 deterministic random and custom golden encodings.') + $expected
     [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
-    Write-Host "Updated golden fixture: $fixturePath"
+    $devCustomTest=Get-Content -LiteralPath $devCustomTestPath -Raw
+    $bridgeMatch=[regex]::Match($devCustomTest,$bridgePattern)
+    if(-not$bridgeMatch.Success){throw 'Dev Lua custom golden bridge markers are missing.'}
+    $updatedDev=$devCustomTest.Substring(0,$bridgeMatch.Index)+$bridgeBlock+$devCustomTest.Substring($bridgeMatch.Index+$bridgeMatch.Length)
+    [IO.File]::WriteAllText($devCustomTestPath,$updatedDev,(New-Object Text.UTF8Encoding($false)))
+    Write-Host "Updated golden fixture and Dev Lua bridge: $fixturePath"
 }else{$expected}
