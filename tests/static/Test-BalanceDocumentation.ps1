@@ -37,19 +37,22 @@ function New-BalanceFixture([string]$SourceRoot) {
     foreach ($RelativePath in @(
         'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx',
         'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx',
+        'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx',
         'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
         'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx',
         'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_item_materializer.script',
+        'src\gamedata\scripts\gamma_arena_item_catalog.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
         'src\gamedata\scripts\gamma_arena_random_generator.script',
         'src\gamedata\scripts\gamma_arena_grenade_generator.script',
         'src\gamedata\scripts\gamma_arena_entity_adapter.script',
         'src\gamedata\scripts\gamma_arena_medical_generator.script',
         'src\gamedata\scripts\gamma_arena_npc_medical.script',
-        'src\gamedata\scripts\gamma_arena_tactical_director.script'
+        'src\gamedata\scripts\gamma_arena_tactical_director.script',
+        'schemas\fight-spec-v8.md'
     )) {
         $Target = Join-Path $FixtureRoot $RelativePath
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Target) | Out-Null
@@ -62,6 +65,9 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: state-passport -->
 <!-- END GENERATED: state-passport -->
+
+<!-- BEGIN GENERATED: custom-setup -->
+<!-- END GENERATED: custom-setup -->
 
 <!-- BEGIN GENERATED: difficulty-dashboard -->
 <!-- END GENERATED: difficulty-dashboard -->
@@ -141,12 +147,14 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $TacticalText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'))
     $GeneratorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'))
     $TacticalDirectorText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'))
+    $CustomRulesText = [IO.File]::ReadAllText((Join-Path $FixtureRoot 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'))
     $DifficultyIds = @('rookie', 'stalker', 'veteran', 'master')
     $WeaponClasses = @('w_pistol', 'w_smg', 'w_shotgun', 'w_rifle', 'w_sniper')
     $ArmorClasses = @('light', 'medium', 'scientific', 'heavy', 'powered_exo')
 
     $ExpectedTableRows = [ordered]@{
         'state-passport' = 6
+        'custom-setup' = 34
         'difficulty-dashboard' = 20
         'medical-loadouts' = 30
         'grenade-loadouts' = 14
@@ -155,13 +163,53 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         'opponent-budgets' = 31
         'arena-tactics' = 33
         'balance-diagnostics' = 21
-        'source-map' = 14
+        'source-map' = 16
     }
     foreach ($BlockName in $ExpectedTableRows.Keys) {
         $Block = Get-TestGeneratedBlock $DocumentText $BlockName
         $Rows = @($Block -split '\r?\n' | Where-Object { $_ -match '^\|' })
         if ($Rows.Count -ne $ExpectedTableRows[$BlockName]) {
             throw "Generated table-row cardinality differs for $BlockName"
+        }
+    }
+
+    $CustomBlock = Get-TestGeneratedBlock $DocumentText 'custom-setup'
+    $BaseBudget = [int](Get-TestLtxValue $CustomRulesText 'limits' 'base_budget')
+    $PhysicalCap = [int](Get-TestLtxValue $CustomRulesText 'limits' 'max_physical_items_per_participant')
+    $MaxGrenades = [int](Get-TestLtxValue $CustomRulesText 'limits' 'max_selected_grenades')
+    $GrenadeQuantity = [int](Get-TestLtxValue $CustomRulesText 'limits' 'max_quantity_per_grenade')
+    $SecondGrenadeMultiplier = [int](Get-TestLtxValue $CustomRulesText 'limits' 'second_grenade_price_multiplier')
+    $RankIds = @(Get-TestLtxCsv $CustomRulesText 'ranks' 'ids')
+    $Threats = @($RankIds | ForEach-Object { [int](Get-TestLtxValue $CustomRulesText ('rank_' + $_) 'threat') })
+    $ExpectedCustomRows = New-Object System.Collections.Generic.List[string]
+    foreach ($Row in @(
+        '| FightSpec/catalog identity | 8/10/10 |',
+        '| enemy faction | one shared faction for the complete cohort |',
+        '| opponent selectors | 1-10 ordered exact-rank selectors; Rostok capacity 10 |',
+        '| exact ranks | novice, trainee, experienced, professional, veteran, expert, master, legend |',
+        '| player budget formula | base_budget + sum(rank threat) |',
+        "| base_budget | $BaseBudget Arena points |",
+        "| physical item cap | $PhysicalCap entities per participant |",
+        '| selectable installed categories | weapon, ammo, outfit, helmet, knife, medicine, grenade |',
+        '| Arena-controlled enemy rerolls | numeric rank, equipment, ammunition, medicine, grenade, spawn, tactical route |',
+        '| integrity retry | reuses the same validated FightSpec v8 |',
+        '| appearance boundary | X-Ray `specific_character` is not seeded or stored in FightSpec v8 |',
+        '| deterministic appearance follow-up | cataloged aliases, fingerprint/validator membership, and catalog identity advance |',
+        "| maximum selected grenades | $MaxGrenades distinct sections |",
+        "| quantity per selected grenade | exactly $GrenadeQuantity |",
+        '| first selected grenade | base Arena-point price |',
+        "| second selected grenade | ${SecondGrenadeMultiplier}x its own base Arena-point price |"
+    )) { $ExpectedCustomRows.Add($Row) | Out-Null }
+    for ($Index = 0; $Index -lt $RankIds.Count; $Index++) {
+        $ExpectedCustomRows.Add("| $($RankIds[$Index]) | $($Threats[$Index]) | $($BaseBudget + $Threats[$Index]) |") | Out-Null
+    }
+    $ExpectedCustomRows.Add("| one novice | novice | $($BaseBudget + $Threats[0]) |") | Out-Null
+    $ExpectedCustomRows.Add("| one legend | legend | $($BaseBudget + $Threats[7]) |") | Out-Null
+    $ExpectedCustomRows.Add("| ten novices | novice x10 | $($BaseBudget + 10 * $Threats[0]) |") | Out-Null
+    $ExpectedCustomRows.Add("| ten legends | legend x10 | $($BaseBudget + 10 * $Threats[7]) |") | Out-Null
+    foreach ($ExpectedRow in $ExpectedCustomRows) {
+        if ([regex]::Matches($CustomBlock, '(?m)^' + [regex]::Escape($ExpectedRow) + '$').Count -ne 1) {
+            throw "Custom setup row differs or is duplicated: $ExpectedRow"
         }
     }
 
@@ -450,6 +498,8 @@ try {
         '| derived | capacity-clipped difficulties | none |',
         '| blind_spot | installed merge item cardinality, DPS, penetration, TTK, win rate | runtime measurement |',
         '| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |',
+        '| custom threats, budgets, physical cap, and grenade pricing | `gamma_arena_custom_rules.ltx` |',
+        '| installed custom combat categories | `gamma_arena_item_catalog.script` |',
         '| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |',
         '| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |'
     )) {
@@ -464,6 +514,42 @@ try {
     if ($First -cne $Second) { throw 'Arena balance document generation is not idempotent' }
 
     & $ToolPath -RepoRoot $Fixture -Verify
+
+    $CustomRules = Join-Path $Fixture 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'
+    $CustomRulesOriginal = [IO.File]::ReadAllText($CustomRules)
+    [IO.File]::WriteAllText(
+        $CustomRules,
+        $CustomRulesOriginal.Replace('base_budget = 600', 'base_budget = 601'),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+    & $ToolPath -RepoRoot $Fixture
+    $ChangedCustom = Get-TestGeneratedBlock ([IO.File]::ReadAllText($Document)) 'custom-setup'
+    if (-not $ChangedCustom.Contains('| base_budget | 601 Arena points |') -or
+        -not $ChangedCustom.Contains('| one novice | novice | 701 |') -or
+        -not $ChangedCustom.Contains('| ten legends | legend x10 | 4601 |')) {
+        throw 'Custom setup generation does not derive budgets from gamma_arena_custom_rules.ltx'
+    }
+    [IO.File]::WriteAllText($CustomRules, $CustomRulesOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
+
+    $CustomSemanticChange = $CustomRulesOriginal.Replace('threat = 330', 'threat = 331').Replace(
+        'second_grenade_price_multiplier = 2',
+        'second_grenade_price_multiplier = 3'
+    )
+    if ($CustomSemanticChange -ceq $CustomRulesOriginal) {
+        throw 'Custom rank/grenade authority mutation fixture did not match production rules'
+    }
+    [IO.File]::WriteAllText($CustomRules, $CustomSemanticChange, (New-Object Text.UTF8Encoding($false)))
+    Invoke-ExpectedFailure { & $ToolPath -RepoRoot $Fixture -Verify } 'document is stale'
+    & $ToolPath -RepoRoot $Fixture
+    $ChangedSemantics = Get-TestGeneratedBlock ([IO.File]::ReadAllText($Document)) 'custom-setup'
+    if (-not $ChangedSemantics.Contains('| master | 331 | 931 |') -or
+        -not $ChangedSemantics.Contains('| second selected grenade | 3x its own base Arena-point price |')) {
+        throw 'Custom setup generation duplicates rank or grenade values outside gamma_arena_custom_rules.ltx'
+    }
+    [IO.File]::WriteAllText($CustomRules, $CustomRulesOriginal, (New-Object Text.UTF8Encoding($false)))
+    & $ToolPath -RepoRoot $Fixture
 
     $Stale = $Second.Replace('Catalog | schema 9 /', 'Catalog | schema 999 /')
     [IO.File]::WriteAllText($Document, $Stale, (New-Object Text.UTF8Encoding($false)))
@@ -489,6 +575,8 @@ try {
 <!-- BEGIN GENERATED: difficulty-dashboard -->
 <!-- BEGIN GENERATED: state-passport -->
 <!-- END GENERATED: state-passport -->
+<!-- BEGIN GENERATED: custom-setup -->
+<!-- END GENERATED: custom-setup -->
 <!-- END GENERATED: difficulty-dashboard -->
 <!-- BEGIN GENERATED: medical-loadouts -->
 <!-- END GENERATED: medical-loadouts -->

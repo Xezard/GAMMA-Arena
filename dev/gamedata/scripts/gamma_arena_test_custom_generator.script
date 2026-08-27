@@ -488,6 +488,21 @@ local function assert_error_only(result, code, message)
     gamma_arena_test_assert.equals(result.value, nil, message .. " has no partial draft")
 end
 
+local function assert_pre_rng_error(action, code, message)
+    local original_derive_seed = gamma_arena_rng.derive_seed
+    local derive_calls = 0
+    gamma_arena_rng.derive_seed = function(parts)
+        derive_calls = derive_calls + 1
+        return original_derive_seed(parts)
+    end
+    local completed, result = pcall(action)
+    gamma_arena_rng.derive_seed = original_derive_seed
+    gamma_arena_test_assert.is_true(completed, message .. " returns a Result")
+    if not completed then return end
+    assert_error_only(result, code, message)
+    gamma_arena_test_assert.equals(derive_calls, 0, message .. " derive calls before failure")
+end
+
 local function custom_generation_preflights_every_pool_member()
     local unknown = catalog()
     local novice = unknown.factions.stalker.ranks.novice
@@ -516,6 +531,13 @@ local function custom_generation_preflights_every_pool_member()
     assert_error_only(
         gamma_arena_custom_generator.build_draft(session({ "novice" }), 0, malformed, layout()),
         "GA_CUSTOM_WEAPON_POOL_INVALID", "malformed exact-pool member fails closed")
+
+    local duplicate = catalog()
+    novice = duplicate.factions.stalker.ranks.novice
+    novice.secondary_weapons[#novice.secondary_weapons + 1] = novice.secondary_weapons[1]
+    assert_pre_rng_error(function()
+        return gamma_arena_custom_generator.build_draft(session({ "novice" }), 0, duplicate, layout())
+    end, "GA_CUSTOM_WEAPON_POOL_INVALID", "duplicate exact-pool member fails before RNG")
 end
 
 local function custom_generation_preflights_every_layout_entry()
@@ -551,6 +573,18 @@ local function custom_generation_preflights_every_layout_entry()
     assert_error_only(
         gamma_arena_custom_generator.build_draft(current, 0, snapshot, corrupt_route),
         "GA_CUSTOM_LAYOUT_INVALID", "invalid unselected tactical route fails closed")
+
+    local duplicate_route = layout()
+    duplicate_route.tactical_routes[2] = duplicate_route.tactical_routes[1]
+    assert_pre_rng_error(function()
+        return gamma_arena_custom_generator.build_draft(current, 0, snapshot, duplicate_route)
+    end, "GA_CUSTOM_LAYOUT_INVALID", "duplicate tactical route fails before RNG")
+
+    local duplicate_slot = layout()
+    duplicate_slot.opponent_spawn_slots[2].id = duplicate_slot.opponent_spawn_slots[1].id
+    assert_pre_rng_error(function()
+        return gamma_arena_custom_generator.build_draft(current, 0, snapshot, duplicate_slot)
+    end, "GA_CUSTOM_LAYOUT_INVALID", "duplicate spawn-slot ID fails before RNG")
 end
 
 local function custom_generation_rejects_noncanonical_profile_alias()

@@ -4,6 +4,15 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-27
+
+- Added a Custom Arena launch alongside the existing seeded Random mode, with one shared enemy faction and 1-10 individually selected exact ranks from novice through legend.
+- Added an installed-GAMMA player combat inventory selector for weapons, ammunition, outfits, helmets, knives, medicine, and grenades, governed by rank-derived Arena equipment points.
+- Added ordered custom grenade pricing: at most two distinct sections, quantity one each, with the second grenade charged at twice its own base price.
+- Unified Random and Custom generation on strict FightSpec v8 and catalog/generator identity `8/10/10`, with one physical item contract and a 256-entity cap per participant.
+- Regenerated Arena-controlled enemy numeric rank, equipment, ammunition, medicine, grenades, spawn, and tactical route after victories while preserving the custom roster and actor template.
+- Documented that X-Ray's internal `specific_character` appearance remains outside seeded FightSpec reproduction until a future catalog identity extension.
+
 ## 0.2.0 - 2026-08-26
 
 - Added rare deterministic physical grenade loadouts: the actor receives zero/one/two at 94%/5%/1%, while each opponent independently has a 10% chance for one; both use the F1/RGD-5/GD-05 pool, smoke is excluded, and native AI remains responsible for throws.

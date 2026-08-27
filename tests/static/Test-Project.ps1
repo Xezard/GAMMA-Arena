@@ -82,7 +82,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitign
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
-Assert-True ($AddonVersion -ceq '0.2.0') 'Active add-on version must be 0.2.0.'
+Assert-True ($AddonVersion -ceq '0.3.0') 'Active add-on version must be 0.3.0.'
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
@@ -328,6 +328,20 @@ foreach ($Locale in @('eng','rus')) {
     foreach ($StringId in @('st_gamma_arena_custom_mode','st_gamma_arena_custom_title','st_gamma_arena_custom_faction','st_gamma_arena_custom_count','st_gamma_arena_custom_seed','st_gamma_arena_custom_budget','st_gamma_arena_custom_spent','st_gamma_arena_custom_remaining','st_gamma_arena_custom_weight','st_gamma_arena_custom_weight_limit','st_gamma_arena_custom_random','st_gamma_arena_custom_category_grenade')) {
         Assert-True ($Task9Locale -match ('id="' + [regex]::Escape($StringId) + '"')) "Task 9 $Locale localization is missing $StringId"
     }
+    if ($Locale -eq 'eng') {
+        [xml]$Task12LocaleDocument = $Task9Locale
+        $Task12HintNode = $Task12LocaleDocument.SelectSingleNode('//string[@id="st_gamma_arena_custom_selected_hint"]/text')
+        $Task12Hint = if ($null -eq $Task12HintNode) { '' } else { $Task12HintNode.InnerText }
+        Assert-True ($Task12Hint -match '(?i)decrements? (?:the )?quantity by one' -and $Task12Hint -match '(?i)removes?.*quantity (?:is|equals) one') 'Task 12 ENG selected-loadout hint must distinguish stack decrement from quantity-one removal.'
+    }
+    else {
+        $Task12HintMatch = [regex]::Match($Task9Locale, '(?s)<string id="st_gamma_arena_custom_selected_hint"><text>(.*?)</text></string>')
+        $Task12HintRaw = if ($Task12HintMatch.Success) { $Task12HintMatch.Groups[1].Value } else { '' }
+        $Task12Decrease = '&#x0443;&#x043C;&#x0435;&#x043D;&#x044C;&#x0448;&#x0430;&#x0435;&#x0442;'
+        $Task12Quantity = '&#x043A;&#x043E;&#x043B;&#x0438;&#x0447;&#x0435;&#x0441;&#x0442;&#x0432;&#x043E;'
+        $Task12Remove = '&#x0443;&#x0434;&#x0430;&#x043B;&#x044F;&#x0435;&#x0442;'
+        Assert-True ($Task12HintRaw.Contains($Task12Decrease) -and $Task12HintRaw.Contains($Task12Quantity) -and $Task12HintRaw.Contains($Task12Remove) -and $Task12HintRaw.Contains(' 1')) 'Task 12 RUS selected-loadout hint must distinguish stack decrement from quantity-one removal.'
+    }
 }
 $Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
 foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
@@ -390,6 +404,9 @@ foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legend
     Assert-True (@($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') }).Count -eq 1) "Task 10 custom golden case is missing: $Name"
 }
 $Task10DevCustom = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
+foreach ($Marker in @('duplicate exact-pool member fails before RNG','duplicate tactical route fails before RNG','duplicate spawn-slot ID fails before RNG','gamma_arena_rng.derive_seed = function','derive calls before failure')) {
+    Assert-True ($Task10DevCustom -match [regex]::Escape($Marker)) "Task 12 fail-closed pre-RNG regression is missing: $Marker"
+}
 $Task10BridgeMatches = [regex]::Matches($Task10DevCustom, '(?ms)\["(?<name>one_novice|mixed_eight|ten_legends_forward|ten_legends_reverse)"\]\s*=\s*\{\s*fight_id\s*=\s*"(?<fight_id>[^"]+)"\s*,\s*stable_encode\s*=\s*\[===\[(?<encoding>.*?)\]===\]\s*\}')
 Assert-True ($Task10BridgeMatches.Count -eq 4) 'Task 10 Dev Lua bridge must embed exactly four synchronized custom expectations.'
 foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
@@ -487,6 +504,29 @@ foreach ($Marker in @(
 }
 $Task11CustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
 Assert-True ($Task11CustomUi -match 'DIK_keys\.DIK_ESCAPE[\s\S]{0,80}self:OnBack\(\)') 'Task 11 custom setup Escape must return through the non-launching back path.'
+
+$Task12BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
+if (Test-Path -LiteralPath $Task12BuildPath) {
+    $Task12Readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
+    $Task12Changelog = Get-Content -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Raw
+    $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
+    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.3\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 12 README must publish the 0.3.0 custom Arena release.'
+    Assert-True ($Task12Changelog -match '(?m)^## 0\.3\.0 - 2026-08-27$') 'Task 12 changelog must publish release 0.3.0.'
+    foreach ($Path in @('schemas\fight-spec-v8.md','tests\fixtures\golden-fights-v8.txt','tests\fixtures\golden-random-selections-v8.txt','tests\fixtures\custom-catalog-v1.json')) {
+        Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
+    }
+    Assert-True ($Task12Build -match 'fight-spec-v\[1-7\]\|golden-fights-v\[1-7\]\|FightSpecV\[1-7\]') 'Task 12 package build must reject retired v1-v7 FightSpec artifacts.'
+    $Task12AcceptancePath = Join-Path $RepoRoot 'docs\custom-arena-acceptance.md'
+    Assert-True (Test-Path -LiteralPath $Task12AcceptancePath) 'Task 12 manual custom Arena acceptance checklist is missing.'
+    if (Test-Path -LiteralPath $Task12AcceptancePath) {
+        $Task12Acceptance = Get-Content -LiteralPath $Task12AcceptancePath -Raw
+        foreach ($Marker in @('Random launch','Custom count 1','Custom count 10','Mixed exact ranks','Shared faction','One grenade','Two grenades','Third grenade','Exact quantities and slots','Rank labels','Victory restoration','Integrity retry identity','In-game restart','Defeat cleanup','Escape cleanup','Battle HUD','Arena audio')) {
+            Assert-True ($Task12Acceptance -match [regex]::Escape($Marker)) "Task 12 manual acceptance checklist is missing: $Marker"
+        }
+        Assert-True ($Task12Acceptance -notmatch '(?m)^\|[^\r\n]*\|\s*PASS\s*\|') 'Task 12 manual in-engine acceptance must not claim PASS from automated evidence.'
+        Assert-True (([regex]::Matches($Task12Acceptance, '(?m)^\|[^\r\n]*\|\s*(?:DEFERRED|NOT RUN)\s*\|')).Count -ge 17) 'Task 12 every in-engine acceptance row must be marked DEFERRED or NOT RUN.'
+    }
+}
 
 foreach ($Path in $Task7CurrentArtifacts) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"

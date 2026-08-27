@@ -293,6 +293,7 @@ function Set-GeneratedMarkdownBlocks([string]$Document, $Blocks) {
 }
 
 $CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+$CustomRulesPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'
 $DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
 $TacticalPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_tactical.ltx'
@@ -300,17 +301,47 @@ $DiscoveryScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_cat
 $CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $BootstrapScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $ItemMaterializerScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script'
+$ItemCatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
 $GrenadeGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
 $EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
 $NpcMedicalScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
 $TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
+$FightSpecSchemaPath = Join-Path $RepoRoot 'schemas\fight-spec-v8.md'
 
 $Catalog = Read-GammaArenaLtx $CatalogPath
+$CustomRules = Read-GammaArenaLtx $CustomRulesPath
 $Difficulties = Read-GammaArenaLtx $DifficultyPath
 $Layout = Read-GammaArenaLtx $LayoutPath
 $Tactical = Read-GammaArenaLtx $TacticalPath
+
+$CustomBaseBudget = Get-RequiredLtxInt $CustomRules 'limits' 'base_budget' $CustomRulesPath
+$CustomPhysicalCap = Get-RequiredLtxInt $CustomRules 'limits' 'max_physical_items_per_participant' $CustomRulesPath
+$CustomMaxGrenades = Get-RequiredLtxInt $CustomRules 'limits' 'max_selected_grenades' $CustomRulesPath
+$CustomGrenadeQuantity = Get-RequiredLtxInt $CustomRules 'limits' 'max_quantity_per_grenade' $CustomRulesPath
+$CustomSecondGrenadeMultiplier = Get-RequiredLtxInt $CustomRules 'limits' 'second_grenade_price_multiplier' $CustomRulesPath
+$CustomRankIds = @(Get-LtxCsv $CustomRules 'ranks' 'ids' $CustomRulesPath)
+if ($CustomRankIds.Count -ne 8) { throw 'Custom Arena rules must define exactly eight ranks' }
+$CustomRanks = New-Object System.Collections.Generic.List[object]
+foreach ($RankId in $CustomRankIds) {
+    $CustomRanks.Add([pscustomobject]@{
+        id = $RankId
+        threat = Get-RequiredLtxInt $CustomRules ('rank_' + $RankId) 'threat' $CustomRulesPath
+    }) | Out-Null
+}
+if ($CustomBaseBudget -le 0 -or $CustomPhysicalCap -le 0 -or $CustomMaxGrenades -le 0 -or
+    $CustomGrenadeQuantity -le 0 -or $CustomSecondGrenadeMultiplier -le 0 -or
+    @($CustomRanks | Where-Object { $_.threat -le 0 }).Count -ne 0) {
+    throw 'Custom Arena budget, threat, item, and grenade rules must be positive'
+}
+$CustomCategories = @(Get-RequiredLuaQuotedArray $ItemCatalogScriptPath 'CATEGORY_IDS')
+if ($CustomCategories.Count -ne 7) { throw 'Custom Arena item catalog must define exactly seven selectable categories' }
+if (-not (Test-Path -LiteralPath $FightSpecSchemaPath)) { throw "FightSpec schema is missing: $FightSpecSchemaPath" }
+$FightSpecSchemaText = [IO.File]::ReadAllText($FightSpecSchemaPath)
+$FightSpecVersionMatch = [regex]::Match($FightSpecSchemaText, '(?m)^# Gamma Arena FightSpec v(\d+)\s*$')
+if (-not $FightSpecVersionMatch.Success) { throw "FightSpec schema heading is malformed: $FightSpecSchemaPath" }
+$FightSpecVersion = [int]::Parse($FightSpecVersionMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 
 $DifficultyIds = @('rookie', 'stalker', 'veteran', 'master')
 $WeaponWeightKeys = [ordered]@{
@@ -580,6 +611,43 @@ $Blocks['state-passport'] = @"
 | Layout | schema $(Get-RequiredLtxInt $Layout 'meta' 'schema_version' $LayoutPath) / revision $(Get-RequiredLtxInt $Layout 'meta' 'revision' $LayoutPath) |
 | Tactics | schema $(Get-RequiredLtxInt $Tactical 'meta' 'schema_version' $TacticalPath) / revision $(Get-RequiredLtxInt $Tactical 'meta' 'revision' $TacticalPath) |
 "@
+
+$CatalogRevision = Get-RequiredLtxInt $Catalog 'meta' 'revision' $CatalogPath
+$CatalogGenerator = Get-RequiredLtxInt $Catalog 'meta' 'generator_version' $CatalogPath
+$CustomLayoutCapacity = Get-RequiredLtxInt $Layout 'ga_layout_rostok_arena_v1' 'virtual_capacity' $LayoutPath
+$CustomLines = New-Object System.Collections.Generic.List[string]
+$CustomLines.Add('| custom policy | value |') | Out-Null
+$CustomLines.Add('|---|---|') | Out-Null
+$CustomLines.Add("| FightSpec/catalog identity | $FightSpecVersion/$CatalogRevision/$CatalogGenerator |") | Out-Null
+$CustomLines.Add('| enemy faction | one shared faction for the complete cohort |') | Out-Null
+$CustomLines.Add("| opponent selectors | 1-$CustomLayoutCapacity ordered exact-rank selectors; Rostok capacity $CustomLayoutCapacity |") | Out-Null
+$CustomLines.Add("| exact ranks | $(@($CustomRanks | ForEach-Object { $_.id }) -join ', ') |") | Out-Null
+$CustomLines.Add('| player budget formula | base_budget + sum(rank threat) |') | Out-Null
+$CustomLines.Add("| base_budget | $CustomBaseBudget Arena points |") | Out-Null
+$CustomLines.Add("| physical item cap | $CustomPhysicalCap entities per participant |") | Out-Null
+$CustomLines.Add("| selectable installed categories | $($CustomCategories -join ', ') |") | Out-Null
+$CustomLines.Add('| Arena-controlled enemy rerolls | numeric rank, equipment, ammunition, medicine, grenade, spawn, tactical route |') | Out-Null
+$CustomLines.Add('| integrity retry | reuses the same validated FightSpec v8 |') | Out-Null
+$CustomLines.Add('| appearance boundary | X-Ray `specific_character` is not seeded or stored in FightSpec v8 |') | Out-Null
+$CustomLines.Add('| deterministic appearance follow-up | cataloged aliases, fingerprint/validator membership, and catalog identity advance |') | Out-Null
+$CustomLines.Add("| maximum selected grenades | $CustomMaxGrenades distinct sections |") | Out-Null
+$CustomLines.Add("| quantity per selected grenade | exactly $CustomGrenadeQuantity |") | Out-Null
+$CustomLines.Add('| first selected grenade | base Arena-point price |') | Out-Null
+$CustomLines.Add("| second selected grenade | ${CustomSecondGrenadeMultiplier}x its own base Arena-point price |") | Out-Null
+$CustomLines.Add('') | Out-Null
+$CustomLines.Add('| exact rank | threat | one-opponent budget |') | Out-Null
+$CustomLines.Add('|---|---:|---:|') | Out-Null
+foreach ($Rank in $CustomRanks) {
+    $CustomLines.Add("| $($Rank.id) | $($Rank.threat) | $($CustomBaseBudget + $Rank.threat) |") | Out-Null
+}
+$CustomLines.Add('') | Out-Null
+$CustomLines.Add('| budget example | roster | Arena points |') | Out-Null
+$CustomLines.Add('|---|---|---:|') | Out-Null
+$CustomLines.Add("| one novice | novice | $($CustomBaseBudget + $CustomRanks[0].threat) |") | Out-Null
+$CustomLines.Add("| one legend | legend | $($CustomBaseBudget + $CustomRanks[7].threat) |") | Out-Null
+$CustomLines.Add("| ten novices | novice x10 | $($CustomBaseBudget + 10 * $CustomRanks[0].threat) |") | Out-Null
+$CustomLines.Add("| ten legends | legend x10 | $($CustomBaseBudget + 10 * $CustomRanks[7].threat) |") | Out-Null
+$Blocks['custom-setup'] = Join-MarkdownLines $CustomLines
 
 $DifficultyLines = New-Object System.Collections.Generic.List[string]
 $DifficultyLines.Add('| difficulty | enemy_count | enemy_budget | actor_gear_budget | actor_medical_budget | primary_share |') | Out-Null
@@ -923,6 +991,8 @@ $SourceLines.Add('| concern | authoritative source |') | Out-Null
 $SourceLines.Add('|---|---|') | Out-Null
 $SourceLines.Add('| player class weights and enemy envelopes | `gamma_arena_difficulties.ltx` |') | Out-Null
 $SourceLines.Add('| fallback items and costs | `gamma_arena_catalogs.ltx` |') | Out-Null
+$SourceLines.Add('| custom threats, budgets, physical cap, and grenade pricing | `gamma_arena_custom_rules.ltx` |') | Out-Null
+$SourceLines.Add('| installed custom combat categories | `gamma_arena_item_catalog.script` |') | Out-Null
 $SourceLines.Add('| installed item classification and class costs | `gamma_arena_catalog_discovery.script` |') | Out-Null
 $SourceLines.Add('| actor/opponent random selection and budget allocation | `gamma_arena_random_generator.script` |') | Out-Null
 $SourceLines.Add('| actor and enemy medical allocation | `gamma_arena_medical_generator.script` |') | Out-Null

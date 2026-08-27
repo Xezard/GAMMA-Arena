@@ -64,16 +64,25 @@ Each `SessionStore` instance owns its own volatile permits. A same-instance dupl
   session_id = string,
   session_nonce = string,
   mode_id = "skirmish",
-  difficulty_id = string,
+  generation_recipe = "random" | "custom",
+  difficulty_id = string | nil,
   session_seed = number,
   fight_index = uint32,
-  generator_version = 1,
-  catalog_revision = 1,
+  generator_version = 10,
+  catalog_revision = 10,
+  catalog_fingerprint = "ga-catalog-v9-...",
+  custom_config = table | nil,
   layout_id = "rostok_arena_v1",
   checkpoint_name = "_gamma_arena_checkpoint",
   phase = string
 }
 ```
+
+`difficulty_id` is present only for the random recipe. `custom_config` is
+present only for the custom recipe and is an immutable validated copy of the
+selected shared faction, ordered exact-rank roster, actor items, and catalog
+fingerprint. Both recipes produce the same strict FightSpec v8 after this
+session-only provenance is consumed.
 
 `session_nonce` binds external resume commands to this exact session. `checkpoint_name` identifies the single reserved Arena checkpoint. The payload is valid only for the addon/schema revisions that created it.
 
