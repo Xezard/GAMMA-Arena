@@ -10,6 +10,7 @@ All notable changes to Gamma Arena are documented in this file.
 - Reset Arena-owned actor treatment, injury, alcohol, and visual-effect state between fights.
 - Locked player input immediately after choosing the next fight and delayed the countdown until the staged Arena was ready to start.
 - Fixed actor alcohol cleanup through the supported engine mutator.
+- Kept authoritative booster cleanup compatible with Modded Exes MT-TEST stale readback, preventing false `GA_ACTOR_TRANSIENT_VERIFY_FAILED` rematch aborts.
 - Preserved the complete actor lighting-device loadout through runtime application, preventing `GA_ACTOR_LOADOUT_INVALID` during Arena startup.
 
 ## 0.3.0 - 2026-08-26

@@ -2113,6 +2113,7 @@ local function fake_actor_conditions(options)
         booster_count = options.boosters or 2,
         alcohol = initial_alcohol,
         alcohol_effector_active = initial_alcohol > 0.0001,
+        booster_clear_calls = 0,
         alcohol_change_calls = 0,
         last_alcohol_delta = nil
     }
@@ -2120,6 +2121,7 @@ local function fake_actor_conditions(options)
         if not options.retain_wounds then self.wound_count = 0 end
     end
     function conditions:ClearAllBoosters()
+        self.booster_clear_calls = self.booster_clear_calls + 1
         if not options.retain_boosters then self.booster_count = 0 end
     end
     function conditions:ChangeAlcohol(delta)
@@ -2149,6 +2151,7 @@ local function runtime_bootstrap_engine_transients_clear_and_verify()
         gamma_arena_test_assert.is_true(result.ok, "engine transient reset succeeds with the installed condition APIs")
         gamma_arena_test_assert.equals(conditions.wound_count, 0, "engine wounds are authoritatively cleared")
         gamma_arena_test_assert.equals(conditions.booster_count, 0, "engine boosters are authoritatively cleared")
+        gamma_arena_test_assert.equals(conditions.booster_clear_calls, 1, "authoritative engine booster cleanup runs exactly once")
         gamma_arena_test_assert.equals(conditions.alcohol, initial_alcohol - 1, "write-only alcohol mutation precedes the engine clamp")
         gamma_arena_test_assert.equals(conditions.alcohol_change_calls, 1, "engine alcohol reset uses the exported write-only API once")
         gamma_arena_test_assert.equals(conditions.last_alcohol_delta, -1, "engine alcohol reset covers the normalized Monolith range")
@@ -2159,16 +2162,19 @@ local function runtime_bootstrap_engine_transients_clear_and_verify()
     end
 end
 
-local function runtime_bootstrap_engine_transient_readback_fails_closed()
-    for _, options in ipairs({
-        { retain_wounds = true },
-        { retain_boosters = true }
-    }) do
-        local actor = fake_actor_conditions(options)
-        local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
-        gamma_arena_test_assert.is_false(result.ok, "surviving engine transient fails closed")
-        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_TRANSIENT_VERIFY_FAILED", "engine readback failure code is stable")
-    end
+local function runtime_bootstrap_engine_booster_readback_is_nonfatal()
+    local stale_actor, stale_conditions = fake_actor_conditions({ retain_boosters = true })
+    local stale = gamma_arena_bootstrap.test_clear_engine_actor_transients(stale_actor)
+    gamma_arena_test_assert.is_true(stale.ok, "MT-TEST stale booster enumeration cannot abort an authoritative engine clear")
+    gamma_arena_test_assert.equals(stale.value.booster_readback_stale, 2, "stale booster count remains diagnostic evidence")
+    gamma_arena_test_assert.equals(stale_conditions.booster_count, 2, "fixture preserves the installed MT-TEST readback contradiction")
+    gamma_arena_test_assert.equals(stale_conditions.booster_clear_calls, 1, "stale readback never triggers a second destructive booster clear")
+
+    local wounded_actor = fake_actor_conditions({ retain_wounds = true })
+    local wounded = gamma_arena_bootstrap.test_clear_engine_actor_transients(wounded_actor)
+    gamma_arena_test_assert.is_false(wounded.ok, "surviving engine wound remains a fatal reset failure")
+    gamma_arena_test_assert.equals(wounded.error.code, "GA_ACTOR_TRANSIENT_VERIFY_FAILED", "wound readback failure code is stable")
+
     local actor = fake_actor_conditions()
     actor.cast_Actor = nil
     local missing = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
@@ -9523,7 +9529,7 @@ local cases = {
     ,{ name = "runtime_actor_rematch_transients_clear_once_before_loadout_cleanup", fn = runtime_actor_rematch_transients_clear_once_before_loadout_cleanup }
     ,{ name = "runtime_actor_transient_failure_prevents_loadout_cleanup", fn = runtime_actor_transient_failure_prevents_loadout_cleanup }
     ,{ name = "runtime_bootstrap_engine_transients_clear_and_verify", fn = runtime_bootstrap_engine_transients_clear_and_verify }
-    ,{ name = "runtime_bootstrap_engine_transient_readback_fails_closed", fn = runtime_bootstrap_engine_transient_readback_fails_closed }
+    ,{ name = "runtime_bootstrap_engine_booster_readback_is_nonfatal", fn = runtime_bootstrap_engine_booster_readback_is_nonfatal }
     ,{ name = "runtime_bootstrap_missing_alcohol_mutator_fails_closed", fn = runtime_bootstrap_missing_alcohol_mutator_fails_closed }
     ,{ name = "runtime_bootstrap_gamma_transient_integrations_are_exact", fn = runtime_bootstrap_gamma_transient_integrations_are_exact }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
