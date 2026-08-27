@@ -82,7 +82,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitign
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
-Assert-True ($AddonVersion -ceq '0.3.0') 'Active add-on version must be 0.3.0.'
+Assert-True ($AddonVersion -ceq '0.4.0') 'Active add-on version must be 0.4.0.'
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
@@ -193,6 +193,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_weapon_diagnostics.script'; Namespace = 'gamma_arena_weapon_diagnostics'; Required = @('(?m)^function\s+snapshot\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_device_generator.script'; Namespace = 'gamma_arena_device_generator'; Required = @('(?m)^function\s+select\s*\(', '(?m)^function\s+generate\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_grenade_generator.script'; Namespace = 'gamma_arena_grenade_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+generate_enemy\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_medical_generator.script'; Namespace = 'gamma_arena_medical_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+allocate_enemies\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_npc_medical.script'; Namespace = 'gamma_arena_npc_medical'; Required = @('(?m)^function\s+new\s*\(') },
@@ -510,8 +511,8 @@ if (Test-Path -LiteralPath $Task12BuildPath) {
     $Task12Readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
     $Task12Changelog = Get-Content -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Raw
     $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
-    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.3\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 12 README must publish the 0.3.0 custom Arena release.'
-    Assert-True ($Task12Changelog -match '(?m)^## 0\.3\.0 - 2026-08-27$') 'Task 12 changelog must publish release 0.3.0.'
+    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.4\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 12 README must publish the 0.4.0 custom Arena integration baseline.'
+    Assert-True ($Task12Changelog -match '(?m)^## 0\.4\.0 - 2026-08-27$') 'Task 12 changelog must publish release 0.4.0.'
     foreach ($Path in @('schemas\fight-spec-v8.md','tests\fixtures\golden-fights-v8.txt','tests\fixtures\golden-random-selections-v8.txt','tests\fixtures\custom-catalog-v1.json')) {
         Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
     }
@@ -1166,6 +1167,8 @@ if (Test-Path -LiteralPath $BattleUiScriptPath) {
     Assert-True ($BattleUiContent -notmatch 'initialization_result\s*=\s*sync_visibility') 'Battle identity visibility failure must not overwrite successful text initialization'
     Assert-True ($BattleUiContent -notmatch 'ShowDialog') 'Battle identity HUD must never become a modal dialog'
     Assert-True ($BattleUiContent -notmatch 'AddCustomStatic|RemoveCustomStatic') 'Battle identity HUD must not mutate shared custom statics'
+    Assert-True ($BattleUiContent -match 'local\s+SEPARATOR\s*=\s*" \| "') 'Battle identity must use an ASCII pipe separator'
+    Assert-True ($BattleUiContent -notmatch 'string\.char\(194,\s*183\)') 'Battle identity must not emit a UTF-8 middle-dot separator'
 }
 if (Test-Path -LiteralPath $BattleUiXmlPath) {
     try {
@@ -1174,7 +1177,11 @@ if (Test-Path -LiteralPath $BattleUiXmlPath) {
             Assert-True ($null -ne $BattleUiXml.SelectSingleNode("//*[local-name()='$Id']")) "Battle identity HUD XML is missing control $Id"
         }
         $BattlePanel = $BattleUiXml.SelectSingleNode("//*[local-name()='panel']")
+        $BattleIdentity = $BattleUiXml.SelectSingleNode("//*[local-name()='identity']")
+        $BattleText = $BattleIdentity.SelectSingleNode("*[local-name()='text']")
         Assert-True ([int]$BattlePanel.x + [int]$BattlePanel.width -eq 994) 'Battle identity HUD must retain the approved right safe-area inset'
+        Assert-True ($null -eq $BattlePanel.SelectSingleNode("*[local-name()='texture']")) 'Battle identity HUD panel must be fully transparent'
+        Assert-True ($BattleText.r -eq '255' -and $BattleText.g -eq '255' -and $BattleText.b -eq '255') 'Battle identity HUD text must be pure white'
     } catch { Assert-True $false "Battle identity HUD XML must parse: $($_.Exception.Message)" }
 }
 foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
@@ -1190,6 +1197,7 @@ $BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
 foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
+Assert-True ($BattleRuntimeTests -match [regex]::Escape('gamma_arena_test_assert.equals(env.added.text, "Fight: 2 | Seed: 42", "existing battle identity window refreshes")')) 'Battle identity refresh fixture must require fight-first ASCII text'
 $BattleOrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
 $BattleBootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $BattleOrchestratorContent = Get-Content -LiteralPath $BattleOrchestratorPath -Raw
@@ -1366,9 +1374,14 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     }
     Assert-True ($Task6ActorContent -notmatch 'function\s+ActorAdapter:enforce_boundary') 'Closed Rostok Arena must not run a per-update actor boundary teleport guard'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_for_rematch') 'Actor adapter must expose one shared in-memory rematch reset'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:begin_rematch_boundary') 'Actor adapter must expose an immediate rematch input boundary'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_transient_state') 'Actor adapter must expose one authoritative transient reset boundary'
+    Assert-True ($Task6ActorContent -match 'interrupt_item_use[\s\S]{0,900}acquire_input') 'Item-use interruption must precede Arena input acquisition in the rematch boundary'
+    Assert-True ($Task6ActorContent -match 'reset_transient_state[\s\S]{0,1500}loadout\.cleanup') 'Transient cleanup must precede rematch loadout cleanup'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:normalize_for_arena[\s\S]{0,1300}if\s+acquired\.value\s*==\s*true\s+then[\s\S]{0,220}release_input') 'Normalization rollback may release only an input lease acquired by that invocation'
     Assert-True ($Task6ActorContent -notmatch 'call_actor\s*\(\s*item\s*,\s*["'']parent_id["'']') 'Actor adapter must use the real client game_object parent():id() API, never nonexistent parent_id()'
     Assert-True ($Task6ActorContent -match '"bleeding"\s*,\s*1') 'GAMMA actor normalization must use the observed cured bleeding sentinel 1'
-    Assert-True ($Task6ActorContent.Contains('mod_body_health_reset')) 'Actor adapter must reset GAMMA Body Health System state between rounds'
+    Assert-True ($Task6ActorContent.Contains('reset_transient_state')) 'Actor adapter must reset GAMMA transient state between rounds'
     foreach ($Forbidden in @('set_power','set_radiation','set_bleeding','set_psy_health')) {
         Assert-True ($Task6ActorContent -notmatch [regex]::Escape($Forbidden)) "Actor adapter must not call nonexistent Anomaly method $Forbidden"
     }
@@ -1399,9 +1412,40 @@ if (Test-Path -LiteralPath $Task6CheckpointPath) {
     Assert-True ($Task6CheckpointContent -notmatch 'pcall\(fs\.exist\s*,\s*fs\s*,\s*path\s*\)') 'Checkpoint existence must never pass one absolute path to getFS.exist'
 }
 $Task6BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils_obj.save_var', 'utils_obj.load_var', 'mod_body_health_reset')) {
+foreach ($Marker in @('zzz_player_injuries', 'BHS_PARTS', 'bhs.health', 'bhs.maxhp', 'bhs.timedhp', 'utils.save_var', 'utils.load_var', 'mod_body_health_reset')) {
     Assert-True ($Task6BootstrapContent.Contains($Marker)) "Bootstrap GAMMA Body Health integration is missing marker: $Marker"
 }
+foreach ($Marker in @('lam2.abort','ClearWounds','ClearAllBoosters','WoundForEach','BoosterForEach','ChangeAlcohol','remove_all_psy_ppe_effects','RemoveTimeEvent','set_stage_two','655808','655820','99123','99133','8053','reset_transient_state')) {
+    Assert-True ($Task6BootstrapContent.Contains($Marker)) "Round transient reset integration is missing marker: $Marker"
+}
+Assert-True ($Task6BootstrapContent -notmatch 'GetAlcohol') 'Round transient reset must not depend on the unexported Monolith GetAlcohol method'
+Assert-True ($Task6BootstrapContent -match 'runtime_object_method\("GA_ACTOR_ALCOHOL_CLEAR_FAILED",\s*api,\s*"ChangeAlcohol",\s*-1\s*\)') 'Round transient reset must zero the normalized Monolith alcohol range through ChangeAlcohol(-1)'
+Assert-True ($Task6BootstrapContent.Contains('GA_ACTOR_BOOSTER_READBACK_STALE')) 'MT-TEST stale booster enumeration must remain nonfatal structured telemetry'
+Assert-True ($Task6BootstrapContent -match 'if\s+wound_count\s*~=\s*0\s+then') 'Native wound readback must remain a strict reset postcondition'
+Assert-True ($Task6BootstrapContent -notmatch 'wound_count\s*~=\s*0\s+or\s+booster_count\s*~=\s*0') 'Contradictory MT-TEST booster enumeration must not share the fatal wound postcondition'
+$RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_preowned_input_survives_normalize_failure','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_booster_readback_is_nonfatal','runtime_bootstrap_missing_alcohol_mutator_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact','runtime_entity_ready_revalidates_items_before_hostility')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
+}
+foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition orchestration regression must cover $Name"
+}
+$VictoryNextStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:victory_next_action')
+$VictoryNextEnd = if ($VictoryNextStart -ge 0) { $Task5OrchestratorContent.IndexOf('function Orchestrator:restart_arena_action', $VictoryNextStart) } else { -1 }
+Assert-True ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) 'Victory-next boundary must remain structurally testable'
+if ($VictoryNextStart -ge 0 -and $VictoryNextEnd -gt $VictoryNextStart) {
+    $VictoryNextBlock = $Task5OrchestratorContent.Substring($VictoryNextStart, $VictoryNextEnd - $VictoryNextStart)
+    $VictoryBoundaryIndex = $VictoryNextBlock.IndexOf('begin_rematch_boundary')
+    $VictoryClearIndex = $VictoryNextBlock.IndexOf('clear_result')
+    Assert-True ($VictoryBoundaryIndex -ge 0 -and $VictoryClearIndex -gt $VictoryBoundaryIndex) 'Victory-next must acquire the rematch boundary before closing Result UI'
+}
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:queue_integrity_retry[\s\S]{0,900}begin_rematch_boundary') 'Integrity retry must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action[\s\S]{0,900}begin_rematch_boundary') 'Manual restart must acquire the shared rematch boundary before transition mutations'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:is_opponent_activation_allowed\(\)[\s\S]{0,160}runtime_stage\s*==\s*"ACTIVATING"') 'Opponent activation gate must open only in orchestrator ACTIVATING'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:begin_countdown_after_equipment[\s\S]{0,350}snapshot\.state\s*~=\s*"READY"') 'Visible countdown must wait for the fully staged entity READY state'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:update_countdown[\s\S]{0,550}set_runtime_stage\("ACTIVATING"\)') 'Countdown deadline must enter the bounded ACTIVATING stage'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:observe_entity_activation[\s\S]{0,350}stage\s*=\s*"ACTIVATING"') 'Activation observation must remain ACTIVATING until entity ACTIVE is proven'
+Assert-True ($Task5OrchestratorContent -match 'GA_ENTITY_UPDATE_FAILED[\s\S]{0,500}runtime_stage\s*==\s*"ACTIVATING"[\s\S]{0,350}observe_entity_activation') 'Orchestrator must observe entity activation again after the entity update'
 
 $CheckpointFreeStatePath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_state_machine.script'
 if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
@@ -1414,7 +1458,7 @@ if (Test-Path -LiteralPath $CheckpointFreeStatePath) {
 
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\(') 'Orchestrator must expose the manual Arena restart action'
 Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1800}pending_continuation_kind\s*=\s*"victory_next"') 'Manual Arena restart must reuse the existing next-fight continuation'
-Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,900}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:restart_arena_action\s*\([\s\S]{0,1500}clear_battle_identity\("manual_restart"\)') 'Manual Arena restart must hide battle identity before leaving active combat'
 Assert-True ($Task5BootstrapContent -match '(?m)^function\s+request_restart\s*\(') 'Bootstrap must expose the registered runtime restart bridge'
 foreach ($Marker in @('runtime_manual_restart_reuses_next_fight_once','runtime_manual_restart_inactive_and_exhausted_are_inert','runtime_bootstrap_restart_without_registered_runtime_is_inert')) {
     Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Runtime tests must cover $Marker"
@@ -1566,6 +1610,11 @@ if (Test-Path -LiteralPath $Task7NpcPath) {
 if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'ARENA_RUNTIME_COMMUNITY\s*=\s*"arena_enemy"') 'Entity adapter must define the isolated Arena runtime community'
     Assert-True ($Task7EntityContent -match 'validate_effective_profile\([^\r\n]+ARENA_RUNTIME_COMMUNITY') 'Entity pre-spawn validation must require the isolated runtime community'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready') 'Entity adapter must split fully staged READY from hostile activation'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:activate_ready[\s\S]{0,700}verify_item_ownership[\s\S]{0,3000}set_actor_hostile') 'READY activation must revalidate assigned item ownership before applying hostility'
+    Assert-True ($Task7EntityContent -match 'WAIT_ACTOR_LOADOUT[\s\S]{0,700}set_state\("SPAWNING"\)') 'Actor loadout readiness must start spawning before countdown'
+    Assert-True ($Task7EntityContent -match 'self\.state_value\s*==\s*"READY"[\s\S]{0,350}opponent_gate_open') 'Closed activation gate must hold a fully staged READY transaction'
+    Assert-True ($Task7EntityContent -notmatch 'set_state\("COUNTDOWN"\)') 'Entity adapter must not own the visible countdown state'
 }
 
 $Task7CatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
@@ -1641,7 +1690,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
 }
 
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    foreach ($Marker in @('runtime_preflight_requires_task7_entity_ports_and_ammo_metadata','runtime_entity_actor_loadout_precedes_spawn','runtime_entity_npcs_are_offline_until_atomic_activation','runtime_entity_online_wait_is_bounded_and_wrap_safe','runtime_entity_active_defers_input_release_to_task8','runtime_bootstrap_actor_loadout_port_is_bound_and_exact','runtime_actor_loadout_creates_physical_grenades_and_rolls_back','runtime_actor_loadout_rollback_blocks_disconnect_until_absent','runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect','runtime_bootstrap_actor_existence_lookup_fails_closed','runtime_bootstrap_hostility_port_is_feature_probed','runtime_entity_ammo_box_size_failure_precedes_actor_mutation','runtime_entity_partial_failures_rollback_in_reverse','runtime_entity_creates_physical_grenade_and_rolls_back_failure','runtime_entity_purges_only_snapshot_children_still_parented','runtime_entity_supports_real_get_children_iterator','runtime_entity_multi_return_ammo_is_exact','runtime_entity_death_dropped_is_persisted_and_round_tripped','runtime_entity_multi_return_late_failure_is_fully_registered','runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation','runtime_entity_registry_is_plain_ids_only','runtime_entity_cleanup_requires_registry_and_tag','runtime_entity_forged_tag_is_ignored','runtime_entity_tag_loss_fails_safe','runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal','runtime_entity_parent_release_blocks_unreadable_child_parent','runtime_entity_cleanup_is_idempotent','runtime_entity_lifecycle_cleanup_takes_over_mid_rollback','runtime_entity_existence_result_must_be_boolean','runtime_entity_duplicate_death_is_idempotent','runtime_entity_unregistered_death_is_ignored','runtime_entity_object_death_signature_is_normalized','runtime_entity_numeric_death_requires_test_injection','runtime_registered_death_owner_tag_failures_route_through_real_callback_router','runtime_registered_death_mismatching_owner_tag_is_benign','runtime_entity_release_is_async_and_never_direct','runtime_entity_release_timeout_is_wrap_safe','runtime_entity_max_cardinality_cleanup_fits_default_budget','runtime_entity_relations_friend_first_then_actor_hostile','runtime_entity_activation_does_not_wait_for_precombat_active_item','runtime_entity_callbacks_fail_closed','runtime_validator_rejects_effective_nonhuman_profile','runtime_entity_runtime_profile_check_precedes_actor_mutation','runtime_orchestrator_living_count_fails_closed','runtime_entity_does_not_spawn_before_begin_apply')) {
+    foreach ($Marker in @('runtime_preflight_requires_task7_entity_ports_and_ammo_metadata','runtime_entity_actor_loadout_precedes_spawn','runtime_entity_npcs_are_offline_until_atomic_activation','runtime_entity_online_wait_is_bounded_and_wrap_safe','runtime_entity_active_defers_input_release_to_task8','runtime_bootstrap_actor_loadout_port_is_bound_and_exact','runtime_actor_loadout_creates_physical_grenades_and_rolls_back','runtime_actor_loadout_rollback_blocks_disconnect_until_absent','runtime_actor_loadout_malformed_existence_blocks_teardown_disconnect','runtime_bootstrap_actor_existence_lookup_fails_closed','runtime_bootstrap_hostility_port_is_feature_probed','runtime_entity_ammo_box_size_failure_precedes_actor_mutation','runtime_entity_partial_failures_rollback_in_reverse','runtime_entity_creates_physical_grenade_and_rolls_back_failure','runtime_entity_purges_only_snapshot_children_still_parented','runtime_entity_supports_real_get_children_iterator','runtime_entity_multi_return_ammo_is_exact','runtime_entity_death_dropped_is_persisted_and_round_tripped','runtime_entity_multi_return_late_failure_is_fully_registered','runtime_entity_multi_return_invalid_or_duplicate_id_rolls_back_every_owned_creation','runtime_entity_registry_is_plain_ids_only','runtime_entity_cleanup_requires_registry_and_tag','runtime_entity_forged_tag_is_ignored','runtime_entity_tag_loss_fails_safe','runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal','runtime_entity_parent_release_blocks_unreadable_child_parent','runtime_entity_cleanup_is_idempotent','runtime_entity_lifecycle_cleanup_takes_over_mid_rollback','runtime_entity_existence_result_must_be_boolean','runtime_entity_duplicate_death_is_idempotent','runtime_entity_unregistered_death_is_ignored','runtime_entity_object_death_signature_is_normalized','runtime_entity_numeric_death_requires_test_injection','runtime_registered_death_owner_tag_failures_route_through_real_callback_router','runtime_registered_death_mismatching_owner_tag_is_benign','runtime_entity_release_is_async_and_never_direct','runtime_entity_release_timeout_is_wrap_safe','runtime_entity_max_cardinality_cleanup_fits_default_budget','runtime_entity_relations_friend_first_then_actor_hostile','runtime_entity_activation_does_not_wait_for_precombat_active_item','runtime_entity_callbacks_fail_closed','runtime_validator_rejects_effective_nonhuman_profile','runtime_entity_runtime_profile_check_precedes_actor_mutation','runtime_orchestrator_living_count_fails_closed','runtime_entity_actor_loadout_readiness_starts_spawning_without_gate')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 7 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_fightspec_preflight_failure_precedes_actor_normalization','runtime_fightspec_preflight_caches_before_normalization_and_applies_after_purge')) {
@@ -1673,6 +1722,295 @@ if (Test-Path -LiteralPath $NpcMedicalPath) {
     Assert-True ($NpcMedicalContent -notmatch '\bmath\.(random|randomseed)\b') 'NPC medical state machine must not use global randomness'
 }
 
+$Task3DataFiles = @(
+    'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx',
+    'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx',
+    'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
+    'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx',
+    'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx',
+    'tests\fixtures\golden-fights-v4.txt',
+    'schemas\fight-spec-v4.md',
+    'tests\fixtures\golden-fights-v5.txt',
+    'schemas\fight-spec-v5.md',
+    'schemas\fight-spec-v6.md',
+    'schemas\fight-spec-v7.md',
+    'tests\fixtures\golden-fights-v7.txt',
+    'schemas\fight-spec-v8.md',
+    'tests\fixtures\golden-fights-v8.txt'
+)
+foreach ($RelativePath in $Task3DataFiles) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
+}
+
+$CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+$DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
+$LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
+$NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
+$SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
+$FightSpecV3Path = Join-Path $RepoRoot 'schemas\fight-spec-v3.md'
+if (Test-Path -LiteralPath $FightSpecV3Path) {
+    $FightSpecV3Content = Get-Content -LiteralPath $FightSpecV3Path -Raw
+    Assert-True ($FightSpecV3Content -match '(?m)^\| schema_version \| exactly 3 \|\s*$') 'FightSpecV3 root schema must remain version 3.'
+    Assert-True ($FightSpecV3Content -match '(?m)^\| generator_version \| exactly 5 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| catalog_revision \| exactly 5 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| layout_version \| exactly 2 \|\s*$') 'FightSpecV3 contract must declare generator 5, catalog 5, and layout 2.'
+    Assert-True ($FightSpecV3Content.Contains('`ga-<seed>-<index>-g5-c5-l2`')) 'FightSpecV3 contract must document the canonical g5/c5/l2 fight ID.'
+    Assert-True ($FightSpecV3Content -match '(?is)actor.+weighted.+weapon.class.+armor.class.+exact player budget.+actor_class_pair' -and $FightSpecV3Content -match '(?is)deterministic.+sorted.+concrete.+actor_weapon.+actor_ammo_boxes.+actor_outfit') 'FightSpecV3 contract must document weighted actor class-pair selection and dedicated deterministic actor streams.'
+    Assert-True ($FightSpecV3Content -match '(?is)opponent.+70.{0,3}100%.+highest-affordable fallback') 'FightSpecV3 contract must scope the affordability band and fallback to opponent equipment.'
+    Assert-True ($FightSpecV3Content -match '(?is)enemy counts.+budgets.+roles.+factions.+loadout selection.+unchanged') 'FightSpecV3 contract must state that opponent generation behavior is unchanged.'
+    Assert-True ($FightSpecV3Content -notmatch '(?i)generator version 4|generator_version \| exactly 4|catalog_revision \| exactly [34]|g[45]-c[34]-l2') 'FightSpecV3 contract must not regress to stale catalog or generator identifiers.'
+    $FightSpecV3ActorContract = [regex]::Match($FightSpecV3Content, '(?ims)^Actor[\s\S]*?(?=\r?\n\r?\n|\z)').Value
+    Assert-True (-not [string]::IsNullOrWhiteSpace($FightSpecV3ActorContract) -and $FightSpecV3ActorContract -notmatch '(?i)70.{0,3}100%|highest-affordable fallback') 'FightSpecV3 contract must not apply opponent max-cost affordability language to actor selection.'
+}
+if (Test-Path -LiteralPath $CatalogPath) {
+    $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*9\s*$') 'Catalog must declare schema_version = 9'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*10\s*$') 'Catalog must declare revision = 10'
+    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*10\s*$') 'Catalog must declare generator_version = 10'
+    Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s+armor_class\s*=\s*light\s*$') 'Novice outfit must declare the light armor class'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_stalker\]\s+section\s*=\s*stalker_outfit\s+cost\s*=\s*3\s+armor_class\s*=\s*medium\s*$') 'Stalker outfit must declare the medium armor class'
+    Assert-True ($CatalogContent -match '(?ms)^\[outfit_banditmerc\]\s+section\s*=\s*banditmerc_outfit\s+cost\s*=\s*4\s+armor_class\s*=\s*scientific\s*$') 'Banditmerc outfit must declare the scientific armor class'
+    foreach ($Profile in @('gamma_arena_bandit_novice', 'gamma_arena_bandit_trainee', 'gamma_arena_bandit_experienced', 'gamma_arena_bandit_veteran')) {
+        Assert-True ($CatalogContent -match [regex]::Escape($Profile)) "Human profile catalog must include $Profile"
+    }
+    Assert-True ($CatalogContent -match '(?m)^\[medical_items\]\r?$') 'Catalog must declare the curated medical_items group'
+    foreach ($Marker in @('section = rebirth','category = rare','actor_cost = 7','npc_cost = 2','max_count = 2')) {
+        Assert-True ($CatalogContent.Contains($Marker)) "Medical catalog must declare $Marker"
+    }
+}
+$Task3CatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
+if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
+    $Task3CatalogScriptContent = Get-Content -LiteralPath $Task3CatalogScriptPath -Raw
+    Assert-True ($Task3CatalogScriptContent -match 'GA_DIFFICULTY_BUDGET_INFEASIBLE') 'Catalog loader must reject infeasible maximum-count budgets'
+    Assert-True ($Task3CatalogScriptContent -match 'section_for_each') 'Runtime catalog enumeration must use section_for_each'
+    Assert-True ($Task3CatalogScriptContent -match 'line_count') 'Runtime catalog enumeration must use line_count'
+    Assert-True ($Task3CatalogScriptContent -match 'r_line') 'Runtime catalog enumeration must use r_line'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_SECTION_CHECK_FAILED') 'Catalog section checks must return structured errors'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_UNKNOWN_SECTION') 'Catalog loader must reject unknown sections'
+    Assert-True ($Task3CatalogScriptContent -match 'GA_CATALOG_MANIFEST_INVALID') 'Catalog loader must enforce the exact v10 semantic manifest'
+    Assert-True ($Task3CatalogScriptContent -match 'pcall\s*\(\s*load_impl') 'Catalog load boundary must convert arbitrary fixture failures to Result errors'
+    Assert-True ($Task3CatalogScriptContent -match 'catalog_manifest_v10') 'Catalog loader must bind exact v10 catalog semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'difficulty_manifest_v5') 'Catalog loader must bind exact v5 difficulty semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'medical_skipped') 'Catalog loader must retain bounded diagnostics for missing optional medicine'
+    foreach ($Diagnostic in @('Catalog group id count differs from v10', 'Catalog group contains a non-v10 id', 'Catalog group is missing a v10 id')) {
+        Assert-True ($Task3CatalogScriptContent.Contains($Diagnostic)) "Strict catalog manifest diagnostic must identify v10: $Diagnostic"
+    }
+    foreach ($Marker in @('armor_class','player_weapon_weights','player_armor_weights','w_pistol','w_smg','w_shotgun','w_rifle','w_sniper','light','medium','scientific','heavy','powered_exo')) {
+        Assert-True ($Task3CatalogScriptContent -match [regex]::Escape($Marker)) "Catalog loader must cover $Marker"
+    }
+    Assert-True ($Task3CatalogScriptContent -match 'layout_manifest_v2') 'Catalog loader must bind exact ordered v2 layout semantics'
+    Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
+    Assert-True ($Task3CatalogScriptContent -match 'ACTOR_WEAPON_QUARANTINE') 'Catalog must declare an explicit actor-only weapon quarantine.'
+    Assert-True ($Task3CatalogScriptContent -match 'wpn_dtmdr\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_dtmdr section.'
+    Assert-True ($Task3CatalogScriptContent -match 'wpn_eft_mts_255_uh2\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_eft_mts_255_uh2 section.'
+    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_list') 'Catalog must expose a deterministic actor weapon list.'
+    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v1') 'Catalog revision identity must include the actor quarantine policy.'
+}
+$Task3ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
+if (Test-Path -LiteralPath $Task3ValidatorPath) {
+    $Task3ValidatorContent = Get-Content -LiteralPath $Task3ValidatorPath -Raw
+    foreach ($Code in @('GA_MODE_INVALID','GA_LEVEL_INVALID','GA_LAYOUT_VERSION_INVALID','GA_OPPONENT_SLOT_INVALID','GA_FIGHT_ID_INVALID','GA_FIGHTSPEC_TYPE_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match $Code) "Validator must return structured $Code"
+    }
+    Assert-True ($Task3ValidatorContent -match 'expected_fight_id') 'Validator must recompute fight_id from session_seed and fight_index'
+    Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_COMBINATION_INVALID') 'Validator must reject non-v2 loadout combinations'
+    Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_KNIFE_INVALID') 'Validator must reject non-cataloged knives'
+    Assert-True ($Task3ValidatorContent -match 'GA_ENEMY_SLOT_BUDGET_INVALID') 'Validator must enforce deterministic per-slot enemy budgets'
+    Assert-True ($Task3ValidatorContent -match 'valid_armor_class') 'Validator must require a recognized outfit armor class'
+    Assert-True ($Task3ValidatorContent -match 'loadout\.consumables\[1\]\s*~=\s*"bandage"') 'Validator must require the actor mandatory bandage first'
+    foreach ($Code in @('GA_SPAWN_SLOT_INVALID','GA_SPAWN_SLOT_DUPLICATE','GA_TACTICAL_ROUTE_INVALID','GA_ENEMY_ROLE_INVALID','GA_ENEMY_PRIMARY_SHARE_INVALID','GA_ENEMY_SNIPER_LIMIT_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match $Code) "FightSpec v3 validator must return structured $Code"
+    }
+    Assert-True ($Task3ValidatorContent -match 'math\.floor\s*\(\s*difficulty\.enemy_total_budget\s*/\s*opponent_count\s*\)') 'Validator must recompute the generator slot-budget base'
+    Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
+    Assert-True ($Task3ValidatorContent -match 'spec\.schema_version\s*~=\s*8') 'Validator must require FightSpec v8'
+    foreach ($Marker in @('GA_LOADOUT_GRENADE_INVALID','actor_grenade_count','enemy_grenade_presence:','enemy_grenade_section:')) {
+        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v7 grenade validator must contain $Marker"
+    }
+    Assert-True ($Task3ValidatorContent -match 'GA_ACTOR_WEAPON_QUARANTINED') 'Validator must reject actor weapons outside actor_weapon_list.'
+    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','GA_MEDICAL_COST_INVALID','GA_ENEMY_MEDICAL_MIX_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v6 validator must contain $Marker"
+    }
+    Assert-True ($Task5DevTestContent -match 'actor creates exact final ordinary rounds' -and $Task5DevTestContent -match 'runtime does not regenerate the reserve floor') 'Runtime actor loadout tests must require exact final ordinary ammunition'
+    foreach ($Marker in @('budgeted_numerator','budgeted_boxes','actor_scaled_ammo:','magazine_size','GA_PLAYER_AMMO_SCALE_INVALID')) {
+        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v6 actor-ammo validator must contain $Marker"
+    }
+}
+$Task3GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
+$Task3GeneratorTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+if (Test-Path -LiteralPath $Task3GeneratorPath) {
+    $Task3GeneratorContent = Get-Content -LiteralPath $Task3GeneratorPath -Raw
+    $Task3GeneratorTestContent = Get-Content -LiteralPath $Task3GeneratorTestPath -Raw
+    Assert-True ($Task3GeneratorContent -match 'local\s+normalized_seed\s*=\s*gamma_arena_rng\.normalize_uint32') 'Generator must normalize session_seed once'
+    Assert-True ($Task3GeneratorContent -match 'session_seed\s*=\s*normalized_seed') 'FightSpec must retain normalized session_seed'
+    Assert-True ($Task3GeneratorContent -match 'fight_index\s*=\s*fight_index') 'FightSpec must retain fight_index'
+    Assert-True ($Task3GeneratorContent -match '"session_seed="') 'Stable encoding must include session_seed'
+    Assert-True ($Task3GeneratorContent -match '"fight_index="') 'Stable encoding must include fight_index'
+    Assert-True ($Task3GeneratorContent -match 'local\s+normalized_request') 'Generator must normalize the request before deriving RNG streams'
+    Assert-True ($Task3GeneratorContent -match 'stream\s*\(\s*normalized_request') 'Every generated RNG stream must use the normalized request'
+    Assert-True ($Task3GeneratorContent -match 'gamma_arena_number\.is_integer') 'Generator seed and index checks must use the finite integer contract'
+    Assert-True ($Task3GeneratorContent -match '"actor_knife"') 'Player knife must use an independent tagged RNG stream'
+    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*8') 'Generator must emit FightSpecV8'
+    Assert-True ($Task3GeneratorContent -match 'CORE_RNG_EPOCH\s*=\s*6') 'Generator must retain core/equipment RNG epoch 6'
+    Assert-True ($Task3GeneratorContent -match 'MEDICAL_RNG_EPOCH\s*=\s*1') 'Generator must declare medical RNG epoch 1'
+    foreach ($Marker in @('gear_cost','medical_cost','gamma_arena_medical_generator.generate_actor','gamma_arena_medical_generator.allocate_enemies')) {
+        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "FightSpec v6 generator must contain $Marker"
+    }
+    foreach ($Marker in @('gamma_arena_grenade_generator.generate_actor','gamma_arena_grenade_generator.generate_enemy','actor_grenade_section:','enemy_grenade_presence:','enemy_grenade_section:',',grenades:')) {
+        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "FightSpec v7 grenade generator must contain $Marker"
+    }
+    foreach ($Marker in @('PLAYER_AMMO_CHANCE','function scaled_ammo_boxes','actor_scaled_ammo:','magazine_size','standard_ammo.box_size','GA_PLAYER_AMMO_SCALE_INVALID')) {
+        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Scaled player-ammo generator must contain $Marker"
+    }
+    foreach ($CaseName in @('player_ammo_scaling_policy_is_uncapped_and_prefix_stable','generated_actor_ammo_is_final_and_outside_budget','player_ammo_scaling_is_stream_isolated')) {
+        Assert-True ($Task3GeneratorTestContent -match [regex]::Escape($CaseName)) "Scaled player-ammo suite must register $CaseName"
+    }
+    foreach ($Marker in @('representative_opponent_counts','player_ammo_rate_sweep','observed rate remains within two percentage points','longer rosters preserve every indexed prefix draw','low_without_actor_ammo')) {
+        Assert-True ($Task3GeneratorTestContent -match [regex]::Escape($Marker)) "Scaled player-ammo suite must retain verification marker $Marker"
+    }
+    foreach ($Marker in @('pick_affordable_band','primary_share_percent','spawn_slot_id','tactical_route','role_weapon_pool','resolved_layout')) {
+        Assert-True ($Task3GeneratorContent -match $Marker) "FightSpec v3 generator must contain $Marker"
+    }
+    Assert-True ($Task3GeneratorContent -match 'global_role_pool') 'Unaffordable faction role pools must fall back to the matching global role pool'
+    Assert-True ($Task3GeneratorContent -match 'function\s+select_player_class_pair\s*\(') 'Generator must expose weighted player class-pair selection'
+    Assert-True ($Task3GeneratorContent -match 'function\s+player_loadout\s*\(') 'Generator must stage player loadout selection by class pair'
+    Assert-True (([regex]::Matches($Task3GeneratorContent, 'catalogs\.actor_weapon_list')).Count -ge 2) 'Player feasibility and final selection must share actor_weapon_list.'
+    foreach ($Marker in @('actor_class_pair','actor_weapon','actor_ammo_boxes','actor_outfit')) {
+        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Player selection must use the $Marker deterministic stream"
+    }
+    $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
+    Assert-True ($GeneratorTests -match 'actor_weapon_quarantine_is_exact_and_actor_only') 'Generator tests must cover exact actor-only weapon quarantine.'
+    Assert-True ($GeneratorTests -match 'fight_spec_v8_separates_gear_medical_and_grenades') 'Generator tests must cover FightSpec v8 cost separation'
+    foreach ($GrenadeCase in @('grenade_loadouts_are_deterministic_uncosted_and_prefix_stable','validator_rejects_forged_grenade_arrays')) {
+        Assert-True ($GeneratorTests -match [regex]::Escape($GrenadeCase)) "Generator tests must cover $GrenadeCase"
+    }
+    Assert-True ($GeneratorTests -match 'validator_rejects_forged_final_actor_ammo') 'Generator tests must cover forged final actor ammo'
+    Assert-True ($GeneratorTests -match 'medical_tuning_does_not_reroll_core_fight') 'Generator tests must prove medical tuning cannot reroll core fight fields'
+    Assert-True ($GeneratorTests -match 'catalog_skips_optional_missing_medicine') 'Generator tests must cover optional missing medicine normalization'
+    foreach ($MedicalCase in @('actor_medical_generation_enforces_budget_and_healer','actor_medical_generation_reaches_master_rare','enemy_medical_generation_spends_team_budget','medical_generation_100000_fights')) {
+        Assert-True ($GeneratorTests -match [regex]::Escape($MedicalCase)) "Generator tests must cover $MedicalCase"
+    }
+    Assert-True ($GeneratorTests -match 'generator_primary_pool_affordability_falls_back') 'Generator tests must cover unaffordable non-empty faction primary pools'
+    Assert-True ($GeneratorTests -match 'weighted_player_class_pair_selection') 'Generator tests must cover weighted player class-pair selection'
+    Assert-True ($GeneratorTests -match 'player_class_pair_ignores_concrete_cardinality') 'Generator tests must prove concrete duplicate cardinality cannot change class selection'
+    Assert-True ($GeneratorTests -match 'master_player_class_diversity') 'Generator tests must cover Master player class diversity'
+    $MasterExoRegistration = [PSCustomObject]@{ Name = 'master_powered_exo_rate_is_rare'; Function = 'master_powered_exo_rate_is_rare' }
+    $MasterExoRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($MasterExoRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($MasterExoRegistration.Function) + '\s*\}'
+    Assert-True ($GeneratorTests -match $MasterExoRegistrationPattern) "Regression case must be registered exactly: $($MasterExoRegistration.Name) -> $($MasterExoRegistration.Function)."
+    Assert-True ($Task3GeneratorContent -match 'value\.knife') 'Stable encoding must include the generated knife'
+}
+if (Test-Path -LiteralPath $DifficultyPath) {
+    $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw
+    foreach ($Difficulty in @('rookie', 'stalker', 'veteran', 'master')) {
+        Assert-True ($DifficultyContent -match ("(?m)^\[ga_difficulty_" + $Difficulty + "\]\r?$")) "Difficulty catalog must include $Difficulty"
+    }
+    foreach ($Marker in @('tier = 4','player_gear_budget = 15','player_medical_budget = 8','medical_weight_rare = 10')) {
+        Assert-True ($DifficultyContent.Contains($Marker)) "Difficulty medical contract must declare $Marker"
+    }
+}
+if (Test-Path -LiteralPath $LayoutPath) {
+    $LayoutContent = Get-Content -LiteralPath $LayoutPath -Raw
+    Assert-True ($LayoutContent -match '(?m)^level\s*=\s*l05_bar\s*$') 'Layout must target l05_bar'
+    Assert-True ($LayoutContent -match '(?m)^actor_spawn_path\s*=\s*t_way\s*$') 'Actor must spawn at the vanilla Rostok Arena ingress patrol'
+    Assert-True ($LayoutContent -match '(?m)^actor_look_path\s*=\s*t_look\s*$') 'Actor must face the vanilla Rostok Arena ingress look patrol'
+    Assert-True ($LayoutContent -notmatch '(?m)^actor_boundary_zone\s*=') 'Closed Rostok Arena must not declare a runtime boundary restrictor'
+    Assert-True ($LayoutContent -match 'bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_1_1') 'Layout must retain the vanilla six-human Arena patrol set'
+    Assert-True ($LayoutContent -notmatch 'bar_arena_monstr_walk') 'Human Arena layouts must never assign the monster patrol'
+    foreach ($Marker in @('virtual_capacity = 10','virtual_radii = 1.5,2.5','max_height_delta = 1.0','min_opponent_separation = 1.75','min_actor_separation = 8.0','max_base_distance = 3.0')) {
+        Assert-True ($LayoutContent.Contains($Marker)) "Layout v2 must declare $Marker"
+    }
+}
+if (Test-Path -LiteralPath $NpcPath) {
+    $NpcContent = Get-Content -LiteralPath $NpcPath -Raw
+    $ProfileBases = @{ army='military'; bandit='bandit'; csky='csky'; dolg='duty'; ecolog='ecolog'; freedom='freedom'; killer='killer'; monolith='monolith'; stalker='stalker' }
+    foreach ($Faction in @('army','bandit','csky','dolg','ecolog','freedom','killer','monolith','stalker')) {
+        $RankNames = @('novice','trainee','experienced','veteran')
+        for ($RankIndex = 0; $RankIndex -lt $RankNames.Count; $RankIndex++) {
+            $Alias = "gamma_arena_${Faction}_$($RankNames[$RankIndex])"
+            Assert-True ($NpcContent -match ("(?m)^\[" + [regex]::Escape($Alias) + "\]:sim_default_" + [regex]::Escape($ProfileBases[$Faction]) + "_" + $RankIndex + "\r?$")) "NPC profile must inherit its effective faction/rank section: $Alias"
+        }
+    }
+}
+if (Test-Path -LiteralPath $SkipPath) {
+    $SkipContent = Get-Content -LiteralPath $SkipPath -Raw
+    Assert-True ($SkipContent -match '(?m)^!\[skip_npcs\]\s*$') 'Loadout patch must use ![skip_npcs]'
+    Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)_(novice|trainee|experienced|veteran)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)\s*$')).Count -eq 36) 'Loadout patch must add all 36 Arena human aliases to skip_npcs'
+}
+$GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v4.txt'
+if (Test-Path -LiteralPath $GoldenPath) {
+    $GoldenContent = Get-Content -LiteralPath $GoldenPath -Raw
+    Assert-True (([regex]::Matches($GoldenContent, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=4\|.+\|diagnostic=FightSpecV4 .+$')).Count -eq 4) 'Golden fixture must contain four complete v4 stable encodings'
+}
+$FightSpecV4Path = Join-Path $RepoRoot 'schemas\fight-spec-v4.md'
+if (Test-Path -LiteralPath $FightSpecV4Path) {
+    $FightSpecV4Content = Get-Content -LiteralPath $FightSpecV4Path -Raw
+    Assert-True ($FightSpecV4Content -match '(?m)^\| schema_version \| exactly 4 \|\s*$') 'FightSpecV4 root schema must be version 4.'
+    Assert-True ($FightSpecV4Content -match '(?m)^\| generator_version \| exactly 6 \|\s*$' -and $FightSpecV4Content -match '(?m)^\| catalog_revision \| exactly 6 \|\s*$' -and $FightSpecV4Content.Contains('`ga-<seed>-<index>-g6-c6-l2`')) 'FightSpecV4 must declare generator/catalog 6 and the g6/c6/l2 fight ID.'
+    Assert-True ($FightSpecV4Content -match '(?is)actor-only.+bonus_ammo.+standard.+1\.\.60.+special.+61\.\.75.+armor_piercing.+76\.\.100') 'FightSpecV4 must document actor-only weighted bonus ammo.'
+    Assert-True ($FightSpecV4Content -match '(?is)actor_bonus_ammo_category.+actor_bonus_ammo_section.+budget.+never') 'FightSpecV4 must document dedicated bonus streams and budget exclusion.'
+}
+$GoldenV5Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v5.txt'
+if (Test-Path -LiteralPath $GoldenV5Path) {
+    $GoldenV5Content = Get-Content -LiteralPath $GoldenV5Path -Raw
+    Assert-True (([regex]::Matches($GoldenV5Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=5\|.+\|diagnostic=FightSpecV5 .+$')).Count -eq 4) 'Golden fixture must contain four complete v5 stable encodings'
+    Assert-True ($GoldenV5Content -match 'medical:[^|,]*\+?[^|,]*,\d+,\d+,\d+') 'Golden v5 fixture must encode medicine plus separated costs'
+    Assert-True ($GoldenV5Content -match 'generator_version=7\|catalog_revision=7' -and $GoldenV5Content -match 'fight_id=ga-[^|]+-g7-c7-l2') 'Golden v5 fixture must use active generator/catalog identity 7/7'
+}
+$FightSpecV5Path = Join-Path $RepoRoot 'schemas\fight-spec-v5.md'
+if (Test-Path -LiteralPath $FightSpecV5Path) {
+    $FightSpecV5Content = Get-Content -LiteralPath $FightSpecV5Path -Raw
+    Assert-True ($FightSpecV5Content -match '(?m)^\| schema_version \| exactly 5 \|\s*$') 'FightSpecV5 root schema must be version 5.'
+    Assert-True ($FightSpecV5Content -match '(?m)^\| generator_version \| exactly 7 \|\s*$') 'FightSpecV5 must declare generator identity 7.'
+    Assert-True ($FightSpecV5Content -match '(?m)^\| catalog_revision \| equals the normalized effective catalog revision \|\s*$') 'FightSpecV5 must admit the deterministic effective-catalog revision.'
+    Assert-True ($FightSpecV5Content.Contains('`ga-<seed>-<index>-g7-c<catalog>-l<layout>`')) 'FightSpecV5 must document the effective catalog/layout Fight ID.'
+    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','enemy medical team budget','core/equipment RNG epoch 6','medical RNG epoch 1')) {
+        Assert-True ($FightSpecV5Content -match [regex]::Escape($Marker)) "FightSpecV5 must document $Marker"
+    }
+}
+$FightSpecV6Path = Join-Path $RepoRoot 'schemas\fight-spec-v6.md'
+Assert-True (Test-Path -LiteralPath $FightSpecV6Path) 'FightSpecV6 schema contract must exist.'
+if (Test-Path -LiteralPath $FightSpecV6Path) {
+    $FightSpecV6Content = Get-Content -LiteralPath $FightSpecV6Path -Raw
+    Assert-True ($FightSpecV6Content -match '(?m)^\| schema_version \| exactly 6 \|\s*$') 'FightSpecV6 root schema must be version 6.'
+    Assert-True ($FightSpecV6Content -match '(?m)^\| generator_version \| exactly 8 \|\s*$') 'FightSpecV6 must declare generator identity 8.'
+    foreach ($Marker in @('final `ammo_boxes`','three-magazine','actor_scaled_ammo:<index>','40%','25%','20%','10%','gear_cost','bonus_ammo','Opponent')) {
+        Assert-True ($FightSpecV6Content -match [regex]::Escape($Marker)) "FightSpecV6 ammo contract must document $Marker"
+    }
+    Assert-True ($FightSpecV6Content -notmatch '(?i)extra_ammo|scaled_ammo_boxes\s*\|\s*field|budgeted_ammo_boxes\s*\|\s*field') 'FightSpecV6 must not expose ammo provenance fields.'
+}
+$FightSpecV7Path = Join-Path $RepoRoot 'schemas\fight-spec-v7.md'
+Assert-True (Test-Path -LiteralPath $FightSpecV7Path) 'FightSpecV7 schema contract must exist.'
+if (Test-Path -LiteralPath $FightSpecV7Path) {
+    $FightSpecV7Content = Get-Content -LiteralPath $FightSpecV7Path -Raw
+    Assert-True ($FightSpecV7Content -match '(?m)^\| schema_version \| exactly 7 \|\s*$') 'FightSpecV7 root schema must be version 7.'
+    Assert-True ($FightSpecV7Content -match '(?m)^\| generator_version \| exactly 9 \|\s*$') 'FightSpecV7 must declare generator identity 9.'
+    foreach ($Marker in @('grenades','94%','5%','1%','10%','90%','`grenade_smoke` is excluded','actor_grenade_count','enemy_grenade_presence:<slot>','GA_LOADOUT_GRENADE_INVALID','native engine decision')) {
+        Assert-True ($FightSpecV7Content -match [regex]::Escape($Marker)) "FightSpecV7 grenade contract must document $Marker"
+    }
+}
+$GoldenV7Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v7.txt'
+if (Test-Path -LiteralPath $GoldenV7Path) {
+    $GoldenV7Content = Get-Content -LiteralPath $GoldenV7Path -Raw
+    Assert-True (([regex]::Matches($GoldenV7Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=7\|.+\|diagnostic=FightSpecV7 .+$')).Count -eq 4) 'Golden fixture must contain four complete v7 stable encodings'
+    Assert-True ($GoldenV7Content -match 'generator_version=9\|catalog_revision=9' -and $GoldenV7Content -match 'fight_id=ga-[^|]+-g9-c9-l2') 'Golden v7 fixture must use active generator/catalog identity 9/9'
+    Assert-True ($GoldenV7Content -match 'actor=[^|]*,ammo_[^,]+,[5-9][0-9]*,') 'Golden v7 fixture must encode the final scaled actor ammo_boxes value'
+    Assert-True ($GoldenV7Content -match 'medical:[^|,]*\+?[^|,]*,grenades:[^,]*,\d+,\d+,\d+') 'Golden v7 fixture must encode grenades separately from medicine and costs'
+}
+$FightSpecV8Path = Join-Path $RepoRoot 'schemas\fight-spec-v8.md'
+Assert-True (Test-Path -LiteralPath $FightSpecV8Path) 'FightSpecV8 schema contract must exist.'
+if (Test-Path -LiteralPath $FightSpecV8Path) {
+    $FightSpecV8Content = Get-Content -LiteralPath $FightSpecV8Path -Raw
+    foreach ($Marker in @('exactly `8`','generator version 10','actor.loadout.device','device_torch_dummy','device_torch_nv_1','device_torch_nv_2','device_torch_nv_3','actor_device','GA_LOADOUT_DEVICE_INVALID')) {
+        Assert-True ($FightSpecV8Content -match [regex]::Escape($Marker)) "FightSpecV8 device contract must document $Marker"
+    }
+}
+$GoldenV8Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v8.txt'
+Assert-True (Test-Path -LiteralPath $GoldenV8Path) 'FightSpecV8 golden fixture must exist.'
+if (Test-Path -LiteralPath $GoldenV8Path) {
+    $GoldenV8Content = Get-Content -LiteralPath $GoldenV8Path -Raw
+    Assert-True (([regex]::Matches($GoldenV8Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=8\|.+\|diagnostic=FightSpecV8 .+$')).Count -eq 4) 'Golden fixture must contain four complete v8 stable encodings'
+    Assert-True ($GoldenV8Content -match 'generator_version=10\|catalog_revision=10' -and $GoldenV8Content -match 'fight_id=ga-[^|]+-g10-c10-l2') 'Golden v8 fixture must use active generator/catalog identity 10/10'
+    Assert-True ($GoldenV8Content -match ',device:(headlamp|nv_gen1|nv_gen2|nv_gen3):device_torch_') 'Golden v8 fixture must encode the deterministic actor device'
+}
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'
 $Task2LogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_log.script'
@@ -2060,7 +2398,8 @@ foreach ($Task11Marker in @('stable_encode', 'deps.tactical', 'tactical_disabled
 Assert-True ($Task11EntityContent -match 'function\s+EntityAdapter:reconcile_active_deaths\s*\(') 'ACTIVE entity updates must reconcile dead registered opponents when an external death callback is missed'
 $Task11OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
 Assert-True ($Task11OrchestratorContent -match 'function\s+Orchestrator:reconcile_active_victory\s*\(') 'ACTIVE orchestration must derive victory from the reconciled living-opponent count'
-Assert-True ($Task11EntityContent -match 'tactical[\s\S]{0,1800}set_actor_hostile[\s\S]{0,1000}set_state\("ACTIVE"\)') 'Tactical bind must precede hostility and ACTIVE'
+Assert-True ($Task11EntityContent -match 'tactical_started\s*=\s*true[\s\S]{0,300}set_state\("READY"\)') 'Tactical bind must be part of READY staging'
+Assert-True ($Task11EntityContent -match 'function\s+EntityAdapter:activate_ready[\s\S]{0,2500}set_actor_hostile[\s\S]{0,1000}set_state\("ACTIVE"\)') 'READY activation must apply hostility before ACTIVE'
 $Task11BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 Assert-True ($Task11BootstrapContent -match 'gamma_arena_tactical_adapter\.new') 'Bootstrap must compose the production tactical adapter'
 Assert-True ($Task11BootstrapContent -match 'function\s+TacticalProxy:begin[\s\S]{0,500}ensure_adapter') 'Tactical adapter must be created lazily after the Arena actor exists'

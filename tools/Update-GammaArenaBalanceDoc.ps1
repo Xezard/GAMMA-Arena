@@ -304,6 +304,7 @@ $ItemMaterializerScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_ar
 $ItemCatalogScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script'
 $GeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
 $GrenadeGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_grenade_generator.script'
+$DeviceGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_device_generator.script'
 $EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
 $MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
 $NpcMedicalScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
@@ -503,6 +504,30 @@ $ActorGrenadeSections = @($ActorGrenadeIds | ForEach-Object { Get-RequiredLtxVal
 $NpcGrenadeSections = @($NpcGrenadeIds | ForEach-Object { Get-RequiredLtxValue $Catalog ('grenade_' + $_) 'section' $CatalogPath })
 if (($ActorGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Actor grenade pool differs from the approved ordered pool' }
 if (($NpcGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-05') { throw 'Opponent grenade pool differs from the approved ordered pool' }
+$DeviceIds = @(Get-LtxCsv $Catalog 'devices' 'ids' $CatalogPath)
+if (($DeviceIds -join ',') -cne 'headlamp,nv_gen1,nv_gen2,nv_gen3') { throw 'Actor device ids differ from the approved ordered pool' }
+$ExpectedDevices = [ordered]@{
+    headlamp = @('device_torch_dummy', 'headlamp', 50, 'none')
+    nv_gen1 = @('device_torch_nv_1', 'gen1', 25, 'nightvision_1')
+    nv_gen2 = @('device_torch_nv_2', 'gen2', 18, 'nightvision_2')
+    nv_gen3 = @('device_torch_nv_3', 'gen3', 7, 'nightvision_3')
+}
+$ActorDevices = New-Object System.Collections.Generic.List[object]
+foreach ($Id in $DeviceIds) {
+    $SectionName = 'device_' + $Id
+    $Device = [pscustomobject]@{
+        id = $Id
+        section = Get-RequiredLtxValue $Catalog $SectionName 'section' $CatalogPath
+        kind = Get-RequiredLtxValue $Catalog $SectionName 'kind' $CatalogPath
+        weight = Get-RequiredLtxInt $Catalog $SectionName 'weight' $CatalogPath
+        nv_effect = Get-RequiredLtxValue $Catalog $SectionName 'nv_effect' $CatalogPath
+    }
+    $Expected = $ExpectedDevices[$Id]
+    $Actual = @($Device.section, $Device.kind, $Device.weight, $Device.nv_effect)
+    if (@(Compare-Object $Expected $Actual -SyncWindow 0).Count -ne 0) { throw "Actor device '$Id' differs from the approved manifest" }
+    $ActorDevices.Add($Device) | Out-Null
+}
+if (($ActorDevices | Measure-Object weight -Sum).Sum -ne 100) { throw 'Actor device weights must total exactly 100' }
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'
 $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"([^"]+)"'
@@ -714,6 +739,22 @@ $GrenadeLines.Add('| two_actor_picks | independent; duplicates allowed |') | Out
 $GrenadeLines.Add('| budget_cost | 0; outside gear and medical budgets |') | Out-Null
 $GrenadeLines.Add('| NPC use | physical possession required; native AI decides whether to throw |') | Out-Null
 $Blocks['grenade-loadouts'] = Join-MarkdownLines $GrenadeLines
+
+$DeviceLines = New-Object System.Collections.Generic.List[string]
+$DeviceLines.Add('| device | section | kind | NV effect | probability |') | Out-Null
+$DeviceLines.Add('|---|---|---|---|---:|') | Out-Null
+foreach ($Device in $ActorDevices) {
+    $DeviceLines.Add("| $($Device.id) | $($Device.section) | $($Device.kind) | $($Device.nv_effect) | $($Device.weight)% |") | Out-Null
+}
+$DeviceLines.Add('') | Out-Null
+$DeviceLines.Add('| policy | value |') | Out-Null
+$DeviceLines.Add('|---|---|') | Out-Null
+$DeviceLines.Add('| recipient | actor only; exactly one device per fight |') | Out-Null
+$DeviceLines.Add('| difficulty | independent of difficulty |') | Out-Null
+$DeviceLines.Add('| equip state | slot 10; full charge |') | Out-Null
+$DeviceLines.Add('| activation | manual; never enabled automatically |') | Out-Null
+$DeviceLines.Add('| budget_cost | 0; outside gear, medical, ammunition, and opponent budgets |') | Out-Null
+$Blocks['actor-devices'] = Join-MarkdownLines $DeviceLines
 
 $NpcMedicalLines = New-Object System.Collections.Generic.List[string]
 $NpcMedicalLines.Add('| runtime policy | value |') | Out-Null
@@ -997,6 +1038,7 @@ $SourceLines.Add('| installed item classification and class costs | `gamma_arena
 $SourceLines.Add('| actor/opponent random selection and budget allocation | `gamma_arena_random_generator.script` |') | Out-Null
 $SourceLines.Add('| actor and enemy medical allocation | `gamma_arena_medical_generator.script` |') | Out-Null
 $SourceLines.Add('| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |') | Out-Null
+$SourceLines.Add('| actor lighting-device probabilities and selection | `gamma_arena_device_generator.script`; `gamma_arena_catalogs.ltx` |') | Out-Null
 $SourceLines.Add('| physical NPC medicine use | `gamma_arena_npc_medical.script` |') | Out-Null
 $SourceLines.Add('| faction profiles and effective weapon pools | `gamma_arena_catalog.script` |') | Out-Null
 $SourceLines.Add('| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |') | Out-Null

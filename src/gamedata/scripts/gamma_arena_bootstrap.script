@@ -73,6 +73,7 @@ local function runtime_probes(catalogs)
         npc_medical_ini = function() return ini_file("ai_tweaks\\xr_eat_medkit.ltx") end,
         axr_main = axr_main,
         safe_release_manager = safe_release_manager,
+        item_device = item_device,
         catalogs = catalogs
     }
 end
@@ -700,6 +701,7 @@ function new_actor_loadout_port(ports)
     local owned_records = {}
     local token_sequence = 0
     local equipment = { state = "IDLE" }
+    local loadout_actor = nil
     local cleanup
     local function normalize_entities(value)
         local single = actor_loadout_call("GA_ACTOR_LOADOUT_ENTITY_INVALID", ports.entity_id, value)
@@ -719,7 +721,9 @@ function new_actor_loadout_port(ports)
                 token = record.token,
                 role = record.role,
                 authorized = record.authorized == true,
-                release_submitted = record.release_submitted == true
+                release_submitted = record.release_submitted == true,
+                equipped = record.equipped == true,
+                device_neutralized = record.device_neutralized == true
             }
         end
         return values
@@ -781,12 +785,14 @@ function new_actor_loadout_port(ports)
         if #owned_records > 0 then return actor_loadout_failure("GA_ACTOR_LOADOUT_BUSY", "Prior Arena actor items are still owned or pending cleanup") end
         local actor_id = actor_loadout_call("GA_ACTOR_LOADOUT_ACTOR_INVALID", ports.actor_id, actor)
         if not actor_id.ok or type(actor_id.value) ~= "number" then return actor_id.ok and actor_loadout_failure("GA_ACTOR_LOADOUT_ACTOR_INVALID", "Arena actor has no numeric id") or actor_id end
+        loadout_actor = actor
         local ownership = actor_loadout_call("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", ports.ownership_token, actor, actor_id.value)
         if not ownership.ok then return ownership end
         if type(ownership.value) ~= "string" or ownership.value == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_OWNERSHIP_TOKEN_INVALID", "Arena actor loadout requires a non-empty session ownership token")
         end
-        if type(loadout) ~= "table" or not dense_section_array(loadout.consumables) or not dense_section_array(loadout.grenades) or type(loadout.knife) ~= "string" or loadout.knife == "" then
+        if type(loadout) ~= "table" or not dense_section_array(loadout.consumables) or not dense_section_array(loadout.grenades) or type(loadout.knife) ~= "string" or loadout.knife == ""
+            or type(loadout.device) ~= "table" or type(loadout.device.section) ~= "string" or loadout.device.section == "" then
             return actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Validated actor loadout is malformed")
         end
         local started = actor_loadout_call("GA_ACTOR_LOADOUT_CLOCK_FAILED", ports.clock)
@@ -827,7 +833,8 @@ function new_actor_loadout_port(ports)
             { section = loadout.ammo, count = ammo_rounds, ammo = true, role = "ammo", box_size = box_size.value },
             { section = loadout.bonus_ammo.section, count = bonus_ammo_rounds, ammo = true, role = "bonus_ammo", box_size = bonus_box_size.value },
             { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
-            { section = loadout.knife, count = 1, ammo = false, role = "knife" }
+            { section = loadout.knife, count = 1, ammo = false, role = "knife" },
+            { section = loadout.device.section, count = 1, ammo = false, role = "device" }
         }
         for _, section in ipairs(loadout.consumables) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "consumable" } end
         for index, section in ipairs(loadout.grenades) do descriptors[#descriptors + 1] = { section = section, count = 1, ammo = false, role = "grenade", ordinal = index } end
@@ -893,7 +900,7 @@ function new_actor_loadout_port(ports)
         }
         return gamma_arena_result.ok({ created_ids = (function() local ids = {}; for index, record in ipairs(owned_records) do ids[index] = record.id end; return ids end)() })
     end
-    local equipment_roles = { "outfit", "knife", "weapon" }
+    local equipment_roles = { "outfit", "knife", "device", "weapon" }
     local function equipment_record(role)
         local found = nil
         for _, record in ipairs(owned_records) do
@@ -916,6 +923,8 @@ function new_actor_loadout_port(ports)
                 role = equipment_roles[equipment.role_index]
             elseif equipment.phase == "CHARGE_OUTFIT" then
                 role = "outfit"
+            elseif equipment.phase == "CHARGE_DEVICE" then
+                role = "device"
             elseif equipment.phase == "SUBMIT_MAGAZINE" or equipment.phase == "WAIT_MAGAZINE_VERIFY"
                 or equipment.phase == "SUBMIT_ACTIVE" or equipment.phase == "WAIT_ACTIVE_VERIFY" then
                 role = "weapon"
@@ -997,6 +1006,9 @@ function new_actor_loadout_port(ports)
             if item.value.pending == true then return pending_or_rollback() end
             local slot = effective_equipment_slot(item.value.record)
             if not slot.ok then return rollback(owned_records, slot) end
+            if role == "device" and slot.value ~= 10 then
+                return rollback(owned_records, actor_loadout_failure("GA_ACTOR_DEVICE_SLOT_INVALID", "Actor device effective slot must be 10", { section = item.value.record.section, slot = slot.value }))
+            end
             local moved = actor_loadout_call("GA_ACTOR_LOADOUT_EQUIP_FAILED", ports.move_to_slot, actor, item.value.object, slot.value)
             if not moved.ok then return rollback(owned_records, moved) end
             equipment.pending_slot = { role = role, id = item.value.record.id, section = item.value.record.section, slot = slot.value }
@@ -1018,9 +1030,15 @@ function new_actor_loadout_port(ports)
                 return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_EQUIP_VERIFY_FAILED", "Actor slot contains a different item", { section = pending_slot.section, slot = pending_slot.slot, expected_id = pending_slot.id, actual_id = current_id.value }))
             end
             equipment.slots[pending_slot.role] = pending_slot.slot
+            local equipped_record = equipment_record(pending_slot.role)
+            if equipped_record ~= nil then equipped_record.equipped = true end
             equipment.pending_slot = nil
             if pending_slot.role == "outfit" then
                 equipment.phase = "CHARGE_OUTFIT"
+                return pending_or_rollback(true)
+            end
+            if pending_slot.role == "device" then
+                equipment.phase = "CHARGE_DEVICE"
                 return pending_or_rollback(true)
             end
             equipment.role_index = equipment.role_index + 1
@@ -1061,6 +1079,24 @@ function new_actor_loadout_port(ports)
                 end
                 equipment.outfit_power = 100
             end
+            equipment.role_index = equipment.role_index + 1
+            equipment.phase = "SUBMIT_SLOT"
+            return pending_or_rollback(true)
+        end
+
+        if equipment.phase == "CHARGE_DEVICE" then
+            local device = required_equipment(actor, "device")
+            if not device.ok then return rollback(owned_records, device) end
+            if device.value.pending == true then return pending_or_rollback() end
+            local written = actor_loadout_call("GA_ACTOR_DEVICE_CHARGE_FAILED", ports.set_item_condition, device.value.object, 0.9999)
+            if not written.ok then return rollback(owned_records, written) end
+            local condition = actor_loadout_call("GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED", ports.item_condition, device.value.object)
+            if not condition.ok or type(condition.value) ~= "number" or condition.value ~= condition.value
+                or condition.value == math.huge or condition.value == -math.huge or condition.value < 0.999 then
+                local cause = condition.ok and actor_loadout_failure("GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED", "Actor device did not retain full charge", { section = device.value.record.section, condition = condition.value }) or condition
+                return rollback(owned_records, cause)
+            end
+            equipment.device_condition = condition.value
             equipment.role_index = equipment.role_index + 1
             equipment.phase = "SUBMIT_SLOT"
             return pending_or_rollback(true)
@@ -1145,7 +1181,8 @@ function new_actor_loadout_port(ports)
         if active_id.value ~= weapon.value.record.id then return pending_or_rollback() end
         local outfit = equipment_record("outfit")
         local knife = equipment_record("knife")
-        if outfit == nil or knife == nil then
+        local device = equipment_record("device")
+        if outfit == nil or knife == nil or device == nil then
             return rollback(owned_records, actor_loadout_failure("GA_ACTOR_LOADOUT_INVALID", "Required equipped item record is missing at readiness"))
         end
         equipment.summary = {
@@ -1154,9 +1191,12 @@ function new_actor_loadout_port(ports)
             weapon = weapon.value.record.section,
             knife = knife.section,
             outfit = outfit.section,
+            device = device.section,
             weapon_slot = equipment.slots.weapon,
             knife_slot = equipment.slots.knife,
             outfit_slot = equipment.slots.outfit,
+            device_slot = equipment.slots.device,
+            device_condition = equipment.device_condition,
             magazine_rounds = equipment.magazine_rounds,
             reserve_rounds = equipment.reserve_rounds,
             bonus_ammo_rounds = equipment.bonus_ammo_rounds,
@@ -1165,8 +1205,24 @@ function new_actor_loadout_port(ports)
         equipment.state = "READY"
         return gamma_arena_result.ok(equipment.summary)
     end
+    local function neutralize_device(record)
+        if record.role ~= "device" then return gamma_arena_result.ok(true) end
+        if record.equipped ~= true then record.device_neutralized = true; return gamma_arena_result.ok(true) end
+        local online = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.online_item, loadout_actor, record.id)
+        if not online.ok then return online end
+        if online.value ~= nil then
+            local online_id = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.entity_id, online.value)
+            if not online_id.ok then return online_id end
+            if online_id.value ~= record.id then return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Online actor device identity changed before shutdown", { id = record.id, actual_id = online_id.value }) end
+        end
+        local stopped = actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.shutdown_device, online.value, record.id, record.section)
+        if not stopped.ok then return stopped end
+        if stopped.value ~= true then return gamma_arena_result.ok(false) end
+        record.device_neutralized = true
+        return gamma_arena_result.ok(true)
+    end
     cleanup = function()
-        if #owned_records == 0 then equipment = { state = "CLEAN" }; return gamma_arena_result.ok(false) end
+        if #owned_records == 0 then equipment = { state = "CLEAN" }; loadout_actor = nil; return gamma_arena_result.ok(false) end
         local remaining = {}
         local errors = {}
         for index = #owned_records, 1, -1 do
@@ -1176,7 +1232,15 @@ function new_actor_loadout_port(ports)
                 errors[#errors + 1] = resolved.error
                 table.insert(remaining, 1, record)
             elseif resolved.value == nil then
-                -- The authoritative current-id lookup proves the owned entity is gone.
+                local neutralized = neutralize_device(record)
+                if not neutralized.ok then
+                    errors[#errors + 1] = neutralized.error
+                    table.insert(remaining, 1, record)
+                elseif neutralized.value ~= true then
+                    table.insert(remaining, 1, record)
+                end
+                -- The authoritative current-id lookup proves the owned entity is
+                -- gone, but Beef's device state is global and must be cleared too.
             else
                 -- Cleanup may only consume durable ownership proof written during
                 -- creation. It must never manufacture ownership for a current
@@ -1194,17 +1258,25 @@ function new_actor_loadout_port(ports)
                     -- mismatch is safe ID reuse: retire the old record and never
                     -- submit release against the new object. Token-only loss stays
                     -- tracked because it cannot prove whether the original remains.
-                elseif record.release_submitted == true then
-                    table.insert(remaining, 1, record)
                 else
-                    record.authorized = true
-                    local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, record.id)
-                    if not released.ok then
-                        errors[#errors + 1] = released.error
+                    local neutralized = neutralize_device(record)
+                    if not neutralized.ok then
+                        errors[#errors + 1] = neutralized.error
+                        table.insert(remaining, 1, record)
+                    elseif neutralized.value ~= true then
+                        table.insert(remaining, 1, record)
+                    elseif record.release_submitted == true then
+                        table.insert(remaining, 1, record)
                     else
-                        record.release_submitted = true
+                        record.authorized = true
+                        local released = actor_loadout_call("GA_ACTOR_LOADOUT_RELEASE_FAILED", ports.release_item, record.id)
+                        if not released.ok then
+                            errors[#errors + 1] = released.error
+                        else
+                            record.release_submitted = true
+                        end
+                        table.insert(remaining, 1, record)
                     end
-                    table.insert(remaining, 1, record)
                 end
             end
         end
@@ -1215,6 +1287,7 @@ function new_actor_loadout_port(ports)
             return gamma_arena_result.ok({ pending = true, remaining_ids = pending })
         end
         equipment = { state = "CLEAN" }
+        loadout_actor = nil
         return gamma_arena_result.ok(true)
     end
     return {
@@ -1228,12 +1301,88 @@ end
 
 local BHS_PARTS = { "head", "torso", "rightarm", "leftarm", "rightleg", "leftleg" }
 
-local function reset_gamma_body_health(actor)
-    local bhs = zzz_player_injuries
+local function finite_runtime_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function runtime_object_method(code, object, method_name, ...)
+    local looked_up, method = pcall(function() return object and object[method_name] end)
+    if not looked_up or type(method) ~= "function" then
+        return gamma_arena_result.err(code, "Required runtime method is unavailable", { method = method_name })
+    end
+    local called, value = pcall(method, object, ...)
+    if not called then
+        return gamma_arena_result.err(code, "Required runtime method failed safely", { method = method_name, reason = tostring(value) })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+local function clear_engine_actor_transients(actor)
+    local cast = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", actor, "cast_Actor")
+    if not cast.ok or cast.value == nil then return cast.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor cast is unavailable") or cast end
+    local conditions = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", cast.value, "conditions")
+    if not conditions.ok or conditions.value == nil then return conditions.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor conditions are unavailable") or conditions end
+    local api = conditions.value
+    local wounds = runtime_object_method("GA_ACTOR_WOUND_CLEAR_FAILED", api, "ClearWounds")
+    if not wounds.ok then return wounds end
+    local boosters = runtime_object_method("GA_ACTOR_BOOSTER_CLEAR_FAILED", api, "ClearAllBoosters")
+    if not boosters.ok then return boosters end
+    -- Monolith exports only the mutator. Alcohol is normalized to 0..1 and
+    -- clamped by the next condition update, so -1 deterministically clears it.
+    local alcohol = runtime_object_method("GA_ACTOR_ALCOHOL_CLEAR_FAILED", api, "ChangeAlcohol", -1)
+    if not alcohol.ok then return alcohol end
+
+    local wound_count = 0
+    local wound_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "WoundForEach", function()
+        wound_count = wound_count + 1
+        return false
+    end)
+    if not wound_readback.ok then return wound_readback end
+    local booster_count = 0
+    local booster_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "BoosterForEach", function()
+        booster_count = booster_count + 1
+        return false
+    end)
+    if not booster_readback.ok then return booster_readback end
+    if wound_count ~= 0 then
+        return gamma_arena_result.err("GA_ACTOR_TRANSIENT_VERIFY_FAILED", "Actor transient conditions survived reset", {
+            wounds = wound_count,
+            boosters = booster_count
+        })
+    end
+    if booster_count ~= 0 then
+        pcall(gamma_arena_log.warn, "GA_ACTOR_BOOSTER_READBACK_STALE", "MT-TEST enumerated stale booster records after authoritative engine clear", {
+            boosters = booster_count
+        })
+    end
+    return gamma_arena_result.ok({ booster_readback_stale = booster_count })
+end
+
+local function reset_gamma_body_health(actor, ports)
+    ports = ports or {}
+    local bhs = ports.bhs or zzz_player_injuries
+    local utils = ports.utils or utils_obj
+    local remove_time_event = ports.remove_time_event or RemoveTimeEvent
+    local execute = ports.execute or exec_console_cmd
     if type(bhs) ~= "table" then return gamma_arena_result.ok(false) end
     if type(bhs.health) ~= "table" or type(bhs.maxhp) ~= "table" or type(bhs.timedhp) ~= "table"
-        or type(utils_obj) ~= "table" or type(utils_obj.save_var) ~= "function" or type(utils_obj.load_var) ~= "function" then
+        or type(bhs.save_state) ~= "function" or type(bhs.load_state) ~= "function"
+        or type(utils) ~= "table" or type(utils.save_var) ~= "function" or type(utils.load_var) ~= "function"
+        or type(remove_time_event) ~= "function" then
         return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Installed Body Health System API is incomplete")
+    end
+    local prior_state = {}
+    local saved, save_reason = pcall(bhs.save_state, prior_state)
+    if not saved or type(prior_state.head_tbl) ~= "table" then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state is unavailable", { reason = tostring(save_reason) })
+    end
+    local volume = prior_state.head_tbl.volume
+    if volume ~= nil and not finite_runtime_number(volume) then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume is invalid")
+    end
+    local timer_removed, timer_reason = pcall(remove_time_event, 0, "set_stage_two")
+    if not timer_removed then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System concussion timer could not be removed", { reason = tostring(timer_reason) })
     end
     for _, part in ipairs(BHS_PARTS) do
         local maximum = bhs.maxhp[part]
@@ -1243,18 +1392,93 @@ local function reset_gamma_body_health(actor)
         local assigned, reason = pcall(function()
             bhs.health[part] = maximum
             bhs.timedhp[part] = 0
-            utils_obj.save_var(actor, "health." .. part, maximum)
-            utils_obj.save_var(actor, "timedhp." .. part, 0)
+            utils.save_var(actor, "health." .. part, maximum)
+            utils.save_var(actor, "timedhp." .. part, 0)
         end)
         if not assigned then
             return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset failed safely", { part = part, reason = tostring(reason) })
         end
-        local loaded_health_ok, loaded_health = pcall(utils_obj.load_var, actor, "health." .. part)
-        local loaded_timed_ok, loaded_timed = pcall(utils_obj.load_var, actor, "timedhp." .. part)
+        local loaded_health_ok, loaded_health = pcall(utils.load_var, actor, "health." .. part)
+        local loaded_timed_ok, loaded_timed = pcall(utils.load_var, actor, "timedhp." .. part)
         if not loaded_health_ok or loaded_health ~= maximum or not loaded_timed_ok or loaded_timed ~= 0 then
             return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System reset did not round-trip", { part = part })
         end
     end
+    local head_state = { previous = bhs.maxhp.head, stage = 0, volume = volume }
+    local loaded, load_reason = pcall(bhs.load_state, { head_tbl = head_state })
+    if not loaded then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state reset failed safely", { reason = tostring(load_reason) })
+    end
+    local verified_state = {}
+    local verified, verify_reason = pcall(bhs.save_state, verified_state)
+    local verified_head = verified_state.head_tbl
+    if not verified or type(verified_head) ~= "table" or verified_head.previous ~= bhs.maxhp.head
+        or verified_head.stage ~= 0 or verified_head.volume ~= volume then
+        return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System head state reset did not round-trip", { reason = tostring(verify_reason) })
+    end
+    if volume ~= nil then
+        if type(execute) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume restore API is unavailable")
+        end
+        local restored, restore_reason = pcall(execute, "snd_volume_eff " .. tostring(volume))
+        if not restored then
+            return gamma_arena_result.err("GA_ACTOR_BODY_HEALTH_RESET_FAILED", "Body Health System effect volume restore failed safely", { reason = tostring(restore_reason) })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local mod_body_health_reset = reset_gamma_body_health
+
+local function reset_gamma_psy(psy_port)
+    local psy = psy_port or arszi_psy
+    if type(psy) ~= "table" then return gamma_arena_result.ok(false) end
+    if type(psy.set_psy_health) ~= "function" or type(psy.remove_all_psy_ppe_effects) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "Installed GAMMA psy API is incomplete")
+    end
+    local set_ok, set_reason = pcall(psy.set_psy_health, 1)
+    if not set_ok then return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "GAMMA psy health reset failed safely", { reason = tostring(set_reason) }) end
+    local clear_ok, clear_reason = pcall(psy.remove_all_psy_ppe_effects)
+    if not clear_ok then return gamma_arena_result.err("GA_ACTOR_PSY_RESET_FAILED", "GAMMA psy presentation reset failed safely", { reason = tostring(clear_reason) }) end
+    return gamma_arena_result.ok(true)
+end
+
+local function clear_round_effectors(level_port)
+    local runtime_level = level_port or level
+    if type(runtime_level) ~= "table" and type(runtime_level) ~= "userdata" then
+        return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Level effector API is unavailable")
+    end
+    local pp_ok, remove_pp = pcall(function() return runtime_level.remove_pp_effector end)
+    local cam_ok, remove_cam = pcall(function() return runtime_level.remove_cam_effector end)
+    if not pp_ok or type(remove_pp) ~= "function" or not cam_ok or type(remove_cam) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Level effector removal API is incomplete")
+    end
+    local pp_ids = { 2011, 2012, 2013, 2014, 2015, 2016, 99123, 99133 }
+    for id = 655808, 655820 do pp_ids[#pp_ids + 1] = id end
+    for _, id in ipairs(pp_ids) do
+        local removed, reason = pcall(remove_pp, id)
+        if not removed then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Round PP effector removal failed safely", { id = id, reason = tostring(reason) }) end
+    end
+    for _, id in ipairs({ 1001, 2190, 8053, 96872, 9921, 99251, 99261, 99271 }) do
+        local removed, reason = pcall(remove_cam, id)
+        if not removed then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Round camera effector removal failed safely", { id = id, reason = tostring(reason) }) end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function reset_gamma_actor_transients(actor)
+    if type(actor_effects) == "table" and type(actor_effects.disable_effects_timer) == "function" then
+        local disabled, reason = pcall(actor_effects.disable_effects_timer, 100)
+        if not disabled then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Actor effect scheduling reset failed safely", { reason = tostring(reason) }) end
+    end
+    local engine = clear_engine_actor_transients(actor)
+    if not engine.ok then return engine end
+    local body = mod_body_health_reset(actor)
+    if not body.ok then return body end
+    local psy = reset_gamma_psy()
+    if not psy.ok then return psy end
+    local effectors = clear_round_effectors()
+    if not effectors.ok then return effectors end
     return gamma_arena_result.ok(true)
 end
 
@@ -1354,6 +1578,27 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         magazine_capacity = function(section) return effective_magazine_size(section) end,
         move_to_slot = function(actor, item, slot) return actor:move_to_slot(item, slot) end,
         item_in_slot = function(actor, slot) return actor:item_in_slot(slot) end,
+        set_item_condition = function(item, value) return item:set_condition(value) end,
+        item_condition = function(item) return item:condition() end,
+        shutdown_device = function(item, id, section)
+            if type(item_device) ~= "table" or type(item_device.is_nv_active) ~= "function"
+                or type(item_device.set_nightvision) ~= "function" or type(item_device.is_torch_active) ~= "function"
+                or type(item_device.toggle_torch) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Installed item_device shutdown API is unavailable", { id = id, section = section })
+            end
+            if item_device.is_nv_active() then item_device.set_nightvision(section, false) end
+            if item_device.is_nv_active() then return gamma_arena_result.ok(false) end
+            if item_device.is_torch_active() == id then
+                item_device.toggle_torch()
+                -- toggle_torch derives its next state from the current slot-10
+                -- object. If that object changed during teardown, clear the state
+                -- it just selected instead of reporting a foreign torch as safe.
+                if item_device.is_torch_active() then item_device.toggle_torch() end
+            end
+            if item ~= nil then item:enable_torch(false) end
+            if item_device.is_torch_active() then return gamma_arena_result.ok(false) end
+            return gamma_arena_result.ok(true)
+        end,
         set_ammo_elapsed = function(weapon, count) return weapon:set_ammo_elapsed(count) end,
         get_ammo_in_magazine = function(weapon) return weapon:get_ammo_in_magazine() end,
         make_item_active = function(actor, item) return actor:make_item_active(item) end,
@@ -1622,10 +1867,14 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         item_section = function(item) return item:section() end,
         patrol = function(path) return patrol(path) end,
         effects = effects,
-        mod_body_health_reset = reset_gamma_body_health,
-        mod_psy_reset = function()
-            if arszi_psy and type(arszi_psy.set_psy_health) == "function" then arszi_psy.set_psy_health(1) end
+        interrupt_item_use = function()
+            if type(lam2) ~= "table" then return gamma_arena_result.ok(false) end
+            if type(lam2.abort) ~= "function" then return gamma_arena_result.err("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "Installed LAM2 abort API is incomplete") end
+            local called, reason = pcall(lam2.abort)
+            if not called then return gamma_arena_result.err("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "LAM2 item-use interruption failed safely", { reason = tostring(reason) }) end
+            return gamma_arena_result.ok(true)
         end,
+        reset_transient_state = reset_gamma_actor_transients,
         input = input,
         loadout = loadout,
         items = items
@@ -2715,6 +2964,22 @@ function request_restart()
     return invoke_callback(runtime_orchestrator, "manual_restart", function()
         return call_instance(runtime_orchestrator, "restart_arena_action")
     end)
+end
+
+function test_clear_engine_actor_transients(actor)
+    return clear_engine_actor_transients(actor)
+end
+
+function test_reset_gamma_body_health(actor, ports)
+    return reset_gamma_body_health(actor, ports)
+end
+
+function test_reset_gamma_psy(psy)
+    return reset_gamma_psy(psy)
+end
+
+function test_clear_round_effectors(runtime_level)
+    return clear_round_effectors(runtime_level)
 end
 
 function on_game_start()

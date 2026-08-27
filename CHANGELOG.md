@@ -4,7 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
-## 0.3.0 - 2026-08-27
+## 0.4.0 - 2026-08-27
 
 - Added a Custom Arena launch alongside the existing seeded Random mode, with one shared enemy faction and 1-10 individually selected exact ranks from novice through legend.
 - Added an installed-GAMMA player combat inventory selector for weapons, ammunition, outfits, helmets, knives, medicine, and grenades, governed by rank-derived Arena equipment points.
@@ -12,6 +12,18 @@ All notable changes to Gamma Arena are documented in this file.
 - Unified Random and Custom generation on strict FightSpec v8 and catalog/generator identity `8/10/10`, with one physical item contract and a 256-entity cap per participant.
 - Regenerated Arena-controlled enemy numeric rank, equipment, ammunition, medicine, grenades, spawn, and tactical route after victories while preserving the custom roster and actor template.
 - Documented that X-Ray's internal `specific_character` appearance remains outside seeded FightSpec reproduction until a future catalog identity extension.
+- Made the battle identity transparent, fight-first, and ASCII-separated.
+- Reset Arena-owned actor treatment, injury, alcohol, and visual-effect state between fights.
+- Locked player input immediately after choosing the next fight and delayed the countdown until the staged Arena was ready to start.
+- Fixed actor alcohol cleanup through the supported engine mutator.
+- Kept authoritative booster cleanup compatible with Modded Exes MT-TEST stale readback, preventing false `GA_ACTOR_TRANSIENT_VERIFY_FAILED` rematch aborts.
+- Preserved the complete actor lighting-device loadout through runtime application, preventing `GA_ACTOR_LOADOUT_INVALID` during Arena startup.
+
+## 0.3.0 - 2026-08-26
+
+- Added one deterministic actor lighting device per fight: headlamp 50%, Gen 1 NVG 25%, Gen 2 NVG 18%, or Gen 3 NVG 7%, with chances independent of difficulty and outside all budgets.
+- Equipped the selected slot-10 device fully charged but switched off, preserving manual control, and added ownership-safe cleanup that disables active Beef's NVG or torch state before removal.
+- Published catalog identity 9/10/10, FightSpec v8, an independent v8 golden oracle, and generated device-balance documentation.
 
 ## 0.2.0 - 2026-08-26
 

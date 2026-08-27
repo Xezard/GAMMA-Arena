@@ -546,6 +546,7 @@ function EntityAdapter:register_record(kind, id, values)
         held_offline = false,
         online_requested = false,
         staged_friendly = false,
+        hostile = false,
         death_dropped = false,
         hidden_charge_cleared = false,
         released = false,
@@ -1378,9 +1379,41 @@ function EntityAdapter:drive_online()
         if not tactical.ok then return tactical end
         self.tactical_started = true
     end
-    for _, object in ipairs(objects) do
+    self:set_state("READY")
+    return gamma_arena_result.ok({ state = "READY" })
+end
+
+function EntityAdapter:activate_ready()
+    if type(self.registry.actor_loadout) ~= "table" or self.registry.actor_loadout.ready ~= true
+        or self.pairs_staged ~= true or self.tactical_started ~= true then
+        return fail("GA_ENTITY_READY_INVALID", "Arena READY evidence is incomplete")
+    end
+    local equipped = self:verify_item_ownership()
+    if not equipped.ok then return equipped end
+    local actor = result_call("GA_ENTITY_ACTOR_MISSING", self.deps.actor_object)
+    if not actor.ok or actor.value == nil then return actor.ok and fail("GA_ENTITY_ACTOR_MISSING", "Arena actor is unavailable during hostile activation") or actor end
+    local objects = {}
+    for index, record in ipairs(self.registry.npcs) do
+        if record.released or record.proved_online ~= true or record.hidden_charge_cleared ~= true
+            or record.staged_friendly ~= true or record.equipped ~= true then
+            return fail("GA_ENTITY_READY_INVALID", "Arena opponent READY evidence is incomplete", { id = record.id })
+        end
+        local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
+        if not object.ok or object.value == nil then return object.ok and fail("GA_ENTITY_NPC_MISSING", "READY opponent disappeared before hostile activation", { id = record.id }) or object end
+        local community = self:verify_runtime_community(record, object.value, "activation")
+        if not community.ok then return community end
+        local alive = self:is_alive(object.value)
+        if not alive.ok then return alive end
+        if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "READY opponent is not alive during hostile activation", { id = record.id }) end
+        objects[index] = object.value
+    end
+    if #objects ~= #self.registry.npcs or #objects ~= #self.opponents then
+        return fail("GA_ENTITY_READY_INVALID", "Arena READY opponent cardinality is incomplete", { expected = #self.opponents, actual = #objects })
+    end
+    for index, object in ipairs(objects) do
         local hostile = result_call("GA_ENTITY_HOSTILE_RELATION_FAILED", self.deps.set_actor_hostile, object, actor.value, ACTOR_GOODWILL)
         if not hostile.ok then return hostile end
+        self.registry.npcs[index].hostile = true
     end
     local active_clock = self:clock()
     if not active_clock.ok then return active_clock end
@@ -1503,7 +1536,7 @@ function EntityAdapter:quarantine_live_records()
             local object = result_call("GA_ENTITY_ONLINE_LOOKUP_FAILED", self.deps.online_object, record.id)
             if object.ok and object.value ~= nil and actor.ok and actor.value ~= nil then
                 local held = result_call("GA_ENTITY_ACTIVATION_HOLD_FAILED", self.deps.set_actor_hold, object.value, actor.value)
-                if held.ok then record.staged_friendly = true else errors[#errors + 1] = held.error end
+                if held.ok then record.staged_friendly = true; record.hostile = false else errors[#errors + 1] = held.error end
             elseif not object.ok then
                 errors[#errors + 1] = object.error
             elseif not actor.ok then
@@ -1640,18 +1673,17 @@ function EntityAdapter:update()
             return gamma_arena_result.ok({ state = "WAIT_ACTOR_LOADOUT" })
         end
         self.registry.actor_loadout = copy_plain(equipped.value)
-        self:set_state("COUNTDOWN")
-        return gamma_arena_result.ok({ state = "COUNTDOWN", actor_loadout = copy_plain(equipped.value) })
-    end
-    if self.state_value == "COUNTDOWN" then
-        local gate = self:opponent_gate_open()
-        if not gate.ok then return self:fail_and_rollback(gate) end
-        if not gate.value then return gamma_arena_result.ok({ state = "COUNTDOWN" }) end
         self:set_state("SPAWNING")
+        return gamma_arena_result.ok({ state = "SPAWNING", actor_loadout = copy_plain(equipped.value) })
     end
     local result
     if self.state_value == "SPAWNING" then result = self:drive_spawning()
     elseif self.state_value == "WAIT_ONLINE" then result = self:drive_online()
+    elseif self.state_value == "READY" then
+        local gate = self:opponent_gate_open()
+        if not gate.ok then result = gate
+        elseif not gate.value then return gamma_arena_result.ok({ state = "READY" })
+        else result = self:activate_ready() end
     elseif self.state_value == "ACTIVE" then
         local reconciled = self:reconcile_active_deaths()
         if not reconciled.ok then return reconciled end
@@ -1665,7 +1697,7 @@ function EntityAdapter:update()
         return gamma_arena_result.ok({ state = "ACTIVE", tactical_disabled = self.tactical_disabled == true })
     else result = fail("GA_ENTITY_TRANSACTION_INVALID", "Unknown Arena entity adapter state", { state = self.state_value }) end
     if not result.ok then
-        if self.state_value == "WAIT_ONLINE" then
+        if self.state_value == "WAIT_ONLINE" or self.state_value == "READY" then
             local quarantined = self:quarantine_live_records()
             if not quarantined.ok then
                 result = fail("GA_ENTITY_ACTIVATION_QUARANTINE_FAILED", "Activation failed and live opponents could not be synchronously re-held", { cause = result.error, quarantine = quarantined.error })

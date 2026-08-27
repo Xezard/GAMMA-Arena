@@ -219,7 +219,7 @@ function Orchestrator:runtime_stage_snapshot()
 end
 
 function Orchestrator:is_opponent_activation_allowed()
-    return self:is_active() and self.runtime_stage == "SPAWNING"
+    return self:is_active() and self.runtime_stage == "ACTIVATING"
 end
 
 function Orchestrator:start_npc_medical()
@@ -1018,7 +1018,7 @@ end
 function Orchestrator:begin_countdown_after_equipment()
     local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
     if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity registry snapshot failed safely") end
-    if snapshot.state ~= "COUNTDOWN" then return gamma_arena_result.ok({ stage = "EQUIPPING", entity = snapshot.state }) end
+    if snapshot.state ~= "READY" then return gamma_arena_result.ok({ stage = "EQUIPPING", entity = snapshot.state }) end
     local equipped = snapshot.actor_loadout
     if type(equipped) ~= "table" or equipped.ready ~= true then
         return fail("GA_ACTOR_LOADOUT_VERIFY_FAILED", "Actor equipment readiness is missing from the entity transaction")
@@ -1045,8 +1045,8 @@ function Orchestrator:update_countdown()
         local cleared = call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "clear_countdown")
         if not cleared.ok then return cleared end
         self.countdown_value = nil
-        self:set_runtime_stage("SPAWNING")
-        return gamma_arena_result.ok({ stage = "SPAWNING" })
+        self:set_runtime_stage("ACTIVATING")
+        return gamma_arena_result.ok({ stage = "ACTIVATING" })
     end
     local value = 3 - math.floor(elapsed / 1000)
     if value ~= self.countdown_value then
@@ -1065,7 +1065,7 @@ end
 function Orchestrator:observe_entity_activation()
     local snapshot_ok, snapshot = pcall(function() return self.deps.entities:registry_snapshot() end)
     if not snapshot_ok or type(snapshot) ~= "table" then return fail("GA_ENTITY_REGISTRY_SNAPSHOT_FAILED", "Entity registry snapshot failed safely") end
-    if snapshot.state ~= "ACTIVE" then return gamma_arena_result.ok({ stage = "SPAWNING", entity = snapshot.state }) end
+    if snapshot.state ~= "ACTIVE" then return gamma_arena_result.ok({ stage = "ACTIVATING", entity = snapshot.state }) end
     local identity = self:battle_identity_model()
     if not identity.ok then return identity end
     local released = call_method("GA_ACTOR_INPUT_ENABLE_FAILED", self.deps.actor, "release_input")
@@ -1162,6 +1162,9 @@ function Orchestrator:route_result_action(action_name, action)
             result_type = type(result)
         })
     end
+    if not result.ok and action_name == "victory_next" and result.error and result.error.code == "GA_REMATCH_BOUNDARY_FAILED" then
+        return result
+    end
     if not result.ok then return self:on_callback_result_error("result_action_" .. tostring(action_name), result, was_active) end
     return result
 end
@@ -1198,6 +1201,14 @@ function Orchestrator:queue_integrity_retry(fault)
         })
     end
     local attempt = self.integrity_retry_count + 1
+    self.result_action_locked = true
+    local boundary = call_method("GA_ACTOR_REMATCH_BOUNDARY_FAILED", self.deps.actor, "begin_rematch_boundary")
+    if not boundary.ok then
+        self.result_action_locked = false
+        return fail("GA_REMATCH_BOUNDARY_FAILED", "Arena could not acquire the integrity-retry input boundary", {
+            cause = boundary.error and boundary.error.code or "GA_ACTOR_REMATCH_BOUNDARY_FAILED"
+        })
+    end
     self:audio_event("stop_all", self:audio_context({ reason = "integrity_retry" }))
     local medical = self:stop_npc_medical("integrity_retry")
     if not medical.ok then return medical end
@@ -1263,6 +1274,13 @@ function Orchestrator:victory_next_action()
     local next_index = self:resolve_next_fight_index("victory")
     if not next_index.ok then return next_index end
     self.result_action_locked = true
+    local boundary = call_method("GA_ACTOR_REMATCH_BOUNDARY_FAILED", self.deps.actor, "begin_rematch_boundary")
+    if not boundary.ok then
+        self.result_action_locked = false
+        return fail("GA_REMATCH_BOUNDARY_FAILED", "Arena could not acquire the next-fight input boundary", {
+            cause = boundary.error and boundary.error.code or "GA_ACTOR_REMATCH_BOUNDARY_FAILED"
+        })
+    end
     local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
     if not cleared.ok then self.result_action_locked = false; return cleared end
     self:audio_event("stop_all", self:audio_context({ reason = "victory_next" }))
@@ -1279,13 +1297,20 @@ function Orchestrator:restart_arena_action()
     end
     local next_index = self:resolve_next_fight_index("victory")
     if not next_index.ok then return next_index end
+    self.result_action_locked = true
+    local boundary = call_method("GA_ACTOR_REMATCH_BOUNDARY_FAILED", self.deps.actor, "begin_rematch_boundary")
+    if not boundary.ok then
+        self.result_action_locked = false
+        return fail("GA_REMATCH_BOUNDARY_FAILED", "Arena could not acquire the manual-restart input boundary", {
+            cause = boundary.error and boundary.error.code or "GA_ACTOR_REMATCH_BOUNDARY_FAILED"
+        })
+    end
     local medical = self:stop_npc_medical("manual_restart")
     if not medical.ok then return medical end
     local advanced = self:advance(gamma_arena_state_machine.events.RESTART)
     if not advanced.ok then return advanced end
     self:clear_battle_identity("manual_restart")
     self:audio_event("stop_all", self:audio_context({ reason = "manual_restart" }))
-    self.result_action_locked = true
     self.pending_victory = false
     self.result_kind = nil
     self.next_cleanup_started = false
@@ -1440,7 +1465,7 @@ function Orchestrator:drive_runtime()
     if self.runtime_stage == "PREPARING" then return self:prepare_fight() end
     if self.runtime_stage == "EQUIPPING" then return self:begin_countdown_after_equipment() end
     if self.runtime_stage == "COUNTDOWN" then return self:update_countdown() end
-    if self.runtime_stage == "SPAWNING" then return self:observe_entity_activation() end
+    if self.runtime_stage == "ACTIVATING" then return self:observe_entity_activation() end
     if self.runtime_stage == "ACTIVE" and self.pending_victory then return self:show_victory() end
     if self.runtime_stage == "NEXT_CLEANUP" or self.runtime_stage == "NEXT_RESET" then return self:drive_continuation() end
     return gamma_arena_result.ok({ stage = self.runtime_stage })
@@ -1459,7 +1484,12 @@ function Orchestrator:update_runtime()
     local entities = self.deps.entities
     if entities ~= nil then
         local updated = call_method("GA_ENTITY_UPDATE_FAILED", entities, "update")
-        if not updated.ok then return updated end
+        if not updated.ok then return self:enter_fatal(updated) end
+    end
+    if self.runtime_stage == "ACTIVATING" then
+        local observed = self:observe_entity_activation()
+        if not observed.ok then return self:enter_fatal(observed) end
+        runtime = observed
     end
     local medical = self:update_npc_medical()
     if not medical.ok then return medical end

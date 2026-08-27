@@ -139,6 +139,9 @@ if ($Catalog -notmatch 'schema_version\s*=\s*9' -or $Catalog -notmatch 'revision
 foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
     if (-not $Catalog.Contains($Marker)) { throw "Grenade catalog contract is missing marker: $Marker" }
 }
+foreach ($Marker in @('device_list', 'GA_DEVICE_EFFECTIVE_INVALID', 'TORCH_S')) {
+    if (-not $Catalog.Contains($Marker)) { throw "Actor device catalog contract is missing marker: $Marker" }
+}
 foreach ($Marker in @('function generate_actor', 'function generate_enemy', 'GA_GRENADE_ARGUMENT_INVALID', 'GA_GRENADE_SELECTION_INVALID')) {
     if (-not $GrenadeGenerator.Contains($Marker)) { throw "Grenade generator contract is missing marker: $Marker" }
 }
@@ -178,6 +181,7 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
     @{ Content = $Generator; Marker = 'function build_draft' },
+    @{ Content = $Generator; Marker = 'FightSpecV8' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' }

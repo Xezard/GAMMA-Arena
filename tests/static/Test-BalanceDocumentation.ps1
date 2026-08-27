@@ -23,6 +23,9 @@ if (([regex]::Matches($RepositoryDocument, '(?m)^```mermaid$').Count) -ne 1) {
 if ($RepositoryDocument -notmatch 'actorLoadout\s*-->\s*spec\["FightSpec v8"\]' -or $RepositoryDocument -match 'FightSpec v[1-7]') {
     throw 'Arena balance generation diagram must identify only FightSpec v8'
 }
+foreach ($Marker in @('device_torch_dummy','device_torch_nv_1','device_torch_nv_2','device_torch_nv_3','50%','25%','18%','7%','independent of difficulty')) {
+    if (-not $RepositoryDocument.Contains($Marker)) { throw "Arena balance device documentation is missing: $Marker" }
+}
 $Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
 if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
     throw 'README does not link the Arena balance dashboard'
@@ -48,6 +51,7 @@ function New-BalanceFixture([string]$SourceRoot) {
         'src\gamedata\scripts\gamma_arena_generator.script',
         'src\gamedata\scripts\gamma_arena_random_generator.script',
         'src\gamedata\scripts\gamma_arena_grenade_generator.script',
+        'src\gamedata\scripts\gamma_arena_device_generator.script',
         'src\gamedata\scripts\gamma_arena_entity_adapter.script',
         'src\gamedata\scripts\gamma_arena_medical_generator.script',
         'src\gamedata\scripts\gamma_arena_npc_medical.script',
@@ -77,6 +81,9 @@ function New-BalanceFixture([string]$SourceRoot) {
 
 <!-- BEGIN GENERATED: grenade-loadouts -->
 <!-- END GENERATED: grenade-loadouts -->
+
+<!-- BEGIN GENERATED: actor-devices -->
+<!-- END GENERATED: actor-devices -->
 
 <!-- BEGIN GENERATED: npc-medical-runtime -->
 <!-- END GENERATED: npc-medical-runtime -->
@@ -158,12 +165,13 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
         'difficulty-dashboard' = 20
         'medical-loadouts' = 30
         'grenade-loadouts' = 14
+        'actor-devices' = 13
         'npc-medical-runtime' = 20
         'actor-equipment' = 73
         'opponent-budgets' = 31
         'arena-tactics' = 33
         'balance-diagnostics' = 21
-        'source-map' = 16
+        'source-map' = 17
     }
     foreach ($BlockName in $ExpectedTableRows.Keys) {
         $Block = Get-TestGeneratedBlock $DocumentText $BlockName
@@ -223,6 +231,17 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
     $OpponentPoolHasSmoke = $GrenadeBlock -match '(?m)^\| opponent_pool \| [^\r\n]*grenade_smoke'
     if ($ActorPoolHasSmoke -or $OpponentPoolHasSmoke) {
         throw 'Grenade participant pools do not enforce the complete smoke exclusion'
+    }
+
+    $DeviceBlock = Get-TestGeneratedBlock $DocumentText 'actor-devices'
+    foreach ($ExpectedRow in @(
+        '| headlamp | device_torch_dummy | headlamp | none | 50% |',
+        '| nv_gen1 | device_torch_nv_1 | gen1 | nightvision_1 | 25% |',
+        '| nv_gen2 | device_torch_nv_2 | gen2 | nightvision_2 | 18% |',
+        '| nv_gen3 | device_torch_nv_3 | gen3 | nightvision_3 | 7% |',
+        '| difficulty | independent of difficulty |'
+    )) {
+        if (-not $DeviceBlock.Contains($ExpectedRow)) { throw "Actor device balance row differs: $ExpectedRow" }
     }
 
     $DifficultyBlock = Get-TestGeneratedBlock $DocumentText 'difficulty-dashboard'
@@ -501,6 +520,7 @@ try {
         '| custom threats, budgets, physical cap, and grenade pricing | `gamma_arena_custom_rules.ltx` |',
         '| installed custom combat categories | `gamma_arena_item_catalog.script` |',
         '| grenade probabilities and participant pools | `gamma_arena_grenade_generator.script`; `gamma_arena_catalogs.ltx` |',
+        '| actor lighting-device probabilities and selection | `gamma_arena_device_generator.script`; `gamma_arena_catalogs.ltx` |',
         '| powered exo full-charge transaction | `gamma_arena_bootstrap.script` |'
     )) {
         if (-not $First.Contains($Expected)) {
@@ -582,6 +602,8 @@ try {
 <!-- END GENERATED: medical-loadouts -->
 <!-- BEGIN GENERATED: grenade-loadouts -->
 <!-- END GENERATED: grenade-loadouts -->
+<!-- BEGIN GENERATED: actor-devices -->
+<!-- END GENERATED: actor-devices -->
 <!-- BEGIN GENERATED: npc-medical-runtime -->
 <!-- END GENERATED: npc-medical-runtime -->
 <!-- BEGIN GENERATED: actor-equipment -->
