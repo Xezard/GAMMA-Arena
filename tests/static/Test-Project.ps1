@@ -791,6 +791,13 @@ foreach ($Contract in $Task5UniversalRuntimeContracts) {
     }
 }
 $Task5MaterializerContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script') -Raw
+$AggregateRunnerPath = Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'
+Assert-True (Test-Path -LiteralPath $AggregateRunnerPath -PathType Leaf) 'Aggregate runner is required.'
+if (Test-Path -LiteralPath $AggregateRunnerPath -PathType Leaf) {
+    $AggregateRunnerContent = Get-Content -LiteralPath $AggregateRunnerPath -Raw
+    Assert-True ($AggregateRunnerContent -notmatch 'Test-ActorDeviceLoadouts\.ps1') 'Aggregate runner must not invoke the removed v8 actor-device gate.'
+    Assert-True (([regex]::Matches($AggregateRunnerContent, 'Test-ActorDevices\.ps1')).Count -eq 1) 'Aggregate runner must invoke the single current actor-device gate exactly once.'
+}
 Assert-True ($Task5MaterializerContent -notmatch 'UINT32_MOD') 'Task 5 materializer must not narrow physical quantities or box_size to uint32.'
 
 $Task5UniversalRuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw

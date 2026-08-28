@@ -9536,7 +9536,10 @@ local function universal_item_fixture(options)
             return gamma_arena_result.ok({ id = entity.runtime_id, section = descriptor.section })
         end,
         verify_ownership = function(entity) return step("verify_ownership", "ownership:" .. entity.section) end,
+        clock = options.clock,
+        timeout_ms = options.timeout_ms,
         resolve_item = function(entity)
+            if options.resolve_pending == true and entity.section == 'device_torch_dummy' then return nil end
             local accepted = step("resolve_item", "resolve:" .. entity.section)
             if not accepted.ok then return accepted end
             return entity
@@ -9551,6 +9554,18 @@ local function universal_item_fixture(options)
             local accepted = step("item_in_slot", "slot_proof:" .. slot)
             if not accepted.ok then return accepted end
             return env.slots[slot]
+        end,
+        set_item_condition = function(item, value)
+            local accepted = step('set_item_condition', 'condition_write:' .. item.section)
+            if not accepted.ok then return accepted end
+            item.condition_value = value
+            return gamma_arena_result.ok(true)
+        end,
+        item_condition = function(item)
+            local accepted = step('item_condition', 'condition_read:' .. item.section)
+            if not accepted.ok then return accepted end
+            if options.device_condition ~= nil then return options.device_condition end
+            return item.condition_value
         end,
         fill_magazine = function(weapon, ammo_section)
             local accepted = step("fill_magazine", "fill:" .. weapon.section .. ":" .. ammo_section)
@@ -9569,6 +9584,7 @@ local function universal_item_fixture(options)
             env.active = slot
             return gamma_arena_result.ok(true)
         end,
+        prepare_rollback = function() return gamma_arena_result.ok(true) end,
         rollback = function(entity)
             env.events[#env.events + 1] = "rollback:" .. tostring(entity.runtime_id)
             env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
@@ -9576,6 +9592,11 @@ local function universal_item_fixture(options)
                 return gamma_arena_result.err("GA_TEST_ROLLBACK", "injected rollback failure", { id = entity.runtime_id })
             end
             env.released[#env.released + 1] = entity.runtime_id
+            for slot, current in pairs(env.slots) do
+                if current == entity then env.slots[slot] = nil end
+            end
+            env.magazine[entity.runtime_id] = nil
+            if env.active ~= nil and env.slots[env.active] == nil then env.active = nil end
             return gamma_arena_result.ok(true)
         end
     })
@@ -9765,6 +9786,115 @@ local function runtime_universal_items_weapon1_activation_fallback()
     gamma_arena_test_assert.equals(env.active, "weapon_1", "weapon_1 activates when weapon_2 is absent")
 end
 
+local function runtime_universal_actor_device_is_exact_equipped_charged_and_ready()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local items = universal_items()
+    items[#items + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, items, catalog)
+    gamma_arena_test_assert.is_true(result.ok, 'universal actor device materializes')
+    gamma_arena_test_assert.equals(env.slots.device.section, 'device_torch_dummy', 'exact actor device occupies the logical device slot')
+    gamma_arena_test_assert.equals(env.slots.device.condition_value, 0.9999, 'actor device condition write is exact')
+    gamma_arena_test_assert.equals(result.value.device.section, 'device_torch_dummy', 'READY diagnostics retain the exact device section')
+    gamma_arena_test_assert.equals(result.value.device.id, env.slots.device.runtime_id, 'READY diagnostics retain the exact owned device id')
+    gamma_arena_test_assert.equals(result.value.device.slot, 10, 'READY diagnostics retain Lua actor slot 10')
+    gamma_arena_test_assert.is_true(result.value.device.condition >= 0.999, 'READY diagnostics retain finite full charge')
+end
+
+local function runtime_universal_actor_device_timeout_boundary_and_wrap()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = { { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' } }
+    local function verify(started_at, before_deadline, deadline, label)
+        local now = started_at
+        local env, port = universal_item_fixture({ clock = function() return now end, timeout_ms = 5000, resolve_pending = true })
+        local pending = port:apply({ runtime_id = 1 }, selected, catalog)
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'timeout boundary fixture starts pending: ' .. label)
+        now = before_deadline
+        local before = port:update()
+        gamma_arena_test_assert.is_true(before.ok and before.value.pending == true, '4999 ms remains pending: ' .. label)
+        gamma_arena_test_assert.equals(#env.releases, 0, '4999 ms never rolls back: ' .. label)
+        now = deadline
+        local timed_out = port:update()
+        gamma_arena_test_assert.is_false(timed_out.ok, 'exactly 5000 ms times out: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.code, 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT', 'deadline code is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.elapsed_ms, 5000, 'deadline elapsed diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 5000, 'deadline limit diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.section, 'device_torch_dummy', 'deadline section diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.slot, 10, 'deadline Lua slot diagnostic is exact: ' .. label)
+    end
+    verify(100, 5099, 5100, 'linear')
+    verify(4294965296, 2999, 3000, 'uint32-wrap')
+end
+
+local function runtime_universal_actor_device_timeout_is_bounded_and_rolls_back()
+    local now = 100
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }
+    local env, port = universal_item_fixture({
+        clock = function() return now end,
+        timeout_ms = 5000,
+        resolve_pending = true
+    })
+    local pending = port:apply({ runtime_id = 1 }, selected, catalog)
+    gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'unresolved device remains pending while ownership is retained')
+    gamma_arena_test_assert.equals(#env.releases, 0, 'pending device is never released before its deadline')
+    now = 5101
+    local timed_out = port:update()
+    gamma_arena_test_assert.is_false(timed_out.ok, 'unresolved device fails after the bounded no-progress deadline')
+    gamma_arena_test_assert.equals(timed_out.error.code, 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT', 'device timeout diagnostic is stable')
+    gamma_arena_test_assert.equals(timed_out.error.context.section, 'device_torch_dummy', 'timeout diagnostic retains exact section')
+    gamma_arena_test_assert.equals(timed_out.error.context.logical_slot, 'device', 'timeout diagnostic retains logical slot')
+    gamma_arena_test_assert.equals(timed_out.error.context.slot, 10, 'timeout diagnostic retains Lua actor slot 10')
+    gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 5000, 'timeout diagnostic retains bounded deadline')
+    gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, 'device timeout rolls back the entire actor transaction')
+    for index, id in ipairs(env.rollback_attempts) do
+        gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, 'timeout rollback is reverse creation order')
+    end
+    gamma_arena_test_assert.equals(next(env.slots), nil, 'timeout leaves no Arena equipment slot state')
+end
+
+local function runtime_universal_actor_device_faults_rollback_all_actor_state()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = universal_items()
+    selected[#selected + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local cases = {
+        { name = 'write', options = { fail_stage = 'set_item_condition' }, code = 'GA_TEST_MATERIALIZE' },
+        { name = 'read', options = { fail_stage = 'item_condition' }, code = 'GA_TEST_MATERIALIZE' },
+        { name = 'low', options = { device_condition = 0.998 }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'nan', options = { device_condition = 0 / 0 }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'positive-infinity', options = { device_condition = math.huge }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'negative-infinity', options = { device_condition = -math.huge }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' }
+    }
+    for _, case in ipairs(cases) do
+        local env, port = universal_item_fixture(case.options)
+        local result = port:apply({ runtime_id = 1 }, selected, catalog)
+        gamma_arena_test_assert.is_false(result.ok, 'device fault is fail-closed: ' .. case.name)
+        gamma_arena_test_assert.equals(result.error.code, case.code, 'device fault diagnostic is stable: ' .. case.name)
+        gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, 'device fault rolls back every Arena-created actor item: ' .. case.name)
+        gamma_arena_test_assert.equals(#env.released, #env.created, 'device fault releases every Arena-created actor item: ' .. case.name)
+        for index, id in ipairs(env.rollback_attempts) do
+            gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, 'device rollback is reverse creation order: ' .. case.name)
+        end
+        gamma_arena_test_assert.equals(next(env.slots), nil, 'device fault clears every actor equipment slot: ' .. case.name)
+        gamma_arena_test_assert.equals(next(env.magazine), nil, 'device fault clears Arena weapon state: ' .. case.name)
+        gamma_arena_test_assert.equals(env.active, nil, 'device fault clears Arena active-slot state: ' .. case.name)
+    end
+    local invalid_catalog = clone(catalog)
+    invalid_catalog.items.device_torch_dummy.ltx_slot = 10
+    local env, port = universal_item_fixture()
+    local rejected = port:apply({ runtime_id = 1 }, selected, invalid_catalog)
+    gamma_arena_test_assert.is_false(rejected.ok, 'wrong device LTX slot is rejected')
+    gamma_arena_test_assert.equals(rejected.error.code, 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'wrong device LTX slot diagnostic is stable')
+    gamma_arena_test_assert.equals(#env.created, 0, 'wrong device LTX slot rejects before actor mutation')
+end
+
 local function exact_rank_spec()
     local spec = entity_spec(2)
     local opponents = spec.opponents()
@@ -9778,6 +9908,20 @@ end
 local function first_event(events, pattern)
     for index, event in ipairs(events) do if string.find(event, pattern) then return index end end
     return nil
+end
+
+local function runtime_entity_rejects_opponent_device_before_actor_mutation()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    local spec = entity_spec(1)
+    local opponents = spec.opponents()
+    opponents[1].items[#opponents[1].items + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local catalog = entity_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local result = adapter:begin_apply(spec, 'session-opponent-device', catalog)
+    gamma_arena_test_assert.is_false(result.ok, 'runtime refuses every opponent device')
+    gamma_arena_test_assert.equals(result.error.code, 'GA_ENTITY_OPPONENT_DEVICE_FORBIDDEN', 'opponent device rejection code is stable')
+    gamma_arena_test_assert.equals(#env.events, 0, 'opponent device rejection precedes actor and world mutation')
 end
 
 local function runtime_entity_exact_rank_precedes_friend_tactical_and_hostility()
@@ -10308,6 +10452,15 @@ local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_s
     gamma_arena_test_assert.equals(actor_mutations, 0, "Store snapshot verification and later failure precede actor mutation")
 end
 
+local function task6_drive_items_ready(items, initial)
+    local result = initial
+    for _ = 1, 64 do
+        if not result.ok or (type(result.value) == 'table' and result.value.ready == true) then return result end
+        result = items:update()
+    end
+    return gamma_arena_result.err('GA_TEST_ITEMS_UPDATE_LIMIT', 'universal item fixture exceeded bounded update count')
+end
+
 local function task11_production_item_ports(options)
     options = options or {}
     local env = {
@@ -10321,7 +10474,9 @@ local function task11_production_item_ports(options)
         lifecycle = {},
         active_slot = nil,
         tag_writes = 0,
-        tag_reads = 0
+        tag_reads = 0,
+        shutdown_calls = {},
+        offline = {}
     }
     local ports = {
         actor_id = function(actor) return actor:id() end,
@@ -10346,6 +10501,9 @@ local function task11_production_item_ports(options)
             function entity:get_ammo_type() return self.ammo_type end
             function entity:set_ammo_elapsed(count) self.ammo_elapsed = count; return true end
             function entity:get_ammo_in_magazine() return self.ammo_elapsed end
+            function entity:set_condition(value) self.condition_value = value; return true end
+            function entity:condition() return self.condition_value end
+            function entity:enable_torch(value) self.torch_enabled = value; return true end
             env.next_id = env.next_id + 1
             env.created[#env.created + 1] = entity
             env.by_id[entity.runtime_id] = entity
@@ -10365,12 +10523,18 @@ local function task11_production_item_ports(options)
         load_owner_tag = function(id)
             env.tag_reads = env.tag_reads + 1
             if options.fail_tag_read_at == env.tag_reads then
+                if options.mutate_parent_on_tag_read_failure == true and env.by_id[id] ~= nil then
+                    env.by_id[id].parent_runtime_id = 999
+                end
                 return gamma_arena_result.err("GA_TEST_TAG_READ", "injected ownership tag read failure", { id = id })
             end
             if options.mismatch_tag_read_at == env.tag_reads then return "ga_task11_wrong_owner" end
             return env.tags[id]
         end,
-        resolve_item = function(entity) return env.by_id[entity.runtime_id] end,
+        resolve_item = function(entity)
+            if env.offline[entity.runtime_id] then return nil end
+            return env.by_id[entity.runtime_id]
+        end,
         move_to_slot = function(owner, item, slot)
             if options.fail_slot == slot then
                 return gamma_arena_result.err("GA_TEST_UNIVERSAL_EQUIP", "injected composed equip failure", { slot = slot })
@@ -10379,6 +10543,11 @@ local function task11_production_item_ports(options)
             return true
         end,
         item_in_slot = function(owner, slot) return env.slots[slot] end,
+        set_item_condition = function(item, value) return item:set_condition(value) end,
+        item_condition = function(item)
+            if options.device_condition ~= nil then return options.device_condition end
+            return item:condition()
+        end,
         fill_magazine = function(weapon, ammo_section)
             env.magazines[weapon.runtime_id] = ammo_section
             return true
@@ -10387,6 +10556,11 @@ local function task11_production_item_ports(options)
         activate_slot = function(owner, slot) env.active_slot = slot; return true end,
         resolve_entity = function(id) return env.by_id[id] end,
         shutdown_device = function(item, id, section)
+            env.shutdown_calls[#env.shutdown_calls + 1] = { item = item, id = id, section = section }
+            if options.reject_nil_shutdown == true and item == nil then
+                return gamma_arena_result.err('GA_TEST_NIL_DEVICE_SHUTDOWN', 'exact device context is required')
+            end
+            if options.shutdown_pending == true then return gamma_arena_result.ok(false) end
             env.lifecycle[#env.lifecycle + 1] = "shutdown"
             return gamma_arena_result.ok(true)
         end,
@@ -10398,6 +10572,254 @@ local function task11_production_item_ports(options)
         end
     }
     return env, ports
+end
+
+local function runtime_composed_all_exact_actor_devices_reach_ready_cross_frame()
+    local exact_sections = { 'device_torch_dummy', 'device_torch_nv_1', 'device_torch_nv_2', 'device_torch_nv_3' }
+    for _, section in ipairs(exact_sections) do
+        local engine_slots, move_slots, read_slots = {}, {}, {}
+        local owner = {}
+        function owner:id() return 77 end
+        function owner:move_to_slot(item, slot)
+            move_slots[#move_slots + 1] = slot
+            engine_slots[slot] = item
+            return true
+        end
+        function owner:item_in_slot(slot)
+            read_slots[#read_slots + 1] = slot
+            return engine_slots[slot]
+        end
+        local catalog = universal_catalog()
+        catalog.items[section] = { category = 'device', ltx_slot = 9 }
+        local env, item_ports = task11_production_item_ports()
+        item_ports.move_to_slot = nil
+        item_ports.item_in_slot = nil
+        local deps = fake_orchestrator_deps(fake_store())
+        deps.actor = nil
+        deps.actor_item_ports = item_ports
+        local orchestrator = gamma_arena_bootstrap.compose(deps)
+        orchestrator.session = { schema_version = 2, session_id = 'ga_task6_devices', session_nonce = 'ga_task6_devices_nonce' }
+        local items = orchestrator.deps.actor.deps.items
+        local applied = items:apply(owner, { { section = section, quantity = 1, equipped_slot = 'device' } }, catalog)
+        gamma_arena_test_assert.is_true(applied.ok and applied.value.pending == true and applied.value.ready == false, 'exact production device starts cross-frame: ' .. section)
+        local ready = task6_drive_items_ready(items, applied)
+        gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, 'exact production device reaches READY: ' .. section)
+        local device = env.created[1]
+        gamma_arena_test_assert.equals(move_slots[1], 10, 'production move translates raw LTX device slot 9 to Lua slot 10: ' .. section)
+        gamma_arena_test_assert.equals(engine_slots[10], device, 'production move stores the exact device in Lua slot 10: ' .. section)
+        gamma_arena_test_assert.is_true(#read_slots > 0, 'production verification reads the translated device slot: ' .. section)
+        for _, slot in ipairs(read_slots) do
+            gamma_arena_test_assert.equals(slot, 10, 'every production verification reads Lua slot 10 derived from raw LTX slot 9: ' .. section)
+        end
+        gamma_arena_test_assert.equals(device.section_value, section, 'exact production device section is unchanged: ' .. section)
+        gamma_arena_test_assert.equals(device.condition_value, 0.9999, 'exact production device condition write is 0.9999: ' .. section)
+        gamma_arena_test_assert.equals(ready.value.device.section, section, 'READY diagnostics retain exact section: ' .. section)
+        gamma_arena_test_assert.equals(ready.value.device.id, device.runtime_id, 'READY diagnostics retain exact id: ' .. section)
+        gamma_arena_test_assert.equals(ready.value.device.slot, 10, 'READY diagnostics retain Lua actor slot 10: ' .. section)
+        local condition = ready.value.device.condition
+        gamma_arena_test_assert.is_true(type(condition) == 'number' and condition == condition and condition ~= math.huge and condition ~= -math.huge and condition >= 0.999, 'READY diagnostics retain finite full condition: ' .. section)
+    end
+end
+
+local function runtime_composed_non_device_items_reach_ready_cross_frame()
+    local owner = { id = function() return 77 end }
+    local selected = { { section = 'knife', quantity = 1, equipped_slot = 'knife' } }
+    local env, item_ports = task11_production_item_ports()
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.actor = nil
+    deps.actor_item_ports = item_ports
+    local orchestrator = gamma_arena_bootstrap.compose(deps)
+    orchestrator.session = { schema_version = 2, session_id = 'ga_task6_cross_frame', session_nonce = 'ga_task6_cross_frame_nonce' }
+    local items = orchestrator.deps.actor.deps.items
+    local applied = items:apply(owner, selected, universal_catalog())
+    gamma_arena_test_assert.is_true(applied.ok and applied.value.pending == true and applied.value.ready == false, 'production non-device apply is explicitly cross-frame')
+    local ready = task6_drive_items_ready(items, applied)
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, 'production non-device update reaches READY')
+    gamma_arena_test_assert.equals(env.slots.knife, env.created[1], 'production non-device READY retains the exact equipped entity')
+end
+
+local function runtime_universal_actor_device_rollback_neutralizes_once_before_any_release()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local options = { shutdown_pending = true, device_condition = 0.5 }
+    local env, ports = task11_production_item_ports(options)
+    local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+    local selected = {
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' },
+        { section = 'rifle', quantity = 1, equipped_slot = 'weapon_2' },
+        { section = 'ammo_b', quantity = 1 }
+    }
+    local pending = items:apply(owner, selected, catalog)
+    gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'unconfirmed exact device shutdown makes rollback retriable')
+    gamma_arena_test_assert.equals(#env.releases, 0, 'rollback releases nothing before exact shutdown confirmation')
+    gamma_arena_test_assert.equals(#env.shutdown_calls, 1, 'rollback invokes the shared shutdown seam once per attempt')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].item, env.created[1], 'rollback resolves the canonical device before later weapon and ammo')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].id, env.created[1].runtime_id, 'rollback shutdown retains exact device id')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].section, 'device_torch_dummy', 'rollback shutdown retains exact device section')
+    gamma_arena_test_assert.equals(#items:records_snapshot(), 3, 'pending rollback retains the complete actor transaction')
+    options.shutdown_pending = false
+    local failed = items:update()
+    gamma_arena_test_assert.is_false(failed.ok, 'confirmed rollback returns the original charge fault')
+    gamma_arena_test_assert.equals(failed.error.code, 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED', 'rollback retry preserves original fault identity')
+    gamma_arena_test_assert.equals(#env.shutdown_calls, 2, 'confirmed retry invokes the shared seam once more')
+    gamma_arena_test_assert.equals(env.lifecycle[1], 'shutdown', 'exact device shutdown precedes every rollback release')
+    gamma_arena_test_assert.equals(#env.releases, 3, 'confirmed rollback releases the whole actor transaction')
+    for index, id in ipairs(env.releases) do
+        gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, 'confirmed rollback releases in reverse creation order')
+    end
+    local release_count = #env.releases
+    items:cleanup()
+    gamma_arena_test_assert.equals(#env.releases, release_count, 'post-rollback cleanup never duplicates a release')
+end
+
+local function runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }
+    local cases = {
+        { name = 'write', options = { fail_tag_write_at = 2 }, code = 'GA_TEST_TAG_WRITE' },
+        { name = 'read', options = { fail_tag_read_at = 2 }, code = 'GA_TEST_TAG_READ' },
+        { name = 'mismatch', options = { mismatch_tag_read_at = 2 }, code = 'GA_ACTOR_ITEMS_TAG_VERIFY_FAILED' }
+    }
+    for _, case in ipairs(cases) do
+        case.options.shutdown_pending = true
+        case.options.reject_nil_shutdown = true
+        local env, ports = task11_production_item_ports(case.options)
+        local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+        local pending = items:apply(owner, selected, catalog)
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, case.name .. ' provisional rollback waits for exact shutdown')
+        gamma_arena_test_assert.equals(#env.releases, 0, case.name .. ' provisional rollback releases nothing before confirmation')
+        gamma_arena_test_assert.equals(#items:records_snapshot(), 2, case.name .. ' pending rollback retains authorized and provisional records')
+        gamma_arena_test_assert.equals(#env.shutdown_calls, 1, case.name .. ' rollback calls the shared seam once per attempt')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].item, env.created[2], case.name .. ' rollback resolves the exact device object')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].id, env.created[2].runtime_id, case.name .. ' rollback retains the exact device id')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].section, 'device_torch_dummy', case.name .. ' rollback retains the exact device section')
+        case.options.shutdown_pending = false
+        local failed = items:update()
+        gamma_arena_test_assert.is_false(failed.ok, case.name .. ' confirmed rollback returns the original tag failure')
+        gamma_arena_test_assert.equals(failed.error.code, case.code, case.name .. ' confirmed rollback preserves the original cause')
+        gamma_arena_test_assert.equals(#env.shutdown_calls, 2, case.name .. ' rollback retries the exact shared seam')
+        gamma_arena_test_assert.equals(env.shutdown_calls[2].item, env.created[2], case.name .. ' retry resolves the same exact device object')
+        gamma_arena_test_assert.equals(env.shutdown_calls[2].id, env.created[2].runtime_id, case.name .. ' retry retains the exact device id')
+        gamma_arena_test_assert.equals(env.shutdown_calls[2].section, 'device_torch_dummy', case.name .. ' retry retains the exact device section')
+        gamma_arena_test_assert.equals(#env.releases, 2, case.name .. ' confirmed rollback releases the complete transaction')
+        gamma_arena_test_assert.equals(env.releases[1], env.created[2].runtime_id, case.name .. ' rollback starts with the provisional device')
+        gamma_arena_test_assert.equals(env.releases[2], env.created[1].runtime_id, case.name .. ' rollback remains reverse creation order')
+        local release_count = #env.releases
+        case.options.reject_nil_shutdown = false
+        gamma_arena_test_assert.is_true(items:cleanup().ok, case.name .. ' cleanup retires absence-proven rollback records')
+        gamma_arena_test_assert.is_true(items:cleanup().ok, case.name .. ' cleanup remains idempotent')
+        gamma_arena_test_assert.equals(#env.releases, release_count, case.name .. ' cleanup never duplicates a rollback release')
+    end
+
+    local malicious_env, malicious_ports = task11_production_item_ports({
+        fail_tag_read_at = 2,
+        mutate_parent_on_tag_read_failure = true,
+        reject_nil_shutdown = true
+    })
+    local malicious_items = gamma_arena_bootstrap.new_actor_item_port(malicious_ports)
+    local rejected = malicious_items:apply(owner, selected, catalog)
+    gamma_arena_test_assert.is_false(rejected.ok, 'non-owned provisional device is rejected before shutdown')
+    gamma_arena_test_assert.equals(rejected.error.code, 'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', 'non-owned provisional fails exact proof')
+    gamma_arena_test_assert.equals(#malicious_env.shutdown_calls, 0, 'non-owned provisional never reaches the shutdown seam')
+    gamma_arena_test_assert.equals(#malicious_env.releases, 0, 'non-owned provisional can never trigger release')
+end
+
+local function runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }
+    local function materialized(options)
+        local env, ports = task11_production_item_ports(options)
+        local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+        local applied = items:apply(owner, selected, catalog)
+        gamma_arena_test_assert.is_true(applied.ok, 'cleanup lifecycle fixture materializes')
+        return env, items, env.created[2]
+    end
+
+    local absent_env, absent_items, absent_device = materialized()
+    absent_env.by_id[absent_device.runtime_id] = nil
+    local absent = absent_items:cleanup()
+    gamma_arena_test_assert.is_true(absent.ok, 'absent device cleanup remains safe')
+    local absent_call = absent_env.shutdown_calls[#absent_env.shutdown_calls]
+    gamma_arena_test_assert.equals(absent_call.item, nil, 'absent device shutdown uses no stale online object')
+    gamma_arena_test_assert.equals(absent_call.id, absent_device.runtime_id, 'absent device shutdown retains exact owned id')
+    gamma_arena_test_assert.equals(absent_call.section, 'device_torch_dummy', 'absent device shutdown retains exact section')
+
+    local offline_env, offline_items, offline_device = materialized()
+    offline_env.offline[offline_device.runtime_id] = true
+    local offline = offline_items:cleanup()
+    gamma_arena_test_assert.is_true(offline.ok, 'offline device cleanup remains safe')
+    local offline_call = offline_env.shutdown_calls[#offline_env.shutdown_calls]
+    gamma_arena_test_assert.equals(offline_call.item, nil, 'offline device shutdown uses no stale online object')
+    gamma_arena_test_assert.equals(offline_call.id, offline_device.runtime_id, 'offline device shutdown retains exact owned id')
+
+    local pending_options = { shutdown_pending = true }
+    local pending_env, pending_items, pending_device = materialized(pending_options)
+    pending_env.lifecycle = {}
+    local pending = pending_items:cleanup()
+    gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'unconfirmed shutdown retains cleanup pending')
+    gamma_arena_test_assert.equals(#pending_env.releases, 0, 'unconfirmed shutdown precedes and blocks every release')
+    gamma_arena_test_assert.equals(#pending_items:records_snapshot(), 2, 'unconfirmed shutdown retains every actor-owned record')
+    pending_options.shutdown_pending = false
+    local retried = pending_items:cleanup()
+    gamma_arena_test_assert.is_true(retried.ok and retried.value.pending == true, 'confirmed retry submits releases and retains records for reprobe')
+    gamma_arena_test_assert.equals(pending_env.lifecycle[1], 'shutdown', 'confirmed retry shuts down before release')
+    gamma_arena_test_assert.equals(#pending_env.releases, 2, 'confirmed retry releases every actor-owned item exactly once')
+    local reprobed = pending_items:cleanup()
+    gamma_arena_test_assert.is_true(reprobed.ok, 'post-release cleanup reprobes device absence')
+    gamma_arena_test_assert.equals(#pending_items:records_snapshot(), 0, 'absence proof retires every owned record')
+    local reprobe_call = pending_env.shutdown_calls[#pending_env.shutdown_calls]
+    gamma_arena_test_assert.equals(reprobe_call.item, nil, 'reprobe never reuses the released device object')
+    gamma_arena_test_assert.equals(reprobe_call.id, pending_device.runtime_id, 'reprobe retains the exact released device id')
+    local release_count = #pending_env.releases
+    local idempotent = pending_items:cleanup()
+    gamma_arena_test_assert.is_true(idempotent.ok, 'post-clean cleanup is idempotent')
+    gamma_arena_test_assert.equals(#pending_env.releases, release_count, 'idempotent cleanup never duplicates release')
+
+    local no_device_env, no_device_ports = task11_production_item_ports()
+    local no_device_items = gamma_arena_bootstrap.new_actor_item_port(no_device_ports)
+    local no_device_ready = no_device_items:apply(owner, { { section = 'medkit', quantity = 1 } }, catalog)
+    gamma_arena_test_assert.is_true(no_device_ready.ok and no_device_ready.value.ready == true, 'no-device selection reaches READY')
+    no_device_env.lifecycle = {}
+    local no_device_cleanup = no_device_items:cleanup()
+    gamma_arena_test_assert.is_true(no_device_cleanup.ok, 'no-device cleanup remains safe')
+    local no_device_call = no_device_env.shutdown_calls[#no_device_env.shutdown_calls]
+    gamma_arena_test_assert.equals(no_device_call.item, nil, 'no-device shutdown has no item')
+    gamma_arena_test_assert.equals(no_device_call.id, nil, 'no-device shutdown has no id')
+    gamma_arena_test_assert.equals(no_device_call.section, nil, 'no-device shutdown has no section')
+    gamma_arena_test_assert.equals(no_device_env.lifecycle[1], 'shutdown', 'no-device cleanup still uses the shared global seam before release')
+end
+
+local function runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local env, ports = task11_production_item_ports()
+    local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+    local applied = items:apply(owner, {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }, catalog)
+    gamma_arena_test_assert.is_true(applied.ok, 'exact cleanup device fixture materializes')
+    local device = env.created[2]
+    env.lifecycle = {}
+    local cleaned = items:cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok, 'exact actor device cleanup starts safely')
+    gamma_arena_test_assert.equals(env.shutdown_calls[#env.shutdown_calls].item, device, 'shared shutdown receives the exact online device object')
+    gamma_arena_test_assert.equals(env.shutdown_calls[#env.shutdown_calls].id, device.runtime_id, 'shared shutdown receives the exact owned device id')
+    gamma_arena_test_assert.equals(env.shutdown_calls[#env.shutdown_calls].section, 'device_torch_dummy', 'shared shutdown receives the exact device section')
+    gamma_arena_test_assert.equals(env.lifecycle[1], 'shutdown', 'shared shutdown precedes every owned release')
+    gamma_arena_test_assert.is_true(string.find(env.lifecycle[2] or '', '^release:') ~= nil, 'device release begins only after confirmed shutdown')
 end
 
 local function runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback()
@@ -10458,6 +10880,8 @@ local function runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type()
 
         local env, items = composed_items()
         local applied = items:apply(owner, selected, universal_catalog())
+        applied = task6_drive_items_ready(items, applied)
+        gamma_arena_test_assert.is_true(applied.ok and applied.value.ready == true, 'production magazine path reaches READY through updates')
         gamma_arena_test_assert.is_true(applied.ok, "production magazine path accepts a selected non-first ammunition type")
         local weapon = env.created[1]
         gamma_arena_test_assert.equals(#weapon.ammo_type_sets, 1, "production magazine path invokes the real ammo-type setter once")
@@ -10467,6 +10891,7 @@ local function runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type()
 
         local mismatched_env, mismatched_items = composed_items({ ammo_type_mismatch = true })
         local mismatched = mismatched_items:apply(owner, selected, universal_catalog())
+        mismatched = task6_drive_items_ready(mismatched_items, mismatched)
         gamma_arena_test_assert.is_false(mismatched.ok, "ammo-type setter/getter mismatch rejects materialization")
         gamma_arena_test_assert.equals(mismatched.error.code, "GA_ACTOR_ITEMS_AMMO_TYPE_VERIFY_FAILED", "ammo-type mismatch remains exact")
         gamma_arena_test_assert.equals(#mismatched_env.releases, #mismatched_env.created, "ammo-type mismatch rolls back every created entity")
@@ -10826,6 +11251,17 @@ local function runtime_random_recipe_session_remains_difficulty_only()
 end
 
 local cases = {
+    { name = 'runtime_composed_all_exact_actor_devices_reach_ready_cross_frame', fn = runtime_composed_all_exact_actor_devices_reach_ready_cross_frame },
+    { name = 'runtime_universal_actor_device_timeout_boundary_and_wrap', fn = runtime_universal_actor_device_timeout_boundary_and_wrap },
+    { name = 'runtime_composed_non_device_items_reach_ready_cross_frame', fn = runtime_composed_non_device_items_reach_ready_cross_frame },
+    { name = 'runtime_universal_actor_device_rollback_neutralizes_once_before_any_release', fn = runtime_universal_actor_device_rollback_neutralizes_once_before_any_release },
+    { name = 'runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown', fn = runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown },
+    { name = 'runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe', fn = runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe },
+    { name = 'runtime_universal_actor_device_timeout_is_bounded_and_rolls_back', fn = runtime_universal_actor_device_timeout_is_bounded_and_rolls_back },
+    { name = 'runtime_universal_actor_device_faults_rollback_all_actor_state', fn = runtime_universal_actor_device_faults_rollback_all_actor_state },
+    { name = 'runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown', fn = runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown },
+    { name = 'runtime_entity_rejects_opponent_device_before_actor_mutation', fn = runtime_entity_rejects_opponent_device_before_actor_mutation },
+    { name = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready', fn = runtime_universal_actor_device_is_exact_equipped_charged_and_ready },
     { name = "runtime_custom_session_creation_copies_validated_recipe", fn = runtime_custom_session_creation_copies_validated_recipe },
     { name = "runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership", fn = runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership },
     { name = "runtime_custom_stale_catalog_rejects_before_actor_mutation", fn = runtime_custom_stale_catalog_rejects_before_actor_mutation },

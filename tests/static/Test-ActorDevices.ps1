@@ -14,12 +14,13 @@ $ItemCatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_ca
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 $ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
 $EntityAdapterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
+$MaterializerPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script'
 $BootstrapPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script'
 $CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
 $GeneratorTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
 $RuntimeTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 
-foreach ($Path in @($CatalogPath, $RulesPath, $CatalogLoaderPath, $DeviceGeneratorPath, $ItemCatalogPath, $GeneratorPath, $ValidatorPath, $EntityAdapterPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
+foreach ($Path in @($CatalogPath, $RulesPath, $CatalogLoaderPath, $DeviceGeneratorPath, $ItemCatalogPath, $GeneratorPath, $ValidatorPath, $EntityAdapterPath, $MaterializerPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Actor device integration file is missing: $Path" }
 }
 
@@ -31,6 +32,7 @@ $ItemCatalog = Get-Content -Raw -LiteralPath $ItemCatalogPath
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
 $EntityAdapter = Get-Content -Raw -LiteralPath $EntityAdapterPath
+$Materializer = Get-Content -Raw -LiteralPath $MaterializerPath
 $Bootstrap = Get-Content -Raw -LiteralPath $BootstrapPath
 $Compat = Get-Content -Raw -LiteralPath $CompatPath
 $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestsPath
@@ -205,6 +207,59 @@ if (([regex]::Matches($Bootstrap, 'shutdown_device\s*=\s*shutdown_actor_device')
     Add-ControlledFailure 'Legacy and universal actor-item ports must share the production actor-device shutdown seam'
 }
 Write-Host 'PASS: independent universal lifecycle preservation checks executed'
+
+$ExactUniversalCleanupCase = 'runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown'
+if (-not $RuntimeTests.Contains($ExactUniversalCleanupCase) -or $UniversalItemPort -notmatch 'local\s+function\s+shutdown_device\(record,\s*entity,\s*require_active_transaction\)') {
+    throw 'Universal actor-device cleanup must call the shared shutdown seam with exact owned device context'
+}
+
+$UniversalDeviceReadyCase = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready'
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_faults_rollback_all_actor_state')) {
+    throw 'Universal actor-device condition faults must rollback all Arena-owned actor state'
+}
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_rollback_neutralizes_once_before_any_release') -or
+    $Materializer -notmatch 'prepare_rollback' -or $UniversalItemPort -notmatch 'prepare_rollback') {
+    throw 'Universal rollback must confirm one exact transaction-level device shutdown before any release'
+}
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown') -or
+    $UniversalItemPort -notmatch 'transaction\.provisional_by_entity\[entry\.entity\]') {
+    throw 'Provisional device rollback must recover the exact active transaction record'
+}
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_timeout_is_bounded_and_rolls_back') -or
+    $Materializer -notmatch 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT' -or $Materializer -notmatch 'timeout_ms') {
+    throw 'Universal actor-device online/equip timeout must be bounded, diagnosed, and rolled back'
+}
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_timeout_boundary_and_wrap') -or
+    $Materializer -notmatch 'elapsed_ms\([^\r\n]+\)\s*>=\s*pending\.timeout_ms') {
+    throw 'Universal actor-device timeout must fire at the exact deadline across uint32 wrap'
+}
+if (-not $RuntimeTests.Contains('runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe')) {
+    throw 'Universal actor-device cleanup must cover absent, offline, pending, reprobed, idempotent, and no-device paths'
+}
+if (-not $RuntimeTests.Contains('runtime_composed_non_device_items_reach_ready_cross_frame') -or
+    $RuntimeTests -notmatch 'items:update\(\)') {
+    throw 'Production universal items must prove non-device readiness through the cross-frame update protocol'
+}
+if (-not $RuntimeTests.Contains($UniversalDeviceReadyCase)) {
+    throw ('Universal actor-device READY runtime regression is missing: ' + $UniversalDeviceReadyCase)
+}
+if (-not $RuntimeTests.Contains('runtime_composed_all_exact_actor_devices_reach_ready_cross_frame')) {
+    throw 'Production cross-frame runtime must materialize and verify all four exact actor devices'
+}
+if (-not $RuntimeTests.Contains('item_ports.move_to_slot = nil') -or
+    -not $RuntimeTests.Contains('item_ports.item_in_slot = nil') -or
+    -not $RuntimeTests.Contains('move_slots[1], 10')) {
+    throw 'All-four production device regression must exercise raw LTX slot 9 translation at the engine adapter boundary'
+}
+if ($Materializer -notmatch 'CATEGORIES\.device\s*=\s*true') {
+    throw 'Universal actor-device materializer must own the device category'
+}
+Write-Host 'PASS: universal actor-device READY contract is owned by the materializer'
+
+$OpponentDeviceCase = 'runtime_entity_rejects_opponent_device_before_actor_mutation'
+if (-not $RuntimeTests.Contains($OpponentDeviceCase) -or -not $EntityAdapter.Contains('GA_ENTITY_OPPONENT_DEVICE_FORBIDDEN')) {
+    throw 'Universal runtime must reject opponent devices before actor mutation'
+}
 
 foreach ($Marker in @('GA_ACTOR_DEVICE_CHARGE_FAILED','"outfit", "knife", "device", "weapon"','CHARGE_DEVICE','set_item_condition','item_condition','shutdown_device','device_neutralized','device_condition')) {
     if (-not $Bootstrap.Contains($Marker)) { throw "Actor device runtime contract is missing: $Marker" }

@@ -468,8 +468,27 @@ function new_actor_item_port(ports)
     local owned_records, token_sequence = {}, 0
     local state = { name = "IDLE", summary = nil }
     local transaction = nil
+    local exact_current_record, exact_provisional_record
 
-    local function shutdown_device()
+    local function shutdown_device(record, entity, require_active_transaction)
+        if type(record) == 'table' and record.category == 'device' then
+            local item = nil
+            if entity ~= nil then
+                local exact
+                if record.authorized == true then
+                    exact = exact_current_record(entity, record)
+                elseif record.provisional == true then
+                    exact = exact_provisional_record(entity, record, require_active_transaction == true)
+                else
+                    exact = actor_loadout_failure('GA_ACTOR_DEVICE_OWNERSHIP_INVALID', 'Universal actor device lacks exact rollback ownership')
+                end
+                if not exact.ok then return exact end
+                local resolved = actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', ports.resolve_item, entity, record)
+                if not resolved.ok then return resolved end
+                item = resolved.value
+            end
+            return actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', ports.shutdown_device, item, record.id, record.section)
+        end
         if type(ports.shutdown_device) ~= "function" then return gamma_arena_result.ok(true) end
         return actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.shutdown_device, nil, nil, nil)
     end
@@ -484,13 +503,15 @@ function new_actor_item_port(ports)
                 token = record.token,
                 authorized = record.authorized == true,
                 provisional = record.provisional == true,
-                release_submitted = record.release_submitted == true
+                release_submitted = record.release_submitted == true,
+                category = record.category,
+                equipped_slot = record.equipped_slot
             }
         end
         return values
     end
 
-    local function exact_current_record(entity, record)
+    exact_current_record = function(entity, record)
         if type(record) ~= "table" or record.authorized ~= true then
             return actor_loadout_failure("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", "Universal actor item has no authorized ownership record")
         end
@@ -511,7 +532,7 @@ function new_actor_item_port(ports)
         return gamma_arena_result.ok(true)
     end
 
-    local function exact_provisional_record(entity, record, require_active_transaction)
+    exact_provisional_record = function(entity, record, require_active_transaction)
         if type(record) ~= "table" or record.provisional ~= true or record.authorized == true then
             return actor_loadout_failure("GA_ACTOR_ITEMS_ROLLBACK_UNOWNED", "Universal actor item has no exact provisional ownership record")
         end
@@ -566,7 +587,9 @@ function new_actor_item_port(ports)
                 token = transaction.token .. ":" .. tostring(token_sequence) .. ":" .. tostring(id.value),
                 authorized = false,
                 provisional = true,
-                release_submitted = false
+                release_submitted = false,
+                category = descriptor.category,
+                equipped_slot = descriptor.equipped_slot
             }
             owned_records[#owned_records + 1] = record
             transaction.provisional_by_entity[entity] = record
@@ -593,11 +616,40 @@ function new_actor_item_port(ports)
         resolve_item = function(entity, record) return ports.resolve_item(entity, record) end,
         move_to_slot = function(owner, item, slot, definition) return ports.move_to_slot(owner, item, slot, definition) end,
         item_in_slot = function(owner, slot) return ports.item_in_slot(owner, slot) end,
+        set_item_condition = function(item, value) return ports.set_item_condition(item, value) end,
+        item_condition = function(item) return ports.item_condition(item) end,
+        clock = ports.clock,
+        timeout_ms = ports.timeout_ms,
         fill_magazine = function(weapon, ammo_section, definition) return ports.fill_magazine(weapon, ammo_section, definition) end,
         magazine_ammo = function(weapon) return ports.magazine_ammo(weapon) end,
         activate_slot = function(owner, slot) return ports.activate_slot(owner, slot) end,
+        prepare_rollback = function(created)
+            local device_record, device_entity = nil, nil
+            for _, entry in ipairs(created or {}) do
+                local record = entry.record or (type(transaction) == 'table'
+                    and transaction.provisional_by_entity[entry.entity] or nil)
+                if type(record) == 'table' and record.category == 'device' then
+                    if device_record ~= nil then
+                        return actor_loadout_failure('GA_ACTOR_DEVICE_OWNERSHIP_INVALID', 'Universal actor rollback found multiple owned device records')
+                    end
+                    device_record = record
+                end
+            end
+            if device_record ~= nil then
+                local resolved = actor_loadout_call('GA_ACTOR_ITEMS_RESOLVE_FAILED', ports.resolve_entity, device_record.id)
+                if not resolved.ok then return resolved end
+                device_entity = resolved.value
+                if device_entity == nil then
+                    return actor_loadout_failure('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', 'Exact rollback device is not online')
+                end
+            end
+            local neutralized = shutdown_device(device_record, device_entity,
+                type(device_record) == 'table' and device_record.provisional == true)
+            if not neutralized.ok then return neutralized end
+            return gamma_arena_result.ok(neutralized.value == true)
+        end,
         rollback = function(entity, record)
-            local neutralized = shutdown_device()
+            local neutralized = gamma_arena_result.ok(true)
             if not neutralized.ok then return neutralized end
             if neutralized.value ~= true then
                 return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Global actor-device state remains active before universal rollback")
@@ -640,7 +692,15 @@ function new_actor_item_port(ports)
         transaction = { owner = owner, owner_id = actor_id.value, token = ownership.value, ids = {}, provisional_by_entity = {} }
         state = { name = "APPLYING", summary = nil }
         local result = materializer:apply(owner, items, catalog)
-        transaction = nil
+        local rollback_pending = result.ok and type(result.value) == 'table'
+            and result.value.pending == true and result.value.rollback == true
+        if not rollback_pending then transaction = nil end
+        if result.ok and type(result.value) == 'table' and result.value.pending == true then
+            local ids = {}
+            for index, record in ipairs(owned_records) do ids[index] = record.id end
+            state = { name = 'APPLYING', summary = { ready = false, pending = true, state = 'WAIT_ACTOR_ITEMS', created_ids = ids } }
+            return gamma_arena_result.ok(state.summary)
+        end
         if not result.ok then state = { name = "ERROR", summary = nil }; return result end
         local ids = {}
         for index, record in ipairs(owned_records) do ids[index] = record.id end
@@ -648,16 +708,37 @@ function new_actor_item_port(ports)
             name = "READY",
             summary = { ready = true, state = "READY", active_slot = result.value.active_slot, created_ids = ids }
         }
+        state.summary.device = result.value.device
         return gamma_arena_result.ok(state.summary)
     end
 
     local function update()
+        if state.name == 'APPLYING' then
+            local result = materializer:update()
+            if not result.ok then transaction = nil end
+            if not result.ok then state = { name = 'ERROR', summary = nil }; return result end
+            if type(result.value) == 'table' and result.value.pending == true then return gamma_arena_result.ok(state.summary) end
+            transaction = nil
+            local ids = {}
+            for index, record in ipairs(owned_records) do ids[index] = record.id end
+            state = { name = 'READY', summary = { ready = true, state = 'READY', active_slot = result.value.active_slot, created_ids = ids, device = result.value.device } }
+            return gamma_arena_result.ok(state.summary)
+        end
         if state.name == "READY" then return gamma_arena_result.ok(state.summary) end
         return actor_loadout_failure("GA_ACTOR_ITEMS_STATE_INVALID", "Universal actor items are not ready", { state = state.name })
     end
 
     local function cleanup()
-        local neutralized = shutdown_device()
+        local device_record, device_entity = nil, nil
+        for _, record in ipairs(owned_records) do
+            if record.category == 'device' then
+                device_record = record
+                local resolved = actor_loadout_call('GA_ACTOR_ITEMS_RESOLVE_FAILED', ports.resolve_entity, record.id)
+                if resolved.ok then device_entity = resolved.value end
+                break
+            end
+        end
+        local neutralized = shutdown_device(device_record, device_entity)
         if not neutralized.ok then return neutralized end
         if neutralized.value ~= true then
             return gamma_arena_result.ok({ pending = true, stage = "actor_device" })
@@ -1670,6 +1751,7 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         end
     })
     local logical_ltx_slots = { outfit = 6, helmet = 12, knife = 0, weapon_1 = 1, weapon_2 = 2 }
+    logical_ltx_slots.device = 9
     local runtime_weapon_ammo_sections = {}
     local runtime_item_sections = {}
     local function logical_engine_slot(slot)
@@ -1751,6 +1833,10 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             if not translated.ok then return translated end
             return actor:item_in_slot(translated.value)
         end,
+        set_item_condition = function(item, value) return item:set_condition(value) end,
+        item_condition = function(item) return item:condition() end,
+        clock = function() return time_global() end,
+        timeout_ms = 5000,
         fill_magazine = function(weapon, ammo_section, definition)
             local id = runtime_object_id(weapon)
             local section = id and runtime_item_sections[id] or runtime_section_name(weapon)

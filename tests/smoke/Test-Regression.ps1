@@ -55,6 +55,7 @@ function New-Task7Fixture([string]$Name) {
             Copy-Item -Path (Join-Path $Source '*') -Destination $Destination -Recurse -Force
         }
     }
+    Write-FixtureFile $Root 'tools\Test-GammaArena.ps1' ([IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1')))
     return $Root
 }
 
@@ -908,6 +909,11 @@ end
     Remove-Item -LiteralPath (Join-Path $MissingTask2Fixture 'src\gamedata\scripts\gamma_arena_rng.script') -Force
     $MissingTask2Exit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingTask2Fixture)
     Assert-True ($MissingTask2Exit -ne 0) 'Static policy must reject a missing required Task 2 contract script.'
+
+    $MissingAggregateRunnerFixture = New-Task7Fixture 'missing-aggregate-runner'
+    Remove-Item -LiteralPath (Join-Path $MissingAggregateRunnerFixture 'tools\Test-GammaArena.ps1') -Force
+    $MissingAggregateRunnerExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingAggregateRunnerFixture)
+    Assert-True ($MissingAggregateRunnerExit -ne 0) 'Static policy must reject a missing aggregate runner.'
 
     $LogicalDeathFixture = New-Task7Fixture 'logical-death-cancellation'
     $LogicalDeathPath = Join-Path $LogicalDeathFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script'

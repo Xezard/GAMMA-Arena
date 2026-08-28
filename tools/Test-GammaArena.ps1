@@ -6,7 +6,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 & (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') -RepoRoot $RepoRoot
 if (-not $?) { exit 1 }
-& (Join-Path $RepoRoot 'tests\static\Test-ActorDeviceLoadouts.ps1') -RepoRoot $RepoRoot
+& (Join-Path $RepoRoot 'tests\static\Test-ActorDevices.ps1') -RepoRoot $RepoRoot
 if (-not $?) { exit 1 }
 & (Join-Path $RepoRoot 'tests\static\Test-BalanceDocumentation.ps1') -RepoRoot $RepoRoot
 if (-not $?) { exit 1 }
