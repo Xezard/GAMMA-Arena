@@ -27,6 +27,12 @@ function fixture_factory(options)
     local difficulties = { sections = { meta=section{schema_version="4",revision="5"}, ga_difficulty_rookie=section{tier="1",enemy_min="2",enemy_max="3",enemy_total_budget=tostring(options.rookie_enemy_budget or 25),player_gear_budget="7",player_medical_budget="4",primary_share_percent="50",medical_weight_bleed="35",medical_weight_health="50",medical_weight_boost="15",medical_weight_rare="0",weapon_weight_pistol="50",weapon_weight_smg="30",weapon_weight_shotgun="15",weapon_weight_rifle="5",weapon_weight_sniper="0",armor_weight_light="55",armor_weight_medium="30",armor_weight_scientific="10",armor_weight_heavy="5",armor_weight_powered_exo="0"}, ga_difficulty_stalker=section{tier="2",enemy_min="3",enemy_max="5",enemy_total_budget="50",player_gear_budget="10",player_medical_budget="5",primary_share_percent="60",medical_weight_bleed="25",medical_weight_health="50",medical_weight_boost="25",medical_weight_rare="0",weapon_weight_pistol="25",weapon_weight_smg="35",weapon_weight_shotgun="20",weapon_weight_rifle="18",weapon_weight_sniper="2",armor_weight_light="30",armor_weight_medium="40",armor_weight_scientific="20",armor_weight_heavy="9",armor_weight_powered_exo="1"}, ga_difficulty_veteran=section{tier="3",enemy_min="5",enemy_max="7",enemy_total_budget="75",player_gear_budget="13",player_medical_budget="6",primary_share_percent="75",medical_weight_bleed="20",medical_weight_health="45",medical_weight_boost="30",medical_weight_rare="5",weapon_weight_pistol="10",weapon_weight_smg="25",weapon_weight_shotgun="20",weapon_weight_rifle="38",weapon_weight_sniper="7",armor_weight_light="15",armor_weight_medium="30",armor_weight_scientific="25",armor_weight_heavy="25",armor_weight_powered_exo="5"}, ga_difficulty_master=section{tier="4",enemy_min="7",enemy_max="10",enemy_total_budget="100",player_gear_budget="15",player_medical_budget="8",primary_share_percent="80",medical_weight_bleed="15",medical_weight_health="40",medical_weight_boost="35",medical_weight_rare="10",weapon_weight_pistol="5",weapon_weight_smg="15",weapon_weight_shotgun="15",weapon_weight_rifle="50",weapon_weight_sniper="15",armor_weight_light="10",armor_weight_medium="25",armor_weight_scientific="25",armor_weight_heavy="35",armor_weight_powered_exo="5"} } }
     local layouts = { sections = { meta=section{schema_version="2",revision="2"}, ga_layout_rostok_arena_v1=section{level="l05_bar",actor_spawn_path="t_way",actor_look_path="t_look",opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_1_1",virtual_capacity="10",virtual_radii="1.5,2.5",max_height_delta="1.0",min_opponent_separation="1.75",min_actor_separation="8.0",max_base_distance="3.0"} } }
     if type(options.mutate) == "function" then options.mutate(catalog, difficulties, layouts, game_sections, system_sections) end
+    catalog.sections.meta = section{schema_version='10',revision='11',generator_version='11'}
+    for _, id in ipairs({ 'headlamp', 'nv_gen1', 'nv_gen2', 'nv_gen3' }) do
+        local device = catalog.sections['device_' .. id]
+        device.selection_weight, device.weight = device.weight, nil
+    end
+    if type(options.mutate_normalized) == 'function' then options.mutate_normalized(catalog, system_sections) end
     local factory = {
         open=function(path) if options.throw_open then error("fixture open failure") end; if string.find(path,"catalogs") then return catalog elseif string.find(path,"difficulties") then return difficulties else return layouts end end,
         section_exists=function(name) if options.throw_section_exists then error("fixture section failure") end; return game_sections[name] == true or (type(system_sections) == "table" and type(system_sections[name]) == "table") end,
@@ -142,6 +148,22 @@ end
 
 local function device_catalog_and_probability_boundaries()
     local snapshot = catalogs()
+    gamma_arena_test_assert.equals(snapshot.schema_version, 10, 'catalog schema')
+    gamma_arena_test_assert.equals(snapshot.revision, 11, 'catalog revision')
+    gamma_arena_test_assert.equals(snapshot.generator_version, 11, 'generator version')
+    local expected = {
+        headlamp={section='device_torch_dummy',selection_weight=50,effect=nil},
+        nv_gen1={section='device_torch_nv_1',selection_weight=25,effect='nightvision_1'},
+        nv_gen2={section='device_torch_nv_2',selection_weight=18,effect='nightvision_2'},
+        nv_gen3={section='device_torch_nv_3',selection_weight=7,effect='nightvision_3'}
+    }
+    for id, wanted in pairs(expected) do
+        local semantic = snapshot.devices[id]
+        gamma_arena_test_assert.equals(semantic.section, wanted.section, id .. ' exact section')
+        gamma_arena_test_assert.equals(semantic.selection_weight, wanted.selection_weight, id .. ' selection weight')
+        gamma_arena_test_assert.equals(semantic.weight, nil, id .. ' legacy weight removed')
+        gamma_arena_test_assert.equals(semantic.nv_effect, wanted.effect, id .. ' exact effect')
+    end
     gamma_arena_test_assert.equals(#snapshot.device_list, 4, "actor device allowlist has four entries")
     gamma_arena_test_assert.equals(snapshot.devices.headlamp.nv_effect, nil, "headlamp effect marker normalizes to nil")
     gamma_arena_test_assert.equals(snapshot.devices.nv_gen1.nv_effect, "nightvision_1", "Gen 1 effect remains exact")
@@ -169,6 +191,19 @@ local function device_catalog_and_probability_boundaries()
     gamma_arena_test_assert.equals(counts.device_torch_nv_3, 7, "Gen 3 complete-domain count")
 end
 
+local function device_generator_is_mode_free_and_deterministic()
+    local snapshot = catalogs()
+    local identity = { session_seed=77, fight_index=3, generator_version=11, layout_version=2 }
+    local first = gamma_arena_device_generator.generate(snapshot, identity)
+    local second = gamma_arena_device_generator.generate(snapshot, identity)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, 'mode-free device generation succeeds')
+    gamma_arena_test_assert.equals(first.value.section, second.value.section, 'mode-free device replay is deterministic')
+    identity.generator_version = 10
+    local stale = gamma_arena_device_generator.generate(snapshot, identity)
+    gamma_arena_test_assert.is_false(stale.ok, 'stale generator identity is rejected')
+    gamma_arena_test_assert.equals(stale.error.code, 'GA_DEVICE_ARGUMENT_INVALID', 'stale generator identity code')
+end
+
 local function device_generator_rejects_malformed_arguments()
     local snapshot = catalogs()
     for _, result in ipairs({
@@ -182,6 +217,16 @@ local function device_generator_rejects_malformed_arguments()
 end
 
 local function device_catalog_rejects_effective_mismatch()
+    local wrong_class = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_1={class='ARTEFACT',slot='9',nv_effect='nightvision_1'} } }))
+    gamma_arena_test_assert.is_false(wrong_class.ok, 'device catalog rejects non-TORCH_S class')
+    local wrong_effect = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_3={class='TORCH_S',slot='9',nv_effect='nightvision_2'} } }))
+    gamma_arena_test_assert.is_false(wrong_effect.ok, 'device catalog rejects mismatched NV effect')
+    local missing = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.devices.ids='headlamp,nv_gen1,nv_gen2' end }))
+    gamma_arena_test_assert.is_false(missing.ok, 'device catalog rejects missing device')
+    local extra = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.devices.ids='headlamp,nv_gen1,nv_gen2,nv_gen3,extra' end }))
+    gamma_arena_test_assert.is_false(extra.ok, 'device catalog rejects extra device')
+    local legacy = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.device_headlamp.weight='50' end }))
+    gamma_arena_test_assert.is_false(legacy.ok, 'device catalog rejects legacy weight field')
     local semantic = gamma_arena_catalog.load(fixture_factory({ mutate=function(catalog) catalog.sections.device_nv_gen3.weight="8" end }))
     gamma_arena_test_assert.is_false(semantic.ok, "device catalog rejects altered weight")
     local effective = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_2={class="TORCH_S",slot="10",nv_effect="nightvision_2"} } }))
@@ -1752,6 +1797,7 @@ function run(run_case_fn)
         { name="finite_integer_guards", fn=finite_integer_guards },
         { name="golden_fights_v8", fn=golden_fights_v8 }
     }
+    if not run_case_fn('device_generator_is_mode_free_and_deterministic', device_generator_is_mode_free_and_deterministic) then all_passed = false end
     for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed
 end

@@ -9,7 +9,13 @@ local CATEGORY_BY_KIND = {
     o_sci = "outfit", o_heavy = "outfit", o_helmet = "helmet"
 }
 
-local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
+local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade", "device" }
+local DEVICE_MANIFEST = {
+    headlamp={section='device_torch_dummy',kind='headlamp',selection_weight=50,nv_effect=nil},
+    nv_gen1={section='device_torch_nv_1',kind='gen1',selection_weight=25,nv_effect='nightvision_1'},
+    nv_gen2={section='device_torch_nv_2',kind='gen2',selection_weight=18,nv_effect='nightvision_2'},
+    nv_gen3={section='device_torch_nv_3',kind='gen3',selection_weight=7,nv_effect='nightvision_3'}
+}
 
 local PLAYABLE_LOADOUT_SECTIONS = {
     "shared", "stalker_loadout", "bandit_loadout", "ecolog_loadout",
@@ -189,6 +195,20 @@ local function medical_policy(legacy_catalog)
     return accepted
 end
 
+local function device_policy(legacy_catalog)
+    local accepted, count = {}, 0
+    for _, device in pairs(type(legacy_catalog) == 'table' and legacy_catalog.devices or {}) do
+        local expected = type(device) == 'table' and DEVICE_MANIFEST[device.id] or nil
+        if type(device) ~= 'table' or type(device.id) ~= 'string' or type(device.section) ~= 'string'
+            or expected == nil or device.section ~= expected.section or accepted[device.section] ~= nil
+            or device.kind ~= expected.kind or device.selection_weight ~= expected.selection_weight
+            or device.nv_effect ~= expected.nv_effect then return nil end
+        accepted[device.section] = device
+        count = count + 1
+    end
+    return count == 4 and accepted or nil
+end
+
 local function valid_slot(category, slot)
     if category == "weapon" then return slot == 1 or slot == 2 end
     if category == "knife" then return slot == 0 end
@@ -197,11 +217,13 @@ local function valid_slot(category, slot)
     return true
 end
 
-local function physical_candidate(source, section, accepted_medicine, accepted_grenades)
+local function physical_candidate(source, section, accepted_medicine, accepted_grenades, accepted_devices)
     local kind = system_string(source, section, "kind")
     local category = CATEGORY_BY_KIND[kind]
     if category == nil and accepted_medicine[section] ~= nil then category = "medicine" end
     if accepted_grenades[section] == true then category = "grenade" end
+    local device = accepted_devices[section]
+    if device ~= nil then category = "device" end
     if category == nil then return nil end
 
     local spawn_ok, spawnable = guarded(source, "section_spawnable", section)
@@ -228,6 +250,8 @@ local function physical_candidate(source, section, accepted_medicine, accepted_g
     if icon.x == nil or icon.y == nil or icon.width == nil or icon.height == nil then return nil end
 
     local slot = finite_integer(system_number(source, section, "slot"), 0)
+    if device ~= nil and (spawn_class ~= "TORCH_S" or slot ~= 9
+        or system_string(source, section, "nv_effect") ~= device.nv_effect) then return nil end
     if not valid_slot(category, slot) then return nil end
     if category == "ammo" or category == "medicine" then slot = slot or nil end
 
@@ -256,6 +280,12 @@ local function physical_candidate(source, section, accepted_medicine, accepted_g
         spawn_path = spawn_path,
         name_key = name_key
     }
+    if device ~= nil then
+        candidate.device_id = device.id
+        candidate.device_kind = device.kind
+        candidate.selection_weight = device.selection_weight
+        candidate.nv_effect = device.nv_effect
+    end
     if category == "weapon" then
         local ammo = {}
         for _, ammo_section in ipairs(split_csv(system_string(source, section, "ammo_class"))) do
@@ -272,7 +302,7 @@ local function physical_candidate(source, section, accepted_medicine, accepted_g
     return candidate
 end
 
-local function enumerate_physical_candidates(source, accepted_medicine, accepted_grenades)
+local function enumerate_physical_candidates(source, accepted_medicine, accepted_grenades, accepted_devices)
     local ok, sections = guarded(source, "enumerate_system_sections")
     if not ok or type(sections) ~= "table" then
         return nil, failure("GA_ITEM_CATALOG_ENUMERATION_FAILED", "Effective system sections could not be enumerated")
@@ -280,7 +310,7 @@ local function enumerate_physical_candidates(source, accepted_medicine, accepted
     sections = sorted_unique(sections)
     local candidates = {}
     for _, section in ipairs(sections) do
-        local candidate = physical_candidate(source, section, accepted_medicine, accepted_grenades)
+        local candidate = physical_candidate(source, section, accepted_medicine, accepted_grenades, accepted_devices)
         if candidate ~= nil then candidates[section] = candidate end
     end
 
@@ -399,6 +429,9 @@ local function price_candidates(candidates, overrides, gamma_prices, zero_grants
     local items = {}
     for section, item in pairs(candidates) do
         local override = overrides[section]
+        if item.category == "device" and override == nil then
+            return nil, failure("GA_ITEM_CATALOG_OVERRIDE_MISSING", "Exact physical device requires an explicit price override", { section=section })
+        end
         local gamma_price = gamma_prices[section]
         if override ~= nil then
             item.price = override
@@ -466,6 +499,10 @@ local function canonical_item_parts(parts, item_ids, items)
         canonical_add(parts, "price_origin", item.price_origin)
         canonical_add(parts, "weight_mg", item.weight_mg)
         canonical_add(parts, "ltx_slot", item.ltx_slot)
+        canonical_add(parts, "device_id", item.device_id)
+        canonical_add(parts, "device_kind", item.device_kind)
+        canonical_add(parts, "selection_weight", item.selection_weight)
+        canonical_add(parts, "nv_effect", item.nv_effect)
         canonical_array(parts, "ammo_sections", item.ammo_sections)
         canonical_add(parts, "box_size", item.box_size)
         canonical_add(parts, "helmet_allowed", item.helmet_allowed)
@@ -534,11 +571,11 @@ end
 
 local function fingerprint(item_ids, items, rank_catalog, base_carry_weight)
     local parts = {}
-    canonical_add(parts, "domain", "ga-catalog-v9")
+    canonical_add(parts, "domain", "ga-catalog-v10")
     canonical_add(parts, "base_carry_weight", base_carry_weight)
     canonical_item_parts(parts, item_ids, items)
     canonical_rank_parts(parts, rank_catalog)
-    return "ga-catalog-v9-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
+    return "ga-catalog-v10-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
 end
 
 local function valid_inputs(source, legacy_catalog, rank_catalog)
@@ -578,8 +615,13 @@ local function load_impl(source, legacy_catalog, rank_catalog)
     for _, grenade in ipairs(legacy_catalog.actor_grenade_list or {}) do
         if type(grenade) == "table" and type(grenade.section) == "string" then accepted_grenades[grenade.section] = true end
     end
-    local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog), accepted_grenades)
+    local accepted_devices = device_policy(legacy_catalog)
+    if accepted_devices == nil then return failure('GA_ITEM_CATALOG_DEVICE_INVALID', 'Semantic device allowlist is invalid') end
+    local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog), accepted_grenades, accepted_devices)
     if candidates == nil then return candidate_error end
+    for section in pairs(accepted_devices) do
+        if candidates[section] == nil then return failure('GA_ITEM_CATALOG_DEVICE_INVALID', 'Exact physical device is invalid', { section=section }) end
+    end
     local overrides, override_error = load_price_overrides(source)
     if overrides == nil then return override_error end
     local gamma_prices, zero_grants, grant_error = load_gamma_prices(source)
@@ -614,9 +656,9 @@ local function load_impl(source, legacy_catalog, rank_catalog)
     catalog.max_selected_grenades = rank_catalog.max_selected_grenades
     catalog.max_quantity_per_grenade = rank_catalog.max_quantity_per_grenade
     catalog.second_grenade_price_multiplier = rank_catalog.second_grenade_price_multiplier
-    catalog.schema_version = 9
-    catalog.revision = 10
-    catalog.generator_version = 10
+    catalog.schema_version = 10
+    catalog.revision = 11
+    catalog.generator_version = 11
     catalog.base_carry_weight = base_carry_weight
     catalog.fingerprint = fingerprint(item_ids, items, rank_catalog, base_carry_weight)
     return gamma_arena_result.ok(catalog)

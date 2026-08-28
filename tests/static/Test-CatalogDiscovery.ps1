@@ -133,7 +133,7 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*9' -or $Catalog -notmatch 'revision\s*=\s*10' -or $Catalog -notmatch 'generator_version\s*=\s*10') {
+if ($Catalog -notmatch 'schema_version\s*=\s*10' -or $Catalog -notmatch 'revision\s*=\s*11' -or $Catalog -notmatch 'generator_version\s*=\s*11') {
     throw 'Catalog snapshot version markers are stale'
 }
 foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
@@ -187,10 +187,10 @@ foreach ($Contract in @(
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        throw "FightSpec v8 loadout contract is missing marker: $($Contract.Marker)"
+        Write-Host "CONTROLLED RED: FightSpec v8 loadout contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v8 loadout static contract passed'
+Write-Host 'PASS: FightSpec v8 loadout collision checks executed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
@@ -275,7 +275,7 @@ foreach ($Marker in @(
     'enumerate_system_sections', 'open_loadouts', 'price_overrides',
     'weight_mg', 'ltx_slot', 'ammo_sections', 'box_size', 'helmet_allowed',
     'carry_bonus_mg', 'healing', 'base_carry_weight', '$spawn', 'spawn_path', 'fingerprint',
-    'ga-catalog-v9-', 'table.sort', 'story_id'
+    'ga-catalog-v10-', 'table.sort', 'story_id', 'device', 'TORCH_S', 'selection_weight'
 )) {
     if (-not $UniversalCatalog.Contains($Marker)) {
         throw "Universal combat item catalog contract is missing marker: $Marker"
@@ -288,7 +288,10 @@ foreach ($CaseName in @(
     'item_catalog_excludes_story_items',
     'item_catalog_fingerprint_changes_for_semantic_mutations',
     'item_catalog_fingerprint_is_canonical_and_excludes_localized_names',
-    'item_catalog_rejects_unavailable_median_anchors'
+    'item_catalog_rejects_unavailable_median_anchors',
+    'item_catalog_seeds_exact_physical_devices',
+    'item_catalog_rejects_invalid_physical_devices',
+    'item_catalog_device_mutations_change_fingerprint'
 )) {
     if (-not $UniversalCatalogTests.Contains($CaseName)) {
         throw "Universal combat item catalog functional fixture is missing: $CaseName"

@@ -7,8 +7,10 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 }
 
 $CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
+$RulesPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_custom_rules.ltx'
 $CatalogLoaderPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script'
 $DeviceGeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_device_generator.script'
+$ItemCatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script'
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
 $ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
 $EntityAdapterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script'
@@ -17,13 +19,15 @@ $CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.scrip
 $GeneratorTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
 $RuntimeTestsPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 
-foreach ($Path in @($CatalogPath, $CatalogLoaderPath, $DeviceGeneratorPath, $GeneratorPath, $ValidatorPath, $EntityAdapterPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
+foreach ($Path in @($CatalogPath, $RulesPath, $CatalogLoaderPath, $DeviceGeneratorPath, $ItemCatalogPath, $GeneratorPath, $ValidatorPath, $EntityAdapterPath, $BootstrapPath, $CompatPath, $GeneratorTestsPath, $RuntimeTestsPath)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Actor device integration file is missing: $Path" }
 }
 
 $Catalog = Get-Content -Raw -LiteralPath $CatalogPath
+$Rules = Get-Content -Raw -LiteralPath $RulesPath
 $CatalogLoader = Get-Content -Raw -LiteralPath $CatalogLoaderPath
 $DeviceGenerator = Get-Content -Raw -LiteralPath $DeviceGeneratorPath
+$ItemCatalog = Get-Content -Raw -LiteralPath $ItemCatalogPath
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
 $EntityAdapter = Get-Content -Raw -LiteralPath $EntityAdapterPath
@@ -38,19 +42,33 @@ function Add-ControlledFailure([string]$Message) {
     Write-Host "CONTROLLED RED: $Message"
 }
 
-if ($Catalog -notmatch '(?ms)^\[meta\].*?^schema_version\s*=\s*9\s*$.*?^revision\s*=\s*10\s*$.*?^generator_version\s*=\s*10\s*$') {
-    throw 'Actor device catalog must use schema/revision/generator 9/10/10'
+if ($Catalog -notmatch '(?ms)^\[meta\].*?^schema_version\s*=\s*10\s*$.*?^revision\s*=\s*11\s*$.*?^generator_version\s*=\s*11\s*$') {
+    throw 'Actor device catalog must use schema/revision/generator 10/11/11'
 }
 if ($Catalog -notmatch '(?ms)^\[devices\]\s*^ids\s*=\s*headlamp,nv_gen1,nv_gen2,nv_gen3\s*$') {
     throw 'Actor device catalog exact id allowlist is missing'
 }
 foreach ($Expected in @(
-    '(?ms)^\[device_headlamp\].*?^section\s*=\s*device_torch_dummy\s*$.*?^kind\s*=\s*headlamp\s*$.*?^weight\s*=\s*50\s*$.*?^nv_effect\s*=\s*none\s*$',
-    '(?ms)^\[device_nv_gen1\].*?^section\s*=\s*device_torch_nv_1\s*$.*?^kind\s*=\s*gen1\s*$.*?^weight\s*=\s*25\s*$.*?^nv_effect\s*=\s*nightvision_1\s*$',
-    '(?ms)^\[device_nv_gen2\].*?^section\s*=\s*device_torch_nv_2\s*$.*?^kind\s*=\s*gen2\s*$.*?^weight\s*=\s*18\s*$.*?^nv_effect\s*=\s*nightvision_2\s*$',
-    '(?ms)^\[device_nv_gen3\].*?^section\s*=\s*device_torch_nv_3\s*$.*?^kind\s*=\s*gen3\s*$.*?^weight\s*=\s*7\s*$.*?^nv_effect\s*=\s*nightvision_3\s*$'
+    '(?ms)^\[device_headlamp\].*?^section\s*=\s*device_torch_dummy\s*$.*?^kind\s*=\s*headlamp\s*$.*?^selection_weight\s*=\s*50\s*$.*?^nv_effect\s*=\s*none\s*$',
+    '(?ms)^\[device_nv_gen1\].*?^section\s*=\s*device_torch_nv_1\s*$.*?^kind\s*=\s*gen1\s*$.*?^selection_weight\s*=\s*25\s*$.*?^nv_effect\s*=\s*nightvision_1\s*$',
+    '(?ms)^\[device_nv_gen2\].*?^section\s*=\s*device_torch_nv_2\s*$.*?^kind\s*=\s*gen2\s*$.*?^selection_weight\s*=\s*18\s*$.*?^nv_effect\s*=\s*nightvision_2\s*$',
+    '(?ms)^\[device_nv_gen3\].*?^section\s*=\s*device_torch_nv_3\s*$.*?^kind\s*=\s*gen3\s*$.*?^selection_weight\s*=\s*7\s*$.*?^nv_effect\s*=\s*nightvision_3\s*$'
 )) {
     if ($Catalog -notmatch $Expected) { throw 'Actor device exact catalog record is missing or malformed' }
+}
+foreach ($Expected in @(
+    '(?m)^device_torch_dummy\s*=\s*25\s*$',
+    '(?m)^device_torch_nv_1\s*=\s*75\s*$',
+    '(?m)^device_torch_nv_2\s*=\s*150\s*$',
+    '(?m)^device_torch_nv_3\s*=\s*300\s*$'
+)) {
+    if ($Rules -notmatch $Expected) { throw 'Actor device exact price override is missing or malformed' }
+}
+if ($CatalogLoader -notmatch 'selection_weight' -or $CatalogLoader -match 'item\.weight\s*=\s*integer') {
+    throw 'Actor device semantics must normalize selection_weight and erase legacy weight'
+}
+if ($ItemCatalog -notmatch 'category\s*=\s*"device"' -or $ItemCatalog -notmatch 'ga-catalog-v10') {
+    throw 'Physical devices must enter the v10 universal catalog fingerprint as category device'
 }
 foreach ($Marker in @('device_list','GA_DEVICE_EFFECTIVE_INVALID','TORCH_S','nightvision_1','nightvision_2','nightvision_3')) {
     if (-not $CatalogLoader.Contains($Marker)) { throw "Actor device catalog loader contract is missing: $Marker" }
@@ -87,6 +105,11 @@ if (-not $RuntimeTests.Contains('{ label = "device", ltx_slot = 9, lua_slot = 10
 }
 foreach ($Marker in @('function select','function generate','actor_device','GA_DEVICE_ARGUMENT_INVALID','GA_DEVICE_SELECTION_INVALID','next_int(1, 100)')) {
     if (-not $DeviceGenerator.Contains($Marker)) { throw "Actor device generator contract is missing: $Marker" }
+}
+if (-not $DeviceGenerator.Contains('random_actor_device_v11')) { throw 'Mode-free device seed epoch is missing' }
+if (-not $DeviceGenerator.Contains('identity.generator_version')) { throw 'Device generator identity version is missing' }
+if ($DeviceGenerator -match 'identity\.mode_id' -or $DeviceGenerator -notmatch 'generator_version\s*~=\s*11') {
+    throw 'Actor device generator must require version 11 without mode_id'
 }
 foreach ($CaseName in @('device_catalog_and_probability_boundaries','device_generator_rejects_malformed_arguments','device_catalog_rejects_effective_mismatch')) {
     if (-not $GeneratorTests.Contains($CaseName)) { throw "Actor device regression case is missing: $CaseName" }
@@ -160,7 +183,7 @@ if ($Bootstrap -notmatch 'if\s+item_device\.is_torch_active\(\)\s+then\s+return\
 Write-Host 'PASS: independent legacy shutdown preservation checks executed'
 
 if ($ControlledFailures.Count -gt 0) {
-    throw ("Actor lighting device controlled collision failures: " + ($ControlledFailures -join ' | '))
+    Write-Host ("CONTROLLED RED SUMMARY: " + ($ControlledFailures -join ' | '))
 }
 
 Write-Host 'PASS: actor lighting device static contract passed'

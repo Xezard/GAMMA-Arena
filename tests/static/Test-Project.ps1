@@ -213,8 +213,8 @@ $Task1RankScriptContracts = @(
 )
 
 $Task2ItemScriptContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v9-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint') }
 )
 
 $Task6RandomDraftContracts = @(
@@ -548,7 +548,7 @@ if (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_aren
     Assert-True ($Task7BuilderIdentityIndex -ge 0 -and $Task7BuilderIdentityIndex -lt $Task7BuilderDraftIndex) 'Task 7 builder must reject the wrong catalog identity before random draft generation.'
 }
 $Task7CatalogMetadata = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx') -Raw
-Assert-True ($Task7CatalogMetadata -match '(?ms)\[meta\].*?schema_version\s*=\s*9\s*.*?revision\s*=\s*10\s*.*?generator_version\s*=\s*10') 'Task 7 catalog identity must be 9/10/10.'
+Assert-True ($Task7CatalogMetadata -match '(?ms)\[meta\].*?schema_version\s*=\s*10\s*.*?revision\s*=\s*11\s*.*?generator_version\s*=\s*11') 'Task 7 catalog identity must be 10/11/11.'
 $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
 foreach ($Marker in @('universal_v8_random_fight_activation', 'gamma_arena_fight_builder.generate', 'schema_version, 8', 'generator_version, 10', '"ga8-"', 'mode_id, nil', 'actor.items', 'opponents[1].items')) {
     Assert-True ($Task7GeneratorTest -match [regex]::Escape($Marker)) "Task 7 executable activation test is missing: $Marker"
@@ -1762,9 +1762,9 @@ if (Test-Path -LiteralPath $FightSpecV3Path) {
 }
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
-    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*9\s*$') 'Catalog must declare schema_version = 9'
-    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*10\s*$') 'Catalog must declare revision = 10'
-    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*10\s*$') 'Catalog must declare generator_version = 10'
+    Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*10\s*$') 'Catalog must declare schema_version = 10'
+    Assert-True ($CatalogContent -match '(?m)^revision\s*=\s*11\s*$') 'Catalog must declare revision = 11'
+    Assert-True ($CatalogContent -match '(?m)^generator_version\s*=\s*11\s*$') 'Catalog must declare generator_version = 11'
     Assert-True (([regex]::Matches($CatalogContent, '(?m)^section\s*=\s*wpn_knife[2-9]?\s*$')).Count -eq 9) 'Knife catalog must contain exactly the nine installed GAMMA knife sections'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_novice\]\s+section\s*=\s*novice_outfit\s+cost\s*=\s*1\s+armor_class\s*=\s*light\s*$') 'Novice outfit must declare the light armor class'
     Assert-True ($CatalogContent -match '(?ms)^\[outfit_stalker\]\s+section\s*=\s*stalker_outfit\s+cost\s*=\s*3\s+armor_class\s*=\s*medium\s*$') 'Stalker outfit must declare the medium armor class'
@@ -2567,7 +2567,7 @@ $Task7RussianTextPath = Join-Path $RepoRoot 'src\gamedata\configs\text\rus\st_ga
 if ((Test-Path -LiteralPath $Task7CatalogPath) -and (Test-Path -LiteralPath $Task7DifficultyPath)) {
     $Task7CatalogContent = Get-Content -LiteralPath $Task7CatalogPath -Raw
     $Task7DifficultyContent = Get-Content -LiteralPath $Task7DifficultyPath -Raw
-    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*9\s*.*?revision\s*=\s*10\s*.*?generator_version\s*=\s*10') 'Universal catalog metadata must use schema 9, revision 10, and generator 10.'
+    Assert-True ($Task7CatalogContent -match '(?ms)\[meta\].*?schema_version\s*=\s*10\s*.*?revision\s*=\s*11\s*.*?generator_version\s*=\s*11') 'Universal catalog metadata must use schema 10, revision 11, and generator 11.'
     Assert-True ($Task7DifficultyContent -match '(?ms)\[meta\].*?schema_version\s*=\s*4\s*.*?revision\s*=\s*5') 'Weighted player loadouts must retain difficulty schema 4 and revision 5.'
     Assert-True ($Task7DifficultyContent -notmatch '(?m)^player_loadout_budget\s*=') 'Difficulty catalog must expose only separate gear and medical budgets.'
 }
