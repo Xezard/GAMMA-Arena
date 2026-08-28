@@ -175,6 +175,7 @@ edit -> Test-GammaArena.ps1 -> Deploy-GammaArenaDev.ps1 -> launch through MO2 ->
 - `tools/` — build, deployment, compatibility, and log-reading scripts.
 - `schemas/` — versioned session, state, manifest, and FightSpec contracts.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
+- [Arena balance dashboard](ARENA_BALANCE.md) - generated Arena balance reference.
 
 Generated packages, build output, logs, and deployment state stay outside Git.
 

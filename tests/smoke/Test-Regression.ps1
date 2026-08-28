@@ -756,7 +756,6 @@ function run() end
     Write-FixtureFile $Root 'tests\fixtures\settings-v0.ltx' "[gamma_arena]`nlast_difficulty_id = veteran`nlast_seed_mode = manual"
     Write-FixtureFile $Root 'tests\fixtures\settings-v1.ltx' "[gamma_arena]`nsettings_schema_version = 1`nlast_difficulty_id = master`nlast_seed_mode = random"
     Write-FixtureFile $Root 'schemas\session-v1.md' 'session_nonce checkpoint_name resume_session_nonce FightSpec FightRegistry ResumeIntent non-durable ga1:<issued_at_epoch>:<nonce> 600'
-    Write-FixtureFile $Root 'docs\compatibility.md' 'fixture'
 
     # Keep the positive baseline aligned with the current versioned combat-loop
     # contracts. Negative fixtures below overwrite only the file under test.

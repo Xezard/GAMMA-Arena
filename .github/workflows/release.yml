@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Show runner tools
+        run: |
+          $PSVersionTable.PSVersion
+          gh --version
+
+      - name: Extract release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          & .\tools\Get-GammaArenaReleaseNotes.ps1 -Tag $env:RELEASE_TAG -OutputPath .\build\release-notes.md
+          $version = (Get-Content -LiteralPath .\VERSION -Raw).Trim()
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release package
+        run: .\tools\Build-GammaArena.ps1 -Configuration Release
+
+      - name: Locate release asset
+        run: |
+          $asset = Join-Path $PWD "dist\Gamma-Arena-v$env:RELEASE_VERSION-MO2.zip"
+          if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+            throw "Release asset is missing: $asset"
+          }
+          "RELEASE_ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET
+          --verify-tag
+          --title "Gamma Arena $env:RELEASE_TAG"
+          --notes-file .\build\release-notes.md

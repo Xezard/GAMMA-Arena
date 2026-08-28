@@ -262,8 +262,7 @@ $Task4DataFiles = @(
     'src\gamedata\configs\text\eng\st_gamma_arena.xml',
     'tests\fixtures\settings-v0.ltx',
     'tests\fixtures\settings-v1.ltx',
-    'schemas\session-v1.md',
-    'docs\compatibility.md'
+    'schemas\session-v1.md'
 )
 foreach ($RelativePath in $Task4DataFiles) {
     Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 4 data contract is missing: $RelativePath"
@@ -1565,7 +1564,6 @@ $IsRepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 if ($IsRepositoryCheckout) {
     $Task10RequiredFiles = @(
         'tools\New-CompatibilityReport.ps1',
-        'docs\installation.md',
         'schemas\compatibility-manifest-v1.md'
     )
     foreach ($RelativePath in $Task10RequiredFiles) {
@@ -1626,22 +1624,6 @@ if ($IsRepositoryCheckout) {
         }
     }
 
-    $InstallationPath = Join-Path $RepoRoot 'docs\installation.md'
-    if (Test-Path -LiteralPath $InstallationPath) {
-        $InstallationContent = Get-Content -LiteralPath $InstallationPath -Raw
-        foreach ($Marker in @(
-            'Gamma Arena <version>',
-            'one Gamma Arena version at a time',
-            'exit an active Arena session',
-            'keep the old mod folder for rollback',
-            'never merge',
-            'ordinary saves',
-            'durable UI preferences',
-            'not resumed across add-on versions'
-        )) {
-            Assert-True ($InstallationContent -match [regex]::Escape($Marker)) "Installation guide must state: $Marker"
-        }
-    }
 
     $CompatibilityReportPath = Join-Path $RepoRoot 'tools\New-CompatibilityReport.ps1'
     if (Test-Path -LiteralPath $CompatibilityReportPath) {

@@ -10,7 +10,7 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
 }
 if ([string]::IsNullOrWhiteSpace($DocumentPath)) {
-    $DocumentPath = Join-Path $RepoRoot 'docs\arena-balance.md'
+    $DocumentPath = Join-Path $RepoRoot 'ARENA_BALANCE.md'
 }
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 $DocumentPath = [IO.Path]::GetFullPath($DocumentPath)

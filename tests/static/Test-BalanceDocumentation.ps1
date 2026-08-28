@@ -13,7 +13,9 @@ if (-not (Test-Path -LiteralPath $ToolPath)) {
     throw 'Arena balance document generator is missing'
 }
 
-$RepositoryDocument = [IO.File]::ReadAllText((Join-Path $RepoRoot 'docs\arena-balance.md'))
+$RepositoryDocumentPath = Join-Path $RepoRoot 'ARENA_BALANCE.md'
+& $ToolPath -RepoRoot $RepoRoot -DocumentPath $RepositoryDocumentPath -Verify
+$RepositoryDocument = [IO.File]::ReadAllText($RepositoryDocumentPath)
 if (([regex]::Matches($RepositoryDocument, '(?m)^```').Count % 2) -ne 0) {
     throw 'Arena balance document has unbalanced Markdown fences'
 }
@@ -27,7 +29,7 @@ foreach ($Marker in @('device_torch_dummy','device_torch_nv_1','device_torch_nv_
     if (-not $RepositoryDocument.Contains($Marker)) { throw "Arena balance device documentation is missing: $Marker" }
 }
 $Readme = [IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
-if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
+if ($Readme -notmatch '\[Arena balance dashboard\]\(ARENA_BALANCE\.md\)') {
     throw 'README does not link the Arena balance dashboard'
 }
 $StandardSuite = [IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'))
@@ -57,8 +59,7 @@ function New-BalanceFixture([string]$SourceRoot) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Target) | Out-Null
         Copy-Item -LiteralPath (Join-Path $SourceRoot $RelativePath) -Destination $Target
     }
-    $Document = Join-Path $FixtureRoot 'docs\arena-balance.md'
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Document) | Out-Null
+    $Document = Join-Path $FixtureRoot 'ARENA_BALANCE.md'
     [IO.File]::WriteAllText($Document, @'
 # Gamma Arena balance
 
@@ -391,7 +392,7 @@ function Assert-DerivedBalanceInvariants([string]$FixtureRoot, [string]$Document
 
 $Fixture = New-BalanceFixture $RepoRoot
 try {
-    $Document = Join-Path $Fixture 'docs\arena-balance.md'
+    $Document = Join-Path $Fixture 'ARENA_BALANCE.md'
     & $ToolPath -RepoRoot $Fixture
     $First = [IO.File]::ReadAllText($Document)
     if ($First.Contains("`r")) {
