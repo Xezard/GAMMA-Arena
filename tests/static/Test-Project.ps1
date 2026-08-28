@@ -2011,6 +2011,13 @@ if (Test-Path -LiteralPath $GoldenV8Path) {
     Assert-True ($GoldenV8Content -match 'generator_version=10\|catalog_revision=10' -and $GoldenV8Content -match 'fight_id=ga-[^|]+-g10-c10-l2') 'Golden v8 fixture must use active generator/catalog identity 10/10'
     Assert-True ($GoldenV8Content -match ',device:(headlamp|nv_gen1|nv_gen2|nv_gen3):device_torch_') 'Golden v8 fixture must encode the deterministic actor device'
 }
+$Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+$Task5RuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$UniversalDeviceLifecycleCase = 'runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback'
+$UniversalDeviceLifecycleRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($UniversalDeviceLifecycleCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($UniversalDeviceLifecycleCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task5RuntimeContent, $UniversalDeviceLifecycleRegistration)).Count -eq 1) "Universal actor-device lifecycle case must be registered exactly: $UniversalDeviceLifecycleCase -> $UniversalDeviceLifecycleCase"
+Assert-True ($Task5BootstrapContent -match '(?s)function\s+new_actor_item_port\(ports\).*?shutdown_device.*?ports\.release_item') 'Universal actor-item cleanup/rollback must shut down global actor-device state before owned release.'
+Assert-True (([regex]::Matches($Task5BootstrapContent, 'shutdown_device\s*=\s*shutdown_actor_device')).Count -ge 2) 'Legacy and universal actor-item ports must share the production actor-device shutdown seam.'
 
 $Task2RunnerPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runner.script'
 $Task2LogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_log.script'

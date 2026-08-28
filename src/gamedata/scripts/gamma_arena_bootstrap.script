@@ -469,6 +469,11 @@ function new_actor_item_port(ports)
     local state = { name = "IDLE", summary = nil }
     local transaction = nil
 
+    local function shutdown_device()
+        if type(ports.shutdown_device) ~= "function" then return gamma_arena_result.ok(true) end
+        return actor_loadout_call("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", ports.shutdown_device, nil, nil, nil)
+    end
+
     local function copy_records(records)
         local values = {}
         for index, record in ipairs(records) do
@@ -592,6 +597,11 @@ function new_actor_item_port(ports)
         magazine_ammo = function(weapon) return ports.magazine_ammo(weapon) end,
         activate_slot = function(owner, slot) return ports.activate_slot(owner, slot) end,
         rollback = function(entity, record)
+            local neutralized = shutdown_device()
+            if not neutralized.ok then return neutralized end
+            if neutralized.value ~= true then
+                return actor_loadout_failure("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Global actor-device state remains active before universal rollback")
+            end
             local rollback_record = record
             local exact
             if type(rollback_record) == "table" then
@@ -647,6 +657,11 @@ function new_actor_item_port(ports)
     end
 
     local function cleanup()
+        local neutralized = shutdown_device()
+        if not neutralized.ok then return neutralized end
+        if neutralized.value ~= true then
+            return gamma_arena_result.ok({ pending = true, stage = "actor_device" })
+        end
         if #owned_records == 0 then
             state = { name = "CLEAN", summary = nil }
             return gamma_arena_result.ok(true)
@@ -1523,6 +1538,26 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         end
         return session.session_id .. ":" .. session.session_nonce
     end
+    local function shutdown_actor_device(item, id, section)
+        if type(item_device) ~= "table" or type(item_device.is_nv_active) ~= "function"
+            or type(item_device.set_nightvision) ~= "function" or type(item_device.is_torch_active) ~= "function"
+            or type(item_device.toggle_torch) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Installed item_device shutdown API is unavailable", { id = id, section = section })
+        end
+        if item_device.is_nv_active() then item_device.set_nightvision(section, false) end
+        if item_device.is_nv_active() then return gamma_arena_result.ok(false) end
+        local active_torch = item_device.is_torch_active()
+        if active_torch and (id == nil or active_torch == id) then
+            item_device.toggle_torch()
+            -- toggle_torch derives its next state from the current slot-10
+            -- object. If that object changed during teardown, clear the state
+            -- it just selected instead of reporting a foreign torch as safe.
+            if item_device.is_torch_active() then item_device.toggle_torch() end
+        end
+        if item ~= nil then item:enable_torch(false) end
+        if item_device.is_torch_active() then return gamma_arena_result.ok(false) end
+        return gamma_arena_result.ok(true)
+    end
     local loadout = new_actor_loadout_port({
         clock = function() return time_global() end,
         timeout_ms = 5000,
@@ -1580,25 +1615,7 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         item_in_slot = function(actor, slot) return actor:item_in_slot(slot) end,
         set_item_condition = function(item, value) return item:set_condition(value) end,
         item_condition = function(item) return item:condition() end,
-        shutdown_device = function(item, id, section)
-            if type(item_device) ~= "table" or type(item_device.is_nv_active) ~= "function"
-                or type(item_device.set_nightvision) ~= "function" or type(item_device.is_torch_active) ~= "function"
-                or type(item_device.toggle_torch) ~= "function" then
-                return gamma_arena_result.err("GA_ACTOR_DEVICE_SHUTDOWN_FAILED", "Installed item_device shutdown API is unavailable", { id = id, section = section })
-            end
-            if item_device.is_nv_active() then item_device.set_nightvision(section, false) end
-            if item_device.is_nv_active() then return gamma_arena_result.ok(false) end
-            if item_device.is_torch_active() == id then
-                item_device.toggle_torch()
-                -- toggle_torch derives its next state from the current slot-10
-                -- object. If that object changed during teardown, clear the state
-                -- it just selected instead of reporting a foreign torch as safe.
-                if item_device.is_torch_active() then item_device.toggle_torch() end
-            end
-            if item ~= nil then item:enable_torch(false) end
-            if item_device.is_torch_active() then return gamma_arena_result.ok(false) end
-            return gamma_arena_result.ok(true)
-        end,
+        shutdown_device = shutdown_actor_device,
         set_ammo_elapsed = function(weapon, count) return weapon:set_ammo_elapsed(count) end,
         get_ammo_in_magazine = function(weapon) return weapon:get_ammo_in_magazine() end,
         make_item_active = function(actor, item) return actor:make_item_active(item) end,
@@ -1835,6 +1852,7 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             if not called then return gamma_arena_result.err("GA_ACTOR_ITEMS_RESOLVE_FAILED", "ALife current-object resolver failed safely", { id = id, reason = tostring(value) }) end
             return gamma_arena_result.ok(value)
         end,
+        shutdown_device = shutdown_actor_device,
         release_item = function(id)
             if safe_release_manager == nil or type(safe_release_manager.release) ~= "function" then
                 return gamma_arena_result.err("GA_ACTOR_ITEMS_RELEASE_FAILED", "safe_release_manager.release is unavailable")

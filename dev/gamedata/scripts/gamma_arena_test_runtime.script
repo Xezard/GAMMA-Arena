@@ -10279,6 +10279,7 @@ local function task11_production_item_ports(options)
         slots = {},
         magazines = {},
         releases = {},
+        lifecycle = {},
         active_slot = nil,
         tag_writes = 0,
         tag_reads = 0
@@ -10346,13 +10347,40 @@ local function task11_production_item_ports(options)
         magazine_ammo = function(weapon) return env.magazines[weapon.runtime_id] end,
         activate_slot = function(owner, slot) env.active_slot = slot; return true end,
         resolve_entity = function(id) return env.by_id[id] end,
+        shutdown_device = function(item, id, section)
+            env.lifecycle[#env.lifecycle + 1] = "shutdown"
+            return gamma_arena_result.ok(true)
+        end,
         release_item = function(id)
+            env.lifecycle[#env.lifecycle + 1] = "release:" .. tostring(id)
             env.releases[#env.releases + 1] = id
             env.by_id[id] = nil
             return true
         end
     }
     return env, ports
+end
+
+local function runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+
+    local cleanup_env, cleanup_ports = task11_production_item_ports()
+    local cleanup_items = gamma_arena_bootstrap.new_actor_item_port(cleanup_ports)
+    local applied = cleanup_items:apply(owner, { { section = "medkit", quantity = 1 } }, catalog)
+    gamma_arena_test_assert.is_true(applied.ok, "no-device universal fixture materializes")
+    cleanup_env.lifecycle = {}
+    local cleaned = cleanup_items:cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok, "no-device universal cleanup remains safe")
+    gamma_arena_test_assert.equals(cleanup_env.lifecycle[1], "shutdown", "universal cleanup shuts down global actor-device state before release")
+    gamma_arena_test_assert.is_true(string.find(cleanup_env.lifecycle[2] or "", "^release:") ~= nil, "universal cleanup releases only after shutdown")
+
+    local rollback_env, rollback_ports = task11_production_item_ports({ fail_slot = "outfit" })
+    local rollback_items = gamma_arena_bootstrap.new_actor_item_port(rollback_ports)
+    local failed = rollback_items:apply(owner, { { section = "outfit", quantity = 1, equipped_slot = "outfit" } }, catalog)
+    gamma_arena_test_assert.is_false(failed.ok, "universal equip failure enters rollback")
+    gamma_arena_test_assert.equals(rollback_env.lifecycle[1], "shutdown", "universal rollback shuts down global actor-device state before release")
+    gamma_arena_test_assert.is_true(string.find(rollback_env.lifecycle[2] or "", "^release:") ~= nil, "universal rollback releases only after shutdown")
 end
 
 local function runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type()
@@ -10775,6 +10803,7 @@ local cases = {
     { name = "runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation", fn = runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation },
     { name = "runtime_universal_items_rollback_failure_aggregates_original_cause", fn = runtime_universal_items_rollback_failure_aggregates_original_cause },
     { name = "runtime_universal_items_weapon1_activation_fallback", fn = runtime_universal_items_weapon1_activation_fallback },
+    { name = "runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback", fn = runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback },
     { name = "runtime_entity_exact_rank_precedes_friend_tactical_and_hostility", fn = runtime_entity_exact_rank_precedes_friend_tactical_and_hostility },
     { name = "runtime_entity_adjacent_rank_readback_blocks_hostility", fn = runtime_entity_adjacent_rank_readback_blocks_hostility },
     { name = "runtime_save_guard_installs_only_after_launch_ownership", fn = runtime_save_guard_installs_only_after_launch_ownership },

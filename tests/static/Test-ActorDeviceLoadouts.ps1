@@ -31,6 +31,12 @@ $Bootstrap = Get-Content -Raw -LiteralPath $BootstrapPath
 $Compat = Get-Content -Raw -LiteralPath $CompatPath
 $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestsPath
 $RuntimeTests = Get-Content -Raw -LiteralPath $RuntimeTestsPath
+$ControlledFailures = New-Object System.Collections.Generic.List[string]
+
+function Add-ControlledFailure([string]$Message) {
+    $ControlledFailures.Add($Message)
+    Write-Host "CONTROLLED RED: $Message"
+}
 
 if ($Catalog -notmatch '(?ms)^\[meta\].*?^schema_version\s*=\s*9\s*$.*?^revision\s*=\s*10\s*$.*?^generator_version\s*=\s*10\s*$') {
     throw 'Actor device catalog must use schema/revision/generator 9/10/10'
@@ -95,20 +101,39 @@ foreach ($Assertion in @(
 }
 
 foreach ($Marker in @('gamma_arena_device_generator.generate','schema_version = 8','FightSpecV8','device:')) {
-    if (-not $Generator.Contains($Marker)) { throw "FightSpec v8 actor device generator contract is missing: $Marker" }
+    if (-not $Generator.Contains($Marker)) { Add-ControlledFailure "FightSpec v8 actor device generator contract is missing: $Marker" }
 }
 foreach ($Marker in @('GA_LOADOUT_DEVICE_INVALID','gamma_arena_device_generator.generate','spec.schema_version ~= 8','copy_device')) {
-    if (-not $Validator.Contains($Marker)) { throw "FightSpec v8 actor device validator contract is missing: $Marker" }
+    if (-not $Validator.Contains($Marker)) { Add-ControlledFailure "FightSpec v8 actor device validator contract is missing: $Marker" }
 }
 foreach ($CaseName in @('actor_device_is_difficulty_independent_and_stable','validator_rejects_forged_actor_devices','validator_copies_actor_device')) {
-    if (-not $GeneratorTests.Contains($CaseName)) { throw "FightSpec v8 actor device regression case is missing: $CaseName" }
+    if (-not $GeneratorTests.Contains($CaseName)) { Add-ControlledFailure "FightSpec v8 actor device regression case is missing: $CaseName" }
 }
 foreach ($Marker in @('loadout.device.catalog_id','loadout.device.section','loadout.device.kind','loadout.device.weight','loadout.device.nv_effect','device = device')) {
-    if (-not $EntityAdapter.Contains($Marker)) { throw "EntityAdapter actor device copy contract is missing: $Marker" }
+    if (-not $EntityAdapter.Contains($Marker)) { Add-ControlledFailure "EntityAdapter actor device copy contract is missing: $Marker" }
 }
 if (-not $RuntimeTests.Contains('runtime_entity_preserves_actor_device_across_copy')) {
     throw 'EntityAdapter runtime regression must preserve the exact actor device across the FightSpec copy boundary'
 }
+Write-Host 'PASS: independent entity copy preservation checks executed'
+
+$UniversalLifecycleCase = 'runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback'
+if (-not $RuntimeTests.Contains($UniversalLifecycleCase)) {
+    throw "Universal actor-device lifecycle runtime regression is missing: $UniversalLifecycleCase"
+}
+$UniversalItemPortStart = $Bootstrap.IndexOf('function new_actor_item_port')
+$UniversalItemPortEnd = if ($UniversalItemPortStart -ge 0) { $Bootstrap.IndexOf('function new_actor_loadout_port', $UniversalItemPortStart) } else { -1 }
+if ($UniversalItemPortStart -lt 0 -or $UniversalItemPortEnd -le $UniversalItemPortStart) {
+    throw 'Universal actor-item port must remain structurally testable'
+}
+$UniversalItemPort = $Bootstrap.Substring($UniversalItemPortStart, $UniversalItemPortEnd - $UniversalItemPortStart)
+if ($UniversalItemPort -notmatch '(?s)shutdown_device.*?ports\.release_item') {
+    Add-ControlledFailure 'Universal actor-item cleanup/rollback must shut down global actor-device state before owned release'
+}
+if (([regex]::Matches($Bootstrap, 'shutdown_device\s*=\s*shutdown_actor_device')).Count -lt 2) {
+    Add-ControlledFailure 'Legacy and universal actor-item ports must share the production actor-device shutdown seam'
+}
+Write-Host 'PASS: independent universal lifecycle preservation checks executed'
 
 foreach ($Marker in @('GA_ACTOR_DEVICE_CHARGE_FAILED','"outfit", "knife", "device", "weapon"','CHARGE_DEVICE','set_item_condition','item_condition','shutdown_device','device_neutralized','device_condition')) {
     if (-not $Bootstrap.Contains($Marker)) { throw "Actor device runtime contract is missing: $Marker" }
@@ -125,11 +150,17 @@ if ($Bootstrap -notmatch '(?s)elseif\s+resolved\.value\s*==\s*nil\s+then\s+local
 if ($Bootstrap -match 'record\.device_neutralized\s*==\s*true\s+then\s+return') {
     throw 'Pending actor device release must re-probe global state on every cleanup pass'
 }
-if ($Bootstrap -notmatch '(?s)shutdown_device\s*=\s*function\(item,\s*id,\s*section\).*?if\s+item\s*~=\s*nil\s+then\s+item:enable_torch\(false\)\s+end') {
+if ($Bootstrap -notmatch '(?s)local\s+function\s+shutdown_actor_device\(item,\s*id,\s*section\).*?if\s+item\s*~=\s*nil\s+then\s+item:enable_torch\(false\)\s+end') {
     throw 'Actor device shutdown must support global-only cleanup when the item is absent or offline'
 }
 if ($Bootstrap -notmatch 'if\s+item_device\.is_torch_active\(\)\s+then\s+return\s+gamma_arena_result\.ok\(false\)\s+end') {
     throw 'Actor device shutdown must confirm that global torch state is fully inactive'
+}
+
+Write-Host 'PASS: independent legacy shutdown preservation checks executed'
+
+if ($ControlledFailures.Count -gt 0) {
+    throw ("Actor lighting device controlled collision failures: " + ($ControlledFailures -join ' | '))
 }
 
 Write-Host 'PASS: actor lighting device static contract passed'
