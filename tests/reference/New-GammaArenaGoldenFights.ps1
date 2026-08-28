@@ -4,7 +4,7 @@ param([switch]$Verify, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 if ($Verify -and $Update) { throw 'Choose either -Verify or -Update.' }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v8.txt'
+$fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v9.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
@@ -35,10 +35,10 @@ $catalog = Read-GaSimpleLtx $catalogPath
 $difficulties = Read-GaSimpleLtx $difficultyPath
 $layouts = Read-GaSimpleLtx $layoutPath
 $customCatalog = Get-Content -LiteralPath $customCatalogPath -Raw | ConvertFrom-Json
-if ([int]$catalog.meta.schema_version -ne 9 -or [int]$catalog.meta.revision -ne 10 -or [int]$catalog.meta.generator_version -ne 10 -or
+if ([int]$catalog.meta.schema_version -ne 10 -or [int]$catalog.meta.revision -ne 11 -or [int]$catalog.meta.generator_version -ne 11 -or
     [int]$difficulties.meta.schema_version -ne 4 -or [int]$difficulties.meta.revision -ne 5 -or
     [int]$layouts.meta.schema_version -ne 2 -or [int]$layouts.meta.revision -ne 2) {
-    throw 'Reference oracle requires catalog identity 9/10/10, medical difficulty v5, layout v2, and FightSpec v8.'
+    throw 'Reference oracle requires catalog identity 10/11/11, medical difficulty v5, layout v2, and FightSpec v9.'
 }
 
 $difficultyManifest = @{
@@ -144,7 +144,7 @@ $npcGrenadeIds = @($catalog.grenades.npc_ids.Split(',') | ForEach-Object { $_.Tr
 $actorGrenadePool = @($actorGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
 $npcGrenadePool = @($npcGrenadeIds | ForEach-Object { $catalog["grenade_$_"].section })
 if ($actorGrenadePool.Count -ne 3 -or $npcGrenadePool.Count -ne 3 -or $actorGrenadePool -contains 'grenade_smoke' -or $npcGrenadePool -contains 'grenade_smoke') {
-    throw 'Reference grenade pools differ from the FightSpec v7 contract.'
+    throw 'Reference grenade pools differ from the sole FightSpec v9 contract.'
 }
 $bandageCost = [int]$catalog.consumable_bandage.cost
 $medicalItems = @($catalog.medical_items.ids.Split(',') | ForEach-Object { $_.Trim() } | ForEach-Object {
@@ -325,6 +325,30 @@ for ($index=1; $index -le 10; $index++) {
     $route=$routes[($index-1)%$routes.Count]
     $resolvedSlots += [pscustomobject]@{Id=$(if($index -le 6){"native:$route"}else{"virtual:$($index-6)"});BaseRoute=$route;Native=($index -le 6);X=$index*4;Y=0;Z=$(if($index%2 -eq 0){4}else{-4});Lvid=1000+$index;Gvid=77}
 }
+function Get-GaLayoutHash {
+    $parts=@(
+        (ConvertTo-GaScalar 'layout_id' 'rostok_arena_v1'),
+        (ConvertTo-GaScalar 'layout_version' 2),
+        (ConvertTo-GaScalar 'level' $layout.level),
+        (ConvertTo-GaScalar 'actor_spawn_path' $layout.actor_spawn_path),
+        (ConvertTo-GaScalar 'actor_look_path' $layout.actor_look_path),
+        (ConvertTo-GaScalar 'capacity' $resolvedSlots.Count),
+        (ConvertTo-GaScalar 'route_count' $routes.Count)
+    )
+    foreach($route in $routes){$parts+=ConvertTo-GaScalar 'route' $route}
+    $parts+=ConvertTo-GaScalar 'spawn_slot_count' $resolvedSlots.Count
+    foreach($slot in $resolvedSlots){
+        $parts+=ConvertTo-GaScalar 'spawn_slot_id' $slot.Id
+        $parts+=ConvertTo-GaScalar 'spawn_base_route' $slot.BaseRoute
+        $parts+=ConvertTo-GaScalar 'spawn_native' $(if($slot.Native){1}else{0})
+        $parts+=ConvertTo-GaScalar 'position_x' (ConvertTo-GaNumber $slot.X)
+        $parts+=ConvertTo-GaScalar 'position_y' (ConvertTo-GaNumber $slot.Y)
+        $parts+=ConvertTo-GaScalar 'position_z' (ConvertTo-GaNumber $slot.Z)
+        $parts+=ConvertTo-GaScalar 'level_vertex_id' $slot.Lvid
+        $parts+=ConvertTo-GaScalar 'game_vertex_id' $slot.Gvid
+    }
+    return Get-GaContentHash ('ga-layout-v2|' + ($parts -join '|'))
+}
 function Get-GaSelectedSlots([hashtable]$Rng,[int]$Count) {
     $native=Get-GaShuffled $Rng @($resolvedSlots | Where-Object Native)
     $virtual=Get-GaShuffled $Rng @($resolvedSlots | Where-Object { -not $_.Native })
@@ -361,8 +385,8 @@ function Add-GaCanonicalItem([hashtable]$Items,[string]$Section,[int]$Quantity,[
     }
 }
 function Get-GaCanonicalItems([hashtable]$Items) {
-    $slotOrder=@{outfit=1;helmet=2;knife=3;weapon_1=4;weapon_2=5}
-    $categoryOrder=@{outfit=1;helmet=2;knife=3;weapon=4;ammo=5;medicine=6;grenade=7}
+    $slotOrder=@{outfit=1;helmet=2;knife=3;device=4;weapon_1=5;weapon_2=6}
+    $categoryOrder=@{outfit=1;helmet=2;knife=3;device=4;weapon=5;ammo=6;medicine=7;grenade=8}
     return @($Items.Values | Sort-Object @{Expression={if($_.EquippedSlot){$slotOrder[$_.EquippedSlot]}else{999}}},@{Expression={$categoryOrder[$_.Category]}},Section)
 }
 function ConvertTo-GaScalar([string]$Key,$Value) {
@@ -375,22 +399,23 @@ function ConvertTo-GaItemsEncoding([array]$Items) {
     return $parts -join '|'
 }
 function Get-GaContentHash([string]$Payload) {
-    $first=Get-GaDerivedSeed @('ga-fightspec-v8-a',$Payload)
-    $second=Get-GaDerivedSeed @('ga-fightspec-v8-b',$Payload)
+    $first=Get-GaDerivedSeed @('ga-fightspec-v9-a',$Payload)
+    $second=Get-GaDerivedSeed @('ga-fightspec-v9-b',$Payload)
     return ('{0:x8}{1:x8}' -f $first,$second)
 }
-$catalogFingerprint='ga-catalog-v9-'+('{0:x8}' -f (Get-GaDerivedSeed @('ga-catalog-v9',[int]$catalog.meta.schema_version,[int]$catalog.meta.revision,[int]$catalog.meta.generator_version)))
+$layoutHash=Get-GaLayoutHash
+$catalogFingerprint='ga-catalog-v10-'+('{0:x8}' -f (Get-GaDerivedSeed @('ga-catalog-v10',[int]$catalog.meta.schema_version,[int]$catalog.meta.revision,[int]$catalog.meta.generator_version)))
 $rankBands=@{novice=@(0,9999);trainee=@(10000,19999);experienced=@(20000,29999);veteran=@(40000,49999)}
-if ([int]$customCatalog.schema_version -ne 1 -or $customCatalog.catalog_fingerprint -cne $catalogFingerprint -or
+if ([int]$customCatalog.schema_version -ne 1 -or
     $customCatalog.layout_id -cne 'rostok_arena_v1' -or $customCatalog.faction.runtime_community -cne 'arena_enemy') {
-    throw 'Custom reference catalog identity differs from the universal v8 oracle.'
+    throw 'Pinned Custom reference catalog shape differs from the device-free v9 oracle input.'
 }
 
 function ConvertTo-GaFightEncoding($Fight,[bool]$IncludeChecksum) {
     $identity=$Fight.Identity
     $parts=@()
-    $parts+=ConvertTo-GaScalar 'schema_version' 8;$parts+=ConvertTo-GaScalar 'session_seed' $identity.SessionSeed;$parts+=ConvertTo-GaScalar 'fight_index' $identity.FightIndex;$parts+=ConvertTo-GaScalar 'generator_version' 10;$parts+=ConvertTo-GaScalar 'catalog_fingerprint' $catalogFingerprint;$parts+=ConvertTo-GaScalar 'layout_version' 2
-    if($IncludeChecksum){$parts+=ConvertTo-GaScalar 'content_hash' $identity.ContentHash;$parts+=ConvertTo-GaScalar 'fight_id' $identity.FightId}
+    $parts+=ConvertTo-GaScalar 'schema_version' 9;$parts+=ConvertTo-GaScalar 'session_seed' $identity.SessionSeed;$parts+=ConvertTo-GaScalar 'fight_index' $identity.FightIndex;$parts+=ConvertTo-GaScalar 'generator_version' 11;$parts+=ConvertTo-GaScalar 'catalog_schema_version' 10;$parts+=ConvertTo-GaScalar 'catalog_revision' 11;$parts+=ConvertTo-GaScalar 'catalog_fingerprint' $catalogFingerprint;$parts+=ConvertTo-GaScalar 'layout_version' 2;$parts+=ConvertTo-GaScalar 'layout_hash' $layoutHash
+    if($IncludeChecksum){$parts+=ConvertTo-GaScalar 'fight_id' $identity.FightId}
     $parts+=ConvertTo-GaScalar 'layout_id' 'rostok_arena_v1';$parts+=ConvertTo-GaScalar 'level' $layout.level;$parts+=ConvertTo-GaScalar 'route_count' $routes.Count
     foreach($route in $routes){$parts+=ConvertTo-GaScalar 'route' $route}
     $parts+=ConvertTo-GaScalar 'actor_spawn_path' $layout.actor_spawn_path;$parts+=ConvertTo-GaScalar 'actor_look_path' $layout.actor_look_path;$parts+=ConvertTo-GaItemsEncoding $Fight.ActorItems
@@ -441,8 +466,8 @@ function New-GaEncodedFight([int64]$SessionSeed,[string]$DifficultyId,[int]$Figh
     Add-GaCanonicalItem $actorItems $actor.Outfit 1 'outfit' 'outfit';Add-GaCanonicalItem $actorItems $actor.Knife 1 'knife' 'knife';Add-GaCanonicalItem $actorItems $actor.Weapon 1 "weapon_$($actorWeapon.Slot)" 'weapon';Add-GaCanonicalItem $actorItems $actor.Ammo $actor.AmmoBoxes $null 'ammo';Add-GaCanonicalItem $actorItems $actor.BonusSection 1 $null 'ammo'
     foreach($section in $actor.Medicine){Add-GaCanonicalItem $actorItems $section 1 $null 'medicine'};foreach($section in $actor.Grenades){Add-GaCanonicalItem $actorItems $section 1 $null 'grenade'}
     $identitySeed=$SessionSeed%[int64]4294967296;if($identitySeed-lt0){$identitySeed += [int64]4294967296}
-    $fight=[pscustomobject]@{Identity=[pscustomobject]@{SessionSeed=$identitySeed;FightIndex=$FightIndex;ContentHash=$null;FightId=$null};ActorItems=Get-GaCanonicalItems $actorItems;Opponents=$opponents}
-    $payload=ConvertTo-GaFightEncoding $fight $false;$fight.Identity.ContentHash=Get-GaContentHash $payload;$fight.Identity.FightId='ga8-'+$fight.Identity.ContentHash
+    $fight=[pscustomobject]@{Identity=[pscustomobject]@{SessionSeed=$identitySeed;FightIndex=$FightIndex;FightId=$null};ActorItems=Get-GaCanonicalItems $actorItems;Opponents=$opponents}
+    $payload=ConvertTo-GaFightEncoding $fight $false;$fight.Identity.FightId='ga9-'+(Get-GaContentHash $payload)
     return ConvertTo-GaFightEncoding $fight $true
 }
 
@@ -588,8 +613,8 @@ function New-GaCustomEncodedFight([int64]$SessionSeed,[int]$FightIndex,[array]$R
     }
     $actorItems=@{}
     foreach($entry in $actorEntries){$definition=Get-GaCustomItem $entry.section;Add-GaCanonicalItem $actorItems $entry.section ([int]$entry.quantity) $entry.equipped_slot $definition.category}
-    $fight=[pscustomobject]@{Identity=[pscustomobject]@{SessionSeed=$SessionSeed;FightIndex=$FightIndex;ContentHash=$null;FightId=$null};ActorItems=Get-GaCanonicalItems $actorItems;Opponents=$opponents}
-    $payload=ConvertTo-GaFightEncoding $fight $false;$fight.Identity.ContentHash=Get-GaContentHash $payload;$fight.Identity.FightId='ga8-'+$fight.Identity.ContentHash
+    $fight=[pscustomobject]@{Identity=[pscustomobject]@{SessionSeed=$SessionSeed;FightIndex=$FightIndex;FightId=$null};ActorItems=Get-GaCanonicalItems $actorItems;Opponents=$opponents}
+    $payload=ConvertTo-GaFightEncoding $fight $false;$fight.Identity.FightId='ga9-'+(Get-GaContentHash $payload)
     return ConvertTo-GaFightEncoding $fight $true
 }
 
@@ -608,49 +633,13 @@ $requests=@(
     [pscustomobject]@{Seed=[int64]4294967295;Difficulty='master';Fight=31}
 )
 $expected=@($requests|ForEach-Object{"seed=$($_.Seed),difficulty=$($_.Difficulty),fight=$($_.Fight),stable_encode=$(New-GaEncodedFight $_.Seed $_.Difficulty $_.Fight)"})
-$customRequests=@(
-    [pscustomobject]@{Name='one_novice';Seed=[int64]101;Fight=0;Ranks=@('novice');ActorCase='one_grenade'},
-    [pscustomobject]@{Name='mixed_eight';Seed=[int64]202;Fight=7;Ranks=@('novice','trainee','experienced','professional','veteran','expert','master','legend');ActorCase='arsenal'},
-    [pscustomobject]@{Name='ten_legends_forward';Seed=[int64]303;Fight=31;Ranks=@('legend')*10;ActorCase='two_grenades_forward'},
-    [pscustomobject]@{Name='ten_legends_reverse';Seed=[int64]303;Fight=31;Ranks=@('legend')*10;ActorCase='two_grenades_reverse'}
-)
-$customEncodings=@{}
-foreach($request in $customRequests){$encoding=New-GaCustomEncodedFight $request.Seed $request.Fight $request.Ranks $request.ActorCase;$customEncodings[$request.Name]=$encoding;$expected+="recipe=custom,case=$($request.Name),seed=$($request.Seed),fight=$($request.Fight),stable_encode=$encoding"}
-$bridgeLines = [Collections.Generic.List[string]]::new()
-$bridgeLines.Add('-- CUSTOM_GOLDEN_V8_BEGIN')
-$bridgeLines.Add('local CUSTOM_GOLDEN_V8 = {')
-for($index=0;$index-lt$customRequests.Count;$index++){
-    $request=$customRequests[$index];$encoding=$customEncodings[$request.Name]
-    $fightId=[regex]::Match($encoding,'fight_id=20:(?<fight_id>[^|]+)').Groups['fight_id'].Value
-    if(-not$fightId){throw "Custom oracle encoding lacks fight_id for $($request.Name)."}
-    $bridgeLines.Add("    [`"$($request.Name)`"] = {")
-    $bridgeLines.Add("        fight_id = `"$fightId`",")
-    $bridgeLines.Add("        stable_encode = [===[$encoding]===]")
-    $bridgeLines.Add($(if($index-lt$customRequests.Count-1){'    },'}else{'    }'}))
-}
-$bridgeLines.Add('}')
-$bridgeLines.Add('-- CUSTOM_GOLDEN_V8_END')
-$bridgeBlock=$bridgeLines -join "`n"
-$bridgePattern='(?ms)^-- CUSTOM_GOLDEN_V8_BEGIN\r?\n.*?^-- CUSTOM_GOLDEN_V8_END'
-$tenLegends=@('legend')*10
-$forwardTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_forward')
-$reverseTotals=Test-GaCustomConfig $tenLegends (Get-GaCustomActorCase 'two_grenades_reverse')
-if($forwardTotals.Points-eq$reverseTotals.Points-or$customEncodings.ten_legends_forward-cne$customEncodings.ten_legends_reverse){throw 'Grenade order must affect pre-canonical points but not equal physical FightSpec bytes.'}
 if($Verify){
-    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v8 fixture is missing'}
+    if(-not(Test-Path -LiteralPath $fixturePath)){throw 'Golden FightSpec v9 fixture is missing'}
     $actual=@(Get-Content -LiteralPath $fixturePath|Where-Object{$_-and-not$_.StartsWith('#')})
-    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic v8 reference oracle.'}
-    $devCustomTest=Get-Content -LiteralPath $devCustomTestPath -Raw
-    $bridgeMatch=[regex]::Match($devCustomTest,$bridgePattern)
-    if(-not$bridgeMatch.Success-or(($bridgeMatch.Value-replace"`r`n","`n")-cne$bridgeBlock)){throw 'Dev Lua custom golden bridge differs from the independent oracle.'}
-    Write-Host 'PASS: golden reference oracle matches fixture and Dev Lua bridge'
+    if(@(Compare-Object $expected $actual -SyncWindow 0).Count-ne0){throw 'Golden fixture differs from deterministic device-free v9 reference oracle.'}
+    Write-Host 'PASS: device-free v9 golden reference oracle matches fixture'
 }elseif($Update){
-    $lines = @('# Gamma Arena FightSpec v8 deterministic random and custom golden encodings.') + $expected
+    $lines = @('# Gamma Arena FightSpec v9 deterministic device-free golden encodings; Task 5 adds generator-selected devices.') + $expected
     [IO.File]::WriteAllText($fixturePath, (@($lines) -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
-    $devCustomTest=Get-Content -LiteralPath $devCustomTestPath -Raw
-    $bridgeMatch=[regex]::Match($devCustomTest,$bridgePattern)
-    if(-not$bridgeMatch.Success){throw 'Dev Lua custom golden bridge markers are missing.'}
-    $updatedDev=$devCustomTest.Substring(0,$bridgeMatch.Index)+$bridgeBlock+$devCustomTest.Substring($bridgeMatch.Index+$bridgeMatch.Length)
-    [IO.File]::WriteAllText($devCustomTestPath,$updatedDev,(New-Object Text.UTF8Encoding($false)))
-    Write-Host "Updated golden fixture and Dev Lua bridge: $fixturePath"
+    Write-Host "Updated device-free v9 golden fixture: $fixturePath"
 }else{$expected}

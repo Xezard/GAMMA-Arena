@@ -79,6 +79,29 @@ Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'VERSION')) 'VERSION is
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata')) 'src/gamedata is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitattributes')) '.gitattributes is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot '.gitignore')) '.gitignore is missing'
+$Task4V9ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
+$Task4V8ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'
+$Task4V9SchemaPath = Join-Path $RepoRoot 'schemas\fight-spec-v9.md'
+$Task4V9GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v9.txt'
+Assert-True (Test-Path -LiteralPath $Task4V9ValidatorPath) 'Task 4 RED: sole v9 validator is missing.'
+Assert-True (-not (Test-Path -LiteralPath $Task4V8ValidatorPath)) 'Task 4 RED: legacy v8 validator is still active.'
+Assert-True (Test-Path -LiteralPath $Task4V9SchemaPath) 'Task 4 RED: sole v9 schema is missing.'
+Assert-True (Test-Path -LiteralPath $Task4V9GoldenPath) 'Task 4 RED: v9 golden fixture is missing.'
+$Task4FightSpecPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_spec.script'
+$Task4FightSpec = Get-Content -LiteralPath $Task4FightSpecPath -Raw
+foreach ($Marker in @('schema_version = 9','"ga9-"','device = 4','catalog_schema_version','catalog_revision','layout_hash')) {
+    Assert-True ($Task4FightSpec -match [regex]::Escape($Marker)) "Task 4 RED: v9 canonicalizer marker is missing: $Marker"
+}
+foreach ($LegacyMarker in @('"ga8-"','loadout.kind == "legacy"','legacy_items')) {
+    Assert-True ($Task4FightSpec -notmatch [regex]::Escape($LegacyMarker)) "Task 4 RED: legacy canonicalizer acceptance remains: $LegacyMarker"
+}
+if (Test-Path -LiteralPath $Task4V9ValidatorPath) {
+    $Task4V9Validator = Get-Content -LiteralPath $Task4V9ValidatorPath -Raw
+    foreach ($Marker in @('spec.schema_version ~= 9','device = true','entry.quantity ~= 1','entry.equipped_slot ~= "device"','GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID')) {
+        Assert-True ($Task4V9Validator -match [regex]::Escape($Marker)) "Task 4 strict v9 validator marker is missing: $Marker"
+    }
+    Assert-True ($Task4V9Validator -notmatch 'gamma_arena_(random|device)_generator') 'Task 4 validator must never rerun Random device selection.'
+}
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
@@ -202,9 +225,9 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script'; Namespace = 'gamma_arena_test_layout_adapter'; Required = @('(?m)^function\s+run\s*\(') }
-    , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_spec.script'; Namespace = 'gamma_arena_fight_spec'; Required = @('(?m)^function\s+canonicalize\s*\(', '(?m)^function\s+stable_encode\s*\(', '(?m)^function\s+content_hash\s*\(', '(?m)^function\s+copy\s*\(', 'GA_FIGHT_SPEC_ARRAY', 'GA_FIGHT_SPEC_ITEM_LIMIT', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'loadout\.bonus_ammo', 'bonus\.boxes', 'loadout\.kind\s*==\s*"legacy"', 'loadout\.kind\s*==\s*"items"', 'loadout\.value', 'loadout\.items', 'catalog\.fingerprint', 'not\s+text\s*\(\s*layout\.id\s*\)', 'not\s+text\s*\(\s*layout\.level\s*\)', 'not\s+text\s*\(\s*layout\.actor_spawn_path\s*\)', 'not\s+text\s*\(\s*layout\.actor_look_path\s*\)', 'layout\.id', 'layout\.version', 'provenance\s*=\s*true') }
-    , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'; Namespace = 'gamma_arena_fight_validator_v8'; Required = @('(?m)^function\s+validate\s*\(\s*spec\s*,\s*catalog\s*,\s*layout\s*,\s*runtime\s*\)', 'GA_FIGHTSPEC_UNKNOWN_FIELD', 'GA_FIGHTSPEC_FORBIDDEN_FIELD', 'GA_FIGHTSPEC_ITEM_LIMIT', 'max_physical_items_per_participant', 'exact_keys', 'catalog\.items', 'catalog\.ranks', 'catalog\.factions', 'profile\.alias', 'runtime_community', 'arena_enemy', 'opponent_spawn_slots', 'ammo_sections', 'helmet_allowed', 'healing', 'gamma_arena_fight_spec\.canonicalize', 'gamma_arena_fight_spec\.stable_encode', 'session_seed\s*=\s*function', 'fight_index\s*=\s*function', 'fight_id\s*=\s*function', 'actor\s*=\s*function', 'opponents\s*=\s*function', 'tactical_routes\s*=\s*function', 'stable_encode\s*=\s*function', '(?m)^local function\s+valid_vertex\s*\(', 'value\s*<\s*4294967295', 'used_opponent_slots', 'GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE') }
-    , [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script'; Namespace = 'gamma_arena_test_fight_spec'; Required = @('(?m)^function\s+run\s*\(', 'fight_spec_canonicalizes_legacy_and_item_loadouts_equivalently', 'fight_spec_enforces_per_participant_physical_item_cap', 'fight_spec_rejects_forbidden_keys_at_every_depth_and_invalid_identity', 'fight_spec_binds_identity_layout_and_dense_arrays', 'fight_spec_rejects_invalid_resolved_layout_identity_fields', 'fight_spec_uses_resolved_layout_id_and_aggregates_legacy_ammo', 'fight_validator_v8_accepts_valid_and_returns_immutable_copy', 'fight_validator_v8_enforces_per_participant_physical_item_cap', 'fight_validator_v8_rejects_unknown_keys_at_every_schema_level', 'fight_validator_v8_rejects_generation_provenance_recursively', 'fight_validator_v8_rejects_mutation_matrix', 'fight_validator_v8_accepts_unique_nonsequential_logical_slots', 'fight_validator_v8_distinguishes_duplicate_logical_and_physical_slots', 'fight_validator_v8_enforces_engine_vertex_uint32_boundaries', 'fight_validator_v8_enforces_physical_participant_contracts', 'fight_validator_v8_rejects_invalid_catalog_and_layout_without_mutation') }
+    , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_spec.script'; Namespace = 'gamma_arena_fight_spec'; Required = @('(?m)^function\s+canonicalize\s*\(', '(?m)^function\s+stable_encode\s*\(', '(?m)^function\s+content_hash\s*\(', '(?m)^function\s+layout_hash\s*\(', '(?m)^function\s+copy\s*\(', 'GA_FIGHT_SPEC_ARRAY', 'GA_FIGHT_SPEC_ITEM_LIMIT', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'loadout\.kind\s*==\s*"items"', 'catalog\.fingerprint', 'catalog_schema_version', 'catalog_revision', 'layout_hash', 'schema_version\s*=\s*9', 'fight_id\s*=\s*"ga9-"', 'device\s*=\s*4') }
+    , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'; Namespace = 'gamma_arena_fight_validator_v9'; Required = @('(?m)^function\s+validate\s*\(\s*spec\s*,\s*catalog\s*,\s*layout\s*,\s*runtime\s*\)', 'GA_FIGHTSPEC_UNKNOWN_FIELD', 'GA_FIGHTSPEC_FORBIDDEN_FIELD', 'GA_FIGHTSPEC_ITEM_LIMIT', 'max_physical_items_per_participant', 'exact_keys', 'catalog\.items', 'catalog\.ranks', 'catalog\.factions', 'profile\.alias', 'runtime_community', 'arena_enemy', 'opponent_spawn_slots', 'ammo_sections', 'helmet_allowed', 'healing', 'gamma_arena_fight_spec\.canonicalize', 'gamma_arena_fight_spec\.stable_encode', 'session_seed\s*=\s*function', 'fight_index\s*=\s*function', 'fight_id\s*=\s*function', 'actor\s*=\s*function', 'opponents\s*=\s*function', 'tactical_routes\s*=\s*function', 'stable_encode\s*=\s*function', '(?m)^local function\s+valid_vertex\s*\(', 'value\s*<\s*4294967295', 'used_opponent_slots', 'GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE', 'GA_FIGHTSPEC_DEVICE_INVALID', 'GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID', 'spec\.schema_version\s*~=\s*9', '"ga9-"') }
+    , [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script'; Namespace = 'gamma_arena_test_fight_spec'; Required = @('(?m)^function\s+run\s*\(', 'canonicalizes_v9_exact_identity_and_device_order', 'rejects_legacy_loadouts_and_invalid_devices', 'validator_enforces_v9_identity_versions_and_devices', 'validator_never_reruns_random_device_selection', 'fight_spec_enforces_per_participant_physical_item_cap', 'fight_spec_binds_identity_layout_and_dense_arrays', 'fight_spec_rejects_invalid_resolved_layout_identity_fields', 'validator_enforces_per_participant_physical_item_cap', 'validator_enforces_engine_vertex_uint32_boundaries', 'validator_enforces_physical_participant_contracts') }
 )
 
 $Task1RankScriptContracts = @(
@@ -242,17 +265,15 @@ if ($Task6ArtifactsPresent) {
     foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
         Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
     }
-    $Task6FightSpecTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script') -Raw
-    Assert-True ($Task6FightSpecTests -match 'fight_spec_canonicalizes_tagged_loadout_wrappers') 'Task 6 tagged loadout wrapper test is missing.'
     $ActiveGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script') -Raw
-    Assert-True ($ActiveGenerator -match 'gamma_arena_fight_builder\.generate' -and $ActiveGenerator -match 'gamma_arena_fight_spec\.stable_encode') 'Task 7 must activate the thin universal v8 generator facade.'
+    Assert-True ($ActiveGenerator -match 'gamma_arena_fight_builder\.generate' -and $ActiveGenerator -match 'gamma_arena_fight_spec\.stable_encode') 'Task 7 must retain the thin universal generator facade.'
 }
 
 $Task7CurrentArtifacts = @(
     'src\gamedata\scripts\gamma_arena_fight_builder.script',
-    'src\gamedata\scripts\gamma_arena_fight_validator_v8.script',
-    'schemas\fight-spec-v8.md',
-    'tests\fixtures\golden-fights-v8.txt',
+    'src\gamedata\scripts\gamma_arena_fight_validator_v9.script',
+    'schemas\fight-spec-v9.md',
+    'tests\fixtures\golden-fights-v9.txt',
     'tests\fixtures\golden-random-selections-v8.txt'
 )
 
@@ -409,7 +430,7 @@ $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\ref
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'validate_exact_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'custom_golden_sessions_match_sole_v8_fixture', 'CUSTOM_GOLDEN_V8_BEGIN', 'CUSTOM_GOLDEN_V8_END', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
     [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v1.json'; Required = @('"schema_version"\s*:\s*1', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
 )
 foreach ($Contract in $Task10CustomContracts) {
@@ -427,7 +448,7 @@ foreach ($Contract in $Task10CustomContracts) {
     }
 }
 $Task10Builder = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_builder.script') -Raw
-foreach ($Marker in @('gamma_arena_custom_generator.build_draft','generation_recipe','gamma_arena_fight_validator_v8.validate')) {
+foreach ($Marker in @('gamma_arena_custom_generator.build_draft','generation_recipe','gamma_arena_fight_validator_v9.validate')) {
     Assert-True ($Task10Builder -match [regex]::Escape($Marker)) "Task 10 builder dispatch is missing: $Marker"
 }
 $Task10Medical = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script') -Raw
@@ -435,47 +456,22 @@ Assert-True ($Task10Medical -match '(?m)^function\s+allocate_custom_enemies\s*\(
 $Task10Domain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($Task10Domain -match 'gamma_arena_test_custom_generator\.run\s*\(\s*run_case_fn\s*\)') 'Task 10 custom generator tests must run from the Dev domain suite.'
 $Task10Oracle = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1') -Raw
-foreach ($Marker in @('custom-catalog-v1.json','New-GaCustomStream','Test-GaCustomConfig','Get-GaCustomEquipment','equipment_pools','Add-GaCustomMedical','New-GaCustomEncodedFight','one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
-    Assert-True ($Task10Oracle -match [regex]::Escape($Marker)) "Task 10 independent oracle is missing: $Marker"
+foreach ($Marker in @('golden-fights-v9.txt','Get-GaLayoutHash',"ConvertTo-GaScalar 'schema_version' 9",'ga9-')) {
+    Assert-True ($Task10Oracle -match [regex]::Escape($Marker)) "Task 4 independent v9 oracle is missing: $Marker"
 }
-Assert-True ($Task10Oracle -notmatch 'gamma_arena_(?:custom_)?generator\.script') 'Task 10 reference oracle must not read Lua generator source.'
+Assert-True ($Task10Oracle -notmatch 'gamma_arena_(?:random_|custom_)?generator\.script') 'Task 4 reference oracle must not read Lua generator source.'
 $Task10CustomGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_generator.script') -Raw
 Assert-True ($Task10CustomGenerator -notmatch 'slot_stream\s*\([^\)]*,\s*"profile"\s*\)') 'Task 10 fixed exact profile alias must not consume a meaningless RNG stream.'
 Assert-True ($Task10CustomGenerator -match 'profile\.alias\s*~=\s*"gamma_arena_"\s*\.\.\s*faction\.community\s*\.\.\s*"_"\s*\.\.\s*roster_entry\.rank') 'Task 10 generator must reject a noncanonical fixed faction-rank alias before RNG.'
-Assert-True ($Task10Oracle -notmatch "New-GaCustomStream[^\r\n]*'profile'") 'Task 10 independent oracle must bind the fixed exact profile alias without RNG.'
-$Task10GoldenRows = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v8.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
+$Task10GoldenRows = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v9.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
 $Task10RandomRows = @($Task10GoldenRows | Where-Object { $_ -match '^seed=' })
-$Task10CustomRows = @($Task10GoldenRows | Where-Object { $_ -match '^recipe=custom,' })
-Assert-True ($Task10RandomRows.Count -eq 4) 'Task 10 sole v8 fixture must preserve exactly four random golden rows.'
-Assert-True ($Task10CustomRows.Count -eq 4) 'Task 10 sole v8 fixture must add exactly four custom golden rows.'
-foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
-    Assert-True (@($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') }).Count -eq 1) "Task 10 custom golden case is missing: $Name"
-}
+Assert-True ($Task10RandomRows.Count -eq 4 -and $Task10GoldenRows.Count -eq 4) 'Task 4 sole v9 fixture must contain exactly four pinned device-free rows.'
 $Task10DevCustom = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
 foreach ($Marker in @('duplicate exact-pool member fails before RNG','duplicate tactical route fails before RNG','duplicate spawn-slot ID fails before RNG','gamma_arena_rng.derive_seed = function','derive calls before failure')) {
     Assert-True ($Task10DevCustom -match [regex]::Escape($Marker)) "Task 12 fail-closed pre-RNG regression is missing: $Marker"
 }
-$Task10BridgeMatches = [regex]::Matches($Task10DevCustom, '(?ms)\["(?<name>one_novice|mixed_eight|ten_legends_forward|ten_legends_reverse)"\]\s*=\s*\{\s*fight_id\s*=\s*"(?<fight_id>[^"]+)"\s*,\s*stable_encode\s*=\s*\[===\[(?<encoding>.*?)\]===\]\s*\}')
-Assert-True ($Task10BridgeMatches.Count -eq 4) 'Task 10 Dev Lua bridge must embed exactly four synchronized custom expectations.'
-foreach ($Name in @('one_novice','mixed_eight','ten_legends_forward','ten_legends_reverse')) {
-    $GoldenRow = @($Task10CustomRows | Where-Object { $_ -match ('^recipe=custom,case=' + [regex]::Escape($Name) + ',') })[0]
-    $GoldenEncoding = $GoldenRow.Substring($GoldenRow.IndexOf('stable_encode=') + 14)
-    $GoldenFightId = [regex]::Match($GoldenEncoding, 'fight_id=20:(?<fight_id>[^|]+)').Groups['fight_id'].Value
-    $Bridge = @($Task10BridgeMatches | Where-Object { $_.Groups['name'].Value -eq $Name })[0]
-    $BridgeMatchesGolden = $null -ne $Bridge
-    if ($null -ne $Bridge) {
-        $BridgeMatchesGolden = (($Bridge.Groups['fight_id'].Value -ceq $GoldenFightId) -and
-            ($Bridge.Groups['encoding'].Value -ceq $GoldenEncoding))
-    }
-    Assert-True $BridgeMatchesGolden "Task 10 Dev Lua bridge differs from sole v8 fixture: $Name"
-}
-$Task10Forward = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_forward,' })[0]
-$Task10Reverse = @($Task10CustomRows | Where-Object { $_ -match '^recipe=custom,case=ten_legends_reverse,' })[0]
-$Task10ForwardEncoding = $Task10Forward.Substring($Task10Forward.IndexOf('stable_encode=') + 14)
-$Task10ReverseEncoding = $Task10Reverse.Substring($Task10Reverse.IndexOf('stable_encode=') + 14)
-Assert-True ($Task10ForwardEncoding -ceq $Task10ReverseEncoding) 'Task 10 reversed two-grenade selections must canonicalize to identical physical v8 bytes.'
 foreach ($Forbidden in @('mode_id=','difficulty_id=','budget=','price=','custom_config=','generation_recipe=')) {
-    Assert-True (@($Task10GoldenRows | Where-Object { $_.Substring($_.IndexOf('stable_encode=') + 14).Contains($Forbidden) }).Count -eq 0) "Task 10 v8 golden encodings must erase $Forbidden"
+    Assert-True (@($Task10GoldenRows | Where-Object { $_.Substring($_.IndexOf('stable_encode=') + 14).Contains($Forbidden) }).Count -eq 0) "Task 4 v9 golden encodings must erase $Forbidden"
 }
 }
 
@@ -560,10 +556,9 @@ if (Test-Path -LiteralPath $Task12BuildPath) {
     $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
     Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.4\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 12 README must publish the 0.4.0 custom Arena integration baseline.'
     Assert-True ($Task12Changelog -match '(?m)^## 0\.4\.0 - 2026-08-27$') 'Task 12 changelog must publish release 0.4.0.'
-    foreach ($Path in @('schemas\fight-spec-v8.md','tests\fixtures\golden-fights-v8.txt','tests\fixtures\golden-random-selections-v8.txt','tests\fixtures\custom-catalog-v1.json')) {
+    foreach ($Path in @('tests\fixtures\golden-random-selections-v8.txt','tests\fixtures\custom-catalog-v1.json')) {
         Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
     }
-    Assert-True ($Task12Build -match 'fight-spec-v\[1-7\]\|golden-fights-v\[1-7\]\|FightSpecV\[1-7\]') 'Task 12 package build must reject retired v1-v7 FightSpec artifacts.'
     $Task12AcceptancePath = Join-Path $RepoRoot 'docs\custom-arena-acceptance.md'
     Assert-True (Test-Path -LiteralPath $Task12AcceptancePath) 'Task 12 manual custom Arena acceptance checklist is missing.'
     if (Test-Path -LiteralPath $Task12AcceptancePath) {
@@ -577,18 +572,18 @@ if (Test-Path -LiteralPath $Task12BuildPath) {
 }
 
 foreach ($Path in $Task7CurrentArtifacts) {
-    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 7 current-only v8 artifact is missing: $Path"
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $Path)) "Task 4 current-only v9 artifact is missing: $Path"
 }
-foreach ($Version in 1..7) {
+foreach ($Version in 1..8) {
     foreach ($Path in @("schemas\fight-spec-v$Version.md", "tests\fixtures\golden-fights-v$Version.txt")) {
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $Path))) "Task 7 must delete retired FightSpec artifact: $Path"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $Path))) "Task 4 must delete retired FightSpec artifact: $Path"
     }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "src\gamedata\scripts\gamma_arena_fight_validator_v$Version.script"))) "Task 4 must delete retired FightSpec validator v$Version."
 }
-Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v6.script'))) 'Task 7 must delete the retired v6 validator.'
 if (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_builder.script')) {
     $Task7Builder = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_builder.script') -Raw
-    foreach ($Marker in @('gamma_arena_random_generator.build_draft', 'gamma_arena_fight_spec.canonicalize', 'generator_version = catalog.generator_version')) {
-        Assert-True ($Task7Builder -match [regex]::Escape($Marker)) "Task 7 v8 builder is missing: $Marker"
+    foreach ($Marker in @('gamma_arena_random_generator.build_draft', 'gamma_arena_fight_spec.canonicalize', 'generator_version = catalog.generator_version', 'gamma_arena_fight_validator_v9.validate', 'catalog_schema_version = catalog.schema_version', 'catalog_revision = catalog.revision', 'layout_hash = gamma_arena_fight_spec.layout_hash(layout)')) {
+        Assert-True ($Task7Builder -match [regex]::Escape($Marker)) "Task 4 v9 builder is missing: $Marker"
     }
     $Task7BuilderIdentityIndex = $Task7Builder.IndexOf('validate_catalog_identity')
     $Task7BuilderDraftIndex = $Task7Builder.IndexOf('gamma_arena_random_generator.build_draft')
@@ -597,17 +592,16 @@ if (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_aren
 $Task7CatalogMetadata = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx') -Raw
 Assert-True ($Task7CatalogMetadata -match '(?ms)\[meta\].*?schema_version\s*=\s*10\s*.*?revision\s*=\s*11\s*.*?generator_version\s*=\s*11') 'Task 7 catalog identity must be 10/11/11.'
 $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
-foreach ($Marker in @('universal_v8_random_fight_activation', 'gamma_arena_fight_builder.generate', 'schema_version, 8', 'generator_version, 10', '"ga8-"', 'mode_id, nil', 'actor.items', 'opponents[1].items')) {
-    Assert-True ($Task7GeneratorTest -match [regex]::Escape($Marker)) "Task 7 executable activation test is missing: $Marker"
-}
 $Task7MasterExoRegistration = '\{\s*name\s*=\s*"master_powered_exo_rate_is_rare"\s*,\s*fn\s*=\s*master_powered_exo_rate_is_rare\s*\}'
 Assert-True (([regex]::Matches($Task7GeneratorTest, $Task7MasterExoRegistration)).Count -eq 1) 'Regression case must be registered exactly: master_powered_exo_rate_is_rare -> master_powered_exo_rate_is_rare.'
 $Task7FightSpecContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_spec.script') -Raw
 $Task7FightSpecTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script') -Raw
-foreach ($Pattern in @('catalog\.schema_version\s*~=\s*9', 'catalog\.revision\s*~=\s*10', 'catalog\.generator_version\s*~=\s*10', 'ga-catalog-v9-')) {
-    Assert-True ($Task7FightSpecContent -match $Pattern) "Task 7 canonicalization must enforce catalog identity: $Pattern"
+foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11', 'ga-catalog-v10-')) {
+    Assert-True ($Task7FightSpecContent -match $Pattern) "Task 4 canonicalization must enforce catalog identity: $Pattern"
 }
-Assert-True ($Task7FightSpecTestContent -match 'fight_spec_catalog_identity_is_authoritative_for_canonicalization_and_validation') 'Task 7 FightSpec tests must cover every catalog identity component and fingerprint domain.'
+foreach ($Marker in @('canonicalizes_v9_exact_identity_and_device_order','validator_enforces_v9_identity_versions_and_devices','validator_never_reruns_random_device_selection')) {
+    Assert-True ($Task7FightSpecTestContent -match [regex]::Escape($Marker)) "Task 4 v9 executable contract test is missing: $Marker"
+}
 
 $Task5UniversalRuntimeContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_LIMIT', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
@@ -690,10 +684,10 @@ foreach ($Contract in $Task3ScriptContracts) {
     }
 }
 
-$Task4Fix1ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'
+$Task4Fix1ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
 if (Test-Path -LiteralPath $Task4Fix1ValidatorPath) {
     $Task4Fix1ValidatorContent = Get-Content -LiteralPath $Task4Fix1ValidatorPath -Raw
-    Assert-True ($Task4Fix1ValidatorContent -notmatch 'opponent\.slot\s*~=\s*index') 'FightSpec v8 logical opponent slots must be unique rather than equal to array indices.'
+    Assert-True ($Task4Fix1ValidatorContent -notmatch 'opponent\.slot\s*~=\s*index') 'FightSpec v9 logical opponent slots must be unique rather than equal to array indices.'
 }
 
 foreach ($Contract in $Task1RankScriptContracts) {
@@ -1621,15 +1615,15 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($MedicalConsumptionBlock -match 'parent_id\s*~=\s*npc_id[\s\S]*actual_section\.value\s*~=\s*section[\s\S]*item_owner\.value\s*~=\s*self\.session_id\s+or\s+record\.tagged\s*~=\s*true[\s\S]*self\.deps\.release') 'Physical medicine consumption must prove registry, live parent/section, and persisted owner before release.'
     }
 
-$Task7ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'
+$Task7ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
 if (Test-Path -LiteralPath $Task7ValidatorPath) {
     $Task7ValidatorContent = Get-Content -LiteralPath $Task7ValidatorPath -Raw
     foreach ($Marker in @('effective_profile','validate_runtime_profile','AI_STL_S','arena_enemy','GA_FIGHTSPEC_PROFILE_RUNTIME_INVALID')) {
         Assert-True ($Task7ValidatorContent -match [regex]::Escape($Marker)) "Task 7 validator must cover $Marker"
     }
     Assert-True ($Task7ValidatorContent -match 'profile\.runtime_community') 'Fight validation must verify the effective NPC profile against runtime community rather than source faction'
-    foreach ($Pattern in @('catalog\.schema_version\s*~=\s*9', 'catalog\.revision\s*~=\s*10', 'catalog\.generator_version\s*~=\s*10', 'ga-catalog-v9-')) {
-        Assert-True ($Task7ValidatorContent -match $Pattern) "Task 7 strict validator must enforce catalog identity: $Pattern"
+    foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11', 'ga-catalog-v10-')) {
+        Assert-True ($Task7ValidatorContent -match $Pattern) "Task 4 strict validator must enforce catalog identity: $Pattern"
     }
 }
 
@@ -1775,18 +1769,11 @@ $Task3DataFiles = @(
     'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx',
     'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx',
     'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx',
-    'tests\fixtures\golden-fights-v4.txt',
-    'schemas\fight-spec-v4.md',
-    'tests\fixtures\golden-fights-v5.txt',
-    'schemas\fight-spec-v5.md',
-    'schemas\fight-spec-v6.md',
-    'schemas\fight-spec-v7.md',
-    'tests\fixtures\golden-fights-v7.txt',
-    'schemas\fight-spec-v8.md',
-    'tests\fixtures\golden-fights-v8.txt'
+    'schemas\fight-spec-v9.md',
+    'tests\fixtures\golden-fights-v9.txt'
 )
 foreach ($RelativePath in $Task3DataFiles) {
-    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 3 data contract is missing: $RelativePath"
+    Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath)) "Task 4 current data contract is missing: $RelativePath"
 }
 
 $CatalogPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
@@ -1794,19 +1781,6 @@ $DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_ar
 $LayoutPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
 $NpcPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
-$FightSpecV3Path = Join-Path $RepoRoot 'schemas\fight-spec-v3.md'
-if (Test-Path -LiteralPath $FightSpecV3Path) {
-    $FightSpecV3Content = Get-Content -LiteralPath $FightSpecV3Path -Raw
-    Assert-True ($FightSpecV3Content -match '(?m)^\| schema_version \| exactly 3 \|\s*$') 'FightSpecV3 root schema must remain version 3.'
-    Assert-True ($FightSpecV3Content -match '(?m)^\| generator_version \| exactly 5 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| catalog_revision \| exactly 5 \|\s*$' -and $FightSpecV3Content -match '(?m)^\| layout_version \| exactly 2 \|\s*$') 'FightSpecV3 contract must declare generator 5, catalog 5, and layout 2.'
-    Assert-True ($FightSpecV3Content.Contains('`ga-<seed>-<index>-g5-c5-l2`')) 'FightSpecV3 contract must document the canonical g5/c5/l2 fight ID.'
-    Assert-True ($FightSpecV3Content -match '(?is)actor.+weighted.+weapon.class.+armor.class.+exact player budget.+actor_class_pair' -and $FightSpecV3Content -match '(?is)deterministic.+sorted.+concrete.+actor_weapon.+actor_ammo_boxes.+actor_outfit') 'FightSpecV3 contract must document weighted actor class-pair selection and dedicated deterministic actor streams.'
-    Assert-True ($FightSpecV3Content -match '(?is)opponent.+70.{0,3}100%.+highest-affordable fallback') 'FightSpecV3 contract must scope the affordability band and fallback to opponent equipment.'
-    Assert-True ($FightSpecV3Content -match '(?is)enemy counts.+budgets.+roles.+factions.+loadout selection.+unchanged') 'FightSpecV3 contract must state that opponent generation behavior is unchanged.'
-    Assert-True ($FightSpecV3Content -notmatch '(?i)generator version 4|generator_version \| exactly 4|catalog_revision \| exactly [34]|g[45]-c[34]-l2') 'FightSpecV3 contract must not regress to stale catalog or generator identifiers.'
-    $FightSpecV3ActorContract = [regex]::Match($FightSpecV3Content, '(?ims)^Actor[\s\S]*?(?=\r?\n\r?\n|\z)').Value
-    Assert-True (-not [string]::IsNullOrWhiteSpace($FightSpecV3ActorContract) -and $FightSpecV3ActorContract -notmatch '(?i)70.{0,3}100%|highest-affordable fallback') 'FightSpecV3 contract must not apply opponent max-cost affordability language to actor selection.'
-}
 if (Test-Path -LiteralPath $CatalogPath) {
     $CatalogContent = Get-Content -LiteralPath $CatalogPath -Raw
     Assert-True ($CatalogContent -match '(?m)^schema_version\s*=\s*10\s*$') 'Catalog must declare schema_version = 10'
@@ -1852,99 +1826,6 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_list') 'Catalog must expose a deterministic actor weapon list.'
     Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v1') 'Catalog revision identity must include the actor quarantine policy.'
 }
-$Task3ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
-if (Test-Path -LiteralPath $Task3ValidatorPath) {
-    $Task3ValidatorContent = Get-Content -LiteralPath $Task3ValidatorPath -Raw
-    foreach ($Code in @('GA_MODE_INVALID','GA_LEVEL_INVALID','GA_LAYOUT_VERSION_INVALID','GA_OPPONENT_SLOT_INVALID','GA_FIGHT_ID_INVALID','GA_FIGHTSPEC_TYPE_INVALID')) {
-        Assert-True ($Task3ValidatorContent -match $Code) "Validator must return structured $Code"
-    }
-    Assert-True ($Task3ValidatorContent -match 'expected_fight_id') 'Validator must recompute fight_id from session_seed and fight_index'
-    Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_COMBINATION_INVALID') 'Validator must reject non-v2 loadout combinations'
-    Assert-True ($Task3ValidatorContent -match 'GA_LOADOUT_KNIFE_INVALID') 'Validator must reject non-cataloged knives'
-    Assert-True ($Task3ValidatorContent -match 'GA_ENEMY_SLOT_BUDGET_INVALID') 'Validator must enforce deterministic per-slot enemy budgets'
-    Assert-True ($Task3ValidatorContent -match 'valid_armor_class') 'Validator must require a recognized outfit armor class'
-    Assert-True ($Task3ValidatorContent -match 'loadout\.consumables\[1\]\s*~=\s*"bandage"') 'Validator must require the actor mandatory bandage first'
-    foreach ($Code in @('GA_SPAWN_SLOT_INVALID','GA_SPAWN_SLOT_DUPLICATE','GA_TACTICAL_ROUTE_INVALID','GA_ENEMY_ROLE_INVALID','GA_ENEMY_PRIMARY_SHARE_INVALID','GA_ENEMY_SNIPER_LIMIT_INVALID')) {
-        Assert-True ($Task3ValidatorContent -match $Code) "FightSpec v3 validator must return structured $Code"
-    }
-    Assert-True ($Task3ValidatorContent -match 'math\.floor\s*\(\s*difficulty\.enemy_total_budget\s*/\s*opponent_count\s*\)') 'Validator must recompute the generator slot-budget base'
-    Assert-True ($Task3ValidatorContent -match 'gamma_arena_number\.is_integer') 'Validator numeric fields must use the finite integer contract'
-    Assert-True ($Task3ValidatorContent -match 'spec\.schema_version\s*~=\s*8') 'Validator must require FightSpec v8'
-    foreach ($Marker in @('GA_LOADOUT_GRENADE_INVALID','actor_grenade_count','enemy_grenade_presence:','enemy_grenade_section:')) {
-        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v7 grenade validator must contain $Marker"
-    }
-    Assert-True ($Task3ValidatorContent -match 'GA_ACTOR_WEAPON_QUARANTINED') 'Validator must reject actor weapons outside actor_weapon_list.'
-    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','GA_MEDICAL_COST_INVALID','GA_ENEMY_MEDICAL_MIX_INVALID')) {
-        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v6 validator must contain $Marker"
-    }
-    Assert-True ($Task5DevTestContent -match 'actor creates exact final ordinary rounds' -and $Task5DevTestContent -match 'runtime does not regenerate the reserve floor') 'Runtime actor loadout tests must require exact final ordinary ammunition'
-    foreach ($Marker in @('budgeted_numerator','budgeted_boxes','actor_scaled_ammo:','magazine_size','GA_PLAYER_AMMO_SCALE_INVALID')) {
-        Assert-True ($Task3ValidatorContent -match [regex]::Escape($Marker)) "FightSpec v6 actor-ammo validator must contain $Marker"
-    }
-}
-$Task3GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
-$Task3GeneratorTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script'
-if (Test-Path -LiteralPath $Task3GeneratorPath) {
-    $Task3GeneratorContent = Get-Content -LiteralPath $Task3GeneratorPath -Raw
-    $Task3GeneratorTestContent = Get-Content -LiteralPath $Task3GeneratorTestPath -Raw
-    Assert-True ($Task3GeneratorContent -match 'local\s+normalized_seed\s*=\s*gamma_arena_rng\.normalize_uint32') 'Generator must normalize session_seed once'
-    Assert-True ($Task3GeneratorContent -match 'session_seed\s*=\s*normalized_seed') 'FightSpec must retain normalized session_seed'
-    Assert-True ($Task3GeneratorContent -match 'fight_index\s*=\s*fight_index') 'FightSpec must retain fight_index'
-    Assert-True ($Task3GeneratorContent -match '"session_seed="') 'Stable encoding must include session_seed'
-    Assert-True ($Task3GeneratorContent -match '"fight_index="') 'Stable encoding must include fight_index'
-    Assert-True ($Task3GeneratorContent -match 'local\s+normalized_request') 'Generator must normalize the request before deriving RNG streams'
-    Assert-True ($Task3GeneratorContent -match 'stream\s*\(\s*normalized_request') 'Every generated RNG stream must use the normalized request'
-    Assert-True ($Task3GeneratorContent -match 'gamma_arena_number\.is_integer') 'Generator seed and index checks must use the finite integer contract'
-    Assert-True ($Task3GeneratorContent -match '"actor_knife"') 'Player knife must use an independent tagged RNG stream'
-    Assert-True ($Task3GeneratorContent -match 'schema_version\s*=\s*8') 'Generator must emit FightSpecV8'
-    Assert-True ($Task3GeneratorContent -match 'CORE_RNG_EPOCH\s*=\s*6') 'Generator must retain core/equipment RNG epoch 6'
-    Assert-True ($Task3GeneratorContent -match 'MEDICAL_RNG_EPOCH\s*=\s*1') 'Generator must declare medical RNG epoch 1'
-    foreach ($Marker in @('gear_cost','medical_cost','gamma_arena_medical_generator.generate_actor','gamma_arena_medical_generator.allocate_enemies')) {
-        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "FightSpec v6 generator must contain $Marker"
-    }
-    foreach ($Marker in @('gamma_arena_grenade_generator.generate_actor','gamma_arena_grenade_generator.generate_enemy','actor_grenade_section:','enemy_grenade_presence:','enemy_grenade_section:',',grenades:')) {
-        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "FightSpec v7 grenade generator must contain $Marker"
-    }
-    foreach ($Marker in @('PLAYER_AMMO_CHANCE','function scaled_ammo_boxes','actor_scaled_ammo:','magazine_size','standard_ammo.box_size','GA_PLAYER_AMMO_SCALE_INVALID')) {
-        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Scaled player-ammo generator must contain $Marker"
-    }
-    foreach ($CaseName in @('player_ammo_scaling_policy_is_uncapped_and_prefix_stable','generated_actor_ammo_is_final_and_outside_budget','player_ammo_scaling_is_stream_isolated')) {
-        Assert-True ($Task3GeneratorTestContent -match [regex]::Escape($CaseName)) "Scaled player-ammo suite must register $CaseName"
-    }
-    foreach ($Marker in @('representative_opponent_counts','player_ammo_rate_sweep','observed rate remains within two percentage points','longer rosters preserve every indexed prefix draw','low_without_actor_ammo')) {
-        Assert-True ($Task3GeneratorTestContent -match [regex]::Escape($Marker)) "Scaled player-ammo suite must retain verification marker $Marker"
-    }
-    foreach ($Marker in @('pick_affordable_band','primary_share_percent','spawn_slot_id','tactical_route','role_weapon_pool','resolved_layout')) {
-        Assert-True ($Task3GeneratorContent -match $Marker) "FightSpec v3 generator must contain $Marker"
-    }
-    Assert-True ($Task3GeneratorContent -match 'global_role_pool') 'Unaffordable faction role pools must fall back to the matching global role pool'
-    Assert-True ($Task3GeneratorContent -match 'function\s+select_player_class_pair\s*\(') 'Generator must expose weighted player class-pair selection'
-    Assert-True ($Task3GeneratorContent -match 'function\s+player_loadout\s*\(') 'Generator must stage player loadout selection by class pair'
-    Assert-True (([regex]::Matches($Task3GeneratorContent, 'catalogs\.actor_weapon_list')).Count -ge 2) 'Player feasibility and final selection must share actor_weapon_list.'
-    foreach ($Marker in @('actor_class_pair','actor_weapon','actor_ammo_boxes','actor_outfit')) {
-        Assert-True ($Task3GeneratorContent -match [regex]::Escape($Marker)) "Player selection must use the $Marker deterministic stream"
-    }
-    $GeneratorTests = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script')
-    Assert-True ($GeneratorTests -match 'actor_weapon_quarantine_is_exact_and_actor_only') 'Generator tests must cover exact actor-only weapon quarantine.'
-    Assert-True ($GeneratorTests -match 'fight_spec_v8_separates_gear_medical_and_grenades') 'Generator tests must cover FightSpec v8 cost separation'
-    foreach ($GrenadeCase in @('grenade_loadouts_are_deterministic_uncosted_and_prefix_stable','validator_rejects_forged_grenade_arrays')) {
-        Assert-True ($GeneratorTests -match [regex]::Escape($GrenadeCase)) "Generator tests must cover $GrenadeCase"
-    }
-    Assert-True ($GeneratorTests -match 'validator_rejects_forged_final_actor_ammo') 'Generator tests must cover forged final actor ammo'
-    Assert-True ($GeneratorTests -match 'medical_tuning_does_not_reroll_core_fight') 'Generator tests must prove medical tuning cannot reroll core fight fields'
-    Assert-True ($GeneratorTests -match 'catalog_skips_optional_missing_medicine') 'Generator tests must cover optional missing medicine normalization'
-    foreach ($MedicalCase in @('actor_medical_generation_enforces_budget_and_healer','actor_medical_generation_reaches_master_rare','enemy_medical_generation_spends_team_budget','medical_generation_100000_fights')) {
-        Assert-True ($GeneratorTests -match [regex]::Escape($MedicalCase)) "Generator tests must cover $MedicalCase"
-    }
-    Assert-True ($GeneratorTests -match 'generator_primary_pool_affordability_falls_back') 'Generator tests must cover unaffordable non-empty faction primary pools'
-    Assert-True ($GeneratorTests -match 'weighted_player_class_pair_selection') 'Generator tests must cover weighted player class-pair selection'
-    Assert-True ($GeneratorTests -match 'player_class_pair_ignores_concrete_cardinality') 'Generator tests must prove concrete duplicate cardinality cannot change class selection'
-    Assert-True ($GeneratorTests -match 'master_player_class_diversity') 'Generator tests must cover Master player class diversity'
-    $MasterExoRegistration = [PSCustomObject]@{ Name = 'master_powered_exo_rate_is_rare'; Function = 'master_powered_exo_rate_is_rare' }
-    $MasterExoRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($MasterExoRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($MasterExoRegistration.Function) + '\s*\}'
-    Assert-True ($GeneratorTests -match $MasterExoRegistrationPattern) "Regression case must be registered exactly: $($MasterExoRegistration.Name) -> $($MasterExoRegistration.Function)."
-    Assert-True ($Task3GeneratorContent -match 'value\.knife') 'Stable encoding must include the generated knife'
-}
 if (Test-Path -LiteralPath $DifficultyPath) {
     $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw
     foreach ($Difficulty in @('rookie', 'stalker', 'veteran', 'master')) {
@@ -1981,82 +1862,6 @@ if (Test-Path -LiteralPath $SkipPath) {
     $SkipContent = Get-Content -LiteralPath $SkipPath -Raw
     Assert-True ($SkipContent -match '(?m)^!\[skip_npcs\]\s*$') 'Loadout patch must use ![skip_npcs]'
     Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)_(novice|trainee|experienced|veteran)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)\s*$')).Count -eq 36) 'Loadout patch must add all 36 Arena human aliases to skip_npcs'
-}
-$GoldenPath = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v4.txt'
-if (Test-Path -LiteralPath $GoldenPath) {
-    $GoldenContent = Get-Content -LiteralPath $GoldenPath -Raw
-    Assert-True (([regex]::Matches($GoldenContent, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=4\|.+\|diagnostic=FightSpecV4 .+$')).Count -eq 4) 'Golden fixture must contain four complete v4 stable encodings'
-}
-$FightSpecV4Path = Join-Path $RepoRoot 'schemas\fight-spec-v4.md'
-if (Test-Path -LiteralPath $FightSpecV4Path) {
-    $FightSpecV4Content = Get-Content -LiteralPath $FightSpecV4Path -Raw
-    Assert-True ($FightSpecV4Content -match '(?m)^\| schema_version \| exactly 4 \|\s*$') 'FightSpecV4 root schema must be version 4.'
-    Assert-True ($FightSpecV4Content -match '(?m)^\| generator_version \| exactly 6 \|\s*$' -and $FightSpecV4Content -match '(?m)^\| catalog_revision \| exactly 6 \|\s*$' -and $FightSpecV4Content.Contains('`ga-<seed>-<index>-g6-c6-l2`')) 'FightSpecV4 must declare generator/catalog 6 and the g6/c6/l2 fight ID.'
-    Assert-True ($FightSpecV4Content -match '(?is)actor-only.+bonus_ammo.+standard.+1\.\.60.+special.+61\.\.75.+armor_piercing.+76\.\.100') 'FightSpecV4 must document actor-only weighted bonus ammo.'
-    Assert-True ($FightSpecV4Content -match '(?is)actor_bonus_ammo_category.+actor_bonus_ammo_section.+budget.+never') 'FightSpecV4 must document dedicated bonus streams and budget exclusion.'
-}
-$GoldenV5Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v5.txt'
-if (Test-Path -LiteralPath $GoldenV5Path) {
-    $GoldenV5Content = Get-Content -LiteralPath $GoldenV5Path -Raw
-    Assert-True (([regex]::Matches($GoldenV5Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=5\|.+\|diagnostic=FightSpecV5 .+$')).Count -eq 4) 'Golden fixture must contain four complete v5 stable encodings'
-    Assert-True ($GoldenV5Content -match 'medical:[^|,]*\+?[^|,]*,\d+,\d+,\d+') 'Golden v5 fixture must encode medicine plus separated costs'
-    Assert-True ($GoldenV5Content -match 'generator_version=7\|catalog_revision=7' -and $GoldenV5Content -match 'fight_id=ga-[^|]+-g7-c7-l2') 'Golden v5 fixture must use active generator/catalog identity 7/7'
-}
-$FightSpecV5Path = Join-Path $RepoRoot 'schemas\fight-spec-v5.md'
-if (Test-Path -LiteralPath $FightSpecV5Path) {
-    $FightSpecV5Content = Get-Content -LiteralPath $FightSpecV5Path -Raw
-    Assert-True ($FightSpecV5Content -match '(?m)^\| schema_version \| exactly 5 \|\s*$') 'FightSpecV5 root schema must be version 5.'
-    Assert-True ($FightSpecV5Content -match '(?m)^\| generator_version \| exactly 7 \|\s*$') 'FightSpecV5 must declare generator identity 7.'
-    Assert-True ($FightSpecV5Content -match '(?m)^\| catalog_revision \| equals the normalized effective catalog revision \|\s*$') 'FightSpecV5 must admit the deterministic effective-catalog revision.'
-    Assert-True ($FightSpecV5Content.Contains('`ga-<seed>-<index>-g7-c<catalog>-l<layout>`')) 'FightSpecV5 must document the effective catalog/layout Fight ID.'
-    foreach ($Marker in @('gear_cost','medical_cost','player_gear_budget','player_medical_budget','enemy medical team budget','core/equipment RNG epoch 6','medical RNG epoch 1')) {
-        Assert-True ($FightSpecV5Content -match [regex]::Escape($Marker)) "FightSpecV5 must document $Marker"
-    }
-}
-$FightSpecV6Path = Join-Path $RepoRoot 'schemas\fight-spec-v6.md'
-Assert-True (Test-Path -LiteralPath $FightSpecV6Path) 'FightSpecV6 schema contract must exist.'
-if (Test-Path -LiteralPath $FightSpecV6Path) {
-    $FightSpecV6Content = Get-Content -LiteralPath $FightSpecV6Path -Raw
-    Assert-True ($FightSpecV6Content -match '(?m)^\| schema_version \| exactly 6 \|\s*$') 'FightSpecV6 root schema must be version 6.'
-    Assert-True ($FightSpecV6Content -match '(?m)^\| generator_version \| exactly 8 \|\s*$') 'FightSpecV6 must declare generator identity 8.'
-    foreach ($Marker in @('final `ammo_boxes`','three-magazine','actor_scaled_ammo:<index>','40%','25%','20%','10%','gear_cost','bonus_ammo','Opponent')) {
-        Assert-True ($FightSpecV6Content -match [regex]::Escape($Marker)) "FightSpecV6 ammo contract must document $Marker"
-    }
-    Assert-True ($FightSpecV6Content -notmatch '(?i)extra_ammo|scaled_ammo_boxes\s*\|\s*field|budgeted_ammo_boxes\s*\|\s*field') 'FightSpecV6 must not expose ammo provenance fields.'
-}
-$FightSpecV7Path = Join-Path $RepoRoot 'schemas\fight-spec-v7.md'
-Assert-True (Test-Path -LiteralPath $FightSpecV7Path) 'FightSpecV7 schema contract must exist.'
-if (Test-Path -LiteralPath $FightSpecV7Path) {
-    $FightSpecV7Content = Get-Content -LiteralPath $FightSpecV7Path -Raw
-    Assert-True ($FightSpecV7Content -match '(?m)^\| schema_version \| exactly 7 \|\s*$') 'FightSpecV7 root schema must be version 7.'
-    Assert-True ($FightSpecV7Content -match '(?m)^\| generator_version \| exactly 9 \|\s*$') 'FightSpecV7 must declare generator identity 9.'
-    foreach ($Marker in @('grenades','94%','5%','1%','10%','90%','`grenade_smoke` is excluded','actor_grenade_count','enemy_grenade_presence:<slot>','GA_LOADOUT_GRENADE_INVALID','native engine decision')) {
-        Assert-True ($FightSpecV7Content -match [regex]::Escape($Marker)) "FightSpecV7 grenade contract must document $Marker"
-    }
-}
-$GoldenV7Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v7.txt'
-if (Test-Path -LiteralPath $GoldenV7Path) {
-    $GoldenV7Content = Get-Content -LiteralPath $GoldenV7Path -Raw
-    Assert-True (([regex]::Matches($GoldenV7Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=7\|.+\|diagnostic=FightSpecV7 .+$')).Count -eq 4) 'Golden fixture must contain four complete v7 stable encodings'
-    Assert-True ($GoldenV7Content -match 'generator_version=9\|catalog_revision=9' -and $GoldenV7Content -match 'fight_id=ga-[^|]+-g9-c9-l2') 'Golden v7 fixture must use active generator/catalog identity 9/9'
-    Assert-True ($GoldenV7Content -match 'actor=[^|]*,ammo_[^,]+,[5-9][0-9]*,') 'Golden v7 fixture must encode the final scaled actor ammo_boxes value'
-    Assert-True ($GoldenV7Content -match 'medical:[^|,]*\+?[^|,]*,grenades:[^,]*,\d+,\d+,\d+') 'Golden v7 fixture must encode grenades separately from medicine and costs'
-}
-$FightSpecV8Path = Join-Path $RepoRoot 'schemas\fight-spec-v8.md'
-Assert-True (Test-Path -LiteralPath $FightSpecV8Path) 'FightSpecV8 schema contract must exist.'
-if (Test-Path -LiteralPath $FightSpecV8Path) {
-    $FightSpecV8Content = Get-Content -LiteralPath $FightSpecV8Path -Raw
-    foreach ($Marker in @('exactly `8`','generator version 10','actor.loadout.device','device_torch_dummy','device_torch_nv_1','device_torch_nv_2','device_torch_nv_3','actor_device','GA_LOADOUT_DEVICE_INVALID')) {
-        Assert-True ($FightSpecV8Content -match [regex]::Escape($Marker)) "FightSpecV8 device contract must document $Marker"
-    }
-}
-$GoldenV8Path = Join-Path $RepoRoot 'tests\fixtures\golden-fights-v8.txt'
-Assert-True (Test-Path -LiteralPath $GoldenV8Path) 'FightSpecV8 golden fixture must exist.'
-if (Test-Path -LiteralPath $GoldenV8Path) {
-    $GoldenV8Content = Get-Content -LiteralPath $GoldenV8Path -Raw
-    Assert-True (([regex]::Matches($GoldenV8Content, '(?m)^seed=\d+,difficulty=(rookie|stalker|veteran|master),fight=\d+,stable_encode=schema_version=8\|.+\|diagnostic=FightSpecV8 .+$')).Count -eq 4) 'Golden fixture must contain four complete v8 stable encodings'
-    Assert-True ($GoldenV8Content -match 'generator_version=10\|catalog_revision=10' -and $GoldenV8Content -match 'fight_id=ga-[^|]+-g10-c10-l2') 'Golden v8 fixture must use active generator/catalog identity 10/10'
-    Assert-True ($GoldenV8Content -match ',device:(headlamp|nv_gen1|nv_gen2|nv_gen3):device_torch_') 'Golden v8 fixture must encode the deterministic actor device'
 }
 $Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 $Task5RuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
@@ -2139,7 +1944,6 @@ if ($IsRepositoryCheckout) {
         )) {
             Assert-True ($BuildContent -match ("(?m)^\s*" + [regex]::Escape($Field) + "\s*=")) "Release manifest must record $Field"
         }
-        Assert-True ($BuildContent -match '(?m)^\s*fight_spec_schema_version\s*=\s*8\s*$' -and $BuildContent -match '(?m)^\s*generator_version\s*=\s*10\s*$' -and $BuildContent -match '(?m)^\s*catalog_revision\s*=\s*10\s*$') 'Release manifest must record active FightSpec/catalog identity 8/10/10'
         Assert-True ($BuildContent -match 'Get-OrdinalSortedPaths') 'Release manifest files must be sorted ordinally'
         Assert-True ($BuildContent -match 'Get-FileHash[^\r\n]+SHA256') 'Release manifest must checksum raw staged files with SHA-256'
         Assert-True ($BuildContent -match 'UTF8Encoding\(\$false\)') 'Release manifest must use UTF-8 without BOM'

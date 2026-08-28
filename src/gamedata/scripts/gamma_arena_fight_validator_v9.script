@@ -1,6 +1,6 @@
 local MAX_SAFE_INTEGER = 9007199254740991
-local GENERATOR_VERSION = 10
-local CATALOG_FINGERPRINT_PREFIX = "ga-catalog-v9-"
+local GENERATOR_VERSION = 11
+local CATALOG_FINGERPRINT_PREFIX = "ga-catalog-v10-"
 local FORBIDDEN = {
     mode_id = true, difficulty_id = true, budget = true, player_budget = true,
     price = true, weight = true, weight_total = true, points = true, threat = true,
@@ -10,7 +10,8 @@ local FORBIDDEN = {
 local ROOT_KEYS = { schema_version = true, identity = true, arena = true, actor = true, opponents = true }
 local IDENTITY_KEYS = {
     session_seed = true, fight_index = true, generator_version = true,
-    catalog_fingerprint = true, layout_version = true, content_hash = true, fight_id = true
+    catalog_schema_version = true, catalog_revision = true, catalog_fingerprint = true,
+    layout_version = true, layout_hash = true, fight_id = true
 }
 local ARENA_KEYS = { layout_id = true, level = true, tactical_routes = true }
 local ACTOR_KEYS = { spawn_path = true, look_path = true, items = true }
@@ -24,7 +25,8 @@ local SPAWN_KEYS = { position = true, level_vertex_id = true, game_vertex_id = t
 local POSITION_KEYS = { x = true, y = true, z = true }
 local PARTICIPANT_ROLES = { leader = true, primary = true, secondary = true }
 local ITEM_CATEGORIES = {
-    weapon = true, ammo = true, outfit = true, helmet = true, knife = true, medicine = true, grenade = true
+    weapon = true, ammo = true, outfit = true, helmet = true, knife = true,
+    medicine = true, grenade = true, device = true
 }
 
 local function failure(code, message, context)
@@ -94,8 +96,8 @@ local function rank_contains(record, value)
 end
 
 local function validate_catalog(catalog)
-    if type(catalog) ~= "table" or catalog.schema_version ~= 9 or catalog.revision ~= 10
-        or catalog.generator_version ~= 10 or not text(catalog.fingerprint)
+    if type(catalog) ~= "table" or catalog.schema_version ~= 10 or catalog.revision ~= 11
+        or catalog.generator_version ~= 11 or not text(catalog.fingerprint)
         or string.sub(catalog.fingerprint, 1, #CATALOG_FINGERPRINT_PREFIX) ~= CATALOG_FINGERPRINT_PREFIX
         or type(catalog.items) ~= "table" or type(catalog.ranks) ~= "table"
         or type(catalog.factions) ~= "table"
@@ -133,6 +135,8 @@ local function validate_catalog(catalog)
             end
         elseif definition.category == "medicine" and type(definition.healing) ~= "boolean" then
             return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog medicine healing metadata is invalid", { section = section })
+        elseif definition.category == "device" and definition.ltx_slot ~= 9 then
+            return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Catalog device slot is invalid", { section = section })
         end
     end
     if item_count == 0 then return failure("GA_FIGHTSPEC_CATALOG_INVALID", "Universal item catalog is empty") end
@@ -271,7 +275,7 @@ local function validate_items(items, catalog, actor, path)
     local count, invalid = dense_array(items, path, false)
     if invalid then return invalid end
     local occupied_slots, seen_sections = {}, {}
-    local outfits, helmets, knives, firearms, equipped_firearms = 0, 0, 0, 0, 0
+    local outfits, helmets, knives, devices, firearms, equipped_firearms = 0, 0, 0, 0, 0, 0
     local outfit, selected_ammo, weapons = nil, {}, {}
     local healing = false
     local physical_total = 0
@@ -297,6 +301,15 @@ local function validate_items(items, catalog, actor, path)
                 expected_slot = "weapon_" .. tostring(definition.ltx_slot)
                 equipped_firearms = equipped_firearms + 1
             end
+        elseif category == "device" then
+            if not actor then
+                return failure("GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID", "Opponents cannot own devices", { path = path, section = entry.section })
+            end
+            devices = devices + 1
+            if devices > 1 or entry.quantity ~= 1 or entry.equipped_slot ~= "device" then
+                return failure("GA_FIGHTSPEC_DEVICE_INVALID", "Actor permits at most one quantity-one logical device", { path = path, section = entry.section })
+            end
+            expected_slot = "device"
         elseif category == "ammo" then selected_ammo[entry.section] = true
         elseif category == "medicine" and definition.healing then healing = true end
 
@@ -420,8 +433,8 @@ local function validate_impl(spec, catalog, layout, runtime)
 
     local invalid = exact_keys(spec, ROOT_KEYS, "spec")
     if invalid then return invalid end
-    if spec.schema_version ~= 8 then
-        return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema must be exactly 8")
+    if spec.schema_version ~= 9 then
+        return failure("GA_FIGHTSPEC_VERSION_INVALID", "FightSpec schema must be exactly 9")
     end
     invalid = exact_keys(spec.identity, IDENTITY_KEYS, "spec.identity")
     if invalid then return invalid end
@@ -430,10 +443,13 @@ local function validate_impl(spec, catalog, layout, runtime)
         or identity.session_seed ~= gamma_arena_rng.normalize_uint32(identity.session_seed)
         or not non_negative_integer(identity.fight_index)
         or identity.generator_version ~= GENERATOR_VERSION
+        or identity.catalog_schema_version ~= catalog.schema_version
+        or identity.catalog_revision ~= catalog.revision
         or identity.catalog_fingerprint ~= catalog.fingerprint
         or identity.layout_version ~= layout.version
-        or not text(identity.content_hash) or #identity.content_hash ~= 16
-        or not text(identity.fight_id) then
+        or not text(identity.layout_hash) or #identity.layout_hash ~= 16
+        or identity.layout_hash ~= gamma_arena_fight_spec.layout_hash(layout)
+        or not text(identity.fight_id) or string.sub(identity.fight_id, 1, 4) ~= "ga9-" then
         return failure("GA_FIGHTSPEC_IDENTITY_INVALID", "FightSpec identity is invalid")
     end
 
@@ -475,17 +491,18 @@ local function validate_impl(spec, catalog, layout, runtime)
         { arena = canonical_source.arena, actor = canonical_source.actor, opponents = canonical_source.opponents },
         {
             session_seed = identity.session_seed, fight_index = identity.fight_index,
-            generator_version = identity.generator_version, catalog_fingerprint = identity.catalog_fingerprint,
-            layout_version = identity.layout_version
+            generator_version = identity.generator_version,
+            catalog_schema_version = identity.catalog_schema_version,
+            catalog_revision = identity.catalog_revision,
+            catalog_fingerprint = identity.catalog_fingerprint,
+            layout_version = identity.layout_version, layout_hash = identity.layout_hash
         },
         catalog,
         layout)
     if not canonical.ok then
         return failure("GA_FIGHTSPEC_CANONICAL_INVALID", "FightSpec could not be canonically reconstructed", { cause = canonical.error })
     end
-    if identity.content_hash ~= canonical.value.identity.content_hash
-        or identity.fight_id ~= canonical.value.identity.fight_id
-        or identity.fight_id ~= "ga8-" .. identity.content_hash then
+    if identity.fight_id ~= canonical.value.identity.fight_id then
         return failure("GA_FIGHTSPEC_INTEGRITY_INVALID", "FightSpec hash or id does not match canonical content")
     end
     local supplied_encoding = gamma_arena_fight_spec.stable_encode(spec)

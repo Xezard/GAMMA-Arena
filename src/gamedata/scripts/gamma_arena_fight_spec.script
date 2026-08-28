@@ -1,7 +1,7 @@
-local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon_1 = 4, weapon_2 = 5 }
-local CATEGORY_ORDER = { outfit = 1, helmet = 2, knife = 3, weapon = 4, ammo = 5, medicine = 6, grenade = 7 }
+local SLOT_ORDER = { outfit = 1, helmet = 2, knife = 3, device = 4, weapon_1 = 5, weapon_2 = 6 }
+local CATEGORY_ORDER = { outfit = 1, helmet = 2, knife = 3, device = 4, weapon = 5, ammo = 6, medicine = 7, grenade = 8 }
 local MAX_SAFE_INTEGER = 9007199254740991
-local CATALOG_FINGERPRINT_PREFIX = "ga-catalog-v9-"
+local CATALOG_FINGERPRINT_PREFIX = "ga-catalog-v10-"
 local FORBIDDEN = {
     mode_id = true, difficulty_id = true, budget = true, player_budget = true,
     price = true, weight = true, weight_total = true, points = true, threat = true,
@@ -26,10 +26,10 @@ local function unsigned_integer(value, minimum)
 end
 
 function validate_catalog_identity(catalog)
-    if type(catalog) ~= "table" or catalog.schema_version ~= 9 or catalog.revision ~= 10
-        or catalog.generator_version ~= 10 or not text(catalog.fingerprint)
+    if type(catalog) ~= "table" or catalog.schema_version ~= 10 or catalog.revision ~= 11
+        or catalog.generator_version ~= 11 or not text(catalog.fingerprint)
         or string.sub(catalog.fingerprint, 1, #CATALOG_FINGERPRINT_PREFIX) ~= CATALOG_FINGERPRINT_PREFIX then
-        return failure("GA_FIGHT_SPEC_CATALOG", "FightSpec catalog identity must be exactly 9/10/10 in the ga-catalog-v9 domain")
+        return failure("GA_FIGHT_SPEC_CATALOG", "FightSpec catalog identity must be exactly 10/11/11 in the ga-catalog-v10 domain")
     end
     return gamma_arena_result.ok(true)
 end
@@ -70,22 +70,31 @@ end
 
 local function exact_identity(value, catalog, layout)
     if type(value) ~= "table" then return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity must be a table") end
-    local required = { "session_seed", "fight_index", "generator_version", "catalog_fingerprint", "layout_version" }
+    local required = {
+        "session_seed", "fight_index", "generator_version", "catalog_schema_version",
+        "catalog_revision", "catalog_fingerprint", "layout_version", "layout_hash"
+    }
     for _, key in ipairs(required) do if value[key] == nil then return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity is incomplete", { key = key }) end end
     for key in pairs(value) do
-        if key ~= "session_seed" and key ~= "fight_index" and key ~= "generator_version" and key ~= "catalog_fingerprint" and key ~= "layout_version" then
+        if key ~= "session_seed" and key ~= "fight_index" and key ~= "generator_version"
+            and key ~= "catalog_schema_version" and key ~= "catalog_revision"
+            and key ~= "catalog_fingerprint" and key ~= "layout_version" and key ~= "layout_hash" then
             return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity contains an unknown field", { key = key })
         end
     end
     if not unsigned_integer(value.session_seed) or value.session_seed ~= gamma_arena_rng.normalize_uint32(value.session_seed)
-        or not unsigned_integer(value.fight_index) or value.generator_version ~= 10
-        or not text(value.catalog_fingerprint) or not unsigned_integer(value.layout_version, 1) then
+        or not unsigned_integer(value.fight_index) or value.generator_version ~= 11
+        or value.catalog_schema_version ~= 10 or value.catalog_revision ~= 11
+        or not text(value.catalog_fingerprint) or not unsigned_integer(value.layout_version, 1)
+        or not text(value.layout_hash) then
         return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec identity has invalid values")
     end
-    if type(catalog) ~= "table" or value.catalog_fingerprint ~= catalog.fingerprint then
+    if type(catalog) ~= "table" or value.catalog_schema_version ~= catalog.schema_version
+        or value.catalog_revision ~= catalog.revision or value.generator_version ~= catalog.generator_version
+        or value.catalog_fingerprint ~= catalog.fingerprint then
         return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec catalog fingerprint does not match", {})
     end
-    if type(layout) ~= "table" or value.layout_version ~= layout.version then
+    if type(layout) ~= "table" or value.layout_version ~= layout.version or value.layout_hash ~= layout_hash(layout) then
         return failure("GA_FIGHT_SPEC_IDENTITY", "FightSpec layout version does not match", {})
     end
     return nil
@@ -99,6 +108,7 @@ end
 
 local function equipped_slot_for(item)
     if item.category == "outfit" or item.category == "helmet" or item.category == "knife" then return item.category end
+    if item.category == "device" then return "device" end
     if item.category == "weapon" then
         local slot = tonumber(item.ltx_slot)
         if slot == 1 or slot == 2 then return "weapon_" .. tostring(slot) end
@@ -106,10 +116,19 @@ local function equipped_slot_for(item)
     return nil
 end
 
-local function add_item(items, owners, section, quantity, equipped_slot, catalog)
+local function add_item(items, owners, section, quantity, equipped_slot, catalog, allow_device)
     if not text(section) or not unsigned_integer(quantity, 1) then return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Item quantity must be a bounded positive integer", { section = section, quantity = quantity }) end
     local item = item_catalog(catalog, section)
     if item == nil then return failure("GA_FIGHT_SPEC_ITEM_UNKNOWN", "Item section is not in the catalog", { section = section }) end
+    if item.category == "device" and not allow_device then
+        return failure("GA_FIGHT_SPEC_OPPONENT_DEVICE", "Opponents cannot own devices", { section = section })
+    end
+    if item.category == "device" and quantity ~= 1 then
+        return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Actor device quantity must be exactly one", { section = section, quantity = quantity })
+    end
+    if item.category == "device" and equipped_slot ~= "device" then
+        return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Actor device must own the logical device slot", { section = section, equipped_slot = equipped_slot })
+    end
     if equipped_slot ~= nil and SLOT_ORDER[equipped_slot] == nil then return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Item uses an unknown equipped slot", { section = section, equipped_slot = equipped_slot }) end
     if equipped_slot ~= nil and equipped_slot_for(item) ~= equipped_slot then return failure("GA_FIGHT_SPEC_ITEM_SLOT", "Item does not match its equipped slot", { section = section, equipped_slot = equipped_slot }) end
     local current = items[section]
@@ -117,6 +136,9 @@ local function add_item(items, owners, section, quantity, equipped_slot, catalog
         current = { section = section, quantity = quantity, equipped_slot = equipped_slot, category = item.category }
         items[section] = current
     else
+        if item.category == "device" then
+            return failure("GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT", "Actor may own at most one device", { section = section })
+        end
         if current.equipped_slot ~= nil and equipped_slot ~= nil and current.equipped_slot ~= equipped_slot then
             return failure("GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT", "Duplicate item sections have conflicting equipped slots", { section = section })
         end
@@ -147,56 +169,14 @@ local function sort_items(values)
     for index = 1, #values do values[index].category = nil end
 end
 
-local function normalized_items(items, catalog)
+local function normalized_items(items, catalog, allow_device)
     local count, invalid = dense_array(items, "items")
     if invalid then return invalid end
     local aggregate, owners = {}, {}
     for index = 1, count do
         local entry = items[index]
         if type(entry) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Item entry must be a table", { index = index }) end
-        local result = add_item(aggregate, owners, entry.section, entry.quantity, entry.equipped_slot, catalog)
-        if result then return result end
-    end
-    local values = {}
-    for _, entry in pairs(aggregate) do values[#values + 1] = entry end
-    sort_items(values)
-    return gamma_arena_result.ok(values)
-end
-
-local function legacy_items(loadout, catalog)
-    if type(loadout) ~= "table" then return failure("GA_FIGHT_SPEC_LOADOUT", "Legacy loadout must be a table") end
-    local aggregate, owners = {}, {}
-    local function add(section, quantity, slot)
-        if section == nil then return nil end
-        return add_item(aggregate, owners, section, quantity or 1, slot, catalog)
-    end
-    local result = add(loadout.outfit, 1, "outfit") or add(loadout.knife, 1, "knife")
-    if result then return result end
-    if loadout.weapon ~= nil then
-        local weapon = item_catalog(catalog, loadout.weapon)
-        result = add(loadout.weapon, 1, weapon and equipped_slot_for(weapon) or nil)
-        if result then return result end
-    end
-    result = add(loadout.ammo, loadout.ammo_boxes)
-    if result then return result end
-    if loadout.bonus_ammo ~= nil then
-        local bonus = loadout.bonus_ammo
-        if type(bonus) ~= "table" or not text(bonus.section) or not unsigned_integer(bonus.boxes, 1) then
-            return failure("GA_FIGHT_SPEC_ITEM_QUANTITY", "Legacy bonus ammunition requires bounded boxes", {})
-        end
-        result = add(bonus.section, bonus.boxes)
-        if result then return result end
-    end
-    local consumable_count, invalid = dense_array(loadout.consumables or {}, "legacy_consumables")
-    if invalid then return invalid end
-    for index = 1, consumable_count do
-        result = add(loadout.consumables[index], 1)
-        if result then return result end
-    end
-    local grenade_count, grenade_invalid = dense_array(loadout.grenades or {}, "legacy_grenades")
-    if grenade_invalid then return grenade_invalid end
-    for index = 1, grenade_count do
-        result = add(loadout.grenades[index], 1)
+        local result = add_item(aggregate, owners, entry.section, entry.quantity, entry.equipped_slot, catalog, allow_device)
         if result then return result end
     end
     local values = {}
@@ -219,23 +199,17 @@ local function enforce_physical_item_cap(result, cap, path)
     return result
 end
 
-local function resolve_items(value, catalog, cap, path)
+local function resolve_items(value, catalog, cap, path, allow_device)
     if type(value) ~= "table" then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must be a table") end
     if value.items ~= nil and value.loadout ~= nil then return failure("GA_FIGHT_SPEC_ITEMS", "Fight participant must use one item shape") end
     local result
     local loadout = value.loadout
     if value.items ~= nil then
-        result = normalized_items(value.items, catalog)
-    elseif type(loadout) == "table" and loadout.kind ~= nil then
-        if loadout.kind == "legacy" and loadout.items == nil then
-            result = legacy_items(loadout.value, catalog)
-        elseif loadout.kind == "items" and loadout.value == nil then
-            result = normalized_items(loadout.items, catalog)
-        else
-            return failure("GA_FIGHT_SPEC_LOADOUT", "Tagged draft loadout shape is invalid", { path = path })
-        end
+        result = normalized_items(value.items, catalog, allow_device)
+    elseif type(loadout) == "table" and loadout.kind == "items" and loadout.value == nil then
+        result = normalized_items(loadout.items, catalog, allow_device)
     else
-        result = legacy_items(loadout, catalog)
+        return failure("GA_FIGHT_SPEC_ITEMS", "Fight draft must use universal physical items", { path = path })
     end
     return enforce_physical_item_cap(result, cap, path)
 end
@@ -250,7 +224,7 @@ local function canonical_opponent(value, catalog, routes, cap, path)
     local position = value.spawn.position
     if not finite_number(position.x) or not finite_number(position.y) or not finite_number(position.z)
         or not unsigned_integer(value.spawn.level_vertex_id) or not unsigned_integer(value.spawn.game_vertex_id) then return failure("GA_FIGHT_SPEC_POSITION", "Opponent spawn data is invalid") end
-    local items = resolve_items(value, catalog, cap, path .. ".items")
+    local items = resolve_items(value, catalog, cap, path .. ".items", false)
     if not items.ok then return items end
     return gamma_arena_result.ok({ slot = value.slot, faction = value.faction, rank = { id = value.rank.id, value = value.rank.value }, profile = value.profile, role = value.role, spawn_slot_id = value.spawn_slot_id, spawn = { position = { x = position.x, y = position.y, z = position.z }, level_vertex_id = value.spawn.level_vertex_id, game_vertex_id = value.spawn.game_vertex_id }, tactical_route = value.tactical_route, items = items.value })
 end
@@ -282,8 +256,15 @@ end
 
 local function encode_spec(spec, include_checksum)
     local identity = spec.identity
-    local parts = { scalar("schema_version", spec.schema_version), scalar("session_seed", identity.session_seed), scalar("fight_index", identity.fight_index), scalar("generator_version", identity.generator_version), scalar("catalog_fingerprint", identity.catalog_fingerprint), scalar("layout_version", identity.layout_version) }
-    if include_checksum then parts[#parts + 1] = scalar("content_hash", identity.content_hash); parts[#parts + 1] = scalar("fight_id", identity.fight_id) end
+    local parts = {
+        scalar("schema_version", spec.schema_version), scalar("session_seed", identity.session_seed),
+        scalar("fight_index", identity.fight_index), scalar("generator_version", identity.generator_version),
+        scalar("catalog_schema_version", identity.catalog_schema_version),
+        scalar("catalog_revision", identity.catalog_revision),
+        scalar("catalog_fingerprint", identity.catalog_fingerprint),
+        scalar("layout_version", identity.layout_version), scalar("layout_hash", identity.layout_hash)
+    }
+    if include_checksum then parts[#parts + 1] = scalar("fight_id", identity.fight_id) end
     parts[#parts + 1] = scalar("layout_id", spec.arena.layout_id); parts[#parts + 1] = scalar("level", spec.arena.level); parts[#parts + 1] = scalar("route_count", #spec.arena.tactical_routes)
     for index = 1, #spec.arena.tactical_routes do parts[#parts + 1] = scalar("route", spec.arena.tactical_routes[index]) end
     parts[#parts + 1] = scalar("actor_spawn_path", spec.actor.spawn_path); parts[#parts + 1] = scalar("actor_look_path", spec.actor.look_path); parts[#parts + 1] = encode_items(spec.actor.items)
@@ -297,9 +278,45 @@ end
 
 function content_hash(payload)
     if type(payload) ~= "string" then payload = tostring(payload) end
-    local first = gamma_arena_rng.derive_seed({ "ga-fightspec-v8-a", payload })
-    local second = gamma_arena_rng.derive_seed({ "ga-fightspec-v8-b", payload })
+    local first = gamma_arena_rng.derive_seed({ "ga-fightspec-v9-a", payload })
+    local second = gamma_arena_rng.derive_seed({ "ga-fightspec-v9-b", payload })
     return string.format("%08x%08x", first, second)
+end
+
+function layout_hash(layout)
+    if type(layout) ~= "table" or not text(layout.id) or not unsigned_integer(layout.version, 1)
+        or not text(layout.level) or not text(layout.actor_spawn_path) or not text(layout.actor_look_path)
+        or not unsigned_integer(layout.capacity, 1) then return nil end
+    local route_count, route_error = dense_array(layout.tactical_routes, "layout.tactical_routes")
+    local slot_count, slot_error = dense_array(layout.opponent_spawn_slots, "layout.opponent_spawn_slots")
+    if route_error or slot_error or slot_count ~= layout.capacity then return nil end
+    local parts = {
+        scalar("layout_id", layout.id), scalar("layout_version", layout.version), scalar("level", layout.level),
+        scalar("actor_spawn_path", layout.actor_spawn_path), scalar("actor_look_path", layout.actor_look_path),
+        scalar("capacity", layout.capacity), scalar("route_count", route_count)
+    }
+    for index = 1, route_count do
+        if not text(layout.tactical_routes[index]) then return nil end
+        parts[#parts + 1] = scalar("route", layout.tactical_routes[index])
+    end
+    parts[#parts + 1] = scalar("spawn_slot_count", slot_count)
+    for index = 1, slot_count do
+        local slot = layout.opponent_spawn_slots[index]
+        local position = type(slot) == "table" and slot.position or nil
+        if type(slot) ~= "table" or not text(slot.id) or not text(slot.base_route)
+            or type(slot.native) ~= "boolean" or type(position) ~= "table"
+            or not finite_number(position.x) or not finite_number(position.y) or not finite_number(position.z)
+            or not unsigned_integer(slot.level_vertex_id) or not unsigned_integer(slot.game_vertex_id) then return nil end
+        parts[#parts + 1] = scalar("spawn_slot_id", slot.id)
+        parts[#parts + 1] = scalar("spawn_base_route", slot.base_route)
+        parts[#parts + 1] = scalar("spawn_native", slot.native and 1 or 0)
+        parts[#parts + 1] = scalar("position_x", position_text(position.x))
+        parts[#parts + 1] = scalar("position_y", position_text(position.y))
+        parts[#parts + 1] = scalar("position_z", position_text(position.z))
+        parts[#parts + 1] = scalar("level_vertex_id", slot.level_vertex_id)
+        parts[#parts + 1] = scalar("game_vertex_id", slot.game_vertex_id)
+    end
+    return content_hash("ga-layout-v2|" .. table.concat(parts, "|"))
 end
 
 function stable_encode(spec)
@@ -308,7 +325,10 @@ end
 
 function copy(spec)
     local result = { schema_version = spec.schema_version, identity = {}, arena = { layout_id = spec.arena.layout_id, level = spec.arena.level, tactical_routes = {} }, actor = { spawn_path = spec.actor.spawn_path, look_path = spec.actor.look_path, items = {} }, opponents = {} }
-    for _, key in ipairs({ "session_seed", "fight_index", "generator_version", "catalog_fingerprint", "layout_version", "content_hash", "fight_id" }) do result.identity[key] = spec.identity[key] end
+    for _, key in ipairs({
+        "session_seed", "fight_index", "generator_version", "catalog_schema_version",
+        "catalog_revision", "catalog_fingerprint", "layout_version", "layout_hash", "fight_id"
+    }) do result.identity[key] = spec.identity[key] end
     for index = 1, #spec.arena.tactical_routes do result.arena.tactical_routes[index] = spec.arena.tactical_routes[index] end
     local function copy_items(source, target)
         for index = 1, #source do target[index] = { section = source[index].section, quantity = source[index].quantity, equipped_slot = source[index].equipped_slot } end
@@ -356,7 +376,7 @@ function canonicalize(draft, identity, catalog, layout)
     end
     local opponent_count, opponents_invalid = dense_array(draft.opponents, "opponents")
     if opponents_invalid then return opponents_invalid end
-    local actor_items = resolve_items(draft.actor, catalog, cap, "draft.actor.items")
+    local actor_items = resolve_items(draft.actor, catalog, cap, "draft.actor.items", true)
     if not actor_items.ok then return actor_items end
     local opponents, slots = {}, {}
     for index = 1, opponent_count do
@@ -366,10 +386,20 @@ function canonicalize(draft, identity, catalog, layout)
         slots[opponent.value.slot] = true; opponents[#opponents + 1] = opponent.value
     end
     table.sort(opponents, function(left, right) return left.slot < right.slot end)
-    local result = { schema_version = 8, identity = { session_seed = identity.session_seed, fight_index = identity.fight_index, generator_version = 10, catalog_fingerprint = catalog.fingerprint, layout_version = layout.version }, arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} }, actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, items = actor_items.value }, opponents = opponents }
+    local result = {
+        schema_version = 9,
+        identity = {
+            session_seed = identity.session_seed, fight_index = identity.fight_index,
+            generator_version = catalog.generator_version, catalog_schema_version = catalog.schema_version,
+            catalog_revision = catalog.revision, catalog_fingerprint = catalog.fingerprint,
+            layout_version = layout.version, layout_hash = identity.layout_hash
+        },
+        arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} },
+        actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, items = actor_items.value },
+        opponents = opponents
+    }
     for index = 1, layout_count do result.arena.tactical_routes[index] = layout.tactical_routes[index] end
     local payload = encode_spec(result, false)
-    result.identity.content_hash = content_hash(payload)
-    result.identity.fight_id = "ga8-" .. result.identity.content_hash
+    result.identity.fight_id = "ga9-" .. content_hash(payload)
     return gamma_arena_result.ok(result)
 end
