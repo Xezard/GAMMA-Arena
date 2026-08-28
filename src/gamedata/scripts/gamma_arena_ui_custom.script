@@ -74,6 +74,17 @@ local function projection_failure(code)
     }
 end
 
+function apply_catalog_result(view, catalog_result)
+    if type(view) ~= 'table' then view = projection_failure('GA_CUSTOM_MODEL_INVALID') end
+    if valid_result(catalog_result) and catalog_result.ok then return view end
+    local detail = type(catalog_result) == 'table' and catalog_result.error or nil
+    local code = type(detail) == 'table' and detail.code or 'GA_START_CATALOG_UNAVAILABLE'
+    view.launch_enabled = false
+    view.validation_code = code
+    view.summary_code = code
+    return view
+end
+
 function project(model, category)
     if type(model) ~= "table" or type(model.snapshot) ~= "function" then
         return projection_failure("GA_CUSTOM_MODEL_INVALID")
@@ -249,6 +260,10 @@ function UICustom:__init(owner, ports) super()
     self.ports = ports or {}
     self.selected_category = "weapon"
     self.catalog_result = load_catalog(self.ports)
+    if not self.catalog_result.ok and type(self.catalog_result.error) == 'table' then
+        pcall(gamma_arena_log.error, self.catalog_result.error.code or 'GA_START_CATALOG_UNAVAILABLE',
+            self.catalog_result.error.message or 'Active Arena catalog loading failed', self.catalog_result.error.context or {})
+    end
     local catalog = self.catalog_result.ok and self.catalog_result.value or {}
     local layout = self.ports.layout or (type(catalog.layouts) == "table" and catalog.layouts.rostok_arena_v1 or nil) or {}
     self.model = self.ports.model or gamma_arena_custom_setup_model.new(catalog, layout)
@@ -367,10 +382,7 @@ end
 
 function UICustom:Rebuild()
     local view = project(self.model, self.selected_category)
-    if not self.catalog_result.ok then
-        view.launch_enabled = false
-        view.validation_code = self.catalog_result.error.code
-    end
+    view = apply_catalog_result(view, self.catalog_result)
     if self.submission_error and self.submission_error.error then
         view.submission_error_code = self.submission_error.error.code
         view.summary_code = view.submission_error_code

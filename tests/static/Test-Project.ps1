@@ -481,6 +481,9 @@ $Task9StartContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata
 foreach ($Marker in @('custom_mode', 'function UIStart:OnCustom', 'gamma_arena_ui_custom.create')) {
     Assert-True ($Task9StartContent -match [regex]::Escape($Marker)) "Task 9 start-mode routing is missing: $Marker"
 }
+$Task9UiDiagnosticPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script'
+$Task9UiDiagnostic = Get-Content -LiteralPath $Task9UiDiagnosticPath -Raw
+Assert-True ($Task9UiDiagnostic -match '(?m)^function\s+apply_catalog_result\s*\(') 'Task 9 Custom UI must preserve primary catalog failures in the visible summary.'
 $Task9StartXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
 [xml]$Task9StartXml = Get-Content -LiteralPath $Task9StartXmlPath -Raw
 Assert-True ($null -ne $Task9StartXml.SelectSingleNode("//*[local-name()='custom_mode']")) 'Task 9 start XML must expose Custom mode.'
