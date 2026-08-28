@@ -81,6 +81,34 @@ local function apply_medical(loadout_value, medical)
     loadout_value.cost = loadout_value.gear_cost + loadout_value.medical_cost
 end
 
+local function append_item(items, section, quantity, equipped_slot)
+    items[#items + 1] = {
+        section = section,
+        quantity = quantity,
+        equipped_slot = equipped_slot
+    }
+    if equipped_slot == nil then items[#items].equipped_slot = nil end
+end
+
+local function universal_items(loadout_value, catalogs)
+    local weapon
+    for _, candidate in ipairs(catalogs.weapon_list or {}) do
+        if candidate.section == loadout_value.weapon then weapon = candidate; break end
+    end
+    if type(weapon) ~= "table" or (weapon.slot ~= 1 and weapon.slot ~= 2) then return nil end
+    local items = {}
+    append_item(items, loadout_value.outfit, 1, "outfit")
+    append_item(items, loadout_value.knife, 1, "knife")
+    append_item(items, loadout_value.weapon, 1, "weapon_" .. tostring(weapon.slot))
+    append_item(items, loadout_value.ammo, loadout_value.ammo_boxes)
+    if type(loadout_value.bonus_ammo) == "table" then
+        append_item(items, loadout_value.bonus_ammo.section, loadout_value.bonus_ammo.boxes)
+    end
+    for _, section in ipairs(loadout_value.consumables or {}) do append_item(items, section, 1) end
+    for _, section in ipairs(loadout_value.grenades or {}) do append_item(items, section, 1) end
+    return items
+end
+
 local function pick_affordable_band(rng, values, maximum)
     local affordable, band = {}, {}
     local threshold = math.ceil(maximum * PRIMARY_BAND_PERCENT / 100)
@@ -677,9 +705,21 @@ local function generate_draft_internal(session, fight_index, catalog, layout)
     })
     if not actor_grenades.ok then return actor_grenades end
     actor.value.grenades = actor_grenades.value.sections
+    local actor_items = universal_items(actor.value, catalog)
+    if actor_items == nil then
+        return gamma_arena_result.err("GA_RANDOM_ITEM_DRAFT_INVALID", "Random actor loadout could not become universal items", {})
+    end
+    local actor_device = gamma_arena_device_generator.generate(catalog, {
+        session_seed = normalized_seed,
+        fight_index = fight_index,
+        generator_version = catalog.generator_version,
+        layout_version = layout.version
+    })
+    if not actor_device.ok then return actor_device end
+    append_item(actor_items, actor_device.value.section, 1, "device")
     local draft = {
         arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} },
-        actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, loadout = { kind = "legacy", value = actor.value } },
+        actor = { spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path, loadout = { kind = "items", items = actor_items } },
         opponents = {}
     }
     for index, route in ipairs(layout.tactical_routes) do draft.arena.tactical_routes[index] = route end
@@ -714,6 +754,10 @@ local function generate_draft_internal(session, fight_index, catalog, layout)
         })
         if not enemy_grenades.ok then return enemy_grenades end
         gear.value.grenades = enemy_grenades.value.sections
+        local opponent_items = universal_items(gear.value, catalog)
+        if opponent_items == nil then
+            return gamma_arena_result.err("GA_RANDOM_ITEM_DRAFT_INVALID", "Random opponent loadout could not become universal items", { slot = index })
+        end
         local physical = spawn_slots[index]
         selected_profiles[index] = profile
         draft.opponents[index] = {
@@ -725,11 +769,15 @@ local function generate_draft_internal(session, fight_index, catalog, layout)
             spawn_slot_id = physical.id,
             spawn = copy_spawn(physical),
             tactical_route = assigned_routes[index],
-            loadout = { kind = "legacy", value = gear.value }
+            loadout = { kind = "items", items = opponent_items }
         }
     end
     local enemy_medical = gamma_arena_medical_generator.allocate_enemies(catalog, draft.opponents, enemy_medical_streams(normalized_request, fight_index, catalog, enemy_count)); if not enemy_medical.ok then return enemy_medical end
-    for index, allocation in ipairs(enemy_medical.value.allocations) do apply_medical(draft.opponents[index].loadout.value, allocation) end
+    for index, allocation in ipairs(enemy_medical.value.allocations) do
+        for _, section in ipairs(allocation.sections) do
+            append_item(draft.opponents[index].loadout.items, section, 1)
+        end
+    end
     for index, opponent in ipairs(draft.opponents) do
         local profile = selected_profiles[index]
         local rank_stream = stream(normalized_request, fight_index, catalog, "enemy_numeric_rank:" .. index)

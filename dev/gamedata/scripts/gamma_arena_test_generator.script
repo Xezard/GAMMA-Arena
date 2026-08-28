@@ -1733,18 +1733,59 @@ local function validator_rejects_forged_grenade_arrays()
     end, "wrong deterministic opponent section is rejected")
 end
 
-local function universal_v8_random_fight_activation()
+local function universal_v9_random_device_generation()
     local snapshot = catalogs()
-    local generated = gamma_arena_fight_builder.generate(
+    local original = gamma_arena_device_generator.generate
+    local calls = 0
+    gamma_arena_device_generator.generate = function(...)
+        calls = calls + 1
+        return original(...)
+    end
+    local completed, generated = pcall(gamma_arena_fight_builder.generate,
         request(3735928559, "veteran"), 7, snapshot,
         fixture_resolved_layout(snapshot))
-    gamma_arena_test_assert.is_true(generated.ok, "v8 random fight generates")
-    gamma_arena_test_assert.equals(generated.value.schema_version, 8, "only v8 emits")
-    gamma_arena_test_assert.equals(generated.value.identity.generator_version, 10, "generator identity")
-    gamma_arena_test_assert.is_true(string.sub(generated.value.identity.fight_id, 1, 4) == "ga8-", "v8 fight id")
+    gamma_arena_device_generator.generate = original
+    gamma_arena_test_assert.is_true(completed and generated.ok, "v9 random fight generates")
+    gamma_arena_test_assert.equals(calls, 1, "builder and validator do not rerun Random device selection")
+    gamma_arena_test_assert.equals(generated.value.schema_version, 9, "only v9 emits")
+    gamma_arena_test_assert.equals(generated.value.identity.generator_version, 11, "generator identity")
+    gamma_arena_test_assert.is_true(string.sub(generated.value.identity.fight_id, 1, 4) == "ga9-", "v9 fight id")
     gamma_arena_test_assert.equals(generated.value.mode_id, nil, "mode is erased")
     gamma_arena_test_assert.is_true(#generated.value.actor.items > 0, "actor uses universal items")
     gamma_arena_test_assert.is_true(#generated.value.opponents[1].items > 0, "opponent uses universal items")
+    local function selected_device(spec)
+        local count, selected = 0, nil
+        for _, entry in ipairs(spec.actor.items) do
+            if snapshot.items[entry.section].category == "device" then
+                count, selected = count + 1, entry
+            end
+        end
+        gamma_arena_test_assert.equals(count, 1, "Random emits exactly one actor device")
+        gamma_arena_test_assert.equals(selected.quantity, 1, "Random device quantity is exactly one")
+        gamma_arena_test_assert.equals(selected.equipped_slot, "device", "Random device owns the device slot")
+        for _, opponent in ipairs(spec.opponents) do
+            for _, entry in ipairs(opponent.items) do
+                gamma_arena_test_assert.is_false(snapshot.items[entry.section].category == "device", "opponents never receive devices")
+            end
+        end
+        return selected.section
+    end
+    local selected = selected_device(generated.value)
+    local replay = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.equals(selected_device(replay.value), selected, "same Random input reproduces its device")
+    local isolated = gamma_arena_fight_builder.generate(
+        request(3735928559, "rookie"), 7, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.equals(selected_device(isolated.value), selected, "Random device stream is difficulty independent")
+    local variants = {}
+    for seed = 0, 31 do
+        local changed = gamma_arena_fight_builder.generate(
+            request(seed, "rookie"), 0, snapshot, fixture_resolved_layout(snapshot))
+        variants[selected_device(changed.value)] = true
+    end
+    local variant_count = 0
+    for _ in pairs(variants) do variant_count = variant_count + 1 end
+    gamma_arena_test_assert.is_true(variant_count > 1, "changed Random seeds vary the selected device")
 end
 
 local function medical_tuning_does_not_reroll_core_fight()
@@ -1772,7 +1813,7 @@ function run(run_case_fn)
     if not run_case_fn("random_draft_malformed_inputs_are_total_results", random_draft_malformed_inputs_are_total_results) then all_passed = false end
     if not run_case_fn("random_draft_nested_malformed_and_throwing_inputs_are_total_results", random_draft_nested_malformed_and_throwing_inputs_are_total_results) then all_passed = false end
     if not run_case_fn("random_draft_malformed_dependency_results_are_normalized", random_draft_malformed_dependency_results_are_normalized) then all_passed = false end
-    if not run_case_fn("universal_v8_random_fight_activation", universal_v8_random_fight_activation) then all_passed = false end
+    if not run_case_fn("universal_v9_random_device_generation", universal_v9_random_device_generation) then all_passed = false end
     local cases = {
         { name="catalog_enforces_max_count_viability", fn=catalog_enforces_max_count_viability },
         { name="catalog_exposes_approved_player_weight_rows", fn=catalog_exposes_approved_player_weight_rows },

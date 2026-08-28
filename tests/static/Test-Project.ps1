@@ -358,9 +358,9 @@ $Task2ItemScriptContracts = @(
 )
 
 $Task6RandomDraftContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^local function\s+build_draft_internal\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '(?m)^local function\s+valid_build_result\s*\(\s*result\s*\)', '(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'pcall\s*\(\s*build_draft_internal', 'valid_build_result\s*\(\s*result\s*\)', 'GA_RANDOM_CATALOG_INVALID', 'GA_RANDOM_GENERATION_FAILED', 'enemy_numeric_rank:', 'kind\s*=\s*"legacy"', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
-    [PSCustomObject]@{ Path = 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'; Required = @('golden-random-selections-v8\.txt', 'Read-GaLtx', '9/10/10') },
-    [PSCustomObject]@{ Path = 'tests\fixtures\golden-random-selections-v8.txt'; Required = @('seed=0,difficulty=rookie,fight=0', 'seed=1,difficulty=stalker,fight=0', 'seed=3735928559,difficulty=veteran,fight=7', 'seed=4294967295,difficulty=master,fight=31') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^local function\s+build_draft_internal\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '(?m)^local function\s+valid_build_result\s*\(\s*result\s*\)', '(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'pcall\s*\(\s*build_draft_internal', 'valid_build_result\s*\(\s*result\s*\)', 'GA_RANDOM_CATALOG_INVALID', 'GA_RANDOM_GENERATION_FAILED', 'enemy_numeric_rank:', 'kind\s*=\s*"items"', 'gamma_arena_device_generator\.generate', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
+    [PSCustomObject]@{ Path = 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'; Required = @('golden-random-selections-v9\.txt', 'Read-GaLtx', '10/11/11', 'random_actor_device_v11') },
+    [PSCustomObject]@{ Path = 'tests\fixtures\golden-random-selections-v9.txt'; Required = @('seed=0,difficulty=rookie,fight=0', 'seed=1,difficulty=stalker,fight=0', 'seed=3735928559,difficulty=veteran,fight=7', 'seed=4294967295,difficulty=master,fight=31', 'device:') }
 )
 $Task6ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1')
 if ($Task6ArtifactsPresent) {
@@ -376,7 +376,7 @@ if ($Task6ArtifactsPresent) {
     }
     $Task6ReferenceContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1') -Raw
     Assert-True ($Task6ReferenceContent -notmatch 'gamma_arena_(?:random_)?generator\.script') 'Task 6 semantic reference must not read Lua generator source.'
-    $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v8.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
+    $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v9.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
     Assert-True ($Task6SnapshotLines.Count -eq 4) 'Task 6 semantic snapshot must contain exactly four reviewed random scenarios.'
     $Task6GeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
     foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
@@ -391,7 +391,7 @@ $Task7CurrentArtifacts = @(
     'src\gamedata\scripts\gamma_arena_fight_validator_v9.script',
     'schemas\fight-spec-v9.md',
     'tests\fixtures\golden-fights-v9.txt',
-    'tests\fixtures\golden-random-selections-v8.txt'
+    'tests\fixtures\golden-random-selections-v9.txt'
 )
 
 $Task8CustomContracts = @(
@@ -543,6 +543,50 @@ foreach ($Marker in @('emitted request preserves dedicated device','Task 3 does 
     Assert-True ($Task3DeviceRuntime -match [regex]::Escape($Marker)) "Task 3 runtime boundary test is missing: $Marker"
 }
 
+$Task5RequiredArtifacts = @(
+    'src\gamedata\scripts\gamma_arena_random_generator.script',
+    'src\gamedata\scripts\gamma_arena_custom_generator.script',
+    'src\gamedata\scripts\gamma_arena_fight_builder.script',
+    'src\gamedata\scripts\gamma_arena_fight_spec.script',
+    'dev\gamedata\scripts\gamma_arena_test_generator.script',
+    'dev\gamedata\scripts\gamma_arena_test_custom_generator.script',
+    'dev\gamedata\scripts\gamma_arena_test_fight_spec.script',
+    'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1',
+    'tests\reference\New-GammaArenaGoldenFights.ps1',
+    'tests\fixtures\golden-random-selections-v9.txt',
+    'tests\fixtures\golden-fights-v9.txt'
+)
+$Task5ChecksRequired = (Test-Path -LiteralPath (Join-Path $RepoRoot '.git')) -or
+    (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'))
+if ($Task5ChecksRequired) {
+$Task5ArtifactsComplete = $true
+foreach ($Path in $Task5RequiredArtifacts) {
+    $Exists = Test-Path -LiteralPath (Join-Path $RepoRoot $Path)
+    Assert-True $Exists "Task 5 required artifact is missing: $Path"
+    if (-not $Exists) { $Task5ArtifactsComplete = $false }
+}
+if ($Task5ArtifactsComplete) {
+$Task5RandomGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script') -Raw
+$Task5CustomGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_generator.script') -Raw
+$Task5RandomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
+$Task5CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
+Assert-True ($Task5RandomGenerator -match 'gamma_arena_device_generator\.generate') 'Task 5 Random generator must select one isolated actor device.'
+Assert-True ($Task5RandomGenerator -match 'kind\s*=\s*"items"' -and $Task5RandomGenerator -notmatch 'kind\s*=\s*"legacy"') 'Task 5 Random generator must emit only universal item drafts.'
+Assert-True ($Task5CustomGenerator -match 'config\.actor_device' -and $Task5CustomGenerator -match 'equipped_slot\s*=\s*"device"') 'Task 5 Custom generator must append the exact selected actor_device once.'
+foreach ($Marker in @('universal_v9_random_device_generation','builder and validator do not rerun Random device selection','Random emits exactly one actor device','changed Random seeds vary the selected device')) {
+    Assert-True ($Task5RandomTests -match [regex]::Escape($Marker)) "Task 5 Random Dev assertion is missing: $Marker"
+}
+foreach ($Marker in @('custom_actor_device_is_optional_exact_and_prebudgeted','Custom emits zero or one exact selected device','Custom device AP was charged in config','Custom selection survives build and validation without reroll')) {
+    Assert-True ($Task5CustomTests -match [regex]::Escape($Marker)) "Task 5 Custom Dev assertion is missing: $Marker"
+}
+Assert-True ($Task5CustomTests -notmatch 'CUSTOM_GOLDEN_V8') 'Task 5 must remove the embedded CUSTOM_GOLDEN_V8 bridge.'
+$Task5RandomReference = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1') -Raw
+Assert-True ($Task5RandomReference -match 'golden-random-selections-v9\.txt' -and $Task5RandomReference -notmatch 'golden-random-selections-v8\.txt') 'Task 5 Random oracle must target only the v9 semantic snapshot.'
+Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v9.txt')) 'Task 5 v9 Random semantic snapshot is missing.'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v8.txt'))) 'Task 5 stale v8 Random semantic snapshot must be deleted.'
+}
+}
+
 $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
@@ -582,7 +626,8 @@ Assert-True ($Task10CustomGenerator -notmatch 'slot_stream\s*\([^\)]*,\s*"profil
 Assert-True ($Task10CustomGenerator -match 'profile\.alias\s*~=\s*"gamma_arena_"\s*\.\.\s*faction\.community\s*\.\.\s*"_"\s*\.\.\s*roster_entry\.rank') 'Task 10 generator must reject a noncanonical fixed faction-rank alias before RNG.'
 $Task10GoldenRows = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-fights-v9.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
 $Task10RandomRows = @($Task10GoldenRows | Where-Object { $_ -match '^seed=' })
-Assert-True ($Task10RandomRows.Count -eq 4 -and $Task10GoldenRows.Count -eq 4) 'Task 4 sole v9 fixture must contain exactly four pinned device-free rows.'
+$Task10CustomRows = @($Task10GoldenRows | Where-Object { $_ -match '^custom=' })
+Assert-True ($Task10RandomRows.Count -eq 4 -and $Task10CustomRows.Count -eq 6 -and $Task10GoldenRows.Count -eq 10) 'Task 5 sole v9 fixture must contain four Random and six Custom device-aware rows.'
 $Task10DevCustom = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
 foreach ($Marker in @('duplicate exact-pool member fails before RNG','duplicate tactical route fails before RNG','duplicate spawn-slot ID fails before RNG','gamma_arena_rng.derive_seed = function','derive calls before failure')) {
     Assert-True ($Task10DevCustom -match [regex]::Escape($Marker)) "Task 12 fail-closed pre-RNG regression is missing: $Marker"

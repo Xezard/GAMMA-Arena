@@ -163,7 +163,7 @@ if ($AppendDiscovered -match 'local\s+existing\s*=\s*target\s*\[' -or $AppendDis
 Write-Host 'PASS: dynamic catalog integration static contract passed'
 
 $GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
-$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v8.script'
+$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
 foreach ($Contract in @(
@@ -181,16 +181,16 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
     @{ Content = $Generator; Marker = 'function build_draft' },
-    @{ Content = $Generator; Marker = 'FightSpecV8' },
+    @{ Content = $Generator; Marker = 'kind = "items"' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        Write-Host "CONTROLLED RED: FightSpec v8 loadout contract is missing marker: $($Contract.Marker)"
+        Write-Host "CONTROLLED RED: FightSpec v9 loadout contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v8 loadout collision checks executed'
+Write-Host 'PASS: FightSpec v9 loadout collision checks executed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
