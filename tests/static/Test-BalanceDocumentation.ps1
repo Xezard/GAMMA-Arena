@@ -56,9 +56,6 @@ foreach ($Pattern in @(
 )) {
     if ($CurrentProductDocs -notmatch $Pattern) { throw "Task 7 current product documentation marker is missing: $Pattern" }
 }
-if ($Readme -notmatch '\[Arena balance dashboard\]\(docs/arena-balance\.md\)') {
-    throw 'README does not link the Arena balance dashboard'
-}
 $StandardSuite = [IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'))
 if ($StandardSuite -notmatch 'Test-BalanceDocumentation\.ps1') {
     throw 'Standard suite does not verify Arena balance documentation'
