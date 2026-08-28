@@ -571,6 +571,16 @@ $Task5CustomGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamed
 $Task5RandomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
 $Task5CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
 Assert-True ($Task5RandomGenerator -match 'gamma_arena_device_generator\.generate') 'Task 5 Random generator must select one isolated actor device.'
+$Task5DeviceSelector = 'gamma_arena_device_generator.generate'
+$Task5DeviceSelectIndex = $Task5RandomGenerator.IndexOf($Task5DeviceSelector)
+$Task5OpponentBudgetIndex = $Task5RandomGenerator.LastIndexOf('local gear = loadout(')
+$Task5EnemyMedicalBudgetIndex = $Task5RandomGenerator.IndexOf('gamma_arena_medical_generator.allocate_enemies')
+$Task5DeviceAppendIndex = $Task5RandomGenerator.IndexOf('append_item(draft.actor.loadout.items, actor_device.value.section, 1, "device")')
+$Task5DraftReturnIndex = $Task5RandomGenerator.LastIndexOf('return gamma_arena_result.ok(draft)')
+$Task5DeviceOrderValid = (([regex]::Matches($Task5RandomGenerator, [regex]::Escape($Task5DeviceSelector))).Count -eq 1 -and
+    $Task5DeviceSelectIndex -gt $Task5OpponentBudgetIndex -and $Task5DeviceSelectIndex -gt $Task5EnemyMedicalBudgetIndex -and
+    $Task5DeviceAppendIndex -gt $Task5DeviceSelectIndex -and $Task5DraftReturnIndex -gt $Task5DeviceAppendIndex)
+Assert-True $Task5DeviceOrderValid 'Task 5 Random device selector must run exactly once after all actor/opponent AP decisions, then append before return.'
 Assert-True ($Task5RandomGenerator -match 'kind\s*=\s*"items"' -and $Task5RandomGenerator -notmatch 'kind\s*=\s*"legacy"') 'Task 5 Random generator must emit only universal item drafts.'
 Assert-True ($Task5CustomGenerator -match 'config\.actor_device' -and $Task5CustomGenerator -match 'equipped_slot\s*=\s*"device"') 'Task 5 Custom generator must append the exact selected actor_device once.'
 foreach ($Marker in @('universal_v9_random_device_generation','builder and validator do not rerun Random device selection','Random emits exactly one actor device','changed Random seeds vary the selected device')) {
