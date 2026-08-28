@@ -102,6 +102,20 @@ if (Test-Path -LiteralPath $Task4V9ValidatorPath) {
     }
     Assert-True ($Task4V9Validator -notmatch 'gamma_arena_(random|device)_generator') 'Task 4 validator must never rerun Random device selection.'
 }
+$Task4StaticSource = Get-Content -LiteralPath $PSCommandPath -Raw
+foreach ($ProtectionLabel in @(
+    'Task 4 current generator composition protection',
+    'Task 4 current generator RNG isolation protection',
+    'Task 4 current ammo scaling protection',
+    'Task 4 current grenade generation protection',
+    'Task 4 current medical generation protection',
+    'Task 4 current actor quarantine protection',
+    'Task 4 current affordability and diversity protection',
+    'Task 4 current resolved layout and routing protection',
+    'Task 4 current exact runtime ammo protection'
+)) {
+    Assert-True (([regex]::Matches($Task4StaticSource, [regex]::Escape($ProtectionLabel))).Count -ge 2) "Task 4 review RED: missing version-neutral regression gate: $ProtectionLabel"
+}
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
@@ -229,6 +243,109 @@ $Task3ScriptContracts = @(
     , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'; Namespace = 'gamma_arena_fight_validator_v9'; Required = @('(?m)^function\s+validate\s*\(\s*spec\s*,\s*catalog\s*,\s*layout\s*,\s*runtime\s*\)', 'GA_FIGHTSPEC_UNKNOWN_FIELD', 'GA_FIGHTSPEC_FORBIDDEN_FIELD', 'GA_FIGHTSPEC_ITEM_LIMIT', 'max_physical_items_per_participant', 'exact_keys', 'catalog\.items', 'catalog\.ranks', 'catalog\.factions', 'profile\.alias', 'runtime_community', 'arena_enemy', 'opponent_spawn_slots', 'ammo_sections', 'helmet_allowed', 'healing', 'gamma_arena_fight_spec\.canonicalize', 'gamma_arena_fight_spec\.stable_encode', 'session_seed\s*=\s*function', 'fight_index\s*=\s*function', 'fight_id\s*=\s*function', 'actor\s*=\s*function', 'opponents\s*=\s*function', 'tactical_routes\s*=\s*function', 'stable_encode\s*=\s*function', '(?m)^local function\s+valid_vertex\s*\(', 'value\s*<\s*4294967295', 'used_opponent_slots', 'GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE', 'GA_FIGHTSPEC_DEVICE_INVALID', 'GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID', 'spec\.schema_version\s*~=\s*9', '"ga9-"') }
     , [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script'; Namespace = 'gamma_arena_test_fight_spec'; Required = @('(?m)^function\s+run\s*\(', 'canonicalizes_v9_exact_identity_and_device_order', 'rejects_legacy_loadouts_and_invalid_devices', 'validator_enforces_v9_identity_versions_and_devices', 'validator_never_reruns_random_device_selection', 'fight_spec_enforces_per_participant_physical_item_cap', 'fight_spec_binds_identity_layout_and_dense_arrays', 'fight_spec_rejects_invalid_resolved_layout_identity_fields', 'validator_enforces_per_participant_physical_item_cap', 'validator_enforces_engine_vertex_uint32_boundaries', 'validator_enforces_physical_participant_contracts') }
 )
+
+$Task4CurrentGeneratorContracts = @(
+    [PSCustomObject]@{
+        Protection = 'Task 4 current generator composition protection'
+        Path = 'src\gamedata\scripts\gamma_arena_generator.script'
+        Required = @('gamma_arena_fight_builder\.generate', 'gamma_arena_fight_spec\.stable_encode')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current generator composition protection'
+        Path = 'src\gamedata\scripts\gamma_arena_fight_builder.script'
+        Required = @('gamma_arena_random_generator\.build_draft', 'gamma_arena_custom_generator\.build_draft', 'gamma_arena_fight_spec\.canonicalize', 'gamma_arena_fight_validator_v9\.validate', 'session_seed\s*=\s*session\.session_seed', 'fight_index\s*=\s*fight_index', 'layout_hash\s*=\s*gamma_arena_fight_spec\.layout_hash')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current generator RNG isolation protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('CORE_RNG_EPOCH\s*=\s*6', 'MEDICAL_RNG_EPOCH\s*=\s*1', 'local\s+normalized_seed\s*=\s*gamma_arena_rng\.normalize_uint32', 'local\s+normalized_request', 'stream\s*\(\s*normalized_request', 'gamma_arena_number\.is_integer', '"actor_knife"', 'actor\.value\.knife\s*=\s*actor_knife\.value', '"actor_class_pair"', '"actor_weapon"', '"actor_ammo_boxes"', '"actor_outfit"', '"enemy_numeric_rank:"')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current generator RNG isolation protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('random_numeric_rank_stream_is_isolated', 'player_ammo_scaling_is_stream_isolated', 'medical_tuning_does_not_reroll_core_fight', 'longer rosters preserve every indexed prefix draw', 'low_without_actor_ammo')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current ammo scaling protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('PLAYER_AMMO_CHANCE', 'function\s+scaled_ammo_boxes', 'actor_scaled_ammo:', 'magazine_size', 'standard_ammo\.box_size', 'GA_PLAYER_AMMO_SCALE_INVALID', 'final_ammo_boxes')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current ammo scaling protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('player_ammo_scaling_policy_is_uncapped_and_prefix_stable', 'generated_actor_ammo_is_final_and_outside_budget', 'player_ammo_scaling_is_stream_isolated', 'representative_opponent_counts', 'player_ammo_rate_sweep', 'observed rate remains within two percentage points', 'validator_rejects_forged_final_actor_ammo')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current grenade generation protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('gamma_arena_grenade_generator\.generate_actor', 'gamma_arena_grenade_generator\.generate_enemy', 'actor_grenade_count', 'actor_grenade_section:1', 'actor_grenade_section:2', 'enemy_grenade_presence:', 'enemy_grenade_section:', 'actor\.value\.grenades', 'gear\.value\.grenades')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current grenade generation protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('grenade_loadouts_are_deterministic_uncosted_and_prefix_stable', 'validator_rejects_forged_grenade_arrays')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current medical generation protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('gear_cost', 'medical_cost', 'player_gear_budget', 'player_medical_budget', 'gamma_arena_medical_generator\.generate_actor', 'gamma_arena_medical_generator\.allocate_enemies', 'actor_medical_streams', 'enemy_medical_streams')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current medical generation protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('catalog_skips_optional_missing_medicine', 'actor_medical_generation_enforces_budget_and_healer', 'actor_medical_generation_reaches_master_rare', 'enemy_medical_generation_spends_team_budget', 'medical_generation_100000_fights', 'medical_tuning_does_not_reroll_core_fight')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current actor quarantine protection'
+        Path = 'src\gamedata\scripts\gamma_arena_catalog.script'
+        Required = @('ACTOR_WEAPON_QUARANTINE', 'wpn_dtmdr\s*=\s*true', 'wpn_eft_mts_255_uh2\s*=\s*true', 'actor_weapon_quarantine_v1', 'snapshot\.actor_weapon_list')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current actor quarantine protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('actor_weapon_quarantine_is_exact_and_actor_only', 'GA_ACTOR_WEAPON_QUARANTINED', 'actor generation never selects quarantined MTS-255 UH2')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current affordability and diversity protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('pick_affordable_band', 'global_role_pool', 'role_weapon_pool', 'function\s+select_player_class_pair', 'function\s+player_loadout', 'primary_share_percent', '"actor_class_pair"', '"actor_weapon"', '"actor_ammo_boxes"', '"actor_outfit"')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current affordability and diversity protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
+        Required = @('generator_primary_pool_affordability_falls_back', 'weighted_player_class_pair_selection', 'player_class_pair_ignores_concrete_cardinality', 'master_player_class_diversity', 'master_powered_exo_rate_is_rare')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current resolved layout and routing protection'
+        Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'
+        Required = @('valid_resolved_layout', 'select_spawn_slots', 'assign_routes', 'spawn_slot_id', 'tactical_route', 'primary_share_percent', 'enemy_total_budget')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current resolved layout and routing protection'
+        Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
+        Required = @('GA_FIGHTSPEC_SPAWN_INVALID', 'GA_FIGHTSPEC_ROUTE_INVALID', 'GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE', 'used_opponent_slots', 'used_spawns')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current exact runtime ammo protection'
+        Path = 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
+        Required = @('actor creates exact final ordinary rounds', 'runtime does not regenerate the reserve floor')
+    },
+    [PSCustomObject]@{
+        Protection = 'Task 4 current exact runtime ammo protection'
+        Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
+        Required = @('GA_FIGHTSPEC_ITEM_EQUIPMENT_INVALID', 'GA_FIGHTSPEC_AMMO_MISSING', 'GA_FIGHTSPEC_AMMO_ORPHAN', 'GA_FIGHTSPEC_ACTOR_HEALING_MISSING')
+    }
+)
+foreach ($Contract in $Task4CurrentGeneratorContracts) {
+    $ContractPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ContractPath) "$($Contract.Protection): current contract file is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ContractPath) {
+        $ContractContent = Get-Content -LiteralPath $ContractPath -Raw
+        foreach ($Pattern in $Contract.Required) {
+            Assert-True ($ContractContent -match $Pattern) "$($Contract.Protection): missing $Pattern in $($Contract.Path)"
+        }
+    }
+}
 
 $Task1RankScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_rank_catalog.script'; Namespace = 'gamma_arena_rank_catalog'; Required = @('(?m)^function\s+load\s*\(', 'max_physical_items_per_participant', 'GA_RANK_PROFILE_RANGE_EMPTY', 'GA_RANK_THRESHOLD_INVALID', 'GA_RANK_LOADOUT_MISSING', 'GA_RANK_ALIAS_MISSING', 'GA_RANK_FACTION_DUPLICATE') },
