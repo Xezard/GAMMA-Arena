@@ -204,6 +204,30 @@ local function device_generator_is_mode_free_and_deterministic()
     gamma_arena_test_assert.equals(stale.error.code, 'GA_DEVICE_ARGUMENT_INVALID', 'stale generator identity code')
 end
 
+local function device_selector_rejects_forged_exact_catalogs()
+    local function forged(mutate)
+        local snapshot, list = catalogs(), {}
+        for index, item in ipairs(snapshot.device_list) do
+            local copy = {}
+            for key, value in pairs(item) do copy[key] = value end
+            list[index] = copy
+        end
+        local catalog = { schema_version=10, revision=11, generator_version=11, device_list=list }
+        mutate(catalog)
+        local selected = gamma_arena_device_generator.select(catalog, sequence_rng({ 1 }))
+        gamma_arena_test_assert.is_false(selected.ok, 'forged exact device catalog is rejected')
+        gamma_arena_test_assert.equals(selected.error.code, 'GA_DEVICE_ARGUMENT_INVALID', 'forged device catalog code')
+    end
+    for _, mutate in ipairs({
+        function(c) c.schema_version=9 end, function(c) c.revision=10 end, function(c) c.generator_version=10 end,
+        function(c) c.device_list[2].id='headlamp' end, function(c) c.device_list[2].id='forged' end,
+        function(c) c.device_list[2].section='device_torch_nv_3' end, function(c) c.device_list[2].kind='gen3' end,
+        function(c) c.device_list[1].selection_weight=49; c.device_list[2].selection_weight=26 end,
+        function(c) c.device_list[4].nv_effect='nightvision_2' end,
+        function(c) c.device_list[4].weight=7 end
+    }) do forged(mutate) end
+end
+
 local function device_generator_rejects_malformed_arguments()
     local snapshot = catalogs()
     for _, result in ipairs({
@@ -1797,6 +1821,7 @@ function run(run_case_fn)
         { name="finite_integer_guards", fn=finite_integer_guards },
         { name="golden_fights_v8", fn=golden_fights_v8 }
     }
+    if not run_case_fn('device_selector_rejects_forged_exact_catalogs', device_selector_rejects_forged_exact_catalogs) then all_passed = false end
     if not run_case_fn('device_generator_is_mode_free_and_deterministic', device_generator_is_mode_free_and_deterministic) then all_passed = false end
     for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed

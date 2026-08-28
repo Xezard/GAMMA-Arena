@@ -37,6 +37,43 @@ $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestsPath
 $RuntimeTests = Get-Content -Raw -LiteralPath $RuntimeTestsPath
 $ControlledFailures = New-Object System.Collections.Generic.List[string]
 
+function Test-ExactDevicePrices([string]$Text) {
+    # Price validation is intentionally independent from semantic tuple validation.
+    foreach ($Expected in @(
+        '(?m)^device_torch_dummy\s*=\s*25\s*$', '(?m)^device_torch_nv_1\s*=\s*75\s*$',
+        '(?m)^device_torch_nv_2\s*=\s*150\s*$', '(?m)^device_torch_nv_3\s*=\s*300\s*$'
+    )) { if ($Text -notmatch $Expected) { return $false } }
+    return $true
+}
+if (-not (Test-ExactDevicePrices $Rules)) { throw 'Exact device price baseline is invalid' }
+$WrongPriceRules = $Rules -replace '(?m)^device_torch_nv_3\s*=\s*300\s*$', 'device_torch_nv_3 = 301'
+$MissingPriceRules = $Rules -replace '(?m)^device_torch_nv_3\s*=\s*300\s*$', ''
+if ((Test-ExactDevicePrices $WrongPriceRules) -or (Test-ExactDevicePrices $MissingPriceRules)) {
+    throw 'Exact device price mutation gate accepted wrong or missing Gen3 price'
+}
+Write-Host 'PASS: exact device price mutation gate rejected 301 and missing override'
+
+function Test-ExactDeviceCatalog([string]$Text) {
+    $Expected = @(
+        '(?ms)^\[meta\].*?^schema_version\s*=\s*10\s*$.*?^revision\s*=\s*11\s*$.*?^generator_version\s*=\s*11\s*$',
+        '(?ms)^\[devices\]\s*^ids\s*=\s*headlamp,nv_gen1,nv_gen2,nv_gen3\s*$',
+        '(?ms)^\[device_headlamp\].*?^section\s*=\s*device_torch_dummy\s*$.*?^kind\s*=\s*headlamp\s*$.*?^selection_weight\s*=\s*50\s*$.*?^nv_effect\s*=\s*none\s*$',
+        '(?ms)^\[device_nv_gen1\].*?^section\s*=\s*device_torch_nv_1\s*$.*?^kind\s*=\s*gen1\s*$.*?^selection_weight\s*=\s*25\s*$.*?^nv_effect\s*=\s*nightvision_1\s*$'
+    )
+    foreach ($Pattern in $Expected) { if ($Text -notmatch $Pattern) { return $false } }
+    return $Text -notmatch '(?m)^weight\s*='
+}
+if (-not (Test-ExactDeviceCatalog $Catalog)) { throw 'Exact selector catalog baseline is invalid' }
+$CatalogMutations = @(
+    ($Catalog -replace 'headlamp,nv_gen1,nv_gen2,nv_gen3', 'headlamp,headlamp,nv_gen2,nv_gen3'),
+    ($Catalog -replace 'section = device_torch_nv_1', 'section = device_torch_nv_3'),
+    ($Catalog -replace 'selection_weight = 50', 'selection_weight = 49'),
+    ($Catalog -replace 'nv_effect = nightvision_1', 'nv_effect = nightvision_2'),
+    ($Catalog -replace 'selection_weight = 50', ('selection_weight = 50' + [Environment]::NewLine + 'weight = 50'))
+)
+foreach ($Mutation in $CatalogMutations) { if (Test-ExactDeviceCatalog $Mutation) { throw 'Selector catalog mutation was accepted' } }
+Write-Host 'PASS: exact selector catalog mutation gate rejected forged tuples and legacy weight'
+
 function Add-ControlledFailure([string]$Message) {
     $ControlledFailures.Add($Message)
     Write-Host "CONTROLLED RED: $Message"
@@ -69,6 +106,9 @@ if ($CatalogLoader -notmatch 'selection_weight' -or $CatalogLoader -match 'item\
 }
 if ($ItemCatalog -notmatch 'category\s*=\s*"device"' -or $ItemCatalog -notmatch 'ga-catalog-v10') {
     throw 'Physical devices must enter the v10 universal catalog fingerprint as category device'
+}
+if (-not $ItemCatalog.Contains('GA_ITEM_CATALOG_DEVICE_PRICE_INVALID') -or $ItemCatalog -notmatch 'override\s*~=\s*expected\.price') {
+    throw 'Physical device prices must reject missing and mismatched exact overrides'
 }
 foreach ($Marker in @('device_list','GA_DEVICE_EFFECTIVE_INVALID','TORCH_S','nightvision_1','nightvision_2','nightvision_3')) {
     if (-not $CatalogLoader.Contains($Marker)) { throw "Actor device catalog loader contract is missing: $Marker" }
@@ -106,6 +146,14 @@ if (-not $RuntimeTests.Contains('{ label = "device", ltx_slot = 9, lua_slot = 10
 foreach ($Marker in @('function select','function generate','actor_device','GA_DEVICE_ARGUMENT_INVALID','GA_DEVICE_SELECTION_INVALID','next_int(1, 100)')) {
     if (-not $DeviceGenerator.Contains($Marker)) { throw "Actor device generator contract is missing: $Marker" }
 }
+if ((-not $DeviceGenerator.Contains('DEVICE_MANIFEST')) -or
+    ($DeviceGenerator -notmatch 'catalogs\.schema_version\s*~=\s*10') -or
+    ($DeviceGenerator -notmatch 'catalogs\.revision\s*~=\s*11') -or
+    ($DeviceGenerator -notmatch 'catalogs\.generator_version\s*~=\s*11') -or
+    ($DeviceGenerator -notmatch 'item\.weight\s*~=\s*nil')) {
+    throw 'Selector must require catalog 10/11/11 and exact device tuples without legacy weight'
+}
+if (-not $GeneratorTests.Contains('device_selector_rejects_forged_exact_catalogs')) { throw 'Forged selector regression case is missing' }
 if (-not $DeviceGenerator.Contains('random_actor_device_v11')) { throw 'Mode-free device seed epoch is missing' }
 if (-not $DeviceGenerator.Contains('identity.generator_version')) { throw 'Device generator identity version is missing' }
 if ($DeviceGenerator -match 'identity\.mode_id' -or $DeviceGenerator -notmatch 'generator_version\s*~=\s*11') {
