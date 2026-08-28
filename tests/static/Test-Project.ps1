@@ -142,6 +142,15 @@ Assert-True ($Task7CurrentValidators.Count -eq 1 -and $Task7CurrentValidators[0]
 Assert-True ($Task7CurrentGoldenFixtures.Count -eq 1 -and $Task7CurrentGoldenFixtures[0].Name -ceq 'golden-fights-v9.txt') 'Task 7 must publish exactly one FightSpec golden fixture: v9.'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v10.json')) 'Task 7 current catalog fixture custom-catalog-v10.json is missing.'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v1.json'))) 'Task 7 stale custom-catalog-v1.json must be removed.'
+$Task8CurrentDesignPath = Join-Path $RepoRoot 'docs\superpowers\specs\2026-08-28-custom-arena-main-integration-design.md'
+Assert-True (Test-Path -LiteralPath $Task8CurrentDesignPath -PathType Leaf) 'Task 8 current design is missing.'
+if (Test-Path -LiteralPath $Task8CurrentDesignPath -PathType Leaf) {
+    $Task8CurrentDesign = Get-Content -LiteralPath $Task8CurrentDesignPath -Raw
+    Assert-True ($Task8CurrentDesign -notmatch '(?m)^\s*content_hash\s*=') 'Task 8 current design must not expose identity.content_hash.'
+    Assert-True ($Task8CurrentDesign.Contains('layout_hash = "...",')) 'Task 8 current design must expose identity.layout_hash.'
+    Assert-True ($Task8CurrentDesign.Contains('excludes only `fight_id`')) 'Task 8 current design must exclude only fight_id from canonical hashing.'
+    Assert-True ($Task8CurrentDesign.Contains('no separate content hash field is exposed')) 'Task 8 current design must state that no separate content hash is exposed.'
+}
 }
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {

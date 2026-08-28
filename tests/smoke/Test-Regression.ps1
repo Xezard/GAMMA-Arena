@@ -833,9 +833,10 @@ try {
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'VERSION') -Force
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1') -Force
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tests\fixtures\custom-catalog-v10.json') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'docs\superpowers\specs\2026-08-28-custom-arena-main-integration-design.md') -Force
     $MissingReleaseSurfaceResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingReleaseSurfaceFixture) -CaptureOutput
     Assert-True ($MissingReleaseSurfaceResult.ExitCode -ne 0) 'A real-repo-shaped release surface must fail when current artifacts are missing.'
-    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.')) {
+    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.','Task 8 current design is missing.')) {
         Assert-True ($MissingReleaseSurfaceResult.Output.Contains($Diagnostic)) "Currentness gate must report every missing real-repo artifact: $Diagnostic"
     }
 
