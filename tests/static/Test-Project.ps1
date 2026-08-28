@@ -768,7 +768,7 @@ if (Test-Path -LiteralPath $Task12BuildPath) {
     $Task12Readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
     $Task12Changelog = Get-Content -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Raw
     $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
-    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.5\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 7 README must publish the 0.5.0 Custom Arena release.'
+    Assert-True ($Task12Readme -match 'releases/latest' -and $Task12Readme -match 'Gamma-Arena-vX\.Y\.Z-MO2\.zip' -and $Task12Readme -match 'Build-GammaArena\.ps1\s+-Configuration\s+Release') 'Task 7 README must publish the current release workflow.'
     Assert-True ($Task12Changelog -match '(?m)^## 0\.5\.0 - 2026-08-28$') 'Task 7 changelog must publish release 0.5.0.'
     foreach ($Path in @('tests\fixtures\golden-random-selections-v9.txt','tests\fixtures\custom-catalog-v10.json')) {
         Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
