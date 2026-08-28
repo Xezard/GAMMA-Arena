@@ -358,6 +358,47 @@ foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.
     Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate custom rule field: $Marker"
 }
 
+$Task3DeviceConfig = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_config.script') -Raw
+$Task3DeviceCodec = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_codec.script') -Raw
+$Task3DeviceModel = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_model.script') -Raw
+foreach ($Marker in @('actor_device','GA_CUSTOM_DEVICE_UNKNOWN','GA_CUSTOM_DEVICE_IN_ITEMS')) {
+    Assert-True ($Task3DeviceConfig -match [regex]::Escape($Marker)) "Task 3 Custom config is missing $Marker"
+}
+Assert-True ($Task3DeviceCodec -match 'prefix\s*\.\.\s*"actor_device"') 'Task 3 codec must own one bounded actor_device key.'
+foreach ($Marker in @('function Model:set_device','device_options','disabled_reason','affordable')) {
+    Assert-True ($Task3DeviceModel -match [regex]::Escape($Marker)) "Task 3 Custom model is missing $Marker"
+}
+Assert-True ($Task3DeviceModel -notmatch 'CATEGORY_IDS\s*=\s*\{[^\r\n]*device') 'Task 3 devices must stay outside ordinary item categories.'
+$Task3DeviceUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+foreach ($Marker in @('device_combo','OnDevice','st_gamma_arena_custom_device_none','option.disabled','device_option_text')) {
+    Assert-True ($Task3DeviceUi -match [regex]::Escape($Marker)) "Task 3 Custom UI is missing $Marker"
+}
+[xml]$Task3DeviceXml = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_custom.xml') -Raw
+Assert-True ($null -ne $Task3DeviceXml.SelectSingleNode("//*[local-name()='device']")) 'Task 3 UI XML must expose the dedicated device selector.'
+Assert-True ($null -eq $Task3DeviceXml.SelectSingleNode("//*[local-name()='category_device']")) 'Task 3 UI XML must not add an ordinary device category.'
+foreach ($Locale in @('eng','rus')) {
+    $Path = Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena_custom_device.xml"
+    Assert-True (Test-Path -LiteralPath $Path) "Task 3 $Locale device localization companion is missing."
+    if (Test-Path -LiteralPath $Path) {
+        [xml]$Task3LocaleDocument = Get-Content -LiteralPath $Path -Raw
+        foreach ($Id in @('st_gamma_arena_custom_device','st_gamma_arena_custom_device_none','st_gamma_arena_custom_device_headlamp','st_gamma_arena_custom_device_nv_gen1','st_gamma_arena_custom_device_nv_gen2','st_gamma_arena_custom_device_nv_gen3')) {
+            Assert-True ($null -ne $Task3LocaleDocument.SelectSingleNode("//string[@id='$Id']/text")) "Task 3 $Locale localization is missing $Id"
+        }
+    }
+}
+$Task3DeviceTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
+foreach ($Name in @('custom_config_devices_are_optional_budgeted_and_bounded','custom_config_device_counts_and_totals_are_bounded','custom_setup_model_device_selection_is_dedicated','custom_setup_model_rejects_device_mutations_atomically','custom_codec_persists_optional_device_with_one_key')) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($Task3DeviceTests, $Registration)).Count -eq 1) "Task 3 device case must be registered exactly: $Name"
+}
+foreach ($Marker in @('device is distinct entry 65','device is physical entity 257','GA_CUSTOM_OVERSPEND','GA_CUSTOM_OVERWEIGHT','preserves snapshot','208')) {
+    Assert-True ($Task3DeviceTests -match [regex]::Escape($Marker)) "Task 3 device tests are missing $Marker"
+}
+$Task3DeviceRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Marker in @('emitted request preserves dedicated device','Task 3 does not materialize actor_device into FightSpec items','Task 3 emits no separate FightSpec device field')) {
+    Assert-True ($Task3DeviceRuntime -match [regex]::Escape($Marker)) "Task 3 runtime boundary test is missing: $Marker"
+}
+
 $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(

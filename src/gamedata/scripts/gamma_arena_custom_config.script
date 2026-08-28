@@ -5,7 +5,7 @@ local SLOT_CATEGORY = {
 }
 local CONFIG_FIELDS = {
     schema_version = true, faction = true, roster = true,
-    actor_items = true, catalog_fingerprint = true
+    actor_items = true, actor_device = true, catalog_fingerprint = true
 }
 local ROSTER_FIELDS = { rank = true }
 local ITEM_FIELDS = { section = true, quantity = true, equipped_slot = true }
@@ -58,6 +58,7 @@ local function copy_config(value)
         faction = value.faction,
         roster = {},
         actor_items = {},
+        actor_device = value.actor_device,
         catalog_fingerprint = value.catalog_fingerprint
     }
     for index, entry in ipairs(value.roster) do copied.roster[index] = { rank = entry.rank } end
@@ -138,6 +139,20 @@ local function totals_internal(config, catalog)
             totals.weight_limit_mg = totals.weight_limit_mg + (definition.carry_bonus_mg or 0)
         end
     end
+    if config.actor_device ~= nil then
+        local device = catalog.items[config.actor_device]
+        if type(device) ~= "table" or device.category ~= "device"
+            or not finite_positive(device.price) or not finite_positive(device.weight_mg) then
+            return failure("GA_CUSTOM_DEVICE_UNKNOWN", "Custom actor device is unavailable", {
+                section = config.actor_device
+            })
+        end
+        totals.points = totals.points + device.price
+        totals.weight_mg = totals.weight_mg + device.weight_mg
+        if totals.points > MAX_SAFE_INTEGER or totals.weight_mg > MAX_SAFE_INTEGER then
+            return failure("GA_CUSTOM_TOTAL_INVALID", "Custom item totals exceed the safe integer range")
+        end
+    end
     return gamma_arena_result.ok(totals)
 end
 
@@ -187,13 +202,25 @@ local function validate_internal(value, context, editable)
         end
     end
 
+    local actor_device = nil
+    if value.actor_device ~= nil then
+        actor_device = text(value.actor_device) and catalog.items[value.actor_device] or nil
+        if type(actor_device) ~= "table" or actor_device.category ~= "device" then
+            return failure("GA_CUSTOM_DEVICE_UNKNOWN", "Custom actor device is unavailable", {
+                section = value.actor_device
+            })
+        end
+    end
     local item_count, item_error = dense_length(value.actor_items, "GA_CUSTOM_ITEM_INVALID", "actor_items")
     if item_count == nil then return item_error end
-    if item_count > catalog.max_entries or (not editable and item_count < 1) then
-        return failure("GA_CUSTOM_ENTRY_LIMIT", "Custom actor inventory has too many distinct entries", { count = item_count, limit = catalog.max_entries })
+    local distinct_count = item_count + (actor_device and 1 or 0)
+    if distinct_count > catalog.max_entries or (not editable and item_count < 1) then
+        return failure("GA_CUSTOM_ENTRY_LIMIT", "Custom actor inventory has too many distinct entries", {
+            count = distinct_count, limit = catalog.max_entries
+        })
     end
     local seen, categories, equipped_weapons, weapons, ammunition = {}, {}, {}, {}, {}
-    local physical_count = 0
+    local physical_count = actor_device and 1 or 0
     for index, entry in ipairs(value.actor_items) do
         local item_field_error = exact_fields(entry, ITEM_FIELDS, "GA_CUSTOM_ITEM_INVALID", "actor_items[" .. tostring(index) .. "]")
         if item_field_error then return item_field_error end
@@ -214,6 +241,11 @@ local function validate_internal(value, context, editable)
         local definition = catalog.items[entry.section]
         local category = definition.category
         if type(category) ~= "string" then return failure("GA_CUSTOM_ITEM_INVALID", "Custom item category is invalid", { section = entry.section }) end
+        if category == "device" then
+            return failure("GA_CUSTOM_DEVICE_IN_ITEMS", "Custom devices require the dedicated actor_device field", {
+                index = index, section = entry.section
+            })
+        end
         categories[category] = (categories[category] or 0) + 1
         local slot = entry.equipped_slot
         if (category == "outfit" or category == "helmet" or category == "knife"

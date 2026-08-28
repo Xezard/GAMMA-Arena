@@ -27,7 +27,11 @@ function make_catalog()
         medkit = item("medkit", "medicine", 30, 100, { healing = true }),
         grenade_f1 = item("grenade_f1", "grenade", 40, 400),
         grenade_rgd5 = item("grenade_rgd5", "grenade", 70, 500),
-        grenade_gd05 = item("grenade_gd05", "grenade", 30, 300)
+        grenade_gd05 = item("grenade_gd05", "grenade", 30, 300),
+        device_torch_dummy = item("device_torch_dummy", "device", 25, 200),
+        device_torch_nv_1 = item("device_torch_nv_1", "device", 75, 250),
+        device_torch_nv_2 = item("device_torch_nv_2", "device", 150, 300),
+        device_torch_nv_3 = item("device_torch_nv_3", "device", 300, 350)
     }
     return {
         schema_version = 9, revision = 10, generator_version = 10,
@@ -68,6 +72,7 @@ function make_valid_config(catalog)
             { section = "grenade_f1", quantity = 1 },
             { section = "grenade_rgd5", quantity = 1 }
         },
+        actor_device = nil,
         catalog_fingerprint = catalog.fingerprint
     }
 end
@@ -427,7 +432,7 @@ local function custom_codec_round_trip_preserves_bounded_order()
     gamma_arena_test_assert.is_true(decoded.ok, "persisted config decodes")
     gamma_arena_test_assert.equals(decoded.value.actor_items[6].section, "grenade_f1", "round trip first grenade")
     gamma_arena_test_assert.equals(decoded.value.actor_items[7].section, "grenade_rgd5", "round trip second grenade")
-    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 207, "codec key space is bounded")
+    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 208, "codec key space is bounded")
 end
 
 local function custom_codec_rejects_sparse_and_oversized_shapes()
@@ -485,6 +490,144 @@ local function custom_codec_encode_uses_canonical_decimal_quantities()
     gamma_arena_test_assert.equals(quantity, "9007199254740991", "quantity encoding is canonical decimal text")
 end
 
+local function custom_config_devices_are_optional_budgeted_and_bounded()
+    local c = make_catalog()
+    local v = make_valid_config(c)
+    local plain = gamma_arena_custom_config.validate(v, make_context(c))
+    gamma_arena_test_assert.is_true(plain.ok, "device is optional")
+    gamma_arena_test_assert.equals(plain.value.actor_device, nil, "default has no device")
+    v.actor_device = "device_torch_nv_2"
+    local selected = gamma_arena_custom_config.validate(v, make_context(c))
+    gamma_arena_test_assert.is_true(selected.ok, "NV Gen2 is valid")
+    gamma_arena_test_assert.equals(selected.value.actor_device, "device_torch_nv_2", "device copied separately")
+    gamma_arena_test_assert.equals(#selected.value.actor_items, 7, "device excluded from actor items")
+    local totals = gamma_arena_custom_config.totals(selected.value, c)
+    gamma_arena_test_assert.equals(totals.value.points, 650, "NV Gen2 adds 150 AP")
+    gamma_arena_test_assert.equals(totals.value.weight_mg, 10000, "NV Gen2 adds mass")
+    local hidden = make_valid_config(c)
+    hidden.actor_items[8] = { section = "device_torch_dummy", quantity = 1 }
+    assert_code(gamma_arena_custom_config.validate(hidden, make_context(c)), "GA_CUSTOM_DEVICE_IN_ITEMS", "hidden device")
+    local unknown = make_valid_config(c); unknown.actor_device = "missing"
+    assert_code(gamma_arena_custom_config.validate(unknown, make_context(c)), "GA_CUSTOM_DEVICE_UNKNOWN", "unknown device")
+    local wrong = make_valid_config(c); wrong.actor_device = "medkit"
+    assert_code(gamma_arena_custom_config.validate(wrong, make_context(c)), "GA_CUSTOM_DEVICE_UNKNOWN", "non-device")
+end
+
+local function custom_config_device_counts_and_totals_are_bounded()
+    local c = make_catalog()
+    local many = make_valid_config(c)
+    for i = 8, 64 do
+        local s = "limit_" .. tostring(i)
+        c.items[s] = { section=s, category="medicine", price=1, weight_mg=1, healing=false, ammo_sections={} }
+        many.actor_items[i] = { section=s, quantity=1 }
+    end
+    many.actor_device = "device_torch_dummy"
+    assert_code(gamma_arena_custom_config.validate(many, make_context(c)), "GA_CUSTOM_ENTRY_LIMIT", "device is distinct entry 65")
+    c = make_catalog()
+    local physical = make_valid_config(c); physical.actor_items[3].quantity = 250; physical.actor_device = "device_torch_dummy"
+    assert_code(gamma_arena_custom_config.validate(physical, make_context(c)), "GA_CUSTOM_PHYSICAL_LIMIT", "device is physical entity 257")
+    c = make_catalog()
+    local spend = make_valid_config(c); spend.actor_device = "device_torch_nv_3"; c.items.device_torch_nv_3.price = 301
+    assert_code(gamma_arena_custom_config.validate(spend, make_context(c)), "GA_CUSTOM_OVERSPEND", "device budget")
+    c = make_catalog()
+    local mass = make_valid_config(c); mass.actor_device = "device_torch_dummy"; c.items.device_torch_dummy.weight_mg = 60001
+    assert_code(gamma_arena_custom_config.validate(mass, make_context(c)), "GA_CUSTOM_OVERWEIGHT", "device mass")
+end
+
+local function custom_setup_model_device_selection_is_dedicated()
+    local c = make_catalog()
+    c.categories = { device = { "device_torch_dummy", "device_torch_nv_1", "device_torch_nv_2", "device_torch_nv_3" } }
+    local m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    local initial = m:snapshot()
+    gamma_arena_test_assert.equals(initial.config.actor_device, nil, "model defaults No device")
+    gamma_arena_test_assert.equals(#initial.device_options, 4, "four device options")
+    gamma_arena_test_assert.equals(initial.categories.device, nil, "ordinary categories stay device-free")
+    gamma_arena_test_assert.is_true(m:set_device("device_torch_nv_2").ok, "select NV Gen2")
+    local nv2 = m:snapshot()
+    gamma_arena_test_assert.equals(nv2.spent, 150, "NV Gen2 costs 150 AP")
+    gamma_arena_test_assert.equals(nv2.weight_mg, 300, "NV Gen2 contributes mass")
+    gamma_arena_test_assert.equals(nv2.distinct_count, 1, "device is one distinct entry")
+    gamma_arena_test_assert.equals(nv2.physical_count, 1, "device is one physical entity")
+    gamma_arena_test_assert.equals(nv2.device_options[3].selected, true, "NV Gen2 is selected")
+    gamma_arena_test_assert.is_true(m:set_device("device_torch_dummy").ok, "replace with headlamp")
+    local lamp = m:snapshot()
+    gamma_arena_test_assert.equals(lamp.config.actor_device, "device_torch_dummy", "headlamp replaces device")
+    gamma_arena_test_assert.equals(lamp.spent, 25, "replacement costs 25 AP")
+    gamma_arena_test_assert.equals(lamp.distinct_count, 1, "replacement stays one distinct")
+    gamma_arena_test_assert.is_true(m:set_device(nil).ok, "clear device")
+    gamma_arena_test_assert.equals(m:snapshot().physical_count, 0, "clear removes device")
+end
+
+local function device_snapshot_signature(m)
+    local s = m:snapshot()
+    return tostring(s.config.actor_device) .. "|" .. tostring(#s.config.actor_items) .. "|"
+        .. tostring(s.spent) .. "|" .. tostring(s.weight_mg) .. "|"
+        .. tostring(s.distinct_count) .. "|" .. tostring(s.physical_count)
+end
+
+local function reject_device_atomically(m, section, code, label)
+    local before = device_snapshot_signature(m)
+    assert_code(m:set_device(section), code, label)
+    gamma_arena_test_assert.equals(device_snapshot_signature(m), before, label .. " preserves snapshot")
+end
+
+local function custom_setup_model_rejects_device_mutations_atomically()
+    local c = make_catalog()
+    local m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    reject_device_atomically(m, "missing", "GA_CUSTOM_DEVICE_UNKNOWN", "unknown device")
+    reject_device_atomically(m, "medkit", "GA_CUSTOM_DEVICE_UNKNOWN", "non-device")
+    local before = device_snapshot_signature(m)
+    assert_code(m:add_item("device_torch_dummy", 1), "GA_CUSTOM_DEVICE_IN_ITEMS", "hidden device API")
+    gamma_arena_test_assert.equals(device_snapshot_signature(m), before, "hidden device rejection preserves snapshot")
+    c = make_catalog(); c.items.device_torch_nv_3.price = 701
+    reject_device_atomically(gamma_arena_custom_setup_model.new(c, make_context(c).layout),
+        "device_torch_nv_3", "GA_CUSTOM_OVERSPEND", "over-budget device")
+    c = make_catalog(); c.items.device_torch_nv_3.weight_mg = 50001
+    reject_device_atomically(gamma_arena_custom_setup_model.new(c, make_context(c).layout),
+        "device_torch_nv_3", "GA_CUSTOM_OVERWEIGHT", "overweight device")
+    c = make_catalog(); c.max_entries = 1
+    m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    gamma_arena_test_assert.is_true(m:add_item("medkit", 1).ok, "entry cap fixture")
+    reject_device_atomically(m, "device_torch_dummy", "GA_CUSTOM_ENTRY_LIMIT", "distinct cap")
+    c = make_catalog(); c.max_physical_items_per_participant = 1
+    m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    gamma_arena_test_assert.is_true(m:add_item("medkit", 1).ok, "physical cap fixture")
+    reject_device_atomically(m, "device_torch_dummy", "GA_CUSTOM_PHYSICAL_LIMIT", "physical cap")
+end
+
+local function custom_codec_persists_optional_device_with_one_key()
+    local c = make_catalog()
+    local v = make_valid_config(c)
+    local absent = gamma_arena_custom_codec.encode(v, "launch_custom_")
+    gamma_arena_test_assert.is_true(absent.ok, "No device encodes")
+    local absent_action
+    for _, op in ipairs(absent.value) do
+        if op.key == "launch_custom_actor_device" then absent_action = op.action end
+    end
+    gamma_arena_test_assert.equals(absent_action, "remove", "No device removes key")
+    v.actor_device = "device_torch_nv_2"
+    local encoded = gamma_arena_custom_codec.encode(v, "launch_custom_")
+    local values = {}
+    for _, op in ipairs(encoded.value) do
+        if op.action == "write" then values[op.key] = tostring(op.value) end
+    end
+    gamma_arena_test_assert.equals(values.launch_custom_actor_device, "device_torch_nv_2", "one device section key")
+    local decoded = gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c))
+    gamma_arena_test_assert.is_true(decoded.ok, "device decodes")
+    gamma_arena_test_assert.equals(decoded.value.actor_device, "device_torch_nv_2", "device round trips")
+    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 208, "codec adds one bounded key")
+    values.launch_custom_actor_device = string.rep("x", 257)
+    assert_code(gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c)),
+        "GA_CUSTOM_CODEC_INVALID", "malformed stored device")
+    values.launch_custom_actor_device = "removed_device"
+    assert_code(gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c)),
+        "GA_CUSTOM_DEVICE_UNKNOWN", "stale stored device")
+    values.launch_custom_actor_device = nil
+    local cleared = gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c))
+    gamma_arena_test_assert.is_true(cleared.ok, "absent device decodes")
+    gamma_arena_test_assert.equals(cleared.value.actor_device, nil, "absence restores No device")
+end
+
 local cases = {
     { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
     { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
@@ -501,6 +644,11 @@ local cases = {
     ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
     ,{ name = "custom_codec_encode_rejects_unknown_fields_and_malformed_scalars", fn = custom_codec_encode_rejects_unknown_fields_and_malformed_scalars }
     ,{ name = "custom_codec_encode_uses_canonical_decimal_quantities", fn = custom_codec_encode_uses_canonical_decimal_quantities }
+    ,{ name = "custom_config_devices_are_optional_budgeted_and_bounded", fn = custom_config_devices_are_optional_budgeted_and_bounded }
+    ,{ name = "custom_config_device_counts_and_totals_are_bounded", fn = custom_config_device_counts_and_totals_are_bounded }
+    ,{ name = "custom_setup_model_device_selection_is_dedicated", fn = custom_setup_model_device_selection_is_dedicated }
+    ,{ name = "custom_setup_model_rejects_device_mutations_atomically", fn = custom_setup_model_rejects_device_mutations_atomically }
+    ,{ name = "custom_codec_persists_optional_device_with_one_key", fn = custom_codec_persists_optional_device_with_one_key }
 }
 
 function run(run_case_fn)

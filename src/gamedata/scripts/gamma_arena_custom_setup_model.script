@@ -29,6 +29,7 @@ local function copy_config(value)
         faction = value.faction,
         roster = {},
         actor_items = {},
+        actor_device = value.actor_device,
         catalog_fingerprint = value.catalog_fingerprint
     }
     for index, row in ipairs(value.roster or {}) do copied.roster[index] = { rank = row.rank } end
@@ -51,7 +52,7 @@ local function selected_index(config, section)
 end
 
 local function physical_count(config)
-    local total = 0
+    local total = config.actor_device and 1 or 0
     for _, entry in ipairs(config.actor_items) do total = total + (tonumber(entry.quantity) or 0) end
     return total
 end
@@ -151,9 +152,29 @@ function Model:set_rank(index, rank)
     return commit(self, candidate)
 end
 
+function Model:set_device(section)
+    if section ~= nil then
+        local definition = type(section) == "string" and self.catalog.items
+            and self.catalog.items[section] or nil
+        if type(definition) ~= "table" or definition.category ~= "device" then
+            return reject(self, failure("GA_CUSTOM_DEVICE_UNKNOWN", "Custom actor device is unavailable", {
+                section = section
+            }))
+        end
+    end
+    local candidate = copy_config(self.draft)
+    candidate.actor_device = section
+    return commit(self, candidate)
+end
+
 function Model:add_item(section, quantity, equipped_slot)
     local definition, item_error = item_definition(self, section)
     if item_error then return reject(self, item_error) end
+    if definition.category == "device" then
+        return reject(self, failure("GA_CUSTOM_DEVICE_IN_ITEMS", "Custom devices require set_device", {
+            section = section
+        }))
+    end
     if selected_index(self.draft, section) ~= nil then
         return reject(self, failure("GA_CUSTOM_ITEM_DUPLICATE", "Custom item sections must be distinct", { section = section }))
     end
@@ -367,6 +388,26 @@ function Model:snapshot()
             }
         end
     end
+    local device_options = {}
+    for _, section in ipairs(sorted_category_sections(self.catalog, "device")) do
+        local definition = self.catalog.items[section]
+        local candidate = copy_config(self.draft)
+        candidate.actor_device = section
+        local accepted = gamma_arena_custom_config.validate_draft(candidate, {
+            catalog = self.catalog, layout = self.layout
+        })
+        device_options[#device_options + 1] = {
+            section = section,
+            category = "device",
+            name_key = definition.name_key,
+            price = definition.price,
+            weight_mg = definition.weight_mg,
+            selected = self.draft.actor_device == section,
+            affordable = accepted.ok == true,
+            disabled = accepted.ok ~= true,
+            disabled_reason = accepted.ok and nil or (accepted.error and accepted.error.code or "GA_CUSTOM_INVALID")
+        }
+    end
     local spent = totals_result.ok and totals_result.value.points or 0
     local budget = budget_result.ok and budget_result.value or 0
     return {
@@ -379,9 +420,11 @@ function Model:snapshot()
         capacity = self.layout and self.layout.virtual_capacity or 0,
         category_ids = deep_copy(CATEGORY_IDS),
         categories = categories,
+        actor_device = self.draft.actor_device,
+        device_options = device_options,
         actor_items = selected,
         selected_grenades = selected_grenades,
-        distinct_count = #self.draft.actor_items,
+        distinct_count = #self.draft.actor_items + (self.draft.actor_device and 1 or 0),
         max_entries = self.catalog.max_entries,
         physical_count = physical_count(self.draft),
         max_physical_items_per_participant = self.catalog.max_physical_items_per_participant,
@@ -407,6 +450,7 @@ function new(catalog, layout)
             faction = nil,
             roster = { { rank = "novice" } },
             actor_items = {},
+            actor_device = nil,
             catalog_fingerprint = catalog.fingerprint
         },
         last_operation = nil

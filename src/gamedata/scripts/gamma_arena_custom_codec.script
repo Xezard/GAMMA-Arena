@@ -3,7 +3,7 @@ local MAX_ITEMS = 64
 local MAX_SAFE_INTEGER = 9007199254740991
 local CONFIG_FIELDS = {
     schema_version = true, faction = true, roster = true,
-    actor_items = true, catalog_fingerprint = true
+    actor_items = true, actor_device = true, catalog_fingerprint = true
 }
 local ROSTER_FIELDS = { rank = true }
 local ITEM_FIELDS = { section = true, quantity = true, equipped_slot = true }
@@ -58,7 +58,7 @@ end
 local function key_list(prefix)
     local result = {
         prefix .. "schema_version", prefix .. "faction", prefix .. "catalog_fingerprint",
-        prefix .. "roster_count", prefix .. "actor_item_count"
+        prefix .. "roster_count", prefix .. "actor_item_count", prefix .. "actor_device"
     }
     for index = 1, MAX_ROSTER do result[#result + 1] = prefix .. "roster_" .. tostring(index) .. "_rank" end
     for index = 1, MAX_ITEMS do
@@ -98,7 +98,8 @@ local function encode_internal(config, prefix)
     local field_error = exact_fields(config, CONFIG_FIELDS, "config")
     if field_error then return field_error end
     if config.schema_version ~= 1 or not valid_text(config.faction) or not valid_text(config.catalog_fingerprint)
-        or type(config.roster) ~= "table" or type(config.actor_items) ~= "table" then
+        or type(config.roster) ~= "table" or type(config.actor_items) ~= "table"
+        or (config.actor_device ~= nil and not valid_text(config.actor_device)) then
         return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec input is not a bounded normalized config")
     end
     local roster_count = dense_length(config.roster, MAX_ROSTER)
@@ -113,6 +114,7 @@ local function encode_internal(config, prefix)
         [prefix .. "roster_count"] = roster_count,
         [prefix .. "actor_item_count"] = item_count
     }
+    values[prefix .. "actor_device"] = config.actor_device
     for index, entry in ipairs(config.roster) do
         field_error = exact_fields(entry, ROSTER_FIELDS, "roster[" .. tostring(index) .. "]")
         if field_error then return field_error end
@@ -150,12 +152,16 @@ local function decode_internal(read, prefix, context)
     if schema_version == nil then return parse_error end
     local faction; faction, read_error = call_read(read, prefix .. "faction"); if read_error then return read_error end
     local fingerprint; fingerprint, read_error = call_read(read, prefix .. "catalog_fingerprint"); if read_error then return read_error end
+    local actor_device; actor_device, read_error = call_read(read, prefix .. "actor_device"); if read_error then return read_error end
     local roster_raw; roster_raw, read_error = call_read(read, prefix .. "roster_count"); if read_error then return read_error end
     local item_raw; item_raw, read_error = call_read(read, prefix .. "actor_item_count"); if read_error then return read_error end
     local roster_count; roster_count, parse_error = decimal_integer(roster_raw, 1, MAX_ROSTER, "roster_count"); if roster_count == nil then return parse_error end
     local item_count; item_count, parse_error = decimal_integer(item_raw, 1, MAX_ITEMS, "actor_item_count"); if item_count == nil then return parse_error end
     if type(faction) ~= "string" or faction == "" or type(fingerprint) ~= "string" or fingerprint == "" then
         return failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom scalar is missing")
+    end
+    if actor_device ~= nil and not valid_text(actor_device) then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom device is malformed")
     end
     for index = roster_count + 1, MAX_ROSTER do
         local trailing; trailing, read_error = call_read(read, prefix .. "roster_" .. tostring(index) .. "_rank")
@@ -178,7 +184,7 @@ local function decode_internal(read, prefix, context)
     end
     local config = {
         schema_version = schema_version, faction = faction, catalog_fingerprint = fingerprint,
-        roster = {}, actor_items = {}
+        roster = {}, actor_items = {}, actor_device = actor_device
     }
     for index = 1, roster_count do
         local rank; rank, read_error = call_read(read, prefix .. "roster_" .. tostring(index) .. "_rank")
