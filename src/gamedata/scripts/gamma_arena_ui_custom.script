@@ -25,6 +25,40 @@ local function protected_result(code, message, callback)
     return result
 end
 
+local function format_weight(weight_mg)
+    return string.format("%.2f kg", (tonumber(weight_mg) or 0) / 1000)
+end
+
+local function device_option_text(option)
+    local label = translated(option.label_key or option.section)
+    if option.section == nil then return label end
+    return label .. " | " .. tostring(option.price or 0) .. " AP | " .. format_weight(option.weight_mg)
+end
+
+function resolve_device_option(options, display_text)
+    if type(display_text) ~= "string" then return nil end
+    for _, option in ipairs(options or {}) do
+        if option.display_text == display_text then return option end
+    end
+    return nil
+end
+
+function apply_device_selection(model, options, display_text)
+    if type(model) ~= "table" or type(model.set_device) ~= "function" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup model is unavailable")
+    end
+    local option = resolve_device_option(options, display_text)
+    if option == nil then
+        return gamma_arena_result.err("GA_CUSTOM_DEVICE_UNKNOWN", "Custom actor device is unavailable")
+    end
+    if option.disabled then
+        return gamma_arena_result.err(option.disabled_reason or "GA_CUSTOM_INVALID",
+            "Selected Custom device is unavailable")
+    end
+    return protected_result("GA_CUSTOM_DEVICE_UNKNOWN", "Custom actor device selection failed safely",
+        function() return model:set_device(option.section) end)
+end
+
 local function projection_failure(code)
     return {
         launch_enabled = false,
@@ -83,9 +117,10 @@ function project(model, category)
     end
     local device_options = {}
     for index, option in ipairs(snapshot.device_options or {}) do
-        device_options[index] = {
+        local projected = {
             section = option.section,
-            label_key = DEVICE_LABEL_KEYS[option.section],
+            label_key = option.section == nil and "st_gamma_arena_custom_device_none"
+                or DEVICE_LABEL_KEYS[option.section],
             price = option.price,
             weight_mg = option.weight_mg,
             selected = option.selected == true,
@@ -93,6 +128,8 @@ function project(model, category)
             disabled = option.disabled == true,
             disabled_reason = option.disabled_reason
         }
+        projected.display_text = device_option_text(projected)
+        device_options[index] = projected
     end
     local validation_code = snapshot.validation and snapshot.validation.error and snapshot.validation.error.code or nil
     local operation_error_code = snapshot.last_operation and snapshot.last_operation.error
@@ -205,24 +242,6 @@ local function combo_value(combo, ids, formatter)
     return nil
 end
 
-local function format_weight(weight_mg)
-    return string.format("%.2f kg", (tonumber(weight_mg) or 0) / 1000)
-end
-
-local function device_option_text(option)
-    local label = translated(option.label_key or option.section)
-    return label .. " | " .. tostring(option.price or 0) .. " AP | " .. format_weight(option.weight_mg)
-end
-
-local function selected_device_option(combo, options)
-    local value = combo:GetText()
-    if value == translated("st_gamma_arena_custom_device_none") then return false end
-    for _, option in ipairs(options or {}) do
-        if value == device_option_text(option) then return option end
-    end
-    return nil
-end
-
 class "UICustom" (CUIScriptWnd)
 
 function UICustom:__init(owner, ports) super()
@@ -267,9 +286,9 @@ function UICustom:InitControls()
     self:Register(self.back_button, "back")
 
     local snapshot = self.model:snapshot()
-    self.device_combo:AddItem(translated("st_gamma_arena_custom_device_none"), 1)
-    for index, option in ipairs(snapshot.device_options or {}) do
-        self.device_combo:AddItem(device_option_text(option), index + 1)
+    local initial_view = project(self.model, self.selected_category)
+    for index, option in ipairs(initial_view.device_options or {}) do
+        self.device_combo:AddItem(option.display_text, index)
     end
     for index, faction_id in ipairs(snapshot.faction_ids or {}) do self.faction_combo:AddItem(faction_text(faction_id), index) end
     for count = 1, snapshot.capacity do self.count_combo:AddItem(tostring(count), count) end
@@ -360,9 +379,10 @@ function UICustom:Rebuild()
     set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
     set_combo(self.count_combo, {}, nil, tostring, tostring(view.count))
     self.count_combo:SetText(tostring(view.count))
-    local device_text = translated("st_gamma_arena_custom_device_none")
+    local device_text = view.device_options[1] and view.device_options[1].display_text
+        or translated("st_gamma_arena_custom_device_none")
     for _, option in ipairs(view.device_options or {}) do
-        if option.selected then device_text = device_option_text(option); break end
+        if option.selected then device_text = option.display_text; break end
     end
     self.device_combo:SetText(device_text)
     for index = 1, 10 do
@@ -405,15 +425,8 @@ end
 function UICustom:OnDevice()
     self.submission_error = nil
     local view = self.projection or project(self.model, self.selected_category)
-    local option = selected_device_option(self.device_combo, view.device_options)
-    if option == false then
-        self.model:set_device(nil)
-    elseif option and not option.disabled then
-        self.model:set_device(option.section)
-    elseif option and option.disabled then
-        self.submission_error = gamma_arena_result.err(option.disabled_reason or "GA_CUSTOM_INVALID",
-            "Selected Custom device is unavailable")
-    end
+    local applied = apply_device_selection(self.model, view.device_options, self.device_combo:GetText())
+    if not applied.ok then self.submission_error = applied end
     self:Rebuild()
 end
 

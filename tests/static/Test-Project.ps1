@@ -373,6 +373,9 @@ $Task3DeviceUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scr
 foreach ($Marker in @('device_combo','OnDevice','st_gamma_arena_custom_device_none','option.disabled','device_option_text')) {
     Assert-True ($Task3DeviceUi -match [regex]::Escape($Marker)) "Task 3 Custom UI is missing $Marker"
 }
+foreach ($Marker in @('function resolve_device_option','function apply_device_selection','self.device_combo:AddItem(option.display_text','apply_device_selection(self.model, view.device_options')) {
+    Assert-True ($Task3DeviceUi -match [regex]::Escape($Marker)) "Task 3 Custom UI canonical device path is missing $Marker"
+}
 [xml]$Task3DeviceXml = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_custom.xml') -Raw
 Assert-True ($null -ne $Task3DeviceXml.SelectSingleNode("//*[local-name()='device']")) 'Task 3 UI XML must expose the dedicated device selector.'
 Assert-True ($null -eq $Task3DeviceXml.SelectSingleNode("//*[local-name()='category_device']")) 'Task 3 UI XML must not add an ordinary device category.'
@@ -395,6 +398,9 @@ foreach ($Marker in @('device is distinct entry 65','device is physical entity 2
     Assert-True ($Task3DeviceTests -match [regex]::Escape($Marker)) "Task 3 device tests are missing $Marker"
 }
 $Task3DeviceRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task3DeviceRuntimeName = 'runtime_custom_ui_device_projection_round_trips_all_choices'
+$Task3DeviceRuntimeRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task3DeviceRuntimeName) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Task3DeviceRuntimeName) + '\s*\}'
+Assert-True (([regex]::Matches($Task3DeviceRuntime, $Task3DeviceRuntimeRegistration)).Count -eq 1) "Task 3 runtime device projection case must be registered exactly: $Task3DeviceRuntimeName"
 foreach ($Marker in @('emitted request preserves dedicated device','Task 3 does not materialize actor_device into FightSpec items','Task 3 emits no separate FightSpec device field')) {
     Assert-True ($Task3DeviceRuntime -match [regex]::Escape($Marker)) "Task 3 runtime boundary test is missing: $Marker"
 }
