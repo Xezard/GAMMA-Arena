@@ -284,13 +284,13 @@ section = gamma_arena_bandit_veteran
 class = AI_STL_S
 community = bandit
 '@
-    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v8.txt' @'
-seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=8|session_seed=1|fight_index=0|diagnostic=FightSpecV8 rookie
-seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=8|session_seed=1|fight_index=0|diagnostic=FightSpecV8 stalker
-seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=8|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV8 veteran
-seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=8|session_seed=3|fight_index=31|diagnostic=FightSpecV8 master
+    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v9.txt' @'
+seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=9|session_seed=1|fight_index=0|diagnostic=FightSpecV9 rookie
+seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=9|session_seed=1|fight_index=0|diagnostic=FightSpecV9 stalker
+seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=9|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV9 veteran
+seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=9|session_seed=3|fight_index=31|diagnostic=FightSpecV9 master
 '@
-    Write-FixtureFile $Root 'schemas\fight-spec-v8.md' 'fixture'
+    Write-FixtureFile $Root 'schemas\fight-spec-v9.md' 'fixture'
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
 local function _snapshot_unchecked()
     local value = nil
@@ -772,7 +772,7 @@ function run() end
         'src\gamedata\scripts\gamma_arena_random_generator.script',
         'src\gamedata\scripts\gamma_arena_fight_builder.script',
         'src\gamedata\scripts\gamma_arena_fight_spec.script',
-        'src\gamedata\scripts\gamma_arena_fight_validator_v8.script',
+        'src\gamedata\scripts\gamma_arena_fight_validator_v9.script',
         'src\gamedata\scripts\gamma_arena_validator.script',
         'src\gamedata\scripts\gamma_arena_layout_adapter.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
@@ -784,8 +784,8 @@ function run() end
         'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script',
         'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script',
         'dev\gamedata\scripts\gamma_arena_test_runtime.script',
-        'tests\fixtures\golden-fights-v8.txt',
-        'schemas\fight-spec-v8.md'
+        'tests\fixtures\golden-fights-v9.txt',
+        'schemas\fight-spec-v9.md'
     )
     foreach ($RelativePath in $CurrentContractFiles) {
         $SourcePath = Join-Path $RepoRoot $RelativePath
@@ -825,6 +825,18 @@ try {
         }
         Write-Host 'PASS: isolated positive smoke fixture'
         return
+    }
+
+    $MissingReleaseSurfaceFixture = New-Task7Fixture 'missing-current-release-surface'
+    Write-FixtureFile $MissingReleaseSurfaceFixture '.git' 'gitdir: fixture'
+    Write-FixtureFile $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1' ([IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Build-GammaArena.ps1')))
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'VERSION') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tests\fixtures\custom-catalog-v10.json') -Force
+    $MissingReleaseSurfaceResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingReleaseSurfaceFixture) -CaptureOutput
+    Assert-True ($MissingReleaseSurfaceResult.ExitCode -ne 0) 'A real-repo-shaped release surface must fail when current artifacts are missing.'
+    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.')) {
+        Assert-True ($MissingReleaseSurfaceResult.Output.Contains($Diagnostic)) "Currentness gate must report every missing real-repo artifact: $Diagnostic"
     }
 
     $NestedGammaRandomFixture = New-Task7Fixture 'nested-gamma-random'

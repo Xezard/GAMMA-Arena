@@ -8,12 +8,13 @@ The JSON root is an object with exactly these fields in this order:
 
 | Field | JSON type | v1 value / rule |
 | --- | --- | --- |
-| `addon_version` | string | `"0.3.0"`; must equal the repository `VERSION` used for the build |
+| `addon_version` | string | `"0.5.0"`; must equal the repository `VERSION` used for the build |
 | `state_schema_version` | integer | `1`; durable UI preference schema |
 | `session_schema_version` | integer | `1`; `ArenaSession` and resume-intent schema |
-| `fight_spec_schema_version` | integer | `8`; validated universal `FightSpec` schema |
-| `generator_version` | integer | `10`; deterministic generator behavior |
-| `catalog_revision` | integer | `10`; exact catalog semantics |
+| `fight_spec_schema_version` | integer | `9`; validated universal `FightSpec` schema |
+| `catalog_schema_version` | integer | `10`; exact catalog structure |
+| `catalog_revision` | integer | `11`; exact catalog semantics |
+| `generator_version` | integer | `11`; deterministic generator behavior |
 | `layout_revision` | integer | `2`; exact layout semantics (called `layout_version` inside `FightSpec`) |
 | `compatibility_manifest_version` | integer | `1`; this JSON contract |
 | `files` | array | zero or more file records as defined below |

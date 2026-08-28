@@ -118,9 +118,31 @@ foreach ($ProtectionLabel in @(
 }
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
-$AddonVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
-Assert-True ($AddonVersion -ceq '0.4.0') 'Active add-on version must be 0.4.0.'
+$Task7RepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
+$Task7VersionPath = Join-Path $RepoRoot 'VERSION'
+$AddonVersion = if (Test-Path -LiteralPath $Task7VersionPath -PathType Leaf) { (Get-Content -LiteralPath $Task7VersionPath -Raw).Trim() } else { '' }
+if ($Task7RepositoryCheckout) { Assert-True ($AddonVersion -ceq '0.5.0') 'Task 7 release version must be exactly 0.5.0.' }
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
+if ($Task7RepositoryCheckout) {
+$Task7BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
+Assert-True (Test-Path -LiteralPath $Task7BuildPath -PathType Leaf) 'Task 7 release build script is missing.'
+if (Test-Path -LiteralPath $Task7BuildPath -PathType Leaf) {
+$Task7BuildContent = Get-Content -LiteralPath $Task7BuildPath -Raw
+Assert-True ($Task7BuildContent.Contains('schemas\fight-spec-v9.md')) 'Task 7 build must package the sole v9 schema.'
+Assert-True ($Task7BuildContent.Contains('tests\fixtures\custom-catalog-v10.json')) 'Task 7 Dev build must package the v10 catalog fixture.'
+Assert-True ($Task7BuildContent.Contains('fight_spec_schema_version = 9')) 'Task 7 manifest must publish FightSpec 9.'
+Assert-True ($Task7BuildContent.Contains('catalog_schema_version = 10')) 'Task 7 manifest must publish catalog schema 10.'
+Assert-True ($Task7BuildContent.Contains('catalog_revision = 11')) 'Task 7 manifest must publish catalog revision 11.'
+Assert-True ($Task7BuildContent.Contains('generator_version = 11')) 'Task 7 manifest must publish generator 11.'
+Assert-True ($Task7BuildContent -notmatch '(?:fight-spec|golden-fights|golden-random-selections)-v[1-8]|custom-catalog-v1\.json') 'Task 7 build tooling must reference only current FightSpec/catalog artifacts.'
+}
+$Task7CurrentValidators = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts') -File -Filter 'gamma_arena_fight_validator_v*.script')
+$Task7CurrentGoldenFixtures = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'tests\fixtures') -File -Filter 'golden-fights-v*.txt')
+Assert-True ($Task7CurrentValidators.Count -eq 1 -and $Task7CurrentValidators[0].Name -ceq 'gamma_arena_fight_validator_v9.script') 'Task 7 must publish exactly one active FightSpec validator: v9.'
+Assert-True ($Task7CurrentGoldenFixtures.Count -eq 1 -and $Task7CurrentGoldenFixtures[0].Name -ceq 'golden-fights-v9.txt') 'Task 7 must publish exactly one FightSpec golden fixture: v9.'
+Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v10.json')) 'Task 7 current catalog fixture custom-catalog-v10.json is missing.'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v1.json'))) 'Task 7 stale custom-catalog-v1.json must be removed.'
+}
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
     $_.FullName -notmatch '[\\/](dist|build)[\\/]'
@@ -382,6 +404,9 @@ if ($Task6ArtifactsPresent) {
     foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
         Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
     }
+    $Task7RandomPipelineFixture = [regex]::Match($Task6GeneratorTests, '(?s)local function random_draft_catalogs\(\).*?local function random_draft_semantics').Value
+    Assert-True ($Task7RandomPipelineFixture.Contains('snapshot.fingerprint = "ga-catalog-v10-random-pipeline"')) 'Task 7 positive random pipeline fixture must use the exact v10 catalog fingerprint.'
+    Assert-True ($Task7RandomPipelineFixture -notmatch 'ga-catalog-v[1-9]-') 'Task 7 positive random pipeline fixture must not use a retired catalog fingerprint.'
     $ActiveGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script') -Raw
     Assert-True ($ActiveGenerator -match 'gamma_arena_fight_builder\.generate' -and $ActiveGenerator -match 'gamma_arena_fight_spec\.stable_encode') 'Task 7 must retain the thin universal generator facade.'
 }
@@ -602,7 +627,7 @@ if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'validate_exact_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
-    [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v1.json'; Required = @('"schema_version"\s*:\s*1', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
+    [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v10.json'; Required = @('"schema_version"\s*:\s*10', '"catalog_fingerprint"\s*:\s*"ga-catalog-v10-', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
 )
 foreach ($Contract in $Task10CustomContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
@@ -663,7 +688,7 @@ foreach ($Name in @(
 }
 $Task11Session = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 Assert-True ($Task11Session -match 'arena_session_keys\s*=\s*\{[\s\S]{0,700}generation_recipe\s*=\s*true[\s\S]{0,400}catalog_fingerprint\s*=\s*true[\s\S]{0,400}custom_config\s*=\s*true') 'Task 11 ArenaSession must own recipe, catalog fingerprint, and custom config provenance.'
-Assert-True ($Task11Session -match 'session\.generator_version\s*~=\s*10' -and $Task11Session -match 'session\.catalog_revision\s*~=\s*10') 'Task 11 ArenaSession must bind catalog/generator identity 10/10.'
+Assert-True ($Task11Session -match 'session\.generator_version\s*~=\s*11' -and $Task11Session -match 'session\.catalog_revision\s*~=\s*11') 'Task 11 ArenaSession must bind current catalog/generator identity 11/11.'
 Assert-True ($Task11Session -match 'gamma_arena_custom_config\.validate\s*\(\s*session\.custom_config') 'Task 11 ArenaSession must independently validate and copy custom config.'
 $Task11Orchestrator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
 $Task11Bootstrap = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
@@ -726,9 +751,9 @@ if (Test-Path -LiteralPath $Task12BuildPath) {
     $Task12Readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
     $Task12Changelog = Get-Content -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Raw
     $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
-    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.4\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 12 README must publish the 0.4.0 custom Arena integration baseline.'
-    Assert-True ($Task12Changelog -match '(?m)^## 0\.4\.0 - 2026-08-27$') 'Task 12 changelog must publish release 0.4.0.'
-    foreach ($Path in @('tests\fixtures\golden-random-selections-v8.txt','tests\fixtures\custom-catalog-v1.json')) {
+    Assert-True ($Task12Readme -match 'Gamma-Arena-v0\.5\.0-MO2\.zip' -and $Task12Readme -match '(?i)custom Arena') 'Task 7 README must publish the 0.5.0 Custom Arena release.'
+    Assert-True ($Task12Changelog -match '(?m)^## 0\.5\.0 - 2026-08-28$') 'Task 7 changelog must publish release 0.5.0.'
+    foreach ($Path in @('tests\fixtures\golden-random-selections-v9.txt','tests\fixtures\custom-catalog-v10.json')) {
         Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
     }
     $Task12AcceptancePath = Join-Path $RepoRoot 'docs\custom-arena-acceptance.md'
@@ -763,6 +788,27 @@ if (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_aren
 }
 $Task7CatalogMetadata = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx') -Raw
 Assert-True ($Task7CatalogMetadata -match '(?ms)\[meta\].*?schema_version\s*=\s*10\s*.*?revision\s*=\s*11\s*.*?generator_version\s*=\s*11') 'Task 7 catalog identity must be 10/11/11.'
+$Task7OrchestratorIdentity = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+$Task7SessionStoreIdentity = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
+$Task7RuntimeSessionFixtures = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11')) {
+    Assert-True ($Task7OrchestratorIdentity -match $Pattern) "Task 7 orchestrator catalog guard must enforce current identity: $Pattern"
+}
+foreach ($Pattern in @('session\.generator_version\s*~=\s*11', 'session\.catalog_revision\s*~=\s*11')) {
+    Assert-True ($Task7SessionStoreIdentity -match $Pattern) "Task 7 ArenaSession guard must enforce current identity: $Pattern"
+}
+Assert-True ($Task7RuntimeSessionFixtures -match '(?ms)local function valid_session\(\).*?generator_version\s*=\s*11.*?catalog_revision\s*=\s*11.*?ga-catalog-v10-') 'Task 7 current resume fixture must bind catalog identity 10/11/11.'
+foreach ($CaseName in @('runtime_custom_session_creation_copies_validated_recipe','runtime_random_recipe_session_remains_difficulty_only','resume_is_validated_but_override_is_not_applied_early')) {
+    Assert-True ($Task7RuntimeSessionFixtures -match [regex]::Escape($CaseName)) "Task 7 current session behavioral fixture is missing: $CaseName"
+}
+$Task7SessionSchemaDoc = Get-Content -LiteralPath (Join-Path $RepoRoot 'schemas\session-v1.md') -Raw
+foreach ($Marker in @('FightSpec v9','catalog schema `10`','generator_version = 11','catalog_revision = 11','ga-catalog-v10-')) {
+    Assert-True ($Task7SessionSchemaDoc.Contains($Marker)) "Task 7 session schema documentation is stale: $Marker"
+}
+$Task7CompatibilityManifestDoc = Get-Content -LiteralPath (Join-Path $RepoRoot 'schemas\compatibility-manifest-v1.md') -Raw
+foreach ($Marker in @('"0.5.0"','fight_spec_schema_version` | integer | `9`','catalog_schema_version` | integer | `10`','catalog_revision` | integer | `11`','generator_version` | integer | `11`')) {
+    Assert-True ($Task7CompatibilityManifestDoc.Contains($Marker)) "Task 7 compatibility manifest documentation is stale: $Marker"
+}
 $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
 $Task7MasterExoRegistration = '\{\s*name\s*=\s*"master_powered_exo_rate_is_rare"\s*,\s*fn\s*=\s*master_powered_exo_rate_is_rare\s*\}'
 Assert-True (([regex]::Matches($Task7GeneratorTest, $Task7MasterExoRegistration)).Count -eq 1) 'Regression case must be registered exactly: master_powered_exo_rate_is_rare -> master_powered_exo_rate_is_rare.'

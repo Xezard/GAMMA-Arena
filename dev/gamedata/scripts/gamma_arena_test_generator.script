@@ -257,62 +257,6 @@ local function device_catalog_rejects_effective_mismatch()
     gamma_arena_test_assert.is_false(effective.ok, "device catalog rejects altered effective slot")
 end
 
-local function actor_device_is_difficulty_independent_and_stable()
-    local snapshot = catalogs()
-    local selected_section
-    for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
-        local generated = generate_fixture(request(777, difficulty_id), 5, snapshot)
-        gamma_arena_test_assert.is_true(generated.ok, "device difficulty-independence fixture generates")
-        local device = generated.value.actor.loadout.device
-        gamma_arena_test_assert.is_true(type(device) == "table", "actor FightSpec contains a device record")
-        selected_section = selected_section or device.section
-        gamma_arena_test_assert.equals(device.section, selected_section, "difficulty does not participate in actor device selection")
-        gamma_arena_test_assert.equals(generated.value.opponents[1].loadout.device, nil, "opponents never receive actor devices")
-        local encoded = gamma_arena_generator.stable_encode(generated.value)
-        gamma_arena_test_assert.is_true(string.find(encoded, ",device:" .. device.catalog_id .. ":" .. device.section, 1, true) ~= nil, "stable encoding contains exact device identity")
-        gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "generated FightSpec v8 validates")
-    end
-    local first = generate_fixture(request(991, "rookie"), 4, snapshot)
-    local second = generate_fixture(request(991, "rookie"), 4, snapshot)
-    gamma_arena_test_assert.equals(first.value.actor.loadout.device.section, second.value.actor.loadout.device.section, "same fight replays the same device")
-end
-
-local function validator_rejects_forged_actor_devices()
-    local snapshot = catalogs()
-    local function generated(seed)
-        local result = generate_fixture(request(seed, "master"), seed % 17, snapshot)
-        gamma_arena_test_assert.is_true(result.ok, "device forgery fixture generates")
-        return result.value
-    end
-    local function rejected(spec, mutate, message)
-        mutate(spec)
-        local result = validate_fixture(spec, snapshot)
-        gamma_arena_test_assert.is_false(result.ok, message)
-        gamma_arena_test_assert.equals(result.error.code, "GA_LOADOUT_DEVICE_INVALID", message .. " code")
-    end
-    rejected(generated(1), function(spec) spec.actor.loadout.device = nil end, "missing actor device is rejected")
-    rejected(generated(2), function(spec) spec.actor.loadout.device.section = "device_torch_nv_3" end, "forged device section is rejected")
-    rejected(generated(3), function(spec) spec.actor.loadout.device.weight = 99 end, "forged device weight is rejected")
-    rejected(generated(4), function(spec) spec.actor.loadout.device.kind = "gen9" end, "forged device kind is rejected")
-    rejected(generated(5), function(spec) spec.actor.loadout.device.nv_effect = "nightvision_3" end, "forged device effect is rejected")
-    rejected(generated(6), function(spec) spec.opponents[1].loadout.device = spec.actor.loadout.device end, "opponent device is rejected")
-    rejected(generated(7), function(spec)
-        local replacement = spec.actor.loadout.device.catalog_id == "headlamp" and snapshot.devices.nv_gen1 or snapshot.devices.headlamp
-        spec.actor.loadout.device = { catalog_id=replacement.id, section=replacement.section, kind=replacement.kind, weight=replacement.weight, nv_effect=replacement.nv_effect }
-    end, "wrong deterministic actor device is rejected")
-end
-
-local function validator_copies_actor_device()
-    local snapshot = catalogs()
-    local generated = generate_fixture(request(441, "veteran"), 8, snapshot)
-    local validated = validate_fixture(generated.value, snapshot)
-    gamma_arena_test_assert.is_true(validated.ok, "device immutable-copy fixture validates")
-    local first = validated.value.actor()
-    local expected = first.loadout.device.section
-    first.loadout.device.section = "mutated_device"
-    gamma_arena_test_assert.equals(validated.value.actor().loadout.device.section, expected, "validated actor device is an immutable copy")
-end
-
 local function all_available_pairs()
     local weapons = { "w_pistol", "w_smg", "w_shotgun", "w_rifle", "w_sniper" }
     local armors = { "light", "medium", "scientific", "heavy", "powered_exo" }
@@ -1238,7 +1182,7 @@ local function generator_primary_pool_affordability_falls_back()
     gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
 end
 
-local function golden_fights_v8()
+local function golden_fights_v9()
     local snapshot = catalogs()
     for _, expected in ipairs({
         { seed = 0, difficulty = "rookie", fight = 0 },
@@ -1251,7 +1195,7 @@ local function golden_fights_v8()
         gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
         local encoded = gamma_arena_generator.stable_encode(first.value)
         gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
-        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=8", 1, true) ~= nil, "FightSpec v8 is encoded")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=9", 1, true) ~= nil, "FightSpec v9 is encoded")
         for _, opponent in ipairs(first.value.opponents) do
             gamma_arena_test_assert.equals(opponent.community, nil, "fallback FightSpec encoding remains byte-compatible without a synthetic source community")
         end
@@ -1278,7 +1222,7 @@ local function random_draft_catalogs()
             threat = 1
         }
     end
-    snapshot.fingerprint = "ga-catalog-v9-random-pipeline"
+    snapshot.fingerprint = "ga-catalog-v10-random-pipeline"
     snapshot.max_physical_items_per_participant = 256
     snapshot.items, snapshot.item_ids = {}, {}
     local function add_item(section_name, value)
@@ -1322,15 +1266,15 @@ local function random_draft_pipeline_canonicalizes_and_strictly_validates()
     local canonical = gamma_arena_fight_spec.canonicalize(generated.value, {
         session_seed = gamma_arena_rng.normalize_uint32(session.session_seed),
         fight_index = fight_index,
-        generator_version = 10,
+        generator_version = 11,
         catalog_fingerprint = snapshot.fingerprint,
         layout_version = layout.version
     }, snapshot, layout)
     gamma_arena_test_assert.is_true(canonical.ok, "tagged random draft canonicalizes")
     gamma_arena_test_assert.is_true(#canonical.value.actor.items > 0 and #canonical.value.opponents[1].items > 0, "random pipeline retains nonempty physical items")
     gamma_arena_test_assert.equals(canonical.value.opponents[1].profile, generated.value.opponents[1].profile, "canonical profile preserves authoritative alias")
-    local strict = gamma_arena_fight_validator_v8.validate(canonical.value, snapshot, layout)
-    gamma_arena_test_assert.is_true(strict.ok, "canonical random draft passes strict v8 validation")
+    local strict = gamma_arena_fight_validator_v9.validate(canonical.value, snapshot, layout)
+    gamma_arena_test_assert.is_true(strict.ok, "canonical random draft passes strict v9 validation")
 end
 
 local function random_draft_malformed_inputs_are_total_results()
@@ -1605,11 +1549,11 @@ local function medical_generation_100000_fights()
     end
 end
 
-local function fight_spec_v8_separates_gear_medical_and_grenades()
+local function fight_spec_v9_separates_gear_medical_and_grenades()
     local snapshot = catalogs()
     local generated = generate_fixture(request(37, "master"), 5, snapshot)
-    gamma_arena_test_assert.is_true(generated.ok, "FightSpec v8 generation succeeds")
-    gamma_arena_test_assert.equals(generated.value.schema_version, 8, "FightSpec schema is v8")
+    gamma_arena_test_assert.is_true(generated.ok, "FightSpec v9 generation succeeds")
+    gamma_arena_test_assert.equals(generated.value.schema_version, 9, "FightSpec schema is v9")
     local actor = generated.value.actor.loadout
     gamma_arena_test_assert.equals(actor.cost, actor.gear_cost + actor.medical_cost, "actor total decomposes exactly")
     gamma_arena_test_assert.is_true(actor.gear_cost <= snapshot.difficulties.master.player_gear_budget, "actor gear budget")
@@ -1620,7 +1564,7 @@ local function fight_spec_v8_separates_gear_medical_and_grenades()
         enemy_medical = enemy_medical + opponent.loadout.medical_cost
     end
     gamma_arena_test_assert.equals(enemy_medical, #generated.value.opponents, "enemy medical team budget equals count")
-    gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "FightSpec v8 validates")
+    gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "FightSpec v9 validates")
 end
 
 local function dense_array_length(values)
@@ -1822,9 +1766,6 @@ function run(run_case_fn)
         { name="device_catalog_and_probability_boundaries", fn=device_catalog_and_probability_boundaries },
         { name="device_generator_rejects_malformed_arguments", fn=device_generator_rejects_malformed_arguments },
         { name="device_catalog_rejects_effective_mismatch", fn=device_catalog_rejects_effective_mismatch },
-        { name="actor_device_is_difficulty_independent_and_stable", fn=actor_device_is_difficulty_independent_and_stable },
-        { name="validator_rejects_forged_actor_devices", fn=validator_rejects_forged_actor_devices },
-        { name="validator_copies_actor_device", fn=validator_copies_actor_device },
         { name="grenade_generator_rejects_malformed_arguments", fn=grenade_generator_rejects_malformed_arguments },
         { name="catalog_exposes_medical_pool_and_budgets", fn=catalog_exposes_medical_pool_and_budgets },
         { name="catalog_skips_optional_missing_medicine", fn=catalog_skips_optional_missing_medicine },
@@ -1832,7 +1773,7 @@ function run(run_case_fn)
         { name="actor_medical_generation_reaches_master_rare", fn=actor_medical_generation_reaches_master_rare },
         { name="enemy_medical_generation_spends_team_budget", fn=enemy_medical_generation_spends_team_budget },
         { name="medical_generation_100000_fights", fn=medical_generation_100000_fights },
-        { name="fight_spec_v8_separates_gear_medical_and_grenades", fn=fight_spec_v8_separates_gear_medical_and_grenades },
+        { name="fight_spec_v9_separates_gear_medical_and_grenades", fn=fight_spec_v9_separates_gear_medical_and_grenades },
         { name="grenade_loadouts_are_deterministic_uncosted_and_prefix_stable", fn=grenade_loadouts_are_deterministic_uncosted_and_prefix_stable },
         { name="validator_rejects_forged_grenade_arrays", fn=validator_rejects_forged_grenade_arrays },
         { name="medical_tuning_does_not_reroll_core_fight", fn=medical_tuning_does_not_reroll_core_fight },
@@ -1850,7 +1791,7 @@ function run(run_case_fn)
         { name="master_powered_exo_rate_is_rare", fn=master_powered_exo_rate_is_rare },
         { name="generator_role_first_balance", fn=generator_role_first_balance },
         { name="generator_primary_pool_affordability_falls_back", fn=generator_primary_pool_affordability_falls_back },
-        { name="stable_encode_v8", fn=stable_and_fight_index },
+        { name="stable_encode_v9", fn=stable_and_fight_index },
         { name="player_ammo_scaling_policy_is_uncapped_and_prefix_stable", fn=player_ammo_scaling_policy_is_uncapped_and_prefix_stable },
         { name="generated_actor_ammo_is_final_and_outside_budget", fn=generated_actor_ammo_is_final_and_outside_budget },
         { name="player_ammo_scaling_is_stream_isolated", fn=player_ammo_scaling_is_stream_isolated },
@@ -1860,7 +1801,7 @@ function run(run_case_fn)
         { name="validator_rejects_invalid_bonus_ammo", fn=validator_rejects_invalid_bonus_ammo },
         { name="validator_rejects_forged_final_actor_ammo", fn=validator_rejects_forged_final_actor_ammo },
         { name="finite_integer_guards", fn=finite_integer_guards },
-        { name="golden_fights_v8", fn=golden_fights_v8 }
+        { name="golden_fights_v9", fn=golden_fights_v9 }
     }
     if not run_case_fn('device_selector_rejects_forged_exact_catalogs', device_selector_rejects_forged_exact_catalogs) then all_passed = false end
     if not run_case_fn('device_generator_is_mode_free_and_deterministic', device_generator_is_mode_free_and_deterministic) then all_passed = false end

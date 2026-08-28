@@ -4,6 +4,15 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-28
+
+- Published FightSpec v9 as the sole emitted, accepted, documented, and packaged fight contract with exact catalog identity `10/11/11` and generator 11.
+- Kept Random and Custom as generation recipes for one mode-neutral physical item shape without mode, difficulty, budget, price, weight-total, or provenance fields.
+- Made the Custom lighting device optional and budgeted with exact prices 25/75/150/300 AP while Random still issues one deterministic 50/25/18/7 device outside its loadout budgets.
+- Preserved one shared faction, 1-10 individually selected exact ranks, the `600 + sum(rank threat)` budget, the two-distinct-grenade surcharge, and the 64-distinct/256-physical limits.
+- Recorded NPC appearance as deliberately nondeterministic deferred work until it becomes observable or mechanically relevant.
+- Removed active FightSpec v1-v8 validators, schemas, golden artifacts, aliases, and package branches; Dev references now target only v9/current fixtures.
+
 ## 0.4.0 - 2026-08-27
 
 - Added a Custom Arena launch alongside the existing seeded Random mode, with one shared enemy faction and 1-10 individually selected exact ranks from novice through legend.

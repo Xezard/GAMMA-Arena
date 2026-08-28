@@ -58,7 +58,7 @@ function Copy-RepositoryFile([string]$RelativePath) {
     Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
 }
 
-$LegacyFightSpecPattern = 'fight-spec-v[1-7]|golden-fights-v[1-7]|FightSpecV[1-7]'
+$LegacyFightSpecPattern = 'fight-spec-v[1-8]|golden-fights-v[1-8]|FightSpecV[1-8]'
 $LegacyArtifactPaths = @(foreach ($Root in @('src', 'dev', 'tests', 'schemas', 'tools')) {
     $SourceRoot = Join-Path $RepoRoot $Root
     if (Test-Path -LiteralPath $SourceRoot) {
@@ -72,15 +72,15 @@ if ($LegacyArtifactPaths.Count -ne 0) {
 }
 
 Copy-GameDataTree (Join-Path $RepoRoot 'src\gamedata') $StageGameData
-Copy-RepositoryFile 'schemas\fight-spec-v8.md'
+Copy-RepositoryFile 'schemas\fight-spec-v9.md'
 if ($Configuration -eq 'Dev') {
     Copy-GameDataTree (Join-Path $RepoRoot 'dev\gamedata') $StageGameData
     Copy-GameDataTree (Join-Path $RepoRoot 'schemas') (Join-Path $StageRoot 'schemas')
     Copy-GameDataTree (Join-Path $RepoRoot 'tests') (Join-Path $StageRoot 'tests')
     foreach ($DevContractPath in @(
-        'tests\fixtures\golden-fights-v8.txt',
-        'tests\fixtures\golden-random-selections-v8.txt',
-        'tests\fixtures\custom-catalog-v1.json'
+        'tests\fixtures\golden-fights-v9.txt',
+        'tests\fixtures\golden-random-selections-v9.txt',
+        'tests\fixtures\custom-catalog-v10.json'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $StageRoot $DevContractPath) -PathType Leaf)) {
             throw "Dev package contract file is missing: $DevContractPath"
@@ -113,9 +113,10 @@ $Manifest = [ordered]@{
     addon_version = $Version
     state_schema_version = 1
     session_schema_version = 1
-    fight_spec_schema_version = 8
-    generator_version = 10
-    catalog_revision = 10
+    fight_spec_schema_version = 9
+    catalog_schema_version = 10
+    catalog_revision = 11
+    generator_version = 11
     layout_revision = 2
     compatibility_manifest_version = 1
     files = $ManifestFiles

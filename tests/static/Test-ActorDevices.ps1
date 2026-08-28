@@ -173,23 +173,6 @@ foreach ($Assertion in @(
     if (-not $GeneratorTests.Contains($Assertion)) { throw "Actor device effect normalization regression is missing: $Assertion" }
 }
 
-foreach ($Marker in @('gamma_arena_device_generator.generate','schema_version = 8','FightSpecV8','device:')) {
-    if (-not $Generator.Contains($Marker)) { Add-ControlledFailure "FightSpec v8 actor device generator contract is missing: $Marker" }
-}
-foreach ($Marker in @('GA_LOADOUT_DEVICE_INVALID','gamma_arena_device_generator.generate','spec.schema_version ~= 8','copy_device')) {
-    if (-not $Validator.Contains($Marker)) { Add-ControlledFailure "FightSpec v8 actor device validator contract is missing: $Marker" }
-}
-foreach ($CaseName in @('actor_device_is_difficulty_independent_and_stable','validator_rejects_forged_actor_devices','validator_copies_actor_device')) {
-    if (-not $GeneratorTests.Contains($CaseName)) { Add-ControlledFailure "FightSpec v8 actor device regression case is missing: $CaseName" }
-}
-foreach ($Marker in @('loadout.device.catalog_id','loadout.device.section','loadout.device.kind','loadout.device.weight','loadout.device.nv_effect','device = device')) {
-    if (-not $EntityAdapter.Contains($Marker)) { Add-ControlledFailure "EntityAdapter actor device copy contract is missing: $Marker" }
-}
-if (-not $RuntimeTests.Contains('runtime_entity_preserves_actor_device_across_copy')) {
-    throw 'EntityAdapter runtime regression must preserve the exact actor device across the FightSpec copy boundary'
-}
-Write-Host 'PASS: independent entity copy preservation checks executed'
-
 $UniversalLifecycleCase = 'runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback'
 if (-not $RuntimeTests.Contains($UniversalLifecycleCase)) {
     throw "Universal actor-device lifecycle runtime regression is missing: $UniversalLifecycleCase"

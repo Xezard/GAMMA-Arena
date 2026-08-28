@@ -309,7 +309,7 @@ $EntityAdapterScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena
 $MedicalGeneratorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
 $NpcMedicalScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_npc_medical.script'
 $TacticalDirectorScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_director.script'
-$FightSpecSchemaPath = Join-Path $RepoRoot 'schemas\fight-spec-v8.md'
+$FightSpecSchemaPath = Join-Path $RepoRoot 'schemas\fight-spec-v9.md'
 
 $Catalog = Read-GammaArenaLtx $CatalogPath
 $CustomRules = Read-GammaArenaLtx $CustomRulesPath
@@ -318,6 +318,7 @@ $Layout = Read-GammaArenaLtx $LayoutPath
 $Tactical = Read-GammaArenaLtx $TacticalPath
 
 $CustomBaseBudget = Get-RequiredLtxInt $CustomRules 'limits' 'base_budget' $CustomRulesPath
+$CustomMaxEntries = Get-RequiredLtxInt $CustomRules 'limits' 'max_entries' $CustomRulesPath
 $CustomPhysicalCap = Get-RequiredLtxInt $CustomRules 'limits' 'max_physical_items_per_participant' $CustomRulesPath
 $CustomMaxGrenades = Get-RequiredLtxInt $CustomRules 'limits' 'max_selected_grenades' $CustomRulesPath
 $CustomGrenadeQuantity = Get-RequiredLtxInt $CustomRules 'limits' 'max_quantity_per_grenade' $CustomRulesPath
@@ -331,13 +332,16 @@ foreach ($RankId in $CustomRankIds) {
         threat = Get-RequiredLtxInt $CustomRules ('rank_' + $RankId) 'threat' $CustomRulesPath
     }) | Out-Null
 }
-if ($CustomBaseBudget -le 0 -or $CustomPhysicalCap -le 0 -or $CustomMaxGrenades -le 0 -or
+if ($CustomBaseBudget -le 0 -or $CustomMaxEntries -le 0 -or $CustomPhysicalCap -le 0 -or $CustomMaxGrenades -le 0 -or
     $CustomGrenadeQuantity -le 0 -or $CustomSecondGrenadeMultiplier -le 0 -or
     @($CustomRanks | Where-Object { $_.threat -le 0 }).Count -ne 0) {
     throw 'Custom Arena budget, threat, item, and grenade rules must be positive'
 }
-$CustomCategories = @(Get-RequiredLuaQuotedArray $ItemCatalogScriptPath 'CATEGORY_IDS')
-if ($CustomCategories.Count -ne 7) { throw 'Custom Arena item catalog must define exactly seven selectable categories' }
+$PhysicalCategories = @(Get-RequiredLuaQuotedArray $ItemCatalogScriptPath 'CATEGORY_IDS')
+$CustomCategories = @($PhysicalCategories | Where-Object { $_ -cne 'device' })
+if ($PhysicalCategories.Count -ne 8 -or @($PhysicalCategories | Where-Object { $_ -ceq 'device' }).Count -ne 1 -or $CustomCategories.Count -ne 7) {
+    throw 'Custom Arena item catalog must define seven ordinary categories plus one dedicated device category'
+}
 if (-not (Test-Path -LiteralPath $FightSpecSchemaPath)) { throw "FightSpec schema is missing: $FightSpecSchemaPath" }
 $FightSpecSchemaText = [IO.File]::ReadAllText($FightSpecSchemaPath)
 $FightSpecVersionMatch = [regex]::Match($FightSpecSchemaText, '(?m)^# Gamma Arena FightSpec v(\d+)\s*$')
@@ -507,10 +511,10 @@ if (($NpcGrenadeSections -join ', ') -cne 'grenade_f1, grenade_rgd5, grenade_gd-
 $DeviceIds = @(Get-LtxCsv $Catalog 'devices' 'ids' $CatalogPath)
 if (($DeviceIds -join ',') -cne 'headlamp,nv_gen1,nv_gen2,nv_gen3') { throw 'Actor device ids differ from the approved ordered pool' }
 $ExpectedDevices = [ordered]@{
-    headlamp = @('device_torch_dummy', 'headlamp', 50, 'none')
-    nv_gen1 = @('device_torch_nv_1', 'gen1', 25, 'nightvision_1')
-    nv_gen2 = @('device_torch_nv_2', 'gen2', 18, 'nightvision_2')
-    nv_gen3 = @('device_torch_nv_3', 'gen3', 7, 'nightvision_3')
+    headlamp = @('device_torch_dummy', 'headlamp', 50, 'none', 25)
+    nv_gen1 = @('device_torch_nv_1', 'gen1', 25, 'nightvision_1', 75)
+    nv_gen2 = @('device_torch_nv_2', 'gen2', 18, 'nightvision_2', 150)
+    nv_gen3 = @('device_torch_nv_3', 'gen3', 7, 'nightvision_3', 300)
 }
 $ActorDevices = New-Object System.Collections.Generic.List[object]
 foreach ($Id in $DeviceIds) {
@@ -519,15 +523,16 @@ foreach ($Id in $DeviceIds) {
         id = $Id
         section = Get-RequiredLtxValue $Catalog $SectionName 'section' $CatalogPath
         kind = Get-RequiredLtxValue $Catalog $SectionName 'kind' $CatalogPath
-        weight = Get-RequiredLtxInt $Catalog $SectionName 'weight' $CatalogPath
+        selection_weight = Get-RequiredLtxInt $Catalog $SectionName 'selection_weight' $CatalogPath
         nv_effect = Get-RequiredLtxValue $Catalog $SectionName 'nv_effect' $CatalogPath
+        price = Get-RequiredLtxInt $CustomRules 'price_overrides' (Get-RequiredLtxValue $Catalog $SectionName 'section' $CatalogPath) $CustomRulesPath
     }
     $Expected = $ExpectedDevices[$Id]
-    $Actual = @($Device.section, $Device.kind, $Device.weight, $Device.nv_effect)
+    $Actual = @($Device.section, $Device.kind, $Device.selection_weight, $Device.nv_effect, $Device.price)
     if (@(Compare-Object $Expected $Actual -SyncWindow 0).Count -ne 0) { throw "Actor device '$Id' differs from the approved manifest" }
     $ActorDevices.Add($Device) | Out-Null
 }
-if (($ActorDevices | Measure-Object weight -Sum).Sum -ne 100) { throw 'Actor device weights must total exactly 100' }
+if (($ActorDevices | Measure-Object selection_weight -Sum).Sum -ne 100) { throw 'Actor device selection weights must total exactly 100' }
 $WeaponClassCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'WEAPON_COST' '(\d+)'
 $OutfitKindCosts = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_COST' '(\d+)'
 $OutfitKindClasses = Get-RequiredLuaTable $DiscoveryScriptPath 'OUTFIT_CLASS' '"([^"]+)"'
@@ -576,7 +581,7 @@ $EnemyGrenadeChance = [int]$EnemyGrenadeRule.Groups[1].Value
 if ($EnemyGrenadeChance -ne 10) { throw 'Opponent grenade probability rule differs from 10 percent' }
 $ActorUniversalMaterializer = Get-RequiredLuaMatch $BootstrapScriptPath 'function\s+new_actor_item_port\s*\([\s\S]+?gamma_arena_item_materializer\.new\s*\([\s\S]+?local\s+items\s*=\s*new_actor_item_port\(production_item_ports\)' 'actor universal materializer binding'
 $ActorGrenadeDescriptor = Get-RequiredLuaMatch $ItemMaterializerScriptPath 'CATEGORIES\s*=\s*\{[^\r\n]+grenade\s*=\s*true[\s\S]+?for\s+copy_index\s*=\s*1\s*,\s*item\.quantity' 'actor universal grenade materialization'
-$NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'gamma_arena_item_materializer\.descriptors\(opponents\[index\]\.items,\s*catalog\)[\s\S]{0,700}role\s*=\s*descriptor\.category' 'opponent universal grenade materialization'
+$NpcGrenadeDescriptor = Get-RequiredLuaMatch $EntityAdapterScriptPath 'gamma_arena_item_materializer\.descriptors\(opponents\[index\]\.items,\s*catalog\)[\s\S]{0,1200}role\s*=\s*descriptor\.category' 'opponent universal grenade materialization'
 if ((Get-Content -Raw -LiteralPath $BootstrapScriptPath) -match 'can_throw_grenades' -or (Get-Content -Raw -LiteralPath $EntityAdapterScriptPath) -match 'can_throw_grenades') { throw 'Arena runtime must not force native grenade throwing' }
 
 $PoweredExoRule = Get-RequiredLuaMatch $DiscoveryScriptPath 'armor_class\s*=\s*"powered_exo"' 'powered_exo classification'
@@ -638,22 +643,24 @@ $Blocks['state-passport'] = @"
 "@
 
 $CatalogRevision = Get-RequiredLtxInt $Catalog 'meta' 'revision' $CatalogPath
+$CatalogSchema = Get-RequiredLtxInt $Catalog 'meta' 'schema_version' $CatalogPath
 $CatalogGenerator = Get-RequiredLtxInt $Catalog 'meta' 'generator_version' $CatalogPath
 $CustomLayoutCapacity = Get-RequiredLtxInt $Layout 'ga_layout_rostok_arena_v1' 'virtual_capacity' $LayoutPath
 $CustomLines = New-Object System.Collections.Generic.List[string]
 $CustomLines.Add('| custom policy | value |') | Out-Null
 $CustomLines.Add('|---|---|') | Out-Null
-$CustomLines.Add("| FightSpec/catalog identity | $FightSpecVersion/$CatalogRevision/$CatalogGenerator |") | Out-Null
+$CustomLines.Add("| FightSpec/catalog identity | $FightSpecVersion/$CatalogSchema/$CatalogRevision/$CatalogGenerator |") | Out-Null
 $CustomLines.Add('| enemy faction | one shared faction for the complete cohort |') | Out-Null
 $CustomLines.Add("| opponent selectors | 1-$CustomLayoutCapacity ordered exact-rank selectors; Rostok capacity $CustomLayoutCapacity |") | Out-Null
 $CustomLines.Add("| exact ranks | $(@($CustomRanks | ForEach-Object { $_.id }) -join ', ') |") | Out-Null
 $CustomLines.Add('| player budget formula | base_budget + sum(rank threat) |') | Out-Null
 $CustomLines.Add("| base_budget | $CustomBaseBudget Arena points |") | Out-Null
+$CustomLines.Add("| distinct physical section cap | $CustomMaxEntries across inventory and optional device |") | Out-Null
 $CustomLines.Add("| physical item cap | $CustomPhysicalCap entities per participant |") | Out-Null
 $CustomLines.Add("| selectable installed categories | $($CustomCategories -join ', ') |") | Out-Null
 $CustomLines.Add('| Arena-controlled enemy rerolls | numeric rank, equipment, ammunition, medicine, grenade, spawn, tactical route |') | Out-Null
-$CustomLines.Add('| integrity retry | reuses the same validated FightSpec v8 |') | Out-Null
-$CustomLines.Add('| appearance boundary | X-Ray `specific_character` is not seeded or stored in FightSpec v8 |') | Out-Null
+$CustomLines.Add('| integrity retry | reuses the same validated FightSpec v9 |') | Out-Null
+$CustomLines.Add('| appearance boundary | X-Ray `specific_character` is not seeded or stored in FightSpec v9 |') | Out-Null
 $CustomLines.Add('| deterministic appearance follow-up | cataloged aliases, fingerprint/validator membership, and catalog identity advance |') | Out-Null
 $CustomLines.Add("| maximum selected grenades | $CustomMaxGrenades distinct sections |") | Out-Null
 $CustomLines.Add("| quantity per selected grenade | exactly $CustomGrenadeQuantity |") | Out-Null
@@ -741,19 +748,21 @@ $GrenadeLines.Add('| NPC use | physical possession required; native AI decides w
 $Blocks['grenade-loadouts'] = Join-MarkdownLines $GrenadeLines
 
 $DeviceLines = New-Object System.Collections.Generic.List[string]
-$DeviceLines.Add('| device | section | kind | NV effect | probability |') | Out-Null
-$DeviceLines.Add('|---|---|---|---|---:|') | Out-Null
+$DeviceLines.Add('| device | section | kind | NV effect | Random probability | Custom price |') | Out-Null
+$DeviceLines.Add('|---|---|---|---|---:|---:|') | Out-Null
 foreach ($Device in $ActorDevices) {
-    $DeviceLines.Add("| $($Device.id) | $($Device.section) | $($Device.kind) | $($Device.nv_effect) | $($Device.weight)% |") | Out-Null
+    $DeviceLines.Add("| $($Device.id) | $($Device.section) | $($Device.kind) | $($Device.nv_effect) | $($Device.selection_weight)% | $($Device.price) AP |") | Out-Null
 }
 $DeviceLines.Add('') | Out-Null
 $DeviceLines.Add('| policy | value |') | Out-Null
 $DeviceLines.Add('|---|---|') | Out-Null
-$DeviceLines.Add('| recipient | actor only; exactly one device per fight |') | Out-Null
+$DeviceLines.Add('| recipient | actor only; opponents never receive a device |') | Out-Null
+$DeviceLines.Add('| Random | exactly one automatically selected device; mandatory and outside every loadout budget |') | Out-Null
+$DeviceLines.Add('| Custom | optional dedicated selector; No device is the default and a selection spends its fixed AP price |') | Out-Null
 $DeviceLines.Add('| difficulty | independent of difficulty |') | Out-Null
 $DeviceLines.Add('| equip state | slot 10; full charge |') | Out-Null
 $DeviceLines.Add('| activation | manual; never enabled automatically |') | Out-Null
-$DeviceLines.Add('| budget_cost | 0; outside gear, medical, ammunition, and opponent budgets |') | Out-Null
+$DeviceLines.Add('| universal FightSpec | one mode-neutral v9 item shape; no mode, budget, price, weight total, or generation provenance |') | Out-Null
 $Blocks['actor-devices'] = Join-MarkdownLines $DeviceLines
 
 $NpcMedicalLines = New-Object System.Collections.Generic.List[string]
@@ -908,7 +917,7 @@ $OpponentLines.Add("| selection_band_threshold | ceil(maximum * $PrimaryBandPerc
 $OpponentLines.Add('| max_snipers_per_fight | 1 |') | Out-Null
 $OpponentLines.Add('| faction_per_fight | 1 |') | Out-Null
 $OpponentLines.Add("| supported_factions | $(@($ProfileFactions) -join ', ') |") | Out-Null
-$OpponentLines.Add('| appearance_reproducibility | deferred; X-Ray `specific_character` is not seeded or stored in FightSpec v8 |') | Out-Null
+$OpponentLines.Add('| appearance_reproducibility | deferred; X-Ray `specific_character` is not seeded or stored in FightSpec v9 |') | Out-Null
 $OpponentLines.Add('| appearance_gameplay_effect | none; faction, rank, equipment, budget, and combat rules remain authoritative |') | Out-Null
 $OpponentLines.Add('| deterministic_appearance_follow_up | cataloged appearance aliases + fingerprint/validator membership + catalog identity advance |') | Out-Null
 $OpponentLines.Add('| opponent_total_cost | profile + gear + assigned medicine |') | Out-Null
@@ -1051,16 +1060,39 @@ if (-not (Test-Path -LiteralPath $DocumentPath)) {
     throw "Arena balance document is missing: $DocumentPath"
 }
 $Current = [IO.File]::ReadAllText($DocumentPath)
-$Expected = Set-GeneratedMarkdownBlocks $Current $Blocks
+$LegacyDeviceProse = 'Every fight equips the actor with one fully charged slot-10 headlamp or NVG. The player activates it manually.'
+$CurrentDeviceProse = 'Random always equips exactly one outside-budget device. Custom uses an optional dedicated selector whose default is No device; a selected device spends its fixed AP price.'
+$LegacyDeviceProseCount = Get-SubstringCount $Current $LegacyDeviceProse
+$CurrentDeviceProseCount = Get-SubstringCount $Current $CurrentDeviceProse
+$GeneratedOnDisk = Set-GeneratedMarkdownBlocks $Current $Blocks
 
 if ($Verify) {
-    if ($Current.Replace("`r`n", "`n").Replace("`r", "`n") -cne $Expected) {
+    $ProseIsStale = $LegacyDeviceProseCount -ne 0 -or $CurrentDeviceProseCount -ne 1
+    $NormalizedOnDisk = $Current.Replace("`r`n", "`n").Replace("`r", "`n")
+    if ($ProseIsStale -or $NormalizedOnDisk -cne $GeneratedOnDisk) {
         $ToolInvocation = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$([IO.Path]::GetFullPath($PSCommandPath))`" -RepoRoot `"$RepoRoot`" -DocumentPath `"$DocumentPath`""
         throw "Arena balance document is stale: $DocumentPath. Run: $ToolInvocation"
     }
     Write-Host 'PASS: Arena balance document is current'
     return
 }
+
+if ($LegacyDeviceProseCount -eq 1 -and $CurrentDeviceProseCount -eq 0) {
+    $Current = $Current.Replace($LegacyDeviceProse, $CurrentDeviceProse)
+}
+elseif ($LegacyDeviceProseCount -eq 0 -and $CurrentDeviceProseCount -eq 0) {
+    $DocumentHeading = "# Gamma Arena balance`n"
+    if ((Get-SubstringCount $Current $DocumentHeading) -eq 1) {
+        $Current = $Current.Replace($DocumentHeading, $DocumentHeading + "`n" + $CurrentDeviceProse + "`n")
+    }
+    else {
+        $Current = $CurrentDeviceProse + "`n`n" + $Current
+    }
+}
+elseif ($LegacyDeviceProseCount -ne 0 -or $CurrentDeviceProseCount -ne 1) {
+    throw 'Arena balance document must contain exactly one current Random/Custom device policy paragraph'
+}
+$Expected = Set-GeneratedMarkdownBlocks $Current $Blocks
 
 [IO.File]::WriteAllText($DocumentPath, $Expected, (New-Object Text.UTF8Encoding($false)))
 Write-Host "Updated Arena balance document: $DocumentPath"

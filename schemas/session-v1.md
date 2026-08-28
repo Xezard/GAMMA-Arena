@@ -68,9 +68,9 @@ Each `SessionStore` instance owns its own volatile permits. A same-instance dupl
   difficulty_id = string | nil,
   session_seed = number,
   fight_index = uint32,
-  generator_version = 10,
-  catalog_revision = 10,
-  catalog_fingerprint = "ga-catalog-v9-...",
+  generator_version = 11,
+  catalog_revision = 11,
+  catalog_fingerprint = "ga-catalog-v10-...",
   custom_config = table | nil,
   layout_id = "rostok_arena_v1",
   checkpoint_name = "_gamma_arena_checkpoint",
@@ -81,8 +81,14 @@ Each `SessionStore` instance owns its own volatile permits. A same-instance dupl
 `difficulty_id` is present only for the random recipe. `custom_config` is
 present only for the custom recipe and is an immutable validated copy of the
 selected shared faction, ordered exact-rank roster, actor items, and catalog
-fingerprint. Both recipes produce the same strict FightSpec v8 after this
+fingerprint. Both recipes produce the same strict FightSpec v9 after this
 session-only provenance is consumed.
+
+The current fight identity is FightSpec v9 with catalog schema `10`, catalog
+revision `11`, and generator `11` (identity `9/10/11/11`). ArenaSession
+persists the generator, catalog revision, and exact `ga-catalog-v10-`
+fingerprint; launch and resume validate those fields against the active
+schema-10 catalog before any Arena runtime mutation.
 
 `session_nonce` binds external resume commands to this exact session. `checkpoint_name` identifies the single reserved Arena checkpoint. The payload is valid only for the addon/schema revisions that created it.
 

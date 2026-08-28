@@ -8,7 +8,7 @@ $fixturePath = Join-Path $repoRoot 'tests\fixtures\golden-fights-v9.txt'
 $catalogPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_catalogs.ltx'
 $difficultyPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
 $layoutPath = Join-Path $repoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_layouts.ltx'
-$customCatalogPath = Join-Path $repoRoot 'tests\fixtures\custom-catalog-v1.json'
+$customCatalogPath = Join-Path $repoRoot 'tests\fixtures\custom-catalog-v10.json'
 $devCustomTestPath = Join-Path $repoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'
 
 function Read-GaSimpleLtx {
@@ -429,7 +429,7 @@ function Get-GaContentHash([string]$Payload) {
 $layoutHash=Get-GaLayoutHash
 $catalogFingerprint='ga-catalog-v10-'+('{0:x8}' -f (Get-GaDerivedSeed @('ga-catalog-v10',[int]$catalog.meta.schema_version,[int]$catalog.meta.revision,[int]$catalog.meta.generator_version)))
 $rankBands=@{novice=@(0,9999);trainee=@(10000,19999);experienced=@(20000,29999);veteran=@(40000,49999)}
-if ([int]$customCatalog.schema_version -ne 1 -or
+if ([int]$customCatalog.schema_version -ne 10 -or $customCatalog.catalog_fingerprint -cne 'ga-catalog-v10-5d894c1f' -or
     $customCatalog.layout_id -cne 'rostok_arena_v1' -or $customCatalog.faction.runtime_community -cne 'arena_enemy') {
     throw 'Pinned Custom reference catalog shape differs from the device-aware v9 oracle input.'
 }
