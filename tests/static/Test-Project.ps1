@@ -488,6 +488,11 @@ $Task9CustomXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_c
 Assert-True (Test-Path -LiteralPath $Task9CustomXmlPath) 'Task 9 custom UI XML is missing.'
 if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     [xml]$Task9CustomXml = Get-Content -LiteralPath $Task9CustomXmlPath -Raw
+    $Task9KnownEngineFonts = @('graffiti19','graffiti22','graffiti32','letterica16','letterica18')
+    $Task9CustomFontIds = @($Task9CustomXml.SelectNodes('//@font') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    foreach ($FontId in $Task9CustomFontIds) {
+        Assert-True ($Task9KnownEngineFonts -ccontains $FontId) ('Task 9 custom UI XML uses unknown engine font: ' + $FontId)
+    }
     foreach ($Id in @('gamma_arena_custom','faction','count','seed','catalog_container','selected_container','budget','spent','remaining','weight','weight_limit','validation','start','random','back','category_grenade')) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 custom UI XML is missing control $Id"
     }
