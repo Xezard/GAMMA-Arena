@@ -1003,7 +1003,9 @@ Assert-True ($Task1DomainContent -match 'gamma_arena_test_item_catalog\.run\s*\(
 $Task1RankCatalogContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rank_catalog.script') -Raw
 $Task1RankTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script') -Raw
 Assert-True ($Task1RankTestContent -match 'rank_catalog_accepts_scalar_spawn_rank_metadata') 'Task 1 rank tests must reproduce effective scalar spawn rank metadata.'
+Assert-True ($Task1RankTestContent -match 'rank_catalog_rejects_incomplete_profile_rank_ranges') 'Task 1 rank tests must reject incomplete explicit rank ranges.'
 Assert-True ($Task1RankCatalogContent -match '(?m)^local function parse_optional_profile_range\s*\(') 'Task 1 rank catalog must distinguish optional spawn rank metadata from explicit bounded ranges.'
+Assert-True ($Task1RankCatalogContent -match 'has_range_separator') 'Task 1 rank catalog must preserve empty explicit CSV endpoints for validation.'
 
 foreach ($Contract in $Task4ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
