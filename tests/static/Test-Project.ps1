@@ -1000,6 +1000,10 @@ if (Test-Path -LiteralPath $Task1SkipPath) {
 $Task1DomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($Task1DomainContent -match 'gamma_arena_test_rank_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 1 domain suite must register rank catalog tests'
 Assert-True ($Task1DomainContent -match 'gamma_arena_test_item_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 2 domain suite must register universal item catalog tests'
+$Task1RankCatalogContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rank_catalog.script') -Raw
+$Task1RankTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script') -Raw
+Assert-True ($Task1RankTestContent -match 'rank_catalog_accepts_scalar_spawn_rank_metadata') 'Task 1 rank tests must reproduce effective scalar spawn rank metadata.'
+Assert-True ($Task1RankCatalogContent -match '(?m)^local function parse_optional_profile_range\s*\(') 'Task 1 rank catalog must distinguish optional spawn rank metadata from explicit bounded ranges.'
 
 foreach ($Contract in $Task4ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path

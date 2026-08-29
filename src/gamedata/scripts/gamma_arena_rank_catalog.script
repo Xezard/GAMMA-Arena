@@ -138,8 +138,13 @@ local function parse_rating(raw)
     return bands
 end
 
-local function parse_profile_range(value, alias)
+local function parse_optional_profile_range(value, alias)
     local values = split_csv(value)
+    if #values == 0 then return nil end
+    if #values == 1 then
+        if finite_integer(values[1], 0) ~= nil then return nil end
+        return nil, failure('GA_RANK_PROFILE_RANGE_INVALID', 'Inherited Arena spawn rank metadata is invalid', { alias = alias })
+    end
     if #values ~= 2 then
         return nil, failure("GA_RANK_PROFILE_RANGE_INVALID", "Inherited Arena profile rank must be a bounded range", { alias = alias })
     end
@@ -330,10 +335,18 @@ local function load_impl(source, legacy_catalog)
             if exists ~= true then return failure("GA_RANK_ALIAS_MISSING", "Exact Arena profile alias is missing", { alias = alias }) end
             local range_ok, raw_range = guarded(source, "read_system_string", alias, "rank")
             if not range_ok then return failure("GA_RANK_PROFILE_RANGE_INVALID", "Inherited Arena profile rank could not be read", { alias = alias }) end
-            local profile_range, range_error = parse_profile_range(raw_range, alias)
-            if profile_range == nil then return range_error end
+            local profile_range, range_error = parse_optional_profile_range(raw_range, alias)
+            if range_error ~= nil then return range_error end
             local band = catalog.ranks[rank_id]
-            local intersection = intersect_band(band.minimum, band.maximum, profile_range.minimum, profile_range.maximum)
+            local intersection
+            if profile_range == nil then
+                intersection = gamma_arena_result.ok({
+                    minimum = band.minimum,
+                    maximum = band.maximum or band.minimum
+                })
+            else
+                intersection = intersect_band(band.minimum, band.maximum, profile_range.minimum, profile_range.maximum)
+            end
             if not intersection.ok then
                 intersection.error.context = { alias = alias, rank = rank_id }
                 return intersection
