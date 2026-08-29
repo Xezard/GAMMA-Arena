@@ -257,7 +257,8 @@ end
 local function copy_participant(participant, expected_slot)
     if type(participant) ~= "table" or (expected_slot == 0
         and (type(participant.spawn_path) ~= "string" or participant.spawn_path == ""))
-        or (expected_slot ~= 0 and (type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
+        or (expected_slot ~= 0 and (not finite_integer(expected_slot) or expected_slot < 1
+            or type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
     local items = copy_items(participant.items)
     if items == nil then return nil end
     local copy = {
@@ -335,6 +336,7 @@ function EntityAdapter:__init(deps)
     self.actor_spec = nil
     self.catalog = nil
     self.opponents = nil
+    self.opponent_by_slot = nil
     self.tactical_routes = nil
     self.opponent_index = 1
     self.current = nil
@@ -775,7 +777,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
     if actor_spec == nil or type(opponents_result.value) ~= "table" or #opponents_result.value < 1 then
         return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec accessors returned invalid participants")
     end
-    local opponents, tactical_routes, tactical_route_set = {}, {}, {}
+    local opponents, opponent_by_slot, tactical_routes, tactical_route_set = {}, {}, {}, {}
     if type(tactical_routes_result.value) ~= "table" or #tactical_routes_result.value < 1 then
         return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec exposes no tactical routes")
     end
@@ -789,10 +791,13 @@ function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
     local actor_descriptors = gamma_arena_item_materializer.descriptors(actor_spec.items, catalog)
     if not actor_descriptors.ok then return actor_descriptors end
     for index, participant in ipairs(opponents_result.value) do
-        opponents[index] = copy_participant(participant, index)
-        if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
-        if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = index, route = opponents[index].tactical_route }) end
-        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, ARENA_RUNTIME_COMMUNITY)
+        opponents[index] = copy_participant(participant, participant.slot)
+        if opponents[index] == nil or opponent_by_slot[opponents[index].slot] ~= nil then
+            return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent or logical slot is invalid", { slot = participant.slot, index = index })
+        end
+        opponent_by_slot[opponents[index].slot] = opponents[index]
+        if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = opponents[index].slot, route = opponents[index].tactical_route }) end
+        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, opponents[index].slot, self.deps.profile_runtime, ARENA_RUNTIME_COMMUNITY)
         if not effective.ok then return effective end
         local descriptors = gamma_arena_item_materializer.descriptors(opponents[index].items, catalog)
         if not descriptors.ok then return descriptors end
@@ -800,7 +805,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
         for descriptor_index, descriptor in ipairs(descriptors.value) do
             if descriptor.category == 'device' then
                 return fail('GA_ENTITY_OPPONENT_DEVICE_FORBIDDEN', 'Validated opponents may never receive actor lighting devices', {
-                    slot = index, section = descriptor.section
+                    slot = opponents[index].slot, section = descriptor.section
                 })
             end
             opponents[index].descriptors[descriptor_index] = {
@@ -821,6 +826,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
     self.actor_spec = actor_spec
     self.catalog = catalog
     self.opponents = opponents
+    self.opponent_by_slot = opponent_by_slot
     self.tactical_routes = tactical_routes
     self.registry.session_id = session_id
     local loadout = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "apply_items", actor_spec.items, catalog)
@@ -1322,7 +1328,7 @@ function EntityAdapter:drive_online()
                 if not held.ok then return held end
                 record.staged_friendly = true
             end
-            local opponent = self.opponents[record.slot]
+            local opponent = self.opponent_by_slot[record.slot]
             if opponent ~= nil and opponent.rank ~= nil and not record.rank_verified then
                 local ranked = self:stage_exact_rank(object.value, opponent)
                 if not ranked.ok then return ranked end
@@ -1367,7 +1373,7 @@ function EntityAdapter:drive_online()
         if actor_id == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Arena actor id is unavailable for tactical bind") end
         local tactical_opponents = {}
         for _, record in ipairs(self.registry.npcs) do
-            local opponent = self.opponents[record.slot]
+            local opponent = self.opponent_by_slot[record.slot]
             if opponent == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Tactical participant slot has no validated opponent", { slot = record.slot }) end
             tactical_opponents[#tactical_opponents + 1] = {
                 slot = record.slot,
@@ -1755,7 +1761,7 @@ function EntityAdapter:accept_registered_death(record, evidence)
 end
 
 function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, authoritative_owner)
-    local opponent = self.opponents[record.slot] or {}
+    local opponent = self.opponent_by_slot[record.slot] or {}
     local diagnostic = {
         session_id = self.session_id,
         fight_key = self.fight_key,

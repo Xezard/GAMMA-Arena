@@ -505,6 +505,9 @@ foreach ($Marker in @(
     Assert-True ($Task9UiDiagnostic -match [regex]::Escape($Marker)) `
         "Task 9 bounded catalog UI is missing: $Marker"
 }
+$Task9PaginationCase = [regex]::Match($Task8RuntimeTests, 'local\s+function\s+runtime_custom_ui_catalog_projection_is_bounded_and_complete\(\)[\s\S]*?\r?\nend').Value
+Assert-True ($Task9PaginationCase -match 'for\s+offset,\s*cell\s+in\s+ipairs\(view\.catalog_cells\)' -and
+    $Task9PaginationCase -match 'catalog\.categories\.weapon\s*\[\s*\(page\s*-\s*1\)\s*\*\s*80\s*\+\s*offset\s*\]') 'Bounded Custom catalog regression must assert exact source order at every page and cell offset.'
 $Task9StartXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
 [xml]$Task9StartXml = Get-Content -LiteralPath $Task9StartXmlPath -Raw
 Assert-True ($null -ne $Task9StartXml.SelectSingleNode("//*[local-name()='custom_mode']")) 'Task 9 start XML must expose Custom mode.'
@@ -1877,6 +1880,10 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -match 'expected_created_quantity') 'Opponent loadout must derive exact ammo allocation when server quantity is unavailable'
     Assert-True ($Task7EntityContent -match 'role\s*=\s*descriptor\.category') 'Opponent universal items must preserve materializer categories on owned descriptors'
     Assert-True ($Task7EntityContent -match 'community\s*=\s*participant\.community') 'Entity adapter participant copies must preserve dynamic FightSpec community'
+    Assert-True ($Task7EntityContent -notmatch 'copy_participant\(participant,\s*index\)') 'Entity adapter must not replace validated logical opponent slots with dense array indexes.'
+    Assert-True ($Task7EntityContent -match 'copy_participant\(participant,\s*participant\.slot\)') 'Entity adapter must copy each validated logical opponent slot.'
+    Assert-True ($Task7EntityContent -match 'self\.opponent_by_slot\s*=\s*opponent_by_slot') 'Entity adapter must retain a logical-slot lookup map alongside dense spawn order.'
+    Assert-True ($Task7EntityContent -match 'self\.opponent_by_slot\[record\.slot\]') 'Entity runtime lookups must address opponents by validated logical slot.'
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
     $MedicalActivationBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:drive_online[\s\S]*?function\s+EntityAdapter:add_cleanup_error').Value
     Assert-True ($MedicalActivationBlock.IndexOf('hidden_charge_cleared') -ge 0 -and $MedicalActivationBlock.IndexOf('clear_hidden_charge') -lt $MedicalActivationBlock.IndexOf('set_actor_hostile')) 'Entity activation must clear stock hidden healing before combat hostility'
@@ -1899,6 +1906,20 @@ if (Test-Path -LiteralPath $Task7ValidatorPath) {
     foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11', 'ga-catalog-v10-')) {
         Assert-True ($Task7ValidatorContent -match $Pattern) "Task 4 strict validator must enforce catalog identity: $Pattern"
     }
+}
+$Task7FightSpecTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script'
+if (Test-Path -LiteralPath $Task7FightSpecTestPath) {
+    $Task7FightSpecTestContent = Get-Content -LiteralPath $Task7FightSpecTestPath -Raw
+    $LogicalSlotCase = 'validator_to_entity_adapter_preserves_nonsequential_logical_slot'
+    $LogicalSlotRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($LogicalSlotCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($LogicalSlotCase) + '\s*\}'
+    Assert-True (([regex]::Matches($Task7FightSpecTestContent, $LogicalSlotRegistration)).Count -eq 1) "Regression case must be registered exactly: $LogicalSlotCase -> $LogicalSlotCase."
+    $LogicalSlotBody = [regex]::Match($Task7FightSpecTestContent, 'local\s+function\s+' + [regex]::Escape($LogicalSlotCase) + '\(\)[\s\S]*?\r?\nend').Value
+    Assert-True ($LogicalSlotBody -match 'opponents\[1\]\.slot\s*=\s*2' -and
+        $LogicalSlotBody -match 'gamma_arena_fight_validator_v9\.validate' -and
+        $LogicalSlotBody -match 'gamma_arena_entity_adapter\.new' -and
+        $LogicalSlotBody -match 'begin_apply' -and
+        $LogicalSlotBody -match 'opponents\[1\]\.slot\s*,\s*2' -and
+        $LogicalSlotBody -match 'opponent_by_slot\[2\]') 'Validator-to-entity regression must prove logical slot 2 survives the adapter boundary and is addressable by slot.'
 }
 
 $Task7FixturePath = Join-Path $RepoRoot 'tests\fixtures\effective-arena-npcs-v1.ini'
@@ -2505,6 +2526,12 @@ Assert-True ($Task11DomainContent -match 'gamma_arena_test_tactical_director\.ru
 $Task11AdapterTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_tactical_adapter.script'
 Assert-True (Test-Path -LiteralPath $Task11AdapterTestPath) 'Tactical adapter dev suite is missing'
 Assert-True ($Task11DomainContent -match 'gamma_arena_test_tactical_adapter\.run\s*\(\s*run_case_fn\s*\)') 'Dev domain suite must execute tactical adapter tests'
+if (Test-Path -LiteralPath $Task11AdapterTestPath) {
+    $Task11AdapterTestContent = Get-Content -LiteralPath $Task11AdapterTestPath -Raw
+    $Task11LogicalSlotCase = 'adapter_accepts_nonsequential_logical_slots'
+    $Task11LogicalSlotRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task11LogicalSlotCase) + '"\s*,\s*fn\s*=\s*accepts_nonsequential_logical_slots\s*\}'
+    Assert-True (([regex]::Matches($Task11AdapterTestContent, $Task11LogicalSlotRegistration)).Count -eq 1) 'Tactical adapter regression must register nonsequential logical-slot coverage exactly once.'
+}
 $Task11AdapterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_adapter.script'
 Assert-True (Test-Path -LiteralPath $Task11AdapterPath) 'Tactical engine adapter production script is missing'
 if (Test-Path -LiteralPath $Task11AdapterPath) {
@@ -2520,6 +2547,8 @@ if (Test-Path -LiteralPath $Task11AdapterPath) {
     Assert-True ($Task11AdapterContent -notmatch 'combat_owned\s*=\s*best_enemy\.value\s*~=\s*nil') 'Remembered best_enemy must not permanently block director search movement'
     Assert-True ($Task11AdapterContent -notmatch 'type\s*\(\s*native\s*\)\s*~=\s*["'']table["'']') 'Engine danger_object namespace must not be rejected solely because its Lua type is not table'
     Assert-True ($Task11AdapterContent -notmatch 'set_dest_level_vertex_id|set_sight|set_item|set_enemy|make_object_visible_somewhen|math\.random') 'Tactical adapter must not override native combat or use global randomness'
+    Assert-True ($Task11AdapterContent -notmatch 'opponent\.slot\s*~=\s*index') 'Tactical adapter must not require logical opponent slots to equal dense array indexes.'
+    Assert-True ($Task11AdapterContent -match 'participant_by_slot\[opponent\.slot\]\s*~=\s*nil') 'Tactical adapter must reject duplicate logical opponent slots through its slot map.'
 }
 $Task11EntityContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script') -Raw
 Assert-True ($Task11EntityContent -match 'validated_spec\.tactical_routes') 'Entity adapter must pass every validated Arena route to the tactical director'
@@ -3148,6 +3177,20 @@ Assert-True ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartSta
 if ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartStart) {
     $ArenaRestartBlock = $ArenaOrchestratorContent.Substring($ArenaRestartStart, $ArenaRestartEnd - $ArenaRestartStart)
     Assert-True ($ArenaRestartBlock -match 'audio_event\s*\(\s*"stop_all"') 'Arena manual restart must stop every owned audio channel before cleanup.'
+}
+
+$SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
+if (Test-Path -LiteralPath $SmokeHarnessPath) {
+    $SmokeHarnessContent = Get-Content -LiteralPath $SmokeHarnessPath -Raw
+    $SmokeFinalPass = "Write-Host 'PASS: tool regression smoke checks passed'"
+    $SmokeFinalPassIndex = $SmokeHarnessContent.LastIndexOf($SmokeFinalPass)
+    $SmokeStatusReset = '$global:LASTEXITCODE = 0'
+    $SmokeStatusResetIndex = $SmokeHarnessContent.LastIndexOf($SmokeStatusReset)
+    Assert-True ($SmokeStatusResetIndex -ge 0 -and $SmokeFinalPassIndex -gt $SmokeStatusResetIndex) 'Successful smoke harness must restore the native exit status before its final PASS.'
+    if ($SmokeStatusResetIndex -ge 0 -and $SmokeFinalPassIndex -gt $SmokeStatusResetIndex) {
+        $SmokeSuccessTail = $SmokeHarnessContent.Substring($SmokeStatusResetIndex, $SmokeFinalPassIndex - $SmokeStatusResetIndex)
+        Assert-True ($SmokeSuccessTail -match 'if\s*\(\s*\$global:LASTEXITCODE\s*-ne\s*0\s*\)\s*\{\s*throw') 'Smoke harness must assert the successful same-host LASTEXITCODE postcondition.'
+    }
 }
 
 if ($script:Failures.Count -gt 0) {

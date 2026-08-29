@@ -823,6 +823,8 @@ try {
             foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
             exit 1
         }
+        $global:LASTEXITCODE = 0
+        if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
         Write-Host 'PASS: isolated positive smoke fixture'
         return
     }
@@ -1235,6 +1237,8 @@ end
             foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
             exit 1
         }
+        $global:LASTEXITCODE = 0
+        if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
         Write-Host 'PASS: static smoke fixtures passed'
         return
     }
@@ -1278,4 +1282,6 @@ if ($script:Failures.Count -gt 0) {
     exit 1
 }
 
+$global:LASTEXITCODE = 0
+if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
 Write-Host 'PASS: tool regression smoke checks passed'
