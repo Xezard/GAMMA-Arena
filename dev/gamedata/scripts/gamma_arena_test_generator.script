@@ -1242,6 +1242,54 @@ local function random_draft_catalogs()
     return snapshot
 end
 
+local function random_draft_accepts_unclassified_bonus_ammo()
+    local snapshot = random_draft_catalogs()
+    local weapon = snapshot.weapon_list[1]
+    local extra = snapshot.weapon_list[2].ammo
+    weapon.ammo_variants[#weapon.ammo_variants + 1] = {
+        section = extra,
+        category = nil,
+        box_size = 30
+    }
+    local generated = gamma_arena_random_generator.build_draft(
+        request(1, "stalker"), 0, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.is_true(generated.ok,
+        "Random accepts an optional ammo variant without a special category")
+end
+
+local function catalog_enumerates_effective_system_once_per_load()
+    local enumerations = 0
+    local factory = fixture_factory({
+        system_sections = {
+            wpn_dynamic_fixture = { kind="w_rifle", slot="2", ammo_mag_size="30", ammo_class="ammo_dynamic_fixture" },
+            ammo_dynamic_fixture = { kind="w_ammo", box_size="30" },
+            dynamic_fixture_outfit = { kind="o_medium", slot="6" }
+        }
+    })
+    local enumerate = factory.enumerate_system_sections
+    factory.enumerate_system_sections = function()
+        enumerations = enumerations + 1
+        return enumerate()
+    end
+    local loaded = gamma_arena_catalog.load(factory)
+    gamma_arena_test_assert.is_true(loaded.ok, "memoized effective catalog fixture loads")
+    gamma_arena_test_assert.equals(enumerations, 1,
+        "one catalog load enumerates effective system sections once")
+end
+
+local function catalog_enumeration_failure_is_memoized()
+    local enumerations = 0
+    local factory = fixture_factory({ system_sections = {} })
+    factory.enumerate_system_sections = function()
+        enumerations = enumerations + 1
+        error("fixture enumeration failure")
+    end
+    local loaded = gamma_arena_catalog.load(factory)
+    gamma_arena_test_assert.is_false(loaded.ok, "failed effective enumeration stays fail-closed")
+    gamma_arena_test_assert.equals(enumerations, 1,
+        "one catalog load replays the first enumeration failure without retrying")
+end
+
 local function random_draft_semantics(seed, difficulty, fight_index, draft)
     local actor = draft.actor.loadout.value
     local parts = {
@@ -1778,6 +1826,9 @@ function run(run_case_fn)
         { name="validator_rejects_forged_grenade_arrays", fn=validator_rejects_forged_grenade_arrays },
         { name="medical_tuning_does_not_reroll_core_fight", fn=medical_tuning_does_not_reroll_core_fight },
         { name="catalog_augments_effective_system_without_cartesian_product", fn=catalog_augments_from_effective_system_without_cartesian_product },
+        { name="catalog_enumerates_effective_system_once_per_load", fn=catalog_enumerates_effective_system_once_per_load },
+        { name="catalog_enumeration_failure_is_memoized", fn=catalog_enumeration_failure_is_memoized },
+        { name="random_draft_accepts_unclassified_bonus_ammo", fn=random_draft_accepts_unclassified_bonus_ammo },
         { name="actor_weapon_quarantine_is_exact_and_actor_only", fn=actor_weapon_quarantine_is_exact_and_actor_only },
         { name="catalog_rejects_malformed_data", fn=catalog_rejects_malformed_data },
         { name="validator_never_throws_for_malformed_specs", fn=validator_never_throws_for_malformed_specs },

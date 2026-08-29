@@ -384,12 +384,12 @@ $Task1RankScriptContracts = @(
 )
 
 $Task2ItemScriptContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device', 'candidate_section_name', 'shared_system_sections') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint', 'item_catalog_prefilters_irrelevant_system_sections') }
 )
 
 $Task6RandomDraftContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^local function\s+build_draft_internal\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '(?m)^local function\s+valid_build_result\s*\(\s*result\s*\)', '(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'pcall\s*\(\s*build_draft_internal', 'valid_build_result\s*\(\s*result\s*\)', 'GA_RANDOM_CATALOG_INVALID', 'GA_RANDOM_GENERATION_FAILED', 'enemy_numeric_rank:', 'kind\s*=\s*"items"', 'gamma_arena_device_generator\.generate', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_random_generator.script'; Namespace = 'gamma_arena_random_generator'; Required = @('(?m)^local function\s+build_draft_internal\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '(?m)^local function\s+valid_build_result\s*\(\s*result\s*\)', '(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', 'pcall\s*\(\s*build_draft_internal', 'valid_build_result\s*\(\s*result\s*\)', 'GA_RANDOM_CATALOG_INVALID', 'GA_RANDOM_GENERATION_FAILED', 'enemy_numeric_rank:', 'kind\s*=\s*"items"', 'gamma_arena_device_generator\.generate', 'profile\.rank_id', 'profile\.rank_min', 'profile\.rank_max', 'type\s*\(\s*rank_value\s*\)\s*==\s*"table"', 'rank_value\.ok\s*==\s*false', 'variant\.category\s*==\s*nil') },
     [PSCustomObject]@{ Path = 'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1'; Required = @('golden-random-selections-v9\.txt', 'Read-GaLtx', '10/11/11', 'random_actor_device_v11') },
     [PSCustomObject]@{ Path = 'tests\fixtures\golden-random-selections-v9.txt'; Required = @('seed=0,difficulty=rookie,fight=0', 'seed=1,difficulty=stalker,fight=0', 'seed=3735928559,difficulty=veteran,fight=7', 'seed=4294967295,difficulty=master,fight=31', 'device:') }
 )
@@ -410,9 +410,14 @@ if ($Task6ArtifactsPresent) {
     $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v9.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
     Assert-True ($Task6SnapshotLines.Count -eq 4) 'Task 6 semantic snapshot must contain exactly four reviewed random scenarios.'
     $Task6GeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
-    foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
+    foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'random_draft_accepts_unclassified_bonus_ammo', 'catalog_enumerates_effective_system_once_per_load', 'catalog_enumeration_failure_is_memoized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
         Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
     }
+    $Task6CatalogLoader = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
+    Assert-True ($Task6CatalogLoader -match 'memoized_system_factory') 'Catalog loader must enumerate the effective system once per load.'
+    Assert-True ($Task6CatalogLoader -match 'pcall\(factory\.enumerate_system_sections\)') 'Catalog loader must memoize failed effective-system enumeration attempts.'
+    Assert-True ($Task6CatalogLoader -match 'if\s+not\s+succeeded\s+then\s+error') 'Catalog loader must replay a memoized effective-system enumeration failure.'
+    Assert-True ($Task6CatalogLoader -match 'shared_system_sections') 'Catalog loader must share the memoized system enumeration with the physical item catalog.'
     $Task7RandomPipelineFixture = [regex]::Match($Task6GeneratorTests, '(?s)local function random_draft_catalogs\(\).*?local function random_draft_semantics').Value
     Assert-True ($Task7RandomPipelineFixture.Contains('snapshot.fingerprint = "ga-catalog-v10-random-pipeline"')) 'Task 7 positive random pipeline fixture must use the exact v10 catalog fingerprint.'
     Assert-True ($Task7RandomPipelineFixture -notmatch 'ga-catalog-v[1-9]-') 'Task 7 positive random pipeline fixture must not use a retired catalog fingerprint.'
@@ -462,7 +467,7 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 
 $Task9CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
 foreach ($Contract in $Task9CustomContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
@@ -478,7 +483,7 @@ foreach ($Contract in $Task9CustomContracts) {
 }
 
 $Task9StartContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script') -Raw
-foreach ($Marker in @('custom_mode', 'function UIStart:OnCustom', 'gamma_arena_ui_custom.create')) {
+foreach ($Marker in @('custom_mode', 'function UIStart:OnCustom', 'gamma_arena_ui_custom.create', 'GA_DEBUG_CUSTOM_CLICK', 'GA_DEBUG_CUSTOM_CREATE_RESULT')) {
     Assert-True ($Task9StartContent -match [regex]::Escape($Marker)) "Task 9 start-mode routing is missing: $Marker"
 }
 $Task9UiDiagnosticPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script'

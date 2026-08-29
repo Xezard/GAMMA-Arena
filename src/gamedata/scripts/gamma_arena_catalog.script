@@ -118,6 +118,22 @@ local function runtime_factory()
     }
 end
 
+local function memoized_system_factory(factory)
+    if type(factory) ~= "table" or type(factory.enumerate_system_sections) ~= "function" then return factory end
+    local wrapped = {}
+    for key, value in pairs(factory) do wrapped[key] = value end
+    local attempted, succeeded, sections = false, nil, nil
+    wrapped.enumerate_system_sections = function()
+        if not attempted then
+            attempted = true
+            succeeded, sections = pcall(factory.enumerate_system_sections)
+        end
+        if not succeeded then error(sections) end
+        return sections
+    end
+    return wrapped
+end
+
 local function read(factory, ini, section, key)
     if type(ini.sections) == "table" then
         local values = ini.sections[section]
@@ -582,7 +598,7 @@ local function calculate_minimum_loadout_cost(snapshot, weapons)
 end
 
 local function load_impl(ini_factory)
-    local factory = ini_factory or runtime_factory()
+    local factory = memoized_system_factory(ini_factory or runtime_factory())
     if type(factory) ~= "table" or type(factory.open) ~= "function" or type(factory.section_exists) ~= "function" then
         return gamma_arena_result.err("GA_CATALOG_FACTORY_INVALID", "Catalog loader requires open and section_exists", {})
     end
@@ -798,7 +814,8 @@ local function load_impl(ini_factory)
     local ranks = gamma_arena_rank_catalog.load(rank_source, snapshot)
     if not ranks.ok then return ranks end
     local item_source = type(factory.item_source) == "table" and factory.item_source or nil
-    return gamma_arena_item_catalog.load(item_source, snapshot, ranks.value)
+    local shared_system_sections = item_source == nil and factory or nil
+    return gamma_arena_item_catalog.load(item_source, snapshot, ranks.value, shared_system_sections)
 end
 
 function load(ini_factory)

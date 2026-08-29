@@ -100,11 +100,15 @@ local function read_ini(ini, section, key)
     return called and value or nil
 end
 
-local function runtime_source()
+local function runtime_source(shared_system_sections)
     local base = system_ini()
     return {
         open_rules = function() return ini_file(rules_path) end,
         enumerate_system_sections = function()
+            if type(shared_system_sections) == "table"
+                and type(shared_system_sections.enumerate_system_sections) == "function" then
+                return shared_system_sections.enumerate_system_sections()
+            end
             local sections = {}
             base:section_for_each(function(section) sections[#sections + 1] = section end)
             table.sort(sections)
@@ -302,12 +306,29 @@ local function physical_candidate(source, section, accepted_medicine, accepted_g
     return candidate
 end
 
+local function candidate_section_name(section, accepted_medicine, accepted_grenades, accepted_devices)
+    if type(section) ~= "string" then return false end
+    if accepted_medicine[section] ~= nil or accepted_grenades[section] == true
+        or accepted_devices[section] ~= nil then return true end
+    return string.sub(section, 1, 4) == "wpn_"
+        or string.sub(section, 1, 5) == "ammo_"
+        or string.sub(section, 1, 5) == "helm_"
+        or string.sub(section, 1, 7) == "helmet_"
+        or string.find(section, "outfit", 1, true) ~= nil
+end
+
 local function enumerate_physical_candidates(source, accepted_medicine, accepted_grenades, accepted_devices)
     local ok, sections = guarded(source, "enumerate_system_sections")
     if not ok or type(sections) ~= "table" then
         return nil, failure("GA_ITEM_CATALOG_ENUMERATION_FAILED", "Effective system sections could not be enumerated")
     end
-    sections = sorted_unique(sections)
+    local filtered = {}
+    for _, section in ipairs(sections) do
+        if candidate_section_name(section, accepted_medicine, accepted_grenades, accepted_devices) then
+            filtered[#filtered + 1] = section
+        end
+    end
+    sections = sorted_unique(filtered)
     local candidates = {}
     for _, section in ipairs(sections) do
         local candidate = physical_candidate(source, section, accepted_medicine, accepted_grenades, accepted_devices)
@@ -602,8 +623,8 @@ local function valid_inputs(source, legacy_catalog, rank_catalog)
     return gamma_arena_result.ok(true)
 end
 
-local function load_impl(source, legacy_catalog, rank_catalog)
-    source = source or runtime_source()
+local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sections)
+    source = source or runtime_source(shared_system_sections)
     local inputs = valid_inputs(source, legacy_catalog, rank_catalog)
     if not inputs.ok then return inputs end
     local carry_ok, carry_kg = guarded(source, "read_base_carry_weight")
@@ -665,8 +686,8 @@ local function load_impl(source, legacy_catalog, rank_catalog)
     return gamma_arena_result.ok(catalog)
 end
 
-function load(source, legacy_catalog, rank_catalog)
-    local succeeded, result = pcall(load_impl, source, legacy_catalog, rank_catalog)
+function load(source, legacy_catalog, rank_catalog, shared_system_sections)
+    local succeeded, result = pcall(load_impl, source, legacy_catalog, rank_catalog, shared_system_sections)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     if succeeded then return failure("GA_ITEM_CATALOG_INVALID", "Universal item catalog loader returned an invalid Result") end
     return failure("GA_ITEM_CATALOG_INVALID", "Universal item catalog loading failed safely", { reason = tostring(result) })
