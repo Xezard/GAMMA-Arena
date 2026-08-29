@@ -1,5 +1,7 @@
 # Gamma Arena
 
+[![Nexus Mods](https://img.shields.io/badge/Nexus%20Mods-Download-D98F2B?style=flat-square)](https://www.nexusmods.com/stalkeranomaly/mods/135)
+
 > A deterministic, replayable combat arena for S.T.A.L.K.E.R. Anomaly G.A.M.M.A., distributed as an independent Mod Organizer 2 add-on.
 
 Gamma Arena turns the classic Rostok Arena into a self-contained combat mode with seeded fights, generated equipment, four difficulty levels, and explicit round cleanup.
@@ -32,11 +34,10 @@ Gamma Arena is not a standalone game or a replacement for G.A.M.M.A.
 
 ## Download and installation
 
-1. Open the [latest release](https://github.com/Xezard/GAMMA-Arena/releases/latest).
-2. Download the attached `Gamma-Arena-vX.Y.Z-MO2.zip` package. Do not use GitHub's automatically generated source archive as the mod package.
-3. In Mod Organizer 2, select **Install a new mod from an archive** and choose the downloaded ZIP.
-4. Install it as a separate mod named **Gamma Arena**.
-5. Enable **Gamma Arena** in the `G.A.M.M.A.` profile and launch the game through MO2.
+1. Download the latest `Gamma-Arena-vX.Y.Z-MO2.zip` package from [Nexus Mods](https://www.nexusmods.com/stalkeranomaly/mods/135). The same release archive is also available from [GitHub Releases](https://github.com/Xezard/GAMMA-Arena/releases/latest); do not use GitHub's automatically generated source archive as the mod package.
+2. In Mod Organizer 2, select **Install a new mod from an archive** and choose the downloaded ZIP.
+3. Install it as a separate mod named **Gamma Arena**.
+4. Enable **Gamma Arena** in the `G.A.M.M.A.` profile and launch the game through MO2.
 
 > [!IMPORTANT]
 > Never extract or merge the package directly into the Anomaly or G.A.M.M.A. installation. Keeping it as an independent MO2 entry makes updates, conflict review, rollback, and removal predictable.
