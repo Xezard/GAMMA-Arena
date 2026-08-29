@@ -497,6 +497,14 @@ foreach ($Marker in @('custom_mode', 'function UIStart:OnCustom', 'gamma_arena_u
 $Task9UiDiagnosticPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script'
 $Task9UiDiagnostic = Get-Content -LiteralPath $Task9UiDiagnosticPath -Raw
 Assert-True ($Task9UiDiagnostic -match '(?m)^function\s+apply_catalog_result\s*\(') 'Task 9 Custom UI must preserve primary catalog failures in the visible summary.'
+foreach ($Marker in @(
+    'CATALOG_PAGE_SIZE = 80', 'catalog_page_count', 'catalog_has_previous',
+    'function UICustom:OnCatalogPrevious', 'function UICustom:OnCatalogNext',
+    'self.catalog_page = 1'
+)) {
+    Assert-True ($Task9UiDiagnostic -match [regex]::Escape($Marker)) `
+        "Task 9 bounded catalog UI is missing: $Marker"
+}
 $Task9StartXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
 [xml]$Task9StartXml = Get-Content -LiteralPath $Task9StartXmlPath -Raw
 Assert-True ($null -ne $Task9StartXml.SelectSingleNode("//*[local-name()='custom_mode']")) 'Task 9 start XML must expose Custom mode.'
@@ -511,6 +519,10 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     }
     foreach ($Id in @('gamma_arena_custom','faction','count','seed','catalog_container','selected_container','budget','spent','remaining','weight','weight_limit','validation','start','random','back','category_grenade')) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 custom UI XML is missing control $Id"
+    }
+    foreach ($Id in @('catalog_previous','catalog_page','catalog_next')) {
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) `
+            "Task 9 Custom pagination control is missing: $Id"
     }
     foreach ($Index in 1..10) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='roster_row_$Index']")) "Task 9 custom UI XML is missing roster row $Index"

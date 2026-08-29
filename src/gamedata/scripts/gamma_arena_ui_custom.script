@@ -1,4 +1,5 @@
 local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
+local CATALOG_PAGE_SIZE = 80
 local DEVICE_LABEL_KEYS = {
     device_torch_dummy = "st_gamma_arena_custom_device_headlamp",
     device_torch_nv_1 = "st_gamma_arena_custom_device_nv_gen1",
@@ -72,7 +73,9 @@ local function projection_failure(code)
         category = "weapon",
         category_ids = CATEGORY_IDS,
         actor_device = nil, device_options = {},
-        catalog_cells = {}, selected_cells = {}, roster = {}, count = 0, capacity = 0,
+        catalog_cells = {}, catalog_page = 1, catalog_page_count = 1, catalog_item_count = 0,
+        catalog_has_previous = false, catalog_has_next = false,
+        selected_cells = {}, roster = {}, count = 0, capacity = 0,
         faction_ids = {}, rank_ids = {}, budget = 0, spent = 0, remaining = 0,
         weight_mg = 0, weight_limit_mg = 0
     }
@@ -89,17 +92,29 @@ function apply_catalog_result(view, catalog_result)
     return view
 end
 
-function project(model, category)
+local function page_number(value, maximum)
+    local parsed = tonumber(value)
+    if type(parsed) ~= "number" or parsed ~= math.floor(parsed) then parsed = 1 end
+    return math.max(1, math.min(parsed, maximum))
+end
+
+function project(model, category, page)
     if type(model) ~= "table" or type(model.snapshot) ~= "function" then
         return projection_failure("GA_CUSTOM_MODEL_INVALID")
     end
     local called, snapshot = pcall(model.snapshot, model)
     if not called or type(snapshot) ~= "table" then return projection_failure("GA_CUSTOM_MODEL_INVALID") end
     category = type(category) == "string" and snapshot.categories[category] and category or "weapon"
+    local source = snapshot.categories[category] or {}
+    local page_count = math.max(1, math.ceil(#source / CATALOG_PAGE_SIZE))
+    local current_page = page_number(page, page_count)
+    local first_index = (current_page - 1) * CATALOG_PAGE_SIZE + 1
+    local last_index = math.min(#source, first_index + CATALOG_PAGE_SIZE - 1)
     local catalog_cells = {}
-    for index, cell in ipairs(snapshot.categories[category] or {}) do
+    for index = first_index, last_index do
+        local cell = source[index]
         local multiplier = cell.preview_multiplier or 1
-        catalog_cells[index] = {
+        catalog_cells[#catalog_cells + 1] = {
             section = cell.section,
             category = cell.category,
             name_key = cell.name_key,
@@ -159,6 +174,11 @@ function project(model, category)
         actor_device = snapshot.actor_device,
         device_options = device_options,
         catalog_cells = catalog_cells,
+        catalog_page = current_page,
+        catalog_page_count = page_count,
+        catalog_item_count = #source,
+        catalog_has_previous = current_page > 1,
+        catalog_has_next = current_page < page_count,
         selected_cells = selected_cells,
         roster = snapshot.roster,
         count = snapshot.count,
@@ -263,6 +283,7 @@ function UICustom:__init(owner, ports) super()
     self.owner = owner
     self.ports = ports or {}
     self.selected_category = "weapon"
+    self.catalog_page = 1
     custom_trace("GA_DEBUG_CUSTOM_CATALOG_BEGIN", "Custom Arena catalog loading began")
     self.catalog_result = load_catalog(self.ports)
     custom_trace("GA_DEBUG_CUSTOM_CATALOG_RESULT", "Custom Arena catalog loading returned", {
@@ -303,6 +324,9 @@ function UICustom:InitControls()
     self.start_button = self.xml:Init3tButton("gamma_arena_custom:start", self.root)
     self.random_button = self.xml:Init3tButton("gamma_arena_custom:random", self.root)
     self.back_button = self.xml:Init3tButton("gamma_arena_custom:back", self.root)
+    self.catalog_previous = self.xml:Init3tButton("gamma_arena_custom:catalog_previous", self.root)
+    self.catalog_page_text = self.xml:InitTextWnd("gamma_arena_custom:catalog_page", self.root)
+    self.catalog_next = self.xml:Init3tButton("gamma_arena_custom:catalog_next", self.root)
     self:Register(self.faction_combo, "faction")
     self:Register(self.count_combo, "count")
     self:Register(self.device_combo, "device")
@@ -310,6 +334,8 @@ function UICustom:InitControls()
     self:Register(self.start_button, "start")
     self:Register(self.random_button, "random")
     self:Register(self.back_button, "back")
+    self:Register(self.catalog_previous, "catalog_previous")
+    self:Register(self.catalog_next, "catalog_next")
 
     local snapshot = self.model:snapshot()
     local initial_view = project(self.model, self.selected_category)
@@ -352,6 +378,8 @@ function UICustom:InitCallbacks()
     self:AddCallback("start", ui_events.BUTTON_CLICKED, self.OnStart, self)
     self:AddCallback("random", ui_events.BUTTON_CLICKED, self.OnRandom, self)
     self:AddCallback("back", ui_events.BUTTON_CLICKED, self.OnBack, self)
+    self:AddCallback("catalog_previous", ui_events.BUTTON_CLICKED, self.OnCatalogPrevious, self)
+    self:AddCallback("catalog_next", ui_events.BUTTON_CLICKED, self.OnCatalogNext, self)
     self.rank_callbacks, self.category_callbacks = {}, {}
     for index = 1, 10 do
         self.rank_callbacks[index] = function() self:OnRank(index) end
@@ -395,13 +423,14 @@ function UICustom:Rebuild()
     custom_trace("GA_DEBUG_CUSTOM_REBUILD_BEGIN", "Custom Arena UI rebuild began", {
         category = self.selected_category
     })
-    local view = project(self.model, self.selected_category)
+    local view = project(self.model, self.selected_category, self.catalog_page)
     view = apply_catalog_result(view, self.catalog_result)
     if self.submission_error and self.submission_error.error then
         view.submission_error_code = self.submission_error.error.code
         view.summary_code = view.submission_error_code
     end
     self.projection = view
+    self.catalog_page = view.catalog_page
     set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
     set_combo(self.count_combo, {}, nil, tostring, tostring(view.count))
     self.count_combo:SetText(tostring(view.count))
@@ -429,6 +458,9 @@ function UICustom:Rebuild()
         self.validation_text:Show(true)
     end
     self.start_button:Enable(view.launch_enabled)
+    self.catalog_page_text:SetText(tostring(view.catalog_page) .. " / " .. tostring(view.catalog_page_count))
+    self.catalog_previous:Enable(view.catalog_has_previous)
+    self.catalog_next:Enable(view.catalog_has_next)
     rebuild_container(self.catalog_container, view.catalog_cells, false)
     rebuild_container(self.selected_container, view.selected_cells, true)
     custom_trace("GA_DEBUG_CUSTOM_REBUILD_RESULT", "Custom Arena UI rebuild completed", {
@@ -472,6 +504,17 @@ end
 function UICustom:OnCategory(category)
     self.submission_error = nil
     self.selected_category = category
+    self.catalog_page = 1
+    self:Rebuild()
+end
+
+function UICustom:OnCatalogPrevious()
+    self.catalog_page = math.max(1, self.catalog_page - 1)
+    self:Rebuild()
+end
+
+function UICustom:OnCatalogNext()
+    self.catalog_page = self.catalog_page + 1
     self:Rebuild()
 end
 
