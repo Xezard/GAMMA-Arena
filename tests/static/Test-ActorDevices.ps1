@@ -195,6 +195,20 @@ $ExactUniversalCleanupCase = 'runtime_universal_actor_device_cleanup_uses_exact_
 if (-not $RuntimeTests.Contains($ExactUniversalCleanupCase) -or $UniversalItemPort -notmatch 'local\s+function\s+shutdown_device\(record,\s*entity,\s*require_active_transaction\)') {
     throw 'Universal actor-device cleanup must call the shared shutdown seam with exact owned device context'
 }
+foreach ($CaseName in @(
+    'runtime_universal_actor_device_cleanup_accepts_online_actor_parent_proof',
+    'runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token',
+    'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent'
+)) {
+    if (-not $RuntimeTests.Contains($CaseName)) {
+        throw "Universal actor-device runtime ownership regression is missing: $CaseName"
+    }
+}
+if ($UniversalItemPort -notmatch 'ports\.item_parent_id' -or
+    $UniversalItemPort -notmatch 'server_parent_matches' -or
+    $UniversalItemPort -notmatch 'runtime_parent_matches') {
+    throw 'Universal actor-item cleanup must support exact online actor-parent proof'
+}
 
 $UniversalDeviceReadyCase = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready'
 if (-not $RuntimeTests.Contains('runtime_universal_actor_device_faults_rollback_all_actor_state')) {

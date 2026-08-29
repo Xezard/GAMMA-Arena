@@ -10527,6 +10527,7 @@ local function task11_production_item_ports(options)
             local entity = {
                 runtime_id = env.next_id,
                 parent_runtime_id = owner:id(),
+                runtime_parent_object = owner,
                 section_value = section,
                 create_options = clone(create_options),
                 ammo_type = 0,
@@ -10534,6 +10535,7 @@ local function task11_production_item_ports(options)
                 ammo_elapsed = 0
             }
             function entity:id() return self.runtime_id end
+            function entity:parent() return self.runtime_parent_object end
             function entity:section_name() return self.section_value end
             function entity:set_ammo_type(index)
                 self.ammo_type_sets[#self.ammo_type_sets + 1] = index
@@ -10576,6 +10578,10 @@ local function task11_production_item_ports(options)
         resolve_item = function(entity)
             if env.offline[entity.runtime_id] then return nil end
             return env.by_id[entity.runtime_id]
+        end,
+        item_parent_id = function(item)
+            local parent = item and item:parent() or nil
+            return parent and parent:id() or nil
         end,
         move_to_slot = function(owner, item, slot)
             if options.fail_slot == slot then
@@ -10863,6 +10869,104 @@ local function runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown
     gamma_arena_test_assert.equals(env.shutdown_calls[#env.shutdown_calls].section, 'device_torch_dummy', 'shared shutdown receives the exact device section')
     gamma_arena_test_assert.equals(env.lifecycle[1], 'shutdown', 'shared shutdown precedes every owned release')
     gamma_arena_test_assert.is_true(string.find(env.lifecycle[2] or '', '^release:') ~= nil, 'device release begins only after confirmed shutdown')
+end
+
+local function runtime_universal_actor_device_cleanup_accepts_online_actor_parent_proof()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local env, ports = task11_production_item_ports()
+    local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+    local applied = task6_drive_items_ready(items, items:apply(owner, {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }, catalog))
+    gamma_arena_test_assert.is_true(applied.ok and applied.value.ready == true,
+        'online-parent cleanup fixture reaches READY')
+    local device = env.created[2]
+    gamma_arena_test_assert.equals(device.torch_enabled, nil,
+        'cleanup fixture leaves the issued torch untouched')
+    device.parent_runtime_id = 65535
+    env.lifecycle = {}
+    local cleaned = items:cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value.pending == true,
+        'online actor parent proves ownership when ALife parent changes')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].item, device,
+        'fallback proof preserves the exact online device for shutdown')
+    gamma_arena_test_assert.equals(env.lifecycle[1], 'shutdown',
+        'fallback-owned device shuts down before release')
+    gamma_arena_test_assert.equals(#env.releases, 2,
+        'fallback-owned transaction releases every issued item')
+    gamma_arena_test_assert.is_true(items:cleanup().ok,
+        'fallback-owned records retire after absence reprobe')
+end
+
+local function runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    for _, replacement in ipairs({ false, 'ga_foreign_owner' }) do
+        local env, ports = task11_production_item_ports()
+        local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+        local applied = task6_drive_items_ready(items, items:apply(owner, {
+            { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+        }, catalog))
+        gamma_arena_test_assert.is_true(applied.ok, 'token boundary fixture materializes')
+        local device = env.created[1]
+        local issued_token = env.tags[device.runtime_id]
+        device.parent_runtime_id = 65535
+        env.tags[device.runtime_id] = replacement == false and nil or replacement
+        local rejected = items:cleanup()
+        gamma_arena_test_assert.is_false(rejected.ok,
+            'runtime actor parent cannot replace a missing or foreign token')
+        gamma_arena_test_assert.equals(rejected.error.code,
+            'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', 'token mismatch keeps the public code')
+        gamma_arena_test_assert.equals(rejected.error.context.field, 'owner_tag',
+            'token mismatch names the safe diagnostic field')
+        gamma_arena_test_assert.is_false(rejected.error.context.tag_matches,
+            'token diagnostics expose no token value')
+        for key, value in pairs(rejected.error.context) do
+            gamma_arena_test_assert.is_false(value == issued_token,
+                'token diagnostics never expose the issued token through ' .. tostring(key))
+            if type(replacement) == 'string' then
+                gamma_arena_test_assert.is_false(value == replacement,
+                    'token diagnostics never expose the observed token through ' .. tostring(key))
+            end
+        end
+        gamma_arena_test_assert.equals(#env.shutdown_calls, 0,
+            'token mismatch never reaches device shutdown')
+        gamma_arena_test_assert.equals(#env.releases, 0,
+            'token mismatch never releases an item')
+    end
+end
+
+local function runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent()
+    local owner = { id = function() return 77 end }
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local env, ports = task11_production_item_ports()
+    local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+    local applied = task6_drive_items_ready(items, items:apply(owner, {
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }, catalog))
+    gamma_arena_test_assert.is_true(applied.ok, 'foreign-parent fixture materializes')
+    local device = env.created[1]
+    device.parent_runtime_id = 999
+    device.runtime_parent_object = { id = function() return 999 end }
+    local rejected = items:cleanup()
+    gamma_arena_test_assert.is_false(rejected.ok, 'two foreign parent views fail closed')
+    gamma_arena_test_assert.equals(rejected.error.code,
+        'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', 'foreign parent keeps the public code')
+    gamma_arena_test_assert.equals(rejected.error.context.field, 'parent_id',
+        'foreign parent names the failed field')
+    gamma_arena_test_assert.is_false(rejected.error.context.server_parent_matches,
+        'diagnostics reject the server parent')
+    gamma_arena_test_assert.is_false(rejected.error.context.runtime_parent_matches,
+        'diagnostics reject the runtime parent')
+    gamma_arena_test_assert.equals(#env.shutdown_calls, 0,
+        'foreign parent never reaches device shutdown')
+    gamma_arena_test_assert.equals(#env.releases, 0,
+        'foreign parent never releases an item')
 end
 
 local function runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback()
@@ -11303,6 +11407,9 @@ local cases = {
     { name = 'runtime_universal_actor_device_timeout_is_bounded_and_rolls_back', fn = runtime_universal_actor_device_timeout_is_bounded_and_rolls_back },
     { name = 'runtime_universal_actor_device_faults_rollback_all_actor_state', fn = runtime_universal_actor_device_faults_rollback_all_actor_state },
     { name = 'runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown', fn = runtime_universal_actor_device_cleanup_uses_exact_shared_shutdown },
+    { name = 'runtime_universal_actor_device_cleanup_accepts_online_actor_parent_proof', fn = runtime_universal_actor_device_cleanup_accepts_online_actor_parent_proof },
+    { name = 'runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token', fn = runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token },
+    { name = 'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent', fn = runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent },
     { name = 'runtime_entity_rejects_opponent_device_before_actor_mutation', fn = runtime_entity_rejects_opponent_device_before_actor_mutation },
     { name = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready', fn = runtime_universal_actor_device_is_exact_equipped_charged_and_ready },
     { name = "runtime_custom_session_creation_copies_validated_recipe", fn = runtime_custom_session_creation_copies_validated_recipe },

@@ -369,6 +369,14 @@ local function runtime_game_object_id(object)
     return id
 end
 
+local function runtime_game_object_parent_id(object)
+    local looked_up, method = pcall(function() return object and object.parent end)
+    if not looked_up or type(method) ~= 'function' then return nil end
+    local called, parent = pcall(method, object)
+    if not called or parent == nil then return nil end
+    return runtime_game_object_id(parent)
+end
+
 function actor_ownership_matches(candidate, current_actor, session_active, current_level)
     if session_active ~= true or current_level ~= "l05_bar" then return false end
     local candidate_id = runtime_game_object_id(candidate)
@@ -483,9 +491,13 @@ function new_actor_item_port(ports)
                     exact = actor_loadout_failure('GA_ACTOR_DEVICE_OWNERSHIP_INVALID', 'Universal actor device lacks exact rollback ownership')
                 end
                 if not exact.ok then return exact end
-                local resolved = actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', ports.resolve_item, entity, record)
-                if not resolved.ok then return resolved end
-                item = resolved.value
+                if exact.value and exact.value.item ~= nil then
+                    item = exact.value.item
+                else
+                    local resolved = actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', ports.resolve_item, entity, record)
+                    if not resolved.ok then return resolved end
+                    item = resolved.value
+                end
             end
             return actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED', ports.shutdown_device, item, record.id, record.section)
         end
@@ -511,25 +523,95 @@ function new_actor_item_port(ports)
         return values
     end
 
-    exact_current_record = function(entity, record)
-        if type(record) ~= "table" or record.authorized ~= true then
-            return actor_loadout_failure("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", "Universal actor item has no authorized ownership record")
+    local function ownership_mismatch(record, field, context)
+        context = context or {}
+        context.id = record and record.id or nil
+        context.field = field
+        return actor_loadout_failure('GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH',
+            'Current universal actor item differs from its durable ownership record', context)
+    end
+
+    local function runtime_owner_proof(entity, record, server_parent)
+        local context = {
+            expected_parent_id = record.parent_id,
+            server_parent_available = server_parent.ok and server_parent.value ~= nil,
+            server_parent_id = server_parent.ok and server_parent.value or nil,
+            server_parent_matches = false,
+            runtime_item_available = false,
+            runtime_parent_matches = false
+        }
+        local resolved = actor_loadout_call('GA_ACTOR_ITEMS_RESOLVE_FAILED',
+            ports.resolve_item, entity, record)
+        if not resolved.ok or resolved.value == nil then
+            return ownership_mismatch(record, 'parent_id', context)
         end
-        local id = actor_loadout_call("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", ports.entity_id, entity)
-        local parent = actor_loadout_call("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", ports.entity_parent_id, entity)
-        local section = actor_loadout_call("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", ports.entity_section, entity)
-        local tag = actor_loadout_call("GA_ACTOR_ITEMS_TAG_READ_FAILED", ports.load_owner_tag, record.id)
+        context.runtime_item_available = true
+        local runtime_id = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+            ports.entity_id, resolved.value)
+        if not runtime_id.ok or runtime_id.value ~= record.id then
+            context.expected_runtime_id = record.id
+            context.runtime_id = runtime_id.ok and runtime_id.value or nil
+            return ownership_mismatch(record, 'runtime_id', context)
+        end
+        local runtime_section = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+            ports.entity_section, resolved.value)
+        if not runtime_section.ok or runtime_section.value ~= record.section then
+            context.expected_runtime_section = record.section
+            context.runtime_section = runtime_section.ok and runtime_section.value or nil
+            return ownership_mismatch(record, 'runtime_section', context)
+        end
+        local runtime_parent = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+            ports.item_parent_id, resolved.value)
+        context.runtime_parent_available = runtime_parent.ok and runtime_parent.value ~= nil
+        context.runtime_parent_id = runtime_parent.ok and runtime_parent.value or nil
+        context.runtime_parent_matches = runtime_parent.ok
+            and runtime_parent.value == record.parent_id
+        if not context.runtime_parent_matches then
+            return ownership_mismatch(record, 'parent_id', context)
+        end
+        return gamma_arena_result.ok({
+            item = resolved.value,
+            parent_source = 'runtime_actor'
+        })
+    end
+
+    exact_current_record = function(entity, record)
+        if type(record) ~= 'table' or record.authorized ~= true then
+            return actor_loadout_failure('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+                'Universal actor item has no authorized ownership record')
+        end
+        local id = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID', ports.entity_id, entity)
         if not id.ok then return id end
-        if not parent.ok then return parent end
-        if not section.ok then return section end
-        if not tag.ok then return tag end
-        if id.value ~= record.id or parent.value ~= record.parent_id or section.value ~= record.section
-            or tag.value ~= record.token then
-            return actor_loadout_failure("GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH", "Current universal actor item differs from its durable ownership record", {
-                id = record.id
+        if id.value ~= record.id then
+            return ownership_mismatch(record, 'id', {
+                expected_id = record.id,
+                actual_id = id.value
             })
         end
-        return gamma_arena_result.ok(true)
+        local section = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+            ports.entity_section, entity)
+        if not section.ok then return section end
+        if section.value ~= record.section then
+            return ownership_mismatch(record, 'section', {
+                expected_section = record.section,
+                actual_section = section.value
+            })
+        end
+        local tag = actor_loadout_call('GA_ACTOR_ITEMS_TAG_READ_FAILED',
+            ports.load_owner_tag, record.id)
+        if not tag.ok then return tag end
+        if tag.value ~= record.token then
+            return ownership_mismatch(record, 'owner_tag', {
+                tag_present = type(tag.value) == 'string' and tag.value ~= '',
+                tag_matches = false
+            })
+        end
+        local parent = actor_loadout_call('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+            ports.entity_parent_id, entity)
+        if parent.ok and parent.value == record.parent_id then
+            return gamma_arena_result.ok({ item = nil, parent_source = 'server' })
+        end
+        return runtime_owner_proof(entity, record, parent)
     end
 
     exact_provisional_record = function(entity, record, require_active_transaction)
@@ -1818,6 +1900,7 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
         entity_id = runtime_object_id,
         entity_parent_id = runtime_parent_id,
         entity_section = runtime_section_name,
+        item_parent_id = runtime_game_object_parent_id,
         save_owner_tag = function(id, token) return se_save_var(id, nil, ACTOR_LOADOUT_OWNER_KEY, token) end,
         load_owner_tag = function(id) return se_load_var(id, nil, ACTOR_LOADOUT_OWNER_KEY) end,
         resolve_item = resolve_online_item,
