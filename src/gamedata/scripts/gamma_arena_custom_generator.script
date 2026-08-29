@@ -1,0 +1,361 @@
+local MAX_SAFE_INTEGER = 9007199254740991
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= (minimum or 0) and value <= MAX_SAFE_INTEGER
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function text(value)
+    return type(value) == "string" and value ~= ""
+end
+
+local function exact_keys(value, allowed, expected_count)
+    if type(value) ~= "table" then return false end
+    local count = 0
+    for key in pairs(value) do
+        if not allowed[key] then return false end
+        count = count + 1
+    end
+    return count == expected_count
+end
+
+local function valid_build_result(result)
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then return false end
+    if result.ok then
+        return exact_keys(result, { ok = true, value = true }, 2) and type(result.value) == "table"
+    end
+    local problem = result.error
+    return exact_keys(result, { ok = true, error = true }, 2)
+        and exact_keys(problem, { code = true, message = true, context = true }, 3)
+        and text(problem.code) and type(problem.message) == "string" and type(problem.context) == "table"
+end
+
+local function slot_stream(session, fight_index, slot, rank_id, domain)
+    return gamma_arena_rng.new(gamma_arena_rng.derive_seed({
+        "custom-v1", session.session_seed, fight_index,
+        session.custom_config.catalog_fingerprint,
+        session.custom_config.faction, slot, rank_id, domain
+    }))
+end
+
+local function copy_items(source)
+    local result = {}
+    for index, entry in ipairs(source or {}) do
+        result[index] = {
+            section = entry.section,
+            quantity = entry.quantity,
+            equipped_slot = entry.equipped_slot
+        }
+        if entry.equipped_slot == nil then result[index].equipped_slot = nil end
+    end
+    return result
+end
+
+local function copy_spawn(source)
+    return {
+        position = { x = source.position.x, y = source.position.y, z = source.position.z },
+        level_vertex_id = source.level_vertex_id,
+        game_vertex_id = source.game_vertex_id
+    }
+end
+
+local function dense_count(value)
+    if type(value) ~= "table" then return nil end
+    local maximum, count = 0, 0
+    for key in pairs(value) do
+        if not finite_integer(key, 1) then return nil end
+        maximum = math.max(maximum, key)
+        count = count + 1
+    end
+    if maximum ~= count then return nil end
+    return count
+end
+
+local function validate_layout_preflight(layout)
+    if type(layout) ~= "table" or not text(layout.id) or not finite_integer(layout.version, 1)
+        or not text(layout.level) or not text(layout.actor_spawn_path) or not text(layout.actor_look_path)
+        or not finite_integer(layout.capacity, 1) then
+        return failure("GA_CUSTOM_LAYOUT_INVALID", "Custom resolved layout identity is invalid")
+    end
+    local route_count = dense_count(layout.tactical_routes)
+    if route_count == nil or route_count == 0 then
+        return failure("GA_CUSTOM_LAYOUT_INVALID", "Custom resolved layout routes are invalid")
+    end
+    local routes = {}
+    for index = 1, route_count do
+        local route = layout.tactical_routes[index]
+        if not text(route) or routes[route] then
+            return failure("GA_CUSTOM_LAYOUT_INVALID", "Custom resolved layout routes must be unique", { index = index })
+        end
+        routes[route] = true
+    end
+    local slot_count = dense_count(layout.opponent_spawn_slots)
+    if slot_count == nil or slot_count ~= layout.capacity then
+        return failure("GA_CUSTOM_LAYOUT_INVALID", "Custom resolved layout capacity does not match physical slots")
+    end
+    local slots = {}
+    for index = 1, slot_count do
+        local slot = layout.opponent_spawn_slots[index]
+        local position = type(slot) == "table" and slot.position or nil
+        if type(slot) ~= "table" or not text(slot.id) or slots[slot.id] or not text(slot.base_route)
+            or not routes[slot.base_route] or type(slot.native) ~= "boolean" or type(position) ~= "table"
+            or not finite(position.x) or not finite(position.y) or not finite(position.z)
+            or not finite_integer(slot.level_vertex_id) or slot.level_vertex_id >= 4294967295
+            or not finite_integer(slot.game_vertex_id) or slot.game_vertex_id >= 4294967295 then
+            return failure("GA_CUSTOM_LAYOUT_INVALID", "Custom physical spawn slot is invalid", { index = index })
+        end
+        slots[slot.id] = true
+    end
+    return gamma_arena_result.ok({ route_count = route_count, slot_count = slot_count })
+end
+
+local function weapon_records(catalog)
+    local records = {}
+    for _, weapon in ipairs(type(catalog.weapon_list) == "table" and catalog.weapon_list or {}) do
+        if type(weapon) == "table" and text(weapon.section) then
+            if records[weapon.section] == nil then records[weapon.section] = weapon else records[weapon.section] = false end
+        end
+    end
+    return records
+end
+
+local function validate_exact_weapon_pool(catalog, rank)
+    local records, result, seen = weapon_records(catalog), {}, {}
+    for _, pool_name in ipairs({ "primary_weapons", "secondary_weapons" }) do
+        local source = rank[pool_name]
+        local count = dense_count(source)
+        if count == nil then
+            return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool must be a dense array", {
+                rank = rank.id, pool = pool_name
+            })
+        end
+        for index = 1, count do
+            local section = source[index]
+            local weapon = text(section) and records[section] or nil
+            local definition = text(section) and type(catalog.items) == "table" and catalog.items[section] or nil
+            local ammo = type(weapon) == "table" and type(catalog.ammo) == "table" and catalog.ammo[weapon.ammo] or nil
+            local ammo_definition = type(weapon) == "table" and type(catalog.items) == "table" and catalog.items[weapon.ammo] or nil
+            local ammo_count = type(definition) == "table" and dense_count(definition.ammo_sections) or nil
+            local compatible = false
+            if ammo_count ~= nil then
+                for ammo_index = 1, ammo_count do
+                    if definition.ammo_sections[ammo_index] == weapon.ammo then compatible = true end
+                end
+            end
+            if not text(section) or seen[section] or type(weapon) ~= "table"
+                or weapon.section ~= section or not text(weapon.ammo) or not finite_integer(weapon.cost, 1)
+                or (weapon.slot ~= 1 and weapon.slot ~= 2) or not finite_integer(weapon.ammo_box_min, 1)
+                or not finite_integer(weapon.ammo_box_max, weapon.ammo_box_min)
+                or type(ammo) ~= "table" or ammo.section ~= weapon.ammo or not finite_integer(ammo.cost, 1)
+                or type(definition) ~= "table" or definition.category ~= "weapon" or definition.ltx_slot ~= weapon.slot
+                or ammo_count == nil or ammo_count == 0 or not compatible
+                or type(ammo_definition) ~= "table" or ammo_definition.category ~= "ammo" then
+                return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool member is invalid", {
+                    rank = rank.id, pool = pool_name, index = index, section = section
+                })
+            end
+            seen[section] = true
+            result[#result + 1] = weapon
+        end
+    end
+    if #result == 0 then
+        return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool is empty", { rank = rank.id })
+    end
+    table.sort(result, function(left, right) return left.section < right.section end)
+    return gamma_arena_result.ok(result)
+end
+
+local function equipment_candidates(catalog, weapons, budget)
+    local candidates = {}
+    for _, weapon in ipairs(weapons) do
+        local ammo = type(catalog.ammo) == "table" and catalog.ammo[weapon.ammo] or nil
+        if type(ammo) == "table" and finite_integer(ammo.cost, 1)
+            and finite_integer(weapon.cost, 1) and finite_integer(weapon.slot, 1)
+            and finite_integer(weapon.ammo_box_min, 1) and finite_integer(weapon.ammo_box_max, weapon.ammo_box_min) then
+            for _, outfit in ipairs(catalog.outfit_list or {}) do
+                if type(outfit) == "table" and text(outfit.section) and finite_integer(outfit.cost, 1) then
+                    for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
+                        local cost = weapon.cost + ammo.cost * boxes + outfit.cost
+                        if cost <= budget then
+                            for _, knife in ipairs(catalog.knife_list or {}) do
+                                if type(knife) == "table" and text(knife.section) then
+                                    candidates[#candidates + 1] = {
+                                        cost = cost, weapon = weapon.section, weapon_slot = weapon.slot,
+                                        ammo = ammo.section, ammo_boxes = boxes,
+                                        outfit = outfit.section, knife = knife.section
+                                    }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(candidates, function(left, right)
+        if left.cost ~= right.cost then return left.cost < right.cost end
+        if left.weapon ~= right.weapon then return left.weapon < right.weapon end
+        if left.outfit ~= right.outfit then return left.outfit < right.outfit end
+        if left.ammo_boxes ~= right.ammo_boxes then return left.ammo_boxes < right.ammo_boxes end
+        return left.knife < right.knife
+    end)
+    return candidates
+end
+
+local function equipment_items(catalog, rank, weapons, rng)
+    if type(rank) ~= "table" or not finite_integer(rank.threat, 1)
+        or type(rng) ~= "table" or type(rng.pick) ~= "function" then
+        return failure("GA_CUSTOM_CATALOG_INVALID", "Custom enemy equipment requires an exact rank and stream")
+    end
+    local budget = math.max(7, math.ceil(rank.threat / 20))
+    local candidates = equipment_candidates(catalog, weapons, budget)
+    if #candidates == 0 then
+        return failure("GA_CUSTOM_EQUIPMENT_UNAVAILABLE", "Exact faction-rank equipment pool has no affordable completion", {
+            rank = rank.id, loadout_section = rank.loadout_section, budget = budget
+        })
+    end
+    local choice = rng:pick(candidates)
+    if type(choice) ~= "table" then
+        return failure("GA_CUSTOM_EQUIPMENT_UNAVAILABLE", "Custom enemy equipment selection failed")
+    end
+    return gamma_arena_result.ok({
+        { section = choice.outfit, quantity = 1, equipped_slot = "outfit" },
+        { section = choice.knife, quantity = 1, equipped_slot = "knife" },
+        { section = choice.weapon, quantity = 1, equipped_slot = "weapon_" .. tostring(choice.weapon_slot) },
+        { section = choice.ammo, quantity = choice.ammo_boxes }
+    })
+end
+
+local function select_unique_spawn(session, fight_index, slot, rank_id, layout, used)
+    local available = {}
+    for _, candidate in ipairs(layout.opponent_spawn_slots or {}) do
+        if type(candidate) == "table" and not used[candidate.id] then available[#available + 1] = candidate end
+    end
+    if #available == 0 then return nil end
+    local selected = slot_stream(session, fight_index, slot, rank_id, "spawn"):pick(available)
+    if type(selected) ~= "table" or not text(selected.id) then return nil end
+    used[selected.id] = true
+    return selected
+end
+
+local function append_sections(items, sections)
+    for _, section in ipairs(sections or {}) do items[#items + 1] = { section = section, quantity = 1 } end
+end
+
+local function generate_draft_internal(session, fight_index, catalog, layout)
+    if type(session) ~= "table" or type(catalog) ~= "table" or type(layout) ~= "table" then
+        return failure("GA_CUSTOM_ARGUMENT_INVALID", "Custom fight generation requires session, catalog, and resolved layout")
+    end
+    if not finite_integer(session.session_seed) or session.session_seed > 4294967295 then
+        return failure("GA_SESSION_SEED_INVALID", "Custom session seed must be a finite uint32 integer")
+    end
+    if not finite_integer(fight_index) then
+        return failure("GA_FIGHT_INDEX_INVALID", "Custom fight index must be a finite non-negative integer")
+    end
+    local layout_preflight = validate_layout_preflight(layout)
+    if not layout_preflight.ok then return layout_preflight end
+    local capacity = layout_preflight.value.slot_count
+    local validated = gamma_arena_custom_config.validate(session.custom_config, {
+        catalog = catalog, layout = { id = layout.id, virtual_capacity = capacity }
+    })
+    if not validated.ok then return validated end
+    local config = validated.value
+    if config.catalog_fingerprint ~= catalog.fingerprint then
+        return failure("GA_CUSTOM_CATALOG_STALE", "Custom configuration catalog identity is stale")
+    end
+    local faction = type(catalog.factions) == "table" and catalog.factions[config.faction] or nil
+    if type(faction) ~= "table" or faction.community ~= config.faction or type(faction.ranks) ~= "table" then
+        return failure("GA_CUSTOM_FACTION_UNKNOWN", "Custom source faction is unavailable")
+    end
+    local prepared = {}
+    for slot, roster_entry in ipairs(config.roster) do
+        local named = catalog.ranks[roster_entry.rank]
+        local profile = faction.ranks[roster_entry.rank]
+        if type(named) ~= "table" or type(profile) ~= "table" or profile.id ~= roster_entry.rank
+            or profile.community ~= faction.community or profile.runtime_community ~= "arena_enemy"
+            or profile.alias ~= "gamma_arena_" .. faction.community .. "_" .. roster_entry.rank
+            or not finite_integer(named.minimum) or not finite_integer(profile.minimum) then
+            return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom exact faction-rank profile is unavailable", { slot = slot, rank = roster_entry.rank })
+        end
+        local maximum = math.min(named.maximum or MAX_SAFE_INTEGER, profile.maximum or MAX_SAFE_INTEGER)
+        local minimum = math.max(named.minimum, profile.minimum)
+        if maximum < minimum then
+            return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom named and profile rank bands do not intersect", { slot = slot, rank = roster_entry.rank })
+        end
+        local weapons = validate_exact_weapon_pool(catalog, profile)
+        if not weapons.ok then return weapons end
+        prepared[slot] = { named = named, profile = profile, minimum = minimum, maximum = maximum, weapons = weapons.value }
+    end
+    local draft = {
+        arena = { layout_id = layout.id, level = layout.level, tactical_routes = {} },
+        actor = {
+            spawn_path = layout.actor_spawn_path, look_path = layout.actor_look_path,
+            loadout = { kind = "items", items = copy_items(config.actor_items) }
+        },
+        opponents = {}
+    }
+    if config.actor_device ~= nil then
+        draft.actor.loadout.items[#draft.actor.loadout.items + 1] = {
+            section = config.actor_device,
+            quantity = 1,
+            equipped_slot = "device"
+        }
+    end
+    for index, route in ipairs(layout.tactical_routes) do draft.arena.tactical_routes[index] = route end
+
+    local used_spawns, medicine_streams = {}, {}
+    for slot, roster_entry in ipairs(config.roster) do
+        local current = prepared[slot]
+        local profile = current.profile
+        local rank_value = slot_stream(session, fight_index, slot, roster_entry.rank, "numeric_rank"):next_int(current.minimum, current.maximum)
+        if type(rank_value) == "table" and rank_value.ok == false then return rank_value end
+        local equipment = equipment_items(catalog, profile, current.weapons,
+            slot_stream(session, fight_index, slot, roster_entry.rank, "equipment"))
+        if not equipment.ok then return equipment end
+        local physical = select_unique_spawn(session, fight_index, slot, roster_entry.rank, layout, used_spawns)
+        if physical == nil then
+            return failure("GA_SPAWN_CAPACITY_INVALID", "Custom roster cannot be assigned unique resolved spawn slots", { slot = slot })
+        end
+        local route = slot_stream(session, fight_index, slot, roster_entry.rank, "route"):pick(layout.tactical_routes)
+        if not text(route) then return failure("GA_CUSTOM_ROUTE_INVALID", "Custom tactical route selection failed", { slot = slot }) end
+        local grenades = gamma_arena_grenade_generator.generate_enemy(catalog, {
+            presence = slot_stream(session, fight_index, slot, roster_entry.rank, "enemy_grenade_presence"),
+            section = slot_stream(session, fight_index, slot, roster_entry.rank, "enemy_grenade_section")
+        })
+        if not grenades.ok then return grenades end
+        append_sections(equipment.value, grenades.value.sections)
+        draft.opponents[slot] = {
+            slot = slot, faction = faction.community, rank = { id = roster_entry.rank, value = rank_value },
+            profile = profile.alias, role = slot == 1 and "leader" or "primary",
+            spawn_slot_id = physical.id, spawn = copy_spawn(physical), tactical_route = route,
+            loadout = { kind = "items", items = equipment.value }
+        }
+        medicine_streams[slot] = slot_stream(session, fight_index, slot, roster_entry.rank, "medicine")
+    end
+    local medicine = gamma_arena_medical_generator.allocate_custom_enemies(catalog, draft.opponents, medicine_streams)
+    if not medicine.ok then return medicine end
+    for index, allocation in ipairs(medicine.value.allocations) do
+        append_sections(draft.opponents[index].loadout.items, allocation.sections)
+    end
+    return gamma_arena_result.ok(draft)
+end
+
+local function build_draft_internal(session, fight_index, catalog, layout)
+    local result = generate_draft_internal(session, fight_index, catalog, layout)
+    if valid_build_result(result) then return result end
+    return nil
+end
+
+function build_draft(session, fight_index, catalog, layout)
+    local completed, result = pcall(build_draft_internal, session, fight_index, catalog, layout)
+    if completed and result ~= nil then return result end
+    return failure("GA_CUSTOM_GENERATION_FAILED", "Custom fight generation failed", { phase = "build_draft" })
+end

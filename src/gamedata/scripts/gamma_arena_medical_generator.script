@@ -151,3 +151,38 @@ function allocate_enemies(catalogs, opponents, streams)
     end
     return gamma_arena_result.ok({ allocations = allocations, medical_cost = count, medkit_count = medkit_count, bandage_count = bandage_count })
 end
+
+function allocate_custom_enemies(catalogs, opponents, streams)
+    if type(catalogs) ~= "table" or type(catalogs.medical_items) ~= "table"
+        or type(opponents) ~= "table" or type(streams) ~= "table"
+        or #opponents < 1 or #opponents > 10 or #streams ~= #opponents then
+        return fail("GA_ENEMY_MEDICAL_ARGUMENT_INVALID", "Custom enemy medicine requires one through ten normalized opponents and per-slot streams")
+    end
+    for index = 1, #streams do
+        if type(streams[index]) ~= "table" or type(streams[index].next_int) ~= "function" then
+            return fail("GA_ENEMY_MEDICAL_ARGUMENT_INVALID", "Custom enemy medicine stream is invalid", { slot = index })
+        end
+    end
+    if #opponents == 1 then
+        local draw = streams[1]:next_int(1, 2)
+        if type(draw) == "table" and draw.ok == false then return draw end
+        local section = draw == 1 and "bandage" or "medkit"
+        local item = catalogs.medical_items[section]
+        if type(item) ~= "table" or not gamma_arena_number.is_positive_integer(item.npc_cost) then
+            return fail("GA_NO_VALID_ENEMY_MEDICAL_LOADOUT", "Custom one-opponent medicine is unavailable")
+        end
+        return gamma_arena_result.ok({
+            allocations = { { sections = { section }, medical_cost = item.npc_cost } },
+            medical_cost = item.npc_cost,
+            medkit_count = section == "medkit" and 1 or 0,
+            bandage_count = section == "bandage" and 1 or 0
+        })
+    end
+    local cohort = { mix = streams[1], recipients = { medkit = {}, bandage = {} } }
+    for item_index = 1, #opponents do
+        local stream = streams[((item_index - 1) % #streams) + 1]
+        cohort.recipients.medkit[item_index] = stream
+        cohort.recipients.bandage[item_index] = stream
+    end
+    return allocate_enemies(catalogs, opponents, cohort)
+end

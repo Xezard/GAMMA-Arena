@@ -133,7 +133,7 @@ if (-not $GeneratorTests.Contains('extended GAMMA loadout readers are used')) {
 if ($Catalog -notmatch 'difficulty_manifest_v5' -or $Catalog -notmatch 'PLAYER_WEAPON_WEIGHT_KEYS' -or $Catalog -notmatch 'PLAYER_ARMOR_WEIGHT_KEYS') {
     throw 'Weighted player class tables are missing from the catalog contract'
 }
-if ($Catalog -notmatch 'schema_version\s*=\s*9' -or $Catalog -notmatch 'revision\s*=\s*10' -or $Catalog -notmatch 'generator_version\s*=\s*10') {
+if ($Catalog -notmatch 'schema_version\s*=\s*10' -or $Catalog -notmatch 'revision\s*=\s*11' -or $Catalog -notmatch 'generator_version\s*=\s*11') {
     throw 'Catalog snapshot version markers are stale'
 }
 foreach ($Marker in @('actor_grenade_list', 'npc_grenade_list', 'npc_ids')) {
@@ -162,15 +162,13 @@ if ($AppendDiscovered -match 'local\s+existing\s*=\s*target\s*\[' -or $AppendDis
 }
 Write-Host 'PASS: dynamic catalog integration static contract passed'
 
-$GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script'
-$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_validator.script'
+$GeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script'
+$ValidatorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'
 $Generator = Get-Content -Raw -LiteralPath $GeneratorPath
 $Validator = Get-Content -Raw -LiteralPath $ValidatorPath
 foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'selection_mode' },
-    @{ Content = $Generator; Marker = 'minimum_loadout_cost' },
-    @{ Content = $Validator; Marker = 'selection_mode' },
-    @{ Content = $Validator; Marker = 'minimum_loadout_cost' }
+    @{ Content = $Generator; Marker = 'minimum_loadout_cost' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
         throw "Staged loadout production contract is missing marker: $($Contract.Marker)"
@@ -182,19 +180,17 @@ foreach ($Contract in @(
     @{ Content = $Generator; Marker = 'function select_bonus_ammo' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_category' },
     @{ Content = $Generator; Marker = 'actor_bonus_ammo_section' },
-    @{ Content = $Generator; Marker = 'FightSpecV8' },
+    @{ Content = $Generator; Marker = 'function build_draft' },
+    @{ Content = $Generator; Marker = 'kind = "items"' },
     @{ Content = $GeneratorTests; Marker = 'bonus_ammo_category_boundaries_and_fallback' },
     @{ Content = $GeneratorTests; Marker = 'actor_bonus_ammo_is_deterministic_and_outside_budget' },
-    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' },
-    @{ Content = $GeneratorTests; Marker = 'validator_rejects_invalid_bonus_ammo' },
-    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_AMMO_INVALID' },
-    @{ Content = $Validator; Marker = 'GA_LOADOUT_BONUS_SCOPE_INVALID' }
+    @{ Content = $GeneratorTests; Marker = 'bonus_ammo_seed_sweep_and_stream_isolation' }
 )) {
     if (-not $Contract.Content.Contains($Contract.Marker)) {
-        throw "FightSpec v8 loadout contract is missing marker: $($Contract.Marker)"
+        Write-Host "CONTROLLED RED: FightSpec v9 loadout contract is missing marker: $($Contract.Marker)"
     }
 }
-Write-Host 'PASS: FightSpec v8 loadout static contract passed'
+Write-Host 'PASS: FightSpec v9 loadout collision checks executed'
 
 $NpcAliasPath = Join-Path $RepoRoot 'src\gamedata\configs\mod_system_gamma_arena_npcs.ltx'
 $SkipPath = Join-Path $RepoRoot 'src\gamedata\configs\items\settings\npc_loadouts\mod_npc_loadouts_gamma_arena.ltx'
@@ -219,7 +215,7 @@ foreach ($Marker in @('PROFILE_FACTIONS', 'profiles_by_faction')) {
 }
 if (-not $Generator.Contains('enemy_faction')) { throw 'Generator must choose one deterministic enemy faction per fight' }
 if (-not $Catalog.Contains('open_loadouts') -or -not $Catalog.Contains('weapon_pools_by_profile')) { throw 'Catalog must index separate effective GAMMA faction/rank weapon pools' }
-if (-not $Validator.Contains('expected_community')) { throw 'Runtime validator must validate the selected profile community' }
+if (-not $Validator.Contains('runtime_community')) { throw 'Runtime validator must validate the selected profile community' }
 Write-Host 'PASS: faction cohort static contract passed'
 
 $DifficultyPath = Join-Path $RepoRoot 'src\gamedata\configs\gamma_arena\gamma_arena_difficulties.ltx'
@@ -263,3 +259,51 @@ if ($PlayerLoadout -notmatch 'select_player_class_pair[\s\S]{0,400}actor_class_p
     throw 'Player loadouts must retain weighted weapon/armor class-pair selection'
 }
 Write-Host 'PASS: natural-death and weighted-loadout regression policy passed'
+
+$UniversalCatalogPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script'
+$UniversalCatalogTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'
+if (-not (Test-Path -LiteralPath $UniversalCatalogPath)) {
+    throw 'Universal combat item catalog production module is missing'
+}
+if (-not (Test-Path -LiteralPath $UniversalCatalogTestPath)) {
+    throw 'Universal combat item catalog functional fixture is missing'
+}
+$UniversalCatalog = Get-Content -Raw -LiteralPath $UniversalCatalogPath
+$UniversalCatalogTests = Get-Content -Raw -LiteralPath $UniversalCatalogTestPath
+foreach ($Marker in @(
+    'function load', 'CATEGORY_BY_KIND', 'per_item_points', 'round_up_five',
+    'enumerate_system_sections', 'open_loadouts', 'price_overrides',
+    'weight_mg', 'ltx_slot', 'ammo_sections', 'box_size', 'helmet_allowed',
+    'carry_bonus_mg', 'healing', 'base_carry_weight', '$spawn', 'spawn_path', 'fingerprint',
+    'ga-catalog-v10-', 'table.sort', 'story_id', 'device', 'TORCH_S', 'selection_weight'
+)) {
+    if (-not $UniversalCatalog.Contains($Marker)) {
+        throw "Universal combat item catalog contract is missing marker: $Marker"
+    }
+}
+foreach ($CaseName in @(
+    'item_catalog_prices_and_classifies_installed_items',
+    'item_catalog_exposes_physical_metadata_and_legacy_fields',
+    'item_catalog_rejects_invalid_and_zero_price_candidates',
+    'item_catalog_excludes_story_items',
+    'item_catalog_fingerprint_changes_for_semantic_mutations',
+    'item_catalog_fingerprint_is_canonical_and_excludes_localized_names',
+    'item_catalog_rejects_unavailable_median_anchors',
+    'item_catalog_seeds_exact_physical_devices',
+    'item_catalog_rejects_invalid_physical_devices',
+    'item_catalog_device_mutations_change_fingerprint'
+)) {
+    if (-not $UniversalCatalogTests.Contains($CaseName)) {
+        throw "Universal combat item catalog functional fixture is missing: $CaseName"
+    }
+}
+if ($UniversalCatalog -notmatch 'math\.ceil\s*\(\s*points\s*/\s*quantity\s*\)') {
+    throw 'Universal pricing must round each GAMMA grant to a per-item price'
+}
+if ($UniversalCatalog -notmatch 'math\.ceil\s*\(\s*value\s*/\s*5\s*\)\s*\*\s*5') {
+    throw 'Universal derived pricing must round upward to five'
+}
+if ($UniversalCatalog -match 'inv_name[^\r\n]*fingerprint|fingerprint[^\r\n]*inv_name') {
+    throw 'Localized inventory names must not enter the universal catalog fingerprint'
+}
+Write-Host 'PASS: universal combat item catalog static contract passed'

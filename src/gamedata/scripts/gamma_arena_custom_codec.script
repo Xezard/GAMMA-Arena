@@ -1,0 +1,223 @@
+local MAX_ROSTER = 10
+local MAX_ITEMS = 64
+local MAX_SAFE_INTEGER = 9007199254740991
+local CONFIG_FIELDS = {
+    schema_version = true, faction = true, roster = true,
+    actor_items = true, actor_device = true, catalog_fingerprint = true
+}
+local ROSTER_FIELDS = { rank = true }
+local ITEM_FIELDS = { section = true, quantity = true, equipped_slot = true }
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function valid_prefix(prefix)
+    return type(prefix) == "string" and #prefix <= 64 and string.match(prefix, "^[%w_]*$") ~= nil
+end
+
+local function valid_text(value)
+    return type(value) == "string" and value ~= "" and #value <= 256
+end
+
+local function finite_positive_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= 1 and value <= MAX_SAFE_INTEGER
+end
+
+local function exact_fields(value, allowed, path)
+    if type(value) ~= "table" then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec value must be a table", { path = path })
+    end
+    for key in pairs(value) do
+        if type(key) ~= "string" or not allowed[key] then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec value contains an unknown field", {
+                path = path, field = tostring(key)
+            })
+        end
+    end
+    return nil
+end
+
+local function canonical_integer(value)
+    return string.format("%.0f", value)
+end
+
+local function dense_length(value, maximum)
+    if type(value) ~= "table" then return nil end
+    local highest, count = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then return nil end
+        highest = math.max(highest, key)
+        count = count + 1
+    end
+    if highest ~= count or count < 1 or count > maximum then return nil end
+    return count
+end
+
+local function key_list(prefix)
+    local result = {
+        prefix .. "schema_version", prefix .. "faction", prefix .. "catalog_fingerprint",
+        prefix .. "roster_count", prefix .. "actor_item_count", prefix .. "actor_device"
+    }
+    for index = 1, MAX_ROSTER do result[#result + 1] = prefix .. "roster_" .. tostring(index) .. "_rank" end
+    for index = 1, MAX_ITEMS do
+        local base = prefix .. "actor_item_" .. tostring(index) .. "_"
+        result[#result + 1] = base .. "section"
+        result[#result + 1] = base .. "quantity"
+        result[#result + 1] = base .. "equipped_slot"
+    end
+    return result
+end
+
+local function decimal_integer(value, minimum, maximum, field)
+    if type(value) ~= "string" or not string.match(value, "^%d+$") then
+        return nil, failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom integer is malformed", { field = field, value = value })
+    end
+    local parsed = tonumber(value)
+    if type(parsed) ~= "number" or parsed ~= math.floor(parsed) or parsed < minimum or parsed > maximum
+        or canonical_integer(parsed) ~= value then
+        return nil, failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom integer is non-canonical", { field = field, value = value })
+    end
+    return parsed
+end
+
+local function call_read(read, key)
+    local called, value = pcall(read, key)
+    if not called then return nil, failure("GA_CUSTOM_CODEC_READ_FAILED", "Persisted custom key could not be read", { key = key }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then
+        if not value.ok then return nil, value end
+        value = value.value
+    end
+    if value == nil or value == "" then return nil end
+    return tostring(value)
+end
+
+local function encode_internal(config, prefix)
+    if not valid_prefix(prefix) then return failure("GA_CUSTOM_CODEC_PREFIX_INVALID", "Custom codec prefix is invalid") end
+    local field_error = exact_fields(config, CONFIG_FIELDS, "config")
+    if field_error then return field_error end
+    if config.schema_version ~= 1 or not valid_text(config.faction) or not valid_text(config.catalog_fingerprint)
+        or type(config.roster) ~= "table" or type(config.actor_items) ~= "table"
+        or (config.actor_device ~= nil and not valid_text(config.actor_device)) then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec input is not a bounded normalized config")
+    end
+    local roster_count = dense_length(config.roster, MAX_ROSTER)
+    local item_count = dense_length(config.actor_items, MAX_ITEMS)
+    if roster_count == nil or item_count == nil then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec arrays must be dense and bounded")
+    end
+    local values = {
+        [prefix .. "schema_version"] = 1,
+        [prefix .. "faction"] = config.faction,
+        [prefix .. "catalog_fingerprint"] = config.catalog_fingerprint,
+        [prefix .. "roster_count"] = roster_count,
+        [prefix .. "actor_item_count"] = item_count
+    }
+    values[prefix .. "actor_device"] = config.actor_device
+    for index, entry in ipairs(config.roster) do
+        field_error = exact_fields(entry, ROSTER_FIELDS, "roster[" .. tostring(index) .. "]")
+        if field_error then return field_error end
+        if not valid_text(entry.rank) then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec roster rank is malformed", { index = index })
+        end
+        values[prefix .. "roster_" .. tostring(index) .. "_rank"] = entry.rank
+    end
+    for index, entry in ipairs(config.actor_items) do
+        field_error = exact_fields(entry, ITEM_FIELDS, "actor_items[" .. tostring(index) .. "]")
+        if field_error then return field_error end
+        if not valid_text(entry.section) or not finite_positive_integer(entry.quantity)
+            or (entry.equipped_slot ~= nil and not valid_text(entry.equipped_slot)) then
+            return failure("GA_CUSTOM_CODEC_INVALID", "Custom codec item scalar is malformed", { index = index })
+        end
+        local base = prefix .. "actor_item_" .. tostring(index) .. "_"
+        values[base .. "section"] = entry.section
+        values[base .. "quantity"] = canonical_integer(entry.quantity)
+        if entry.equipped_slot ~= nil then values[base .. "equipped_slot"] = entry.equipped_slot end
+    end
+    local operations = {}
+    for _, key in ipairs(key_list(prefix)) do
+        if values[key] == nil then operations[#operations + 1] = { action = "remove", key = key }
+        else operations[#operations + 1] = { action = "write", key = key, value = values[key] } end
+    end
+    return gamma_arena_result.ok(operations)
+end
+
+local function decode_internal(read, prefix, context)
+    if type(read) ~= "function" then return failure("GA_CUSTOM_CODEC_READ_INVALID", "Custom codec read port is unavailable") end
+    if not valid_prefix(prefix) then return failure("GA_CUSTOM_CODEC_PREFIX_INVALID", "Custom codec prefix is invalid") end
+    local schema, read_error = call_read(read, prefix .. "schema_version")
+    if read_error then return read_error end
+    local schema_version, parse_error = decimal_integer(schema, 1, 1, "schema_version")
+    if schema_version == nil then return parse_error end
+    local faction; faction, read_error = call_read(read, prefix .. "faction"); if read_error then return read_error end
+    local fingerprint; fingerprint, read_error = call_read(read, prefix .. "catalog_fingerprint"); if read_error then return read_error end
+    local actor_device; actor_device, read_error = call_read(read, prefix .. "actor_device"); if read_error then return read_error end
+    local roster_raw; roster_raw, read_error = call_read(read, prefix .. "roster_count"); if read_error then return read_error end
+    local item_raw; item_raw, read_error = call_read(read, prefix .. "actor_item_count"); if read_error then return read_error end
+    local roster_count; roster_count, parse_error = decimal_integer(roster_raw, 1, MAX_ROSTER, "roster_count"); if roster_count == nil then return parse_error end
+    local item_count; item_count, parse_error = decimal_integer(item_raw, 1, MAX_ITEMS, "actor_item_count"); if item_count == nil then return parse_error end
+    if type(faction) ~= "string" or faction == "" or type(fingerprint) ~= "string" or fingerprint == "" then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom scalar is missing")
+    end
+    if actor_device ~= nil and not valid_text(actor_device) then
+        return failure("GA_CUSTOM_CODEC_INVALID", "Persisted custom device is malformed")
+    end
+    for index = roster_count + 1, MAX_ROSTER do
+        local trailing; trailing, read_error = call_read(read, prefix .. "roster_" .. tostring(index) .. "_rank")
+        if read_error then return read_error end
+        if trailing ~= nil then
+            return failure("GA_CUSTOM_CODEC_TRAILING_KEY", "Persisted custom roster contains data beyond its count", { index = index })
+        end
+    end
+    for index = item_count + 1, MAX_ITEMS do
+        local base = prefix .. "actor_item_" .. tostring(index) .. "_"
+        for _, field in ipairs({ "section", "quantity", "equipped_slot" }) do
+            local trailing; trailing, read_error = call_read(read, base .. field)
+            if read_error then return read_error end
+            if trailing ~= nil then
+                return failure("GA_CUSTOM_CODEC_TRAILING_KEY", "Persisted custom inventory contains data beyond its count", {
+                    index = index, field = field
+                })
+            end
+        end
+    end
+    local config = {
+        schema_version = schema_version, faction = faction, catalog_fingerprint = fingerprint,
+        roster = {}, actor_items = {}, actor_device = actor_device
+    }
+    for index = 1, roster_count do
+        local rank; rank, read_error = call_read(read, prefix .. "roster_" .. tostring(index) .. "_rank")
+        if read_error then return read_error end
+        if type(rank) ~= "string" or rank == "" then return failure("GA_CUSTOM_CODEC_INVALID", "Persisted roster rank is missing", { index = index }) end
+        config.roster[index] = { rank = rank }
+    end
+    for index = 1, item_count do
+        local base = prefix .. "actor_item_" .. tostring(index) .. "_"
+        local section; section, read_error = call_read(read, base .. "section"); if read_error then return read_error end
+        local raw_quantity; raw_quantity, read_error = call_read(read, base .. "quantity"); if read_error then return read_error end
+        local slot; slot, read_error = call_read(read, base .. "equipped_slot"); if read_error then return read_error end
+        local quantity; quantity, parse_error = decimal_integer(raw_quantity, 1, 9007199254740991, "quantity"); if quantity == nil then return parse_error end
+        if type(section) ~= "string" or section == "" then return failure("GA_CUSTOM_CODEC_INVALID", "Persisted item section is missing", { index = index }) end
+        config.actor_items[index] = { section = section, quantity = quantity, equipped_slot = slot }
+        if slot == nil then config.actor_items[index].equipped_slot = nil end
+    end
+    return gamma_arena_custom_config.validate(config, context)
+end
+
+function keys(prefix)
+    if not valid_prefix(prefix) then return {} end
+    return key_list(prefix)
+end
+
+function encode(config, prefix)
+    local succeeded, result = pcall(encode_internal, config, prefix or "")
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_CODEC_INVALID", "Custom config encoding failed safely", { reason = tostring(result) })
+end
+
+function decode(read, prefix, context)
+    local succeeded, result = pcall(decode_internal, read, prefix or "", context)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_CODEC_INVALID", "Custom config decoding failed safely", { reason = tostring(result) })
+end

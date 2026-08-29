@@ -4,6 +4,10 @@ local CHECKPOINT_NAME = "_gamma_arena_checkpoint"
 local LAUNCH_TOKEN_TTL = 600
 local DEFEAT_TOKEN_TTL = 600
 local UINT32_MAX = 4294967295
+local CUSTOM_PREFIX = "launch_custom_"
+local custom_launch_keys = gamma_arena_custom_codec.keys(CUSTOM_PREFIX)
+local custom_launch_key_set = {}
+for _, key in ipairs(custom_launch_keys) do custom_launch_key_set[key] = true end
 
 local character_bridge = {
     { key = "new_game_difficulty", action = "write", value = 2 },
@@ -41,14 +45,20 @@ bridge_lease_keys[#bridge_lease_keys + 1] = "bridge_pending"
 local launch_keys = {
     "launch_pending",
     "launch_token",
+    "launch_schema_version",
     "launch_mode_id",
     "launch_difficulty_id",
+    "launch_generation_recipe",
     "launch_seed_mode",
     "launch_session_seed",
+    "launch_generator_version",
+    "launch_catalog_revision",
+    "launch_catalog_fingerprint",
     "launch_stage",
     "launch_deferred_level",
     "launch_target_level"
 }
+for _, key in ipairs(custom_launch_keys) do launch_keys[#launch_keys + 1] = key end
 
 local resume_keys = {
     "resume_pending",
@@ -67,6 +77,7 @@ local defeat_keys = {
     "defeat_session_id",
     "defeat_session_nonce",
     "defeat_mode_id",
+    "defeat_generation_recipe",
     "defeat_difficulty_id",
     "defeat_issued_at"
 }
@@ -89,10 +100,13 @@ local arena_session_keys = {
     session_nonce = true,
     mode_id = true,
     difficulty_id = true,
+    generation_recipe = true,
     session_seed = true,
     fight_index = true,
     generator_version = true,
     catalog_revision = true,
+    catalog_fingerprint = true,
+    custom_config = true,
     layout_id = true,
     checkpoint_name = true,
     phase = true
@@ -177,17 +191,58 @@ local function parse_manual_seed_impl(text)
     return gamma_arena_result.ok(value)
 end
 
-local function validate_start_request_impl(request)
+local function catalog_from_context(context)
+    if type(context) == "table" then
+        if type(context.catalog) == "table" then return context.catalog end
+        if type(context.items) == "table" then return context end
+    end
+    local lookup_ok, loader = pcall(function() return gamma_arena_catalog and gamma_arena_catalog.load end)
+    if not lookup_ok or type(loader) ~= "function" then return nil end
+    local called, loaded = pcall(loader)
+    if not called or type(loaded) ~= "table" or loaded.ok ~= true or type(loaded.value) ~= "table" then return nil end
+    return loaded.value
+end
+
+local function custom_context_from(context)
+    if type(context) == "table" and type(context.catalog) == "table" and type(context.layout) == "table" then return context end
+    local catalog = catalog_from_context(context)
+    local layout = type(catalog) == "table" and type(catalog.layouts) == "table" and catalog.layouts.rostok_arena_v1 or nil
+    if type(catalog) == "table" then return { catalog = catalog, layout = layout } end
+    return nil
+end
+
+local function validate_catalog_provenance(request, context)
+    if not finite_integer(request.generator_version) or request.generator_version < 1
+        or not finite_integer(request.catalog_revision) or request.catalog_revision < 1
+        or type(request.catalog_fingerprint) ~= "string" or request.catalog_fingerprint == "" then
+        return fail("GA_START_CATALOG_INVALID", "ArenaStartRequest catalog provenance is invalid")
+    end
+    local catalog = catalog_from_context(context)
+    if type(catalog) ~= "table" or not finite_integer(catalog.generator_version) or not finite_integer(catalog.revision)
+        or type(catalog.fingerprint) ~= "string" or catalog.fingerprint == "" then
+        return fail("GA_START_CATALOG_UNAVAILABLE", "ArenaStartRequest requires the active validated catalog")
+    end
+    if request.generator_version ~= catalog.generator_version or request.catalog_revision ~= catalog.revision
+        or request.catalog_fingerprint ~= catalog.fingerprint then
+        return fail("GA_START_CATALOG_STALE", "ArenaStartRequest catalog provenance is stale", {
+            generator_version = request.generator_version, catalog_revision = request.catalog_revision,
+            catalog_fingerprint = request.catalog_fingerprint
+        })
+    end
+    return gamma_arena_result.ok(catalog)
+end
+
+local function validate_start_request_impl(request, context)
     if type(request) ~= "table" then
         return fail("GA_START_REQUEST_INVALID", "ArenaStartRequest must be a table")
     end
-    if request.schema_version ~= 1 then
-        return fail("GA_START_REQUEST_SCHEMA_INVALID", "ArenaStartRequest schema must be v1", { value = request.schema_version })
+    if request.schema_version ~= 1 and request.schema_version ~= 2 then
+        return fail("GA_START_REQUEST_SCHEMA_INVALID", "ArenaStartRequest schema must be v1 or v2", { value = request.schema_version })
     end
     if request.mode_id ~= "skirmish" then
         return fail("GA_START_REQUEST_MODE_INVALID", "Only skirmish mode is supported", { value = request.mode_id })
     end
-    if not valid_difficulties[request.difficulty_id] then
+    if request.schema_version == 1 and not valid_difficulties[request.difficulty_id] then
         return fail("GA_START_REQUEST_DIFFICULTY_INVALID", "Difficulty is unknown", { value = request.difficulty_id })
     end
     if not valid_seed_modes[request.seed_mode] then
@@ -195,6 +250,47 @@ local function validate_start_request_impl(request)
     end
     if not finite_integer(request.session_seed) or request.session_seed < 0 or request.session_seed > UINT32_MAX then
         return fail("GA_SESSION_SEED_INVALID", "Session seed must be uint32", { value = request.session_seed })
+    end
+    if request.schema_version == 2 then
+        local allowed = {
+            schema_version = true, mode_id = true, difficulty_id = true, generation_recipe = true,
+            seed_mode = true, session_seed = true, generator_version = true,
+            catalog_revision = true, catalog_fingerprint = true, custom_config = true
+        }
+        for key in pairs(request) do
+            if type(key) ~= "string" or not allowed[key] then
+                return fail("GA_START_REQUEST_UNKNOWN_FIELD", "ArenaStartRequest contains an unknown field", { field = tostring(key) })
+            end
+        end
+        local effective_context = custom_context_from(context)
+        local provenance = validate_catalog_provenance(request, effective_context)
+        if not provenance.ok then return provenance end
+        if request.generation_recipe ~= "random" and request.generation_recipe ~= "custom" then
+            return fail("GA_START_REQUEST_RECIPE_INVALID", "ArenaStartRequest generation recipe is invalid", { value = request.generation_recipe })
+        end
+        if request.generation_recipe == "random" then
+            if not valid_difficulties[request.difficulty_id] or request.custom_config ~= nil then
+                return fail("GA_START_REQUEST_RECIPE_INVALID", "Random ArenaStartRequest requires only a difficulty recipe")
+            end
+        else
+            if request.difficulty_id ~= nil or request.custom_config == nil then
+                return fail("GA_START_REQUEST_RECIPE_INVALID", "Custom ArenaStartRequest requires only a custom configuration")
+            end
+            local normalized = gamma_arena_custom_config.validate(request.custom_config, effective_context)
+            if not normalized.ok then return normalized end
+            return gamma_arena_result.ok({
+                schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+                seed_mode = request.seed_mode, session_seed = request.session_seed,
+                generator_version = request.generator_version, catalog_revision = request.catalog_revision,
+                catalog_fingerprint = request.catalog_fingerprint, custom_config = normalized.value
+            })
+        end
+        return gamma_arena_result.ok({
+            schema_version = 2, mode_id = "skirmish", difficulty_id = request.difficulty_id,
+            generation_recipe = "random", seed_mode = request.seed_mode, session_seed = request.session_seed,
+            generator_version = request.generator_version, catalog_revision = request.catalog_revision,
+            catalog_fingerprint = request.catalog_fingerprint
+        })
     end
     return gamma_arena_result.ok({
         schema_version = 1,
@@ -205,7 +301,16 @@ local function validate_start_request_impl(request)
     })
 end
 
-local function validate_persisted_launch_request(values)
+local function persisted_keys_absent(values, keys)
+    for _, key in ipairs(keys) do
+        if values[key] ~= nil then
+            return fail("GA_START_PAYLOAD_MIXED", "Persisted ArenaStartRequest mixes incompatible schema or recipe keys", { key = key })
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+local function validate_persisted_launch_request(values, context)
     if type(values) ~= "table" then
         return fail("GA_START_REQUEST_INVALID", "Persisted launch payload must be a table")
     end
@@ -216,13 +321,99 @@ local function validate_persisted_launch_request(values)
             value = values.launch_session_seed
         })
     end
-    return validate_start_request_impl({
-        schema_version = 1,
+    local schema_version = values.launch_schema_version == nil and 1 or tonumber(values.launch_schema_version)
+    if schema_version ~= 1 and schema_version ~= 2 then
+        return fail("GA_START_REQUEST_SCHEMA_INVALID", "Persisted ArenaStartRequest schema is invalid", { value = values.launch_schema_version })
+    end
+    local request = {
+        schema_version = schema_version,
         mode_id = values.launch_mode_id,
         difficulty_id = values.launch_difficulty_id,
         seed_mode = values.launch_seed_mode,
         session_seed = seed.value
-    })
+    }
+    local effective_context = context
+    if schema_version == 1 then
+        local schema2_keys = {
+            "launch_generation_recipe", "launch_generator_version",
+            "launch_catalog_revision", "launch_catalog_fingerprint"
+        }
+        local clean = persisted_keys_absent(values, schema2_keys)
+        if clean.ok then clean = persisted_keys_absent(values, custom_launch_keys) end
+        if not clean.ok then return clean end
+    end
+    if schema_version == 2 then
+        effective_context = custom_context_from(context)
+        if values.launch_schema_version ~= "2" then
+            return fail("GA_START_REQUEST_SCHEMA_INVALID", "Persisted ArenaStartRequest schema must use canonical encoding")
+        end
+        request.generation_recipe = values.launch_generation_recipe
+        request.generator_version = values.launch_generator_version and tonumber(values.launch_generator_version) or nil
+        request.catalog_revision = values.launch_catalog_revision and tonumber(values.launch_catalog_revision) or nil
+        request.catalog_fingerprint = values.launch_catalog_fingerprint
+        if request.generator_version == nil or tostring(request.generator_version) ~= values.launch_generator_version
+            or request.catalog_revision == nil or tostring(request.catalog_revision) ~= values.launch_catalog_revision then
+            return fail("GA_START_CATALOG_INVALID", "Persisted ArenaStartRequest catalog provenance is non-canonical")
+        end
+        if request.generation_recipe == "custom" then
+            local decoded = gamma_arena_custom_codec.decode(function(key) return values[key] end, CUSTOM_PREFIX, effective_context)
+            if not decoded.ok then
+                if decoded.error and decoded.error.code == "GA_CUSTOM_CATALOG_STALE" then
+                    return fail("GA_START_CATALOG_STALE", "Persisted custom ArenaStartRequest catalog is stale", { cause = decoded.error })
+                end
+                return decoded
+            end
+            request.custom_config = decoded.value
+        elseif request.generation_recipe == "random" then
+            local clean = persisted_keys_absent(values, custom_launch_keys)
+            if not clean.ok then return clean end
+        end
+    end
+    return validate_start_request_impl(request, effective_context)
+end
+
+local function start_context(options)
+    return type(options) == "table" and (options.custom_context or options.catalog) or nil
+end
+
+local function launch_operations(value, token)
+    local desired = {
+        launch_token = token,
+        launch_schema_version = value.schema_version == 2 and 2 or nil,
+        launch_mode_id = value.mode_id,
+        launch_difficulty_id = value.difficulty_id,
+        launch_generation_recipe = value.schema_version == 2 and value.generation_recipe or nil,
+        launch_seed_mode = value.seed_mode,
+        launch_session_seed = value.session_seed,
+        launch_generator_version = value.schema_version == 2 and value.generator_version or nil,
+        launch_catalog_revision = value.schema_version == 2 and value.catalog_revision or nil,
+        launch_catalog_fingerprint = value.schema_version == 2 and value.catalog_fingerprint or nil,
+        launch_stage = "issued",
+        launch_pending = true
+    }
+    local operations = {}
+    for _, key in ipairs(launch_keys) do
+        if not custom_launch_key_set[key] then
+            if desired[key] == nil then operations[#operations + 1] = { action = "remove", key = key }
+            else operations[#operations + 1] = { action = "write", key = key, value = desired[key] } end
+        end
+    end
+    if value.schema_version == 2 and value.generation_recipe == "custom" then
+        local encoded = gamma_arena_custom_codec.encode(value.custom_config, CUSTOM_PREFIX)
+        if not encoded.ok then return encoded end
+        for _, operation in ipairs(encoded.value) do operations[#operations + 1] = operation end
+    else
+        for _, key in ipairs(custom_launch_keys) do operations[#operations + 1] = { action = "remove", key = key } end
+    end
+    return gamma_arena_result.ok(operations)
+end
+
+local function combined_keys(...)
+    local result = {}
+    for index = 1, select("#", ...) do
+        for _, key in ipairs(select(index, ...)) do result[#result + 1] = key end
+    end
+    return result
 end
 
 local function parse_launch_token_impl(token, now)
@@ -270,6 +461,7 @@ local function validate_defeat_context(context)
         session_id = true,
         session_nonce = true,
         mode_id = true,
+        generation_recipe = true,
         difficulty_id = true
     }
     for key in pairs(context) do
@@ -284,14 +476,22 @@ local function validate_defeat_context(context)
     if context.mode_id ~= "skirmish" then
         return fail("GA_DEFEAT_MODE_INVALID", "Defeat context mode is incompatible", { value = context.mode_id })
     end
-    if not valid_difficulties[context.difficulty_id] then
-        return fail("GA_DEFEAT_DIFFICULTY_INVALID", "Defeat context difficulty is unknown", { value = context.difficulty_id })
+    if context.generation_recipe ~= "random" and context.generation_recipe ~= "custom" then
+        return fail("GA_DEFEAT_RECIPE_INVALID", "Defeat context generation recipe is invalid", { value = context.generation_recipe })
+    end
+    if context.generation_recipe == "random" then
+        if not valid_difficulties[context.difficulty_id] then
+            return fail("GA_DEFEAT_DIFFICULTY_INVALID", "Random defeat context difficulty is unknown", { value = context.difficulty_id })
+        end
+    elseif context.difficulty_id ~= nil then
+        return fail("GA_DEFEAT_RECIPE_INVALID", "Custom defeat context cannot retain a random difficulty")
     end
     return gamma_arena_result.ok({
         schema_version = 1,
         session_id = session_id.value,
         session_nonce = session_nonce.value,
         mode_id = "skirmish",
+        generation_recipe = context.generation_recipe,
         difficulty_id = context.difficulty_id
     })
 end
@@ -302,6 +502,7 @@ local function same_defeat_context(left, right)
         and left.session_id == right.session_id
         and left.session_nonce == right.session_nonce
         and left.mode_id == right.mode_id
+        and left.generation_recipe == right.generation_recipe
         and left.difficulty_id == right.difficulty_id
 end
 
@@ -337,7 +538,7 @@ local function same_resume_intent(left, right)
         and left.checkpoint_name == right.checkpoint_name
 end
 
-local function validate_expected_session(session)
+local function validate_expected_session(session, context)
     if type(session) ~= "table" then
         return fail("GA_SESSION_INVALID", "Expected ArenaSession must be a table")
     end
@@ -346,17 +547,20 @@ local function validate_expected_session(session)
             return fail("GA_SESSION_UNKNOWN_FIELD", "ArenaSession contains an unknown field", { field = tostring(key) })
         end
     end
-    if session.schema_version ~= 1 then
-        return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v1", { value = session.schema_version })
+    if session.schema_version ~= 2 then
+        return fail("GA_SESSION_SCHEMA_INVALID", "ArenaSession schema must be v2", { value = session.schema_version })
     end
     if session.checkpoint_name ~= CHECKPOINT_NAME then
         return fail("GA_RESUME_CHECKPOINT_MISMATCH", "ArenaSession checkpoint name is not the reserved checkpoint", { value = session.checkpoint_name })
     end
-    if session.generator_version ~= 2 then
+    if session.generator_version ~= 11 then
         return fail("GA_SESSION_GENERATOR_VERSION_INVALID", "ArenaSession generator version is incompatible", { value = session.generator_version })
     end
-    if session.catalog_revision ~= 2 then
+    if session.catalog_revision ~= 11 then
         return fail("GA_SESSION_CATALOG_REVISION_INVALID", "ArenaSession catalog revision is incompatible", { value = session.catalog_revision })
+    end
+    if type(session.catalog_fingerprint) ~= "string" or session.catalog_fingerprint == "" then
+        return fail("GA_SESSION_CATALOG_FINGERPRINT_INVALID", "ArenaSession catalog fingerprint is invalid")
     end
     if session.layout_id ~= "rostok_arena_v1" then
         return fail("GA_SESSION_LAYOUT_INVALID", "ArenaSession layout is incompatible", { value = session.layout_id })
@@ -364,8 +568,8 @@ local function validate_expected_session(session)
     if session.mode_id ~= "skirmish" then
         return fail("GA_SESSION_MODE_INVALID", "ArenaSession mode is incompatible", { value = session.mode_id })
     end
-    if not valid_difficulties[session.difficulty_id] then
-        return fail("GA_SESSION_DIFFICULTY_INVALID", "ArenaSession difficulty is unknown", { value = session.difficulty_id })
+    if session.generation_recipe ~= "random" and session.generation_recipe ~= "custom" then
+        return fail("GA_SESSION_RECIPE_INVALID", "ArenaSession generation recipe is invalid", { value = session.generation_recipe })
     end
     if not finite_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > UINT32_MAX then
         return fail("GA_SESSION_SEED_INVALID", "ArenaSession seed must be uint32")
@@ -380,16 +584,47 @@ local function validate_expected_session(session)
     if type(session.phase) ~= "string" or #session.phase < 1 then
         return fail("GA_SESSION_PHASE_INVALID", "ArenaSession phase is missing")
     end
+    local effective_context = type(context) == "table" and custom_context_from(context) or nil
+    local catalog = effective_context and effective_context.catalog
+    if type(catalog) == "table" then
+        if catalog.generator_version ~= session.generator_version or catalog.revision ~= session.catalog_revision
+            or catalog.fingerprint ~= session.catalog_fingerprint then
+            return fail("GA_START_CATALOG_STALE", "ArenaSession catalog identity is stale", {
+                generator_version = session.generator_version,
+                catalog_revision = session.catalog_revision,
+                catalog_fingerprint = session.catalog_fingerprint
+            })
+        end
+    end
+    local custom_config = nil
+    if session.generation_recipe == "random" then
+        if not valid_difficulties[session.difficulty_id] or session.custom_config ~= nil then
+            return fail("GA_SESSION_RECIPE_INVALID", "Random ArenaSession requires only a difficulty recipe")
+        end
+    else
+        if session.difficulty_id ~= nil or session.custom_config == nil then
+            return fail("GA_SESSION_RECIPE_INVALID", "Custom ArenaSession requires only a custom configuration")
+        end
+        if type(effective_context) ~= "table" then
+            return fail("GA_START_CATALOG_UNAVAILABLE", "Custom ArenaSession requires the active catalog and layout")
+        end
+        local normalized = gamma_arena_custom_config.validate(session.custom_config, effective_context)
+        if not normalized.ok then return normalized end
+        custom_config = normalized.value
+    end
     return gamma_arena_result.ok({
-        schema_version = 1,
+        schema_version = 2,
         session_id = session_id.value,
         session_nonce = session_nonce.value,
         mode_id = session.mode_id,
         difficulty_id = session.difficulty_id,
+        generation_recipe = session.generation_recipe,
         session_seed = session.session_seed,
         fight_index = session.fight_index,
-        generator_version = 2,
-        catalog_revision = 2,
+        generator_version = session.generator_version,
+        catalog_revision = session.catalog_revision,
+        catalog_fingerprint = session.catalog_fingerprint,
+        custom_config = custom_config,
         layout_id = "rostok_arena_v1",
         checkpoint_name = CHECKPOINT_NAME,
         phase = session.phase
@@ -607,6 +842,7 @@ function Store:read_defeat(config, now, require_confirmed)
         session_id = values.defeat_session_id,
         session_nonce = values.defeat_session_nonce,
         mode_id = values.defeat_mode_id,
+        generation_recipe = values.defeat_generation_recipe,
         difficulty_id = values.defeat_difficulty_id
     })
     if not context.ok then return self:clear_defeat_and_return(config, context) end
@@ -676,17 +912,23 @@ function Store:arm_defeat(config, context, options)
     local token = "gad1:" .. tostring(now.value) .. ":" .. nonce.value
 
     local value = validated.value
-    local written = self:transaction(config, SECTION, operations_for_writes({
+    local operations = operations_for_writes({
         { "defeat_token", token },
         { "defeat_schema_version", value.schema_version },
         { "defeat_stage", "armed" },
         { "defeat_session_id", value.session_id },
         { "defeat_session_nonce", value.session_nonce },
         { "defeat_mode_id", value.mode_id },
-        { "defeat_difficulty_id", value.difficulty_id },
+        { "defeat_generation_recipe", value.generation_recipe },
         { "defeat_issued_at", now.value },
         { "defeat_pending", true }
-    }), {
+    })
+    if value.difficulty_id == nil then
+        operations[#operations + 1] = { action = "remove", key = "defeat_difficulty_id" }
+    else
+        operations[#operations + 1] = { action = "write", key = "defeat_difficulty_id", value = value.difficulty_id }
+    end
+    local written = self:transaction(config, SECTION, operations, {
         commit_write_keys = { "defeat_pending" },
         fail_closed_keys = defeat_keys,
         error_code = "GA_DEFEAT_ARM_FAILED"
@@ -760,7 +1002,7 @@ function Store:consume_defeat(config, token)
 end
 
 function Store:issue_launch_from_defeat(config, token, request, options)
-    local validated = validate_start_request_impl(request)
+    local validated = validate_start_request_impl(request, start_context(options))
     if not validated.ok then return validated end
     if validated.value.seed_mode ~= "random" then return fail("GA_DEFEAT_REQUEST_INVALID", "Defeat retry must use a random Arena start seed") end
     local now = self:current_time(options)
@@ -773,7 +1015,8 @@ function Store:issue_launch_from_defeat(config, token, request, options)
     local other = self:ensure_defeat_has_no_other_intent(config)
     if not other.ok then return other end
     if token ~= defeat.value.token then return fail("GA_DEFEAT_TOKEN_MISMATCH", "Defeat token does not match the pending intent") end
-    if validated.value.mode_id ~= defeat.value.context.mode_id or validated.value.difficulty_id ~= defeat.value.context.difficulty_id then
+    if defeat.value.context.generation_recipe ~= "random" or validated.value.mode_id ~= defeat.value.context.mode_id
+        or validated.value.difficulty_id ~= defeat.value.context.difficulty_id then
         return fail("GA_DEFEAT_REQUEST_MISMATCH", "Defeat retry request must match the defeated mode and difficulty")
     end
     local nonce = self:nonce_value(options, now.value)
@@ -781,19 +1024,13 @@ function Store:issue_launch_from_defeat(config, token, request, options)
     local launch_token = "ga1:" .. tostring(now.value) .. ":" .. nonce.value
     local operations = operations_for_removals(defeat_keys)
     local value = validated.value
-    for _, operation in ipairs(operations_for_writes({
-        { "launch_token", launch_token },
-        { "launch_mode_id", value.mode_id },
-        { "launch_difficulty_id", value.difficulty_id },
-        { "launch_seed_mode", value.seed_mode },
-        { "launch_session_seed", value.session_seed },
-        { "launch_stage", "issued" },
-        { "launch_pending", true }
-    })) do operations[#operations + 1] = operation end
+    local launch_payload = launch_operations(value, launch_token)
+    if not launch_payload.ok then return launch_payload end
+    for _, operation in ipairs(launch_payload.value) do operations[#operations + 1] = operation end
     local promoted = self:transaction(config, SECTION, operations, {
         commit_remove_keys = { "defeat_pending" },
         commit_write_keys = { "launch_pending" },
-        fail_closed_keys = { "defeat_pending", "defeat_token", "defeat_schema_version", "defeat_stage", "defeat_session_id", "defeat_session_nonce", "defeat_mode_id", "defeat_difficulty_id", "defeat_issued_at", "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level" },
+        fail_closed_keys = combined_keys(defeat_keys, launch_keys),
         error_code = "GA_DEFEAT_PROMOTION_FAILED"
     })
     if not promoted.ok then return promoted end
@@ -842,7 +1079,8 @@ function Store:save_preferences(config, difficulty_id, seed_mode)
 end
 
 function Store:issue_launch(config, request, options)
-    local validated = validate_start_request_impl(request)
+    local context = start_context(options)
+    local validated = validate_start_request_impl(request, context)
     if not validated.ok then return validated end
     local now = self:current_time(options)
     if not now.ok then return now end
@@ -871,7 +1109,7 @@ function Store:issue_launch(config, request, options)
         stale_reason = pending.error.code
     elseif pending.value then
         local parsed = parse_launch_token_impl(existing.launch_token, now.value)
-        local persisted_request = validate_persisted_launch_request(existing)
+        local persisted_request = validate_persisted_launch_request(existing, context)
         if parsed.ok and persisted_request.ok and self.volatile_launch_permits[existing.launch_token] == config then
             return fail("GA_LAUNCH_ALREADY_PENDING", "A valid launch intent is already pending")
         end
@@ -904,15 +1142,9 @@ function Store:issue_launch(config, request, options)
     if not nonce.ok then return nonce end
     local token = "ga1:" .. tostring(now.value) .. ":" .. nonce.value
     local value = validated.value
-    local written = self:transaction(config, SECTION, operations_for_writes({
-        { "launch_token", token },
-        { "launch_mode_id", value.mode_id },
-        { "launch_difficulty_id", value.difficulty_id },
-        { "launch_seed_mode", value.seed_mode },
-        { "launch_session_seed", value.session_seed },
-        { "launch_stage", "issued" },
-        { "launch_pending", true }
-    }), {
+    local payload = launch_operations(value, token)
+    if not payload.ok then return payload end
+    local written = self:transaction(config, SECTION, payload.value, {
         commit_write_keys = { "launch_pending" },
         fail_closed_keys = launch_keys,
         error_code = "GA_LAUNCH_WRITE_FAILED"
@@ -959,7 +1191,7 @@ local function validate_launch_ownership_values(store, config, options, values)
     if not now.ok then return now end
     local parsed = parse_launch_token_impl(values.launch_token, now.value)
     if not parsed.ok then return parsed end
-    local request = validate_persisted_launch_request(values)
+    local request = validate_persisted_launch_request(values, start_context(options))
     if not request.ok then return request end
     if values.launch_stage ~= "issued" and values.launch_stage ~= "deferred" then
         return fail("GA_LAUNCH_STAGE_INVALID", "Arena launch phase is invalid", { stage = values.launch_stage })
@@ -1081,7 +1313,7 @@ function Store:consume_launch(config, options)
         for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
         local cleared = self:transaction(config, SECTION, operations, {
             commit_remove_keys = { "launch_pending", "resume_pending" },
-            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+            fail_closed_keys = combined_keys(launch_keys, resume_keys),
             error_code = "GA_INTENT_CONFLICT_CLEAR_FAILED"
         })
         if values.launch_token ~= nil then
@@ -1203,7 +1435,7 @@ function Store:consume_resume(config, expected, prepared)
         for _, operation in ipairs(operations_for_removals(resume_keys)) do operations[#operations + 1] = operation end
         local cleared = self:transaction(config, SECTION, operations, {
             commit_remove_keys = { "launch_pending", "resume_pending" },
-            fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" },
+            fail_closed_keys = combined_keys(launch_keys, resume_keys),
             error_code = "GA_INTENT_CONFLICT_CLEAR_FAILED"
         })
         return cleared.ok and fail("GA_INTENT_CONFLICT", "Launch and resume intents cannot coexist") or cleared
@@ -1280,7 +1512,7 @@ function Store:clear_transient(config)
     for _, operation in ipairs(operations_for_removals(defeat_keys)) do operations[#operations + 1] = operation end
     return self:transaction(config, SECTION, operations, {
         commit_remove_keys = { "launch_pending", "resume_pending", "defeat_pending" },
-        fail_closed_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level", "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version", "defeat_pending", "defeat_token", "defeat_schema_version", "defeat_stage", "defeat_session_id", "defeat_session_nonce", "defeat_mode_id", "defeat_difficulty_id", "defeat_issued_at" },
+        fail_closed_keys = combined_keys(launch_keys, resume_keys, defeat_keys),
         error_code = "GA_TRANSIENT_CLEAR_FAILED"
     })
 end
@@ -1386,9 +1618,9 @@ local default_store = new_store_impl()
 
 function new_store() return new_store_impl() end
 function parse_manual_seed(text) return parse_manual_seed_impl(text) end
-function validate_start_request(request) return validate_start_request_impl(request) end
-function validate_arena_session(session)
-    local succeeded, result = pcall(validate_expected_session, session)
+function validate_start_request(request, context) return validate_start_request_impl(request, context) end
+function validate_arena_session(session, context)
+    local succeeded, result = pcall(validate_expected_session, session, context)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     return fail("GA_SESSION_INVALID", "ArenaSession validation failed safely", { reason = tostring(result) })
 end

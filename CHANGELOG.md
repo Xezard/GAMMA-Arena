@@ -4,8 +4,23 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-28
+
+- Published FightSpec v9 as the sole emitted, accepted, documented, and packaged fight contract with exact catalog identity `10/11/11` and generator 11.
+- Kept Random and Custom as generation recipes for one mode-neutral physical item shape without mode, difficulty, budget, price, weight-total, or provenance fields.
+- Made the Custom lighting device optional and budgeted with exact prices 25/75/150/300 AP while Random still issues one deterministic 50/25/18/7 device outside its loadout budgets.
+- Preserved one shared faction, 1-10 individually selected exact ranks, the `600 + sum(rank threat)` budget, the two-distinct-grenade surcharge, and the 64-distinct/256-physical limits.
+- Recorded NPC appearance as deliberately nondeterministic deferred work until it becomes observable or mechanically relevant.
+- Removed active FightSpec v1-v8 validators, schemas, golden artifacts, aliases, and package branches; Dev references now target only v9/current fixtures.
+
 ## 0.4.0 - 2026-08-27
 
+- Added a Custom Arena launch alongside the existing seeded Random mode, with one shared enemy faction and 1-10 individually selected exact ranks from novice through legend.
+- Added an installed-GAMMA player combat inventory selector for weapons, ammunition, outfits, helmets, knives, medicine, and grenades, governed by rank-derived Arena equipment points.
+- Added ordered custom grenade pricing: at most two distinct sections, quantity one each, with the second grenade charged at twice its own base price.
+- Unified Random and Custom generation on strict FightSpec v8 and catalog/generator identity `8/10/10`, with one physical item contract and a 256-entity cap per participant.
+- Regenerated Arena-controlled enemy numeric rank, equipment, ammunition, medicine, grenades, spawn, and tactical route after victories while preserving the custom roster and actor template.
+- Documented that X-Ray's internal `specific_character` appearance remains outside seeded FightSpec reproduction until a future catalog identity extension.
 - Made the battle identity transparent, fight-first, and ASCII-separated.
 - Reset Arena-owned actor treatment, injury, alcohol, and visual-effect state between fights.
 - Locked player input immediately after choosing the next fight and delayed the countdown until the staged Arena was ready to start.

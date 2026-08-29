@@ -1,0 +1,168 @@
+local function catalog()
+    return {
+        max_physical_items_per_participant = 256,
+        items = {
+            ammo_test = { category = "ammo", box_size = 20 }
+        }
+    }
+end
+
+local function fixture(created_count)
+    local env = { created = {}, registered = {}, rollback_attempts = {} }
+    local next_id = 900
+    local port = gamma_arena_item_materializer.new({
+        create_item = function(section, owner, options)
+            local entities = {}
+            for index = 1, created_count do
+                local entity = {
+                    runtime_id = next_id,
+                    section = section,
+                    parent = owner.runtime_id,
+                    ammo = options and options.ammo or nil
+                }
+                next_id = next_id + 1
+                entities[index] = entity
+                env.created[#env.created + 1] = entity
+            end
+            return entities
+        end,
+        entity_id = function(entity) return entity and entity.runtime_id or nil end,
+        register = function(entity, descriptor)
+            local record = { id = entity.runtime_id, section = descriptor.section }
+            env.registered[#env.registered + 1] = record
+            return record
+        end,
+        verify_ownership = function() return true end,
+        prepare_rollback = function() return true end,
+        rollback = function(entity)
+            env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
+            return true
+        end
+    })
+    return env, port
+end
+
+local function apply_one(port)
+    return port:apply({ runtime_id = 1 }, {
+        { section = "ammo_test", quantity = 1 }
+    }, catalog())
+end
+
+local function accepts_one_entity_ammo_array()
+    local env, port = fixture(1)
+    local result = apply_one(port)
+    gamma_arena_test_assert.is_true(result.ok, "GAMMA one-box ammo array materializes")
+    gamma_arena_test_assert.equals(#env.created, 1, "one descriptor creates one physical ammo entity")
+    gamma_arena_test_assert.equals(#env.registered, 1, "array entity is registered exactly once")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, 0, "valid ammo array needs no rollback")
+end
+
+local function rolls_back_multi_entity_descriptor_result()
+    local env, port = fixture(2)
+    local result = apply_one(port)
+    gamma_arena_test_assert.is_false(result.ok, "multi-entity descriptor result fails closed")
+    gamma_arena_test_assert.equals(result.error.code,
+        "GA_ITEM_MATERIALIZE_CREATE_CARDINALITY_INVALID", "cardinality failure is exact")
+    gamma_arena_test_assert.equals(#env.registered, 2,
+        "all identifiable returned entities are registered before failure")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, 2,
+        "all transaction-owned returned entities are rolled back")
+    gamma_arena_test_assert.equals(env.rollback_attempts[1], env.created[2].runtime_id,
+        "multi-entity rollback starts with the last returned entity")
+    gamma_arena_test_assert.equals(env.rollback_attempts[2], env.created[1].runtime_id,
+        "multi-entity rollback finishes in reverse creation order")
+end
+
+local function activation_catalog()
+    return {
+        max_physical_items_per_participant = 256,
+        items = {
+            rifle_test = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_test" } },
+            ammo_test = { category = "ammo", box_size = 20 }
+        }
+    }
+end
+
+local function activation_fixture()
+    local env = { now = 0, next_id = 950, slots = {}, magazine = {}, activation_submissions = 0 }
+    local port = gamma_arena_item_materializer.new({
+        create_item = function(section, owner, options)
+            local entity = {
+                runtime_id = env.next_id,
+                section = section,
+                parent = owner.runtime_id,
+                ammo = options and options.ammo or nil
+            }
+            env.next_id = env.next_id + 1
+            return entity
+        end,
+        entity_id = function(entity) return entity and entity.runtime_id or nil end,
+        register = function(entity, descriptor)
+            return { id = entity.runtime_id, section = descriptor.section }
+        end,
+        verify_ownership = function() return true end,
+        clock = function() return env.now end,
+        timeout_ms = 100,
+        resolve_item = function(entity) return entity end,
+        move_to_slot = function(owner, entity, slot) env.slots[slot] = entity; return true end,
+        item_in_slot = function(owner, slot) return env.slots[slot] end,
+        fill_magazine = function(weapon, ammo_section) env.magazine[weapon.runtime_id] = ammo_section; return true end,
+        magazine_ammo = function(weapon) return env.magazine[weapon.runtime_id] end,
+        activate_slot = function(owner, slot)
+            env.activation_submissions = env.activation_submissions + 1
+            env.requested_active = env.slots[slot]
+            return true
+        end,
+        active_item = function() return env.active end,
+        prepare_rollback = function() return true end,
+        rollback = function() return true end
+    })
+    return env, port
+end
+
+local function waits_for_deferred_actor_weapon_activation()
+    local env, port = activation_fixture()
+    local result = port:apply({ runtime_id = 1 }, {
+        { section = "rifle_test", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_test", quantity = 1 }
+    }, activation_catalog())
+    for _ = 1, 16 do
+        if env.activation_submissions > 0 then break end
+        gamma_arena_test_assert.is_true(result.ok and result.value.pending == true,
+            "materializer remains pending before activation submission")
+        env.now = env.now + 1
+        result = port:update()
+    end
+    gamma_arena_test_assert.equals(env.activation_submissions, 1,
+        "actor weapon activation is submitted exactly once")
+    gamma_arena_test_assert.is_true(result.ok and result.value.pending == true,
+        "activation submission waits for a later engine frame")
+    env.now = env.now + 1
+    local waiting = port:update()
+    gamma_arena_test_assert.is_true(waiting.ok and waiting.value.pending == true,
+        "missing active item remains bounded pending")
+    gamma_arena_test_assert.equals(env.activation_submissions, 1,
+        "pending verification does not resubmit activation")
+    env.active = env.requested_active
+    env.now = env.now + 1
+    local ready = port:update()
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.pending ~= true,
+        "matching active item completes materialization")
+    gamma_arena_test_assert.equals(ready.value.active_slot, "weapon_2",
+        "ready result retains the activated logical slot")
+end
+
+local cases = {
+    { name = "item_materializer_accepts_one_entity_ammo_array", fn = accepts_one_entity_ammo_array },
+    { name = "item_materializer_rolls_back_multi_entity_descriptor_result", fn = rolls_back_multi_entity_descriptor_result },
+    { name = "item_materializer_waits_for_deferred_actor_weapon_activation", fn = waits_for_deferred_actor_weapon_activation }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        local case = cases[index]
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

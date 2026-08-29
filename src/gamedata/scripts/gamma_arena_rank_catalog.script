@@ -1,0 +1,386 @@
+local rules_path = "gamma_arena\\gamma_arena_custom_rules.ltx"
+local npc_loadout_path = "items\\settings\\npc_loadouts\\npc_loadouts.ltx"
+local ARENA_RUNTIME_COMMUNITY = "arena_enemy"
+
+local RANK_IDS = {
+    "novice", "trainee", "experienced", "professional",
+    "veteran", "expert", "master", "legend"
+}
+
+local FACTION_IDS = {
+    "army", "bandit", "csky", "dolg", "ecolog", "freedom", "greh",
+    "isg", "killer", "monolith", "renegade", "stalker", "zombied"
+}
+
+local PROFILE_TIER = {
+    novice = 0, trainee = 1, experienced = 2, professional = 2,
+    veteran = 3, expert = 3, master = 4, legend = 4
+}
+
+local PROFILE_PREFIX = {
+    army = "military", bandit = "bandit", csky = "csky",
+    dolg = "duty", ecolog = "ecolog", freedom = "freedom",
+    greh = "greh", isg = "isg", killer = "killer",
+    monolith = "monolith", renegade = "renegade",
+    stalker = "stalker", zombied = "zombied"
+}
+
+local function failure(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function trimmed(value)
+    if type(value) ~= "string" then return nil end
+    local result = string.gsub(value, "^%s*(.-)%s*$", "%1")
+    if result == "" then return nil end
+    return result
+end
+
+local function split_csv(value)
+    local values = {}
+    for token in string.gmatch(value or "", "[^,]+") do
+        local normalized = trimmed(token)
+        if normalized ~= nil then values[#values + 1] = normalized end
+    end
+    return values
+end
+
+local function finite_integer(value, minimum)
+    local number = tonumber(value)
+    if type(number) ~= "number" or number ~= number or number == math.huge or number == -math.huge
+        or number ~= math.floor(number) or number < (minimum or 0) then return nil end
+    return number
+end
+
+local function runtime_factory()
+    local base = system_ini()
+    return {
+        open = function(path) return ini_file(path) end,
+        section_exists = function(section) return base:section_exist(section) end,
+        read_system_string = function(section, key) return base:r_string_ex(section, key) end,
+        open_loadouts = function() return ini_file(npc_loadout_path) end,
+        loadout_section_exists = function(ini, section) return ini:section_exist(section) end,
+        read_loadout_string = function(ini, section, key) return ini:r_string_ex(section, key) end,
+        enumerate_loadout_keys = function(ini, section)
+            local keys = {}
+            local count = ini:line_count(section)
+            for index = 0, count - 1 do
+                local _, key = ini:r_line_ex(section, index)
+                keys[#keys + 1] = key
+            end
+            return keys
+        end
+    }
+end
+
+local function guarded(target, method_name, ...)
+    local method = type(target) == "table" and target[method_name] or nil
+    if type(method) ~= "function" then return false, nil end
+    local called, value = pcall(method, ...)
+    if not called then return false, value end
+    return true, value
+end
+
+local function read_rule(source, ini, section, key)
+    if type(ini) == "table" and type(ini.sections) == "table" then
+        local values = ini.sections[section]
+        return values and values[key] or nil
+    end
+    local ok, value = pcall(function() return ini:r_string(section, key) end)
+    return ok and value or nil
+end
+
+local function exact_ids(raw, expected, duplicate_code, group)
+    local values = split_csv(raw)
+    local seen = {}
+    for _, value in ipairs(values) do
+        if seen[value] then
+            return nil, failure(duplicate_code, "Rank catalog ids must be unique", { group = group, id = value })
+        end
+        seen[value] = true
+    end
+    if #values ~= #expected then
+        return nil, failure("GA_RANK_MANIFEST_INVALID", "Rank catalog id count differs from the exact manifest", { group = group })
+    end
+    for index, value in ipairs(expected) do
+        if values[index] ~= value then
+            return nil, failure("GA_RANK_MANIFEST_INVALID", "Rank catalog ids differ from the exact manifest", { group = group, index = index })
+        end
+    end
+    return values
+end
+
+local function parse_rating(raw)
+    local values = split_csv(raw)
+    if #values ~= #RANK_IDS * 2 - 1 then
+        return nil, failure("GA_RANK_THRESHOLD_INVALID", "Effective rank rating must contain all exact named bands")
+    end
+    local bands = {}
+    local minimum = 0
+    for index, rank_id in ipairs(RANK_IDS) do
+        local name = values[index * 2 - 1]
+        if name ~= rank_id then
+            return nil, failure("GA_RANK_THRESHOLD_INVALID", "Effective rank names must remain in exact order", { index = index, rank = name })
+        end
+        local maximum
+        if index < #RANK_IDS then
+            local next_minimum = finite_integer(values[index * 2], 0)
+            if next_minimum == nil or next_minimum <= minimum then
+                return nil, failure("GA_RANK_THRESHOLD_INVALID", "Effective rank thresholds must increase strictly", { index = index })
+            end
+            maximum = next_minimum - 1
+            bands[rank_id] = { minimum = minimum, maximum = maximum }
+            minimum = next_minimum
+        else
+            bands[rank_id] = { minimum = minimum, maximum = nil }
+        end
+    end
+    return bands
+end
+
+local function parse_optional_profile_range(value, alias)
+    local values = split_csv(value)
+    local has_range_separator = type(value) == 'string' and string.find(value, ',', 1, true) ~= nil
+    if not has_range_separator then
+        if #values == 0 then return nil end
+        if #values == 1 then
+            if finite_integer(values[1], 0) ~= nil then return nil end
+            return nil, failure('GA_RANK_PROFILE_RANGE_INVALID', 'Inherited Arena spawn rank metadata is invalid', { alias = alias })
+        end
+    end
+    local bounded_range_pattern = '^%s*([^,]+)%s*,%s*([^,]+)%s*$'
+    local raw_minimum, raw_maximum = string.match(value, bounded_range_pattern)
+    if raw_minimum == nil or raw_maximum == nil then
+        return nil, failure('GA_RANK_PROFILE_RANGE_INVALID', 'Inherited Arena profile rank must be a bounded range', { alias = alias })
+    end
+    local minimum = finite_integer(trimmed(raw_minimum), 0)
+    local maximum = finite_integer(trimmed(raw_maximum), 0)
+    if minimum == nil or maximum == nil or maximum < minimum then
+        return nil, failure("GA_RANK_PROFILE_RANGE_INVALID", "Inherited Arena profile rank range is invalid", { alias = alias })
+    end
+    return { minimum = minimum, maximum = maximum }
+end
+
+local function intersect_band(named_min, named_max, profile_min, profile_max)
+    local minimum = math.max(named_min, profile_min)
+    local maximum = named_max == nil and profile_max or math.min(named_max, profile_max)
+    if minimum > maximum then
+        return gamma_arena_result.err(
+            "GA_RANK_PROFILE_RANGE_EMPTY",
+            "Named rank and profile ranges do not intersect")
+    end
+    return gamma_arena_result.ok({ minimum = minimum, maximum = maximum })
+end
+
+local function normalized_pool_weapon(line)
+    if type(line) ~= "string" then return nil end
+    return trimmed(string.match(line, "^%s*([^:%s]+)"))
+end
+
+local function eligible_weapons(legacy_catalog)
+    if type(legacy_catalog) ~= "table" or type(legacy_catalog.weapon_list) ~= "table" then
+        return nil, failure("GA_RANK_LEGACY_CATALOG_INVALID", "Rank catalog requires current random weapon definitions")
+    end
+    local eligible = {}
+    for _, weapon in ipairs(legacy_catalog.weapon_list) do
+        if type(weapon) == "table" and type(weapon.section) == "string" and weapon.section ~= "" then
+            eligible[weapon.section] = true
+        end
+    end
+    if next(eligible) == nil then
+        return nil, failure("GA_RANK_LEGACY_CATALOG_INVALID", "Current random weapon definitions are empty")
+    end
+    return eligible
+end
+
+local function loadout_section_exists(source, ini, section)
+    if type(source.loadout_section_exists) == "function" then
+        local ok, value = guarded(source, "loadout_section_exists", ini, section)
+        return ok and value == true
+    end
+    if type(ini) == "table" and type(ini.sections) == "table" then return ini.sections[section] ~= nil end
+    local ok, value = pcall(function() return ini:section_exist(section) end)
+    return ok and value == true
+end
+
+local function read_loadout(source, ini, section, key)
+    if type(source.read_loadout_string) == "function" then
+        local ok, value = guarded(source, "read_loadout_string", ini, section, key)
+        return ok and trimmed(value) or nil
+    end
+    if type(ini) == "table" and type(ini.sections) == "table" then
+        local values = ini.sections[section]
+        return values and trimmed(values[key]) or nil
+    end
+    local ok, value = pcall(function() return ini:r_string_ex(section, key) end)
+    return ok and trimmed(value) or nil
+end
+
+local function enumerate_pool(source, ini, pool_section)
+    if not loadout_section_exists(source, ini, pool_section) then return nil end
+    if type(source.enumerate_loadout_keys) == "function" then
+        local ok, values = guarded(source, "enumerate_loadout_keys", ini, pool_section)
+        if ok and type(values) == "table" then return values end
+        return nil
+    end
+    if type(ini) == "table" and type(ini.sections) == "table" then
+        local result = {}
+        for key in pairs(ini.sections[pool_section] or {}) do result[#result + 1] = key end
+        return result
+    end
+    local ok, count = pcall(function() return ini:line_count(pool_section) end)
+    if not ok or type(count) ~= "number" then return nil end
+    local result = {}
+    for index = 0, count - 1 do
+        local read_ok, _, key = pcall(function() return ini:r_line_ex(pool_section, index) end)
+        if not read_ok then return nil end
+        result[#result + 1] = key
+    end
+    return result
+end
+
+local function weapon_pools(source, ini, loadout_section, eligible)
+    if not loadout_section_exists(source, ini, loadout_section) then
+        return nil, failure("GA_RANK_LOADOUT_MISSING", "Exact faction rank loadout section is missing", { section = loadout_section })
+    end
+    local pools = { primary_weapons = {}, secondary_weapons = {} }
+    local seen = { primary_weapons = {}, secondary_weapons = {} }
+    for _, key in ipairs({ "primary", "primery", "secondary" }) do
+        local target = key == "secondary" and "secondary_weapons" or "primary_weapons"
+        local pool_section = read_loadout(source, ini, loadout_section, key)
+        if pool_section ~= nil then
+            local lines = enumerate_pool(source, ini, pool_section)
+            if lines == nil then
+                return nil, failure("GA_RANK_LOADOUT_POOL_INVALID", "Exact faction rank weapon pool cannot be enumerated", { section = loadout_section, pool = pool_section })
+            end
+            for _, line in ipairs(lines) do
+                local weapon = normalized_pool_weapon(line)
+                if weapon ~= nil and eligible[weapon] and not seen[target][weapon] then
+                    seen[target][weapon] = true
+                    pools[target][#pools[target] + 1] = weapon
+                end
+            end
+        end
+    end
+    table.sort(pools.primary_weapons)
+    table.sort(pools.secondary_weapons)
+    if #pools.primary_weapons == 0 and #pools.secondary_weapons == 0 then
+        return nil, failure("GA_RANK_LOADOUT_POOL_EMPTY", "Exact faction rank loadout has no current random catalog weapons", { section = loadout_section })
+    end
+    return pools
+end
+
+local function load_impl(source, legacy_catalog)
+    source = source or runtime_factory()
+    if type(source) ~= "table" or type(source.open) ~= "function" or type(source.section_exists) ~= "function"
+        or type(source.read_system_string) ~= "function" or type(source.open_loadouts) ~= "function" then
+        return failure("GA_RANK_SOURCE_INVALID", "Rank catalog source is incomplete")
+    end
+    local eligible, eligible_error = eligible_weapons(legacy_catalog)
+    if eligible == nil then return eligible_error end
+    local rules_ok, rules = guarded(source, "open", rules_path)
+    if not rules_ok or rules == nil then return failure("GA_RANK_RULES_OPEN_FAILED", "Custom rank rules could not be opened") end
+    local loadouts_ok, loadouts = guarded(source, "open_loadouts")
+    if not loadouts_ok or loadouts == nil then return failure("GA_RANK_LOADOUT_OPEN_FAILED", "Effective NPC loadouts could not be opened") end
+
+    local schema_version = finite_integer(read_rule(source, rules, "meta", "schema_version"), 1)
+    local revision = finite_integer(read_rule(source, rules, "meta", "revision"), 1)
+    local base_budget = finite_integer(read_rule(source, rules, "limits", "base_budget"), 0)
+    local max_entries = finite_integer(read_rule(source, rules, "limits", "max_entries"), 1)
+    local max_physical_items_per_participant = finite_integer(
+        read_rule(source, rules, "limits", "max_physical_items_per_participant"), 1)
+    local max_selected_grenades = finite_integer(read_rule(source, rules, "limits", "max_selected_grenades"), 1)
+    local max_quantity_per_grenade = finite_integer(read_rule(source, rules, "limits", "max_quantity_per_grenade"), 1)
+    local second_grenade_price_multiplier = finite_integer(read_rule(source, rules, "limits", "second_grenade_price_multiplier"), 1)
+    if schema_version ~= 1 or revision ~= 1 or base_budget ~= 600 or max_entries ~= 64
+        or max_physical_items_per_participant ~= 256 or max_selected_grenades ~= 2
+        or max_quantity_per_grenade ~= 1 or second_grenade_price_multiplier ~= 2 then
+        return failure("GA_RANK_RULES_INVALID", "Custom rank rules metadata or limits differ from schema 1")
+    end
+    local faction_ids, ids_error = exact_ids(read_rule(source, rules, "factions", "ids"), FACTION_IDS, "GA_RANK_FACTION_DUPLICATE", "factions")
+    if faction_ids == nil then return ids_error end
+    local rank_ids; rank_ids, ids_error = exact_ids(read_rule(source, rules, "ranks", "ids"), RANK_IDS, "GA_RANK_ID_DUPLICATE", "ranks")
+    if rank_ids == nil then return ids_error end
+
+    local rating_ok, rating = guarded(source, "read_system_string", "game_relations", "rating")
+    if not rating_ok then return failure("GA_RANK_THRESHOLD_READ_FAILED", "Effective rank rating could not be read") end
+    local bands, bands_error = parse_rating(rating)
+    if bands == nil then return bands_error end
+    local catalog = {
+        schema_version = schema_version,
+        revision = revision,
+        base_budget = base_budget,
+        max_entries = max_entries,
+        max_physical_items_per_participant = max_physical_items_per_participant,
+        max_selected_grenades = max_selected_grenades,
+        max_quantity_per_grenade = max_quantity_per_grenade,
+        second_grenade_price_multiplier = second_grenade_price_multiplier,
+        rank_ids = rank_ids,
+        ranks = {},
+        faction_ids = faction_ids,
+        factions = {}
+    }
+    for _, rank_id in ipairs(rank_ids) do
+        local threat = finite_integer(read_rule(source, rules, "rank_" .. rank_id, "threat"), 1)
+        if threat == nil then return failure("GA_RANK_THREAT_INVALID", "Rank threat must be a positive integer", { rank = rank_id }) end
+        catalog.ranks[rank_id] = {
+            id = rank_id,
+            minimum = bands[rank_id].minimum,
+            maximum = bands[rank_id].maximum,
+            threat = threat
+        }
+    end
+
+    for _, faction_id in ipairs(faction_ids) do
+        local faction = { id = faction_id, community = faction_id, ranks = {} }
+        for _, rank_id in ipairs(rank_ids) do
+            local alias = "gamma_arena_" .. faction_id .. "_" .. rank_id
+            local exists_ok, exists = guarded(source, "section_exists", alias)
+            if not exists_ok then return failure("GA_RANK_ALIAS_CHECK_FAILED", "Exact Arena profile alias could not be checked", { alias = alias }) end
+            if exists ~= true then return failure("GA_RANK_ALIAS_MISSING", "Exact Arena profile alias is missing", { alias = alias }) end
+            local range_ok, raw_range = guarded(source, "read_system_string", alias, "rank")
+            if not range_ok then return failure("GA_RANK_PROFILE_RANGE_INVALID", "Inherited Arena profile rank could not be read", { alias = alias }) end
+            local profile_range, range_error = parse_optional_profile_range(raw_range, alias)
+            if range_error ~= nil then return range_error end
+            local band = catalog.ranks[rank_id]
+            local intersection
+            if profile_range == nil then
+                intersection = gamma_arena_result.ok({
+                    minimum = band.minimum,
+                    maximum = band.maximum or band.minimum
+                })
+            else
+                intersection = intersect_band(band.minimum, band.maximum, profile_range.minimum, profile_range.maximum)
+            end
+            if not intersection.ok then
+                intersection.error.context = { alias = alias, rank = rank_id }
+                return intersection
+            end
+            local loadout_section = faction_id .. "_" .. rank_id
+            local pools, pools_error = weapon_pools(source, loadouts, loadout_section, eligible)
+            if pools == nil then return pools_error end
+            faction.ranks[rank_id] = {
+                id = rank_id,
+                alias = alias,
+                profile_section = "sim_default_" .. PROFILE_PREFIX[faction_id] .. "_" .. PROFILE_TIER[rank_id],
+                community = faction_id,
+                runtime_community = ARENA_RUNTIME_COMMUNITY,
+                minimum = intersection.value.minimum,
+                maximum = intersection.value.maximum,
+                loadout_section = loadout_section,
+                primary_weapons = pools.primary_weapons,
+                secondary_weapons = pools.secondary_weapons,
+                threat = band.threat
+            }
+        end
+        catalog.factions[faction_id] = faction
+    end
+    return gamma_arena_result.ok(catalog)
+end
+
+function load(source, legacy_catalog)
+    local succeeded, result = pcall(load_impl, source, legacy_catalog)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    if succeeded then return failure("GA_RANK_CATALOG_INVALID", "Rank catalog loader returned an invalid Result") end
+    return failure("GA_RANK_CATALOG_INVALID", "Rank catalog loading failed safely", { reason = tostring(result) })
+end

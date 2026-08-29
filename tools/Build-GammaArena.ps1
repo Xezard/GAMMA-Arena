@@ -48,9 +48,44 @@ function Copy-GameDataTree([string]$Source, [string]$Destination) {
     }
 }
 
+function Copy-RepositoryFile([string]$RelativePath) {
+    $SourcePath = Join-Path $RepoRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+        throw "Package contract file is missing: $RelativePath"
+    }
+    $DestinationPath = Join-Path $StageRoot $RelativePath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
+    Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+}
+
+$LegacyFightSpecPattern = 'fight-spec-v[1-8]|golden-fights-v[1-8]|FightSpecV[1-8]'
+$LegacyArtifactPaths = @(foreach ($Root in @('src', 'dev', 'tests', 'schemas', 'tools')) {
+    $SourceRoot = Join-Path $RepoRoot $Root
+    if (Test-Path -LiteralPath $SourceRoot) {
+        Get-ChildItem -LiteralPath $SourceRoot -File -Recurse | Where-Object {
+            $_.FullName.Substring($RepoRoot.Length).TrimStart('\', '/') -match $LegacyFightSpecPattern
+        }
+    }
+})
+if ($LegacyArtifactPaths.Count -ne 0) {
+    throw "Retired FightSpec artifact cannot be packaged: $($LegacyArtifactPaths[0].FullName)"
+}
+
 Copy-GameDataTree (Join-Path $RepoRoot 'src\gamedata') $StageGameData
+Copy-RepositoryFile 'schemas\fight-spec-v9.md'
 if ($Configuration -eq 'Dev') {
     Copy-GameDataTree (Join-Path $RepoRoot 'dev\gamedata') $StageGameData
+    Copy-GameDataTree (Join-Path $RepoRoot 'schemas') (Join-Path $StageRoot 'schemas')
+    Copy-GameDataTree (Join-Path $RepoRoot 'tests') (Join-Path $StageRoot 'tests')
+    foreach ($DevContractPath in @(
+        'tests\fixtures\golden-fights-v9.txt',
+        'tests\fixtures\golden-random-selections-v9.txt',
+        'tests\fixtures\custom-catalog-v10.json'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $StageRoot $DevContractPath) -PathType Leaf)) {
+            throw "Dev package contract file is missing: $DevContractPath"
+        }
+    }
 }
 
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'README.md') -Destination (Join-Path $StageRoot 'README.md') -Force
@@ -78,9 +113,10 @@ $Manifest = [ordered]@{
     addon_version = $Version
     state_schema_version = 1
     session_schema_version = 1
-    fight_spec_schema_version = 8
-    generator_version = 10
-    catalog_revision = 10
+    fight_spec_schema_version = 9
+    catalog_schema_version = 10
+    catalog_revision = 11
+    generator_version = 11
     layout_revision = 2
     compatibility_manifest_version = 1
     files = $ManifestFiles

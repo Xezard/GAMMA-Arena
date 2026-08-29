@@ -417,6 +417,21 @@ function ActorAdapter:apply_loadout(loadout)
     return dependency_result("GA_ACTOR_LOADOUT_UNAVAILABLE", port and port.apply, owned.value, loadout)
 end
 
+function ActorAdapter:apply_items(items, catalog)
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local port = self.deps.items
+    return dependency_result("GA_ACTOR_ITEMS_UNAVAILABLE", port and port.apply, port, owned.value, items, catalog)
+end
+
+function ActorAdapter:update_items()
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local port = self.deps.items
+    if type(port) ~= "table" or type(port.update) ~= "function" then return gamma_arena_result.ok({ ready = true }) end
+    return dependency_result("GA_ACTOR_ITEMS_UPDATE_FAILED", port.update, port, owned.value)
+end
+
 function ActorAdapter:update_loadout()
     local owned = self:owned_actor()
     if not owned.ok then return owned end
@@ -424,8 +439,14 @@ function ActorAdapter:update_loadout()
     return dependency_result("GA_ACTOR_LOADOUT_UPDATE_FAILED", port and port.update, owned.value)
 end
 
+function ActorAdapter:owned_item_cleanup_port()
+    local items = self.deps.items
+    if type(items) == "table" and type(items.cleanup) == "function" then return items end
+    return self.deps.loadout
+end
+
 function ActorAdapter:cleanup_loadout_for_restore()
-    local loadout = self.deps.loadout
+    local loadout = self:owned_item_cleanup_port()
     if type(loadout) ~= "table" or type(loadout.cleanup) ~= "function" then
         return fail("GA_ACTOR_LOADOUT_CLEANUP_FAILED", "Arena actor loadout cleanup port is unavailable before checkpoint restore")
     end
@@ -448,7 +469,7 @@ function ActorAdapter:reset_for_rematch(layout)
         if not transients.ok then return transients end
         self.rematch_transients_reset = true
     end
-    local loadout = self.deps.loadout
+    local loadout = self:owned_item_cleanup_port()
     if type(loadout) == "table" and type(loadout.cleanup) == "function" then
         local cleaned = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
         if not cleaned.ok then return cleaned end
@@ -463,7 +484,7 @@ end
 function ActorAdapter:cleanup()
     local errors = {}
     local loadout_pending = false
-    local loadout = self.deps.loadout
+    local loadout = self:owned_item_cleanup_port()
     if type(loadout) == "table" and type(loadout.cleanup) == "function" then
         local result = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
         if not result.ok then

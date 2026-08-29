@@ -187,9 +187,14 @@ local function assert_keys_absent(config, keys, message)
     end
 end
 
-local launch_keys = { "launch_pending", "launch_token", "launch_mode_id", "launch_difficulty_id", "launch_seed_mode", "launch_session_seed", "launch_stage", "launch_deferred_level", "launch_target_level" }
+local launch_keys = {
+    "launch_pending", "launch_token", "launch_schema_version", "launch_mode_id", "launch_difficulty_id",
+    "launch_generation_recipe", "launch_seed_mode", "launch_session_seed", "launch_generator_version",
+    "launch_catalog_revision", "launch_catalog_fingerprint", "launch_stage", "launch_deferred_level", "launch_target_level"
+}
+for _, key in ipairs(gamma_arena_custom_codec.keys("launch_custom_")) do launch_keys[#launch_keys + 1] = key end
 local resume_keys = { "resume_pending", "resume_session_id", "resume_session_nonce", "resume_next_fight_index", "resume_checkpoint_name", "resume_schema_version" }
-local defeat_keys = { "defeat_pending", "defeat_token", "defeat_schema_version", "defeat_stage", "defeat_session_id", "defeat_session_nonce", "defeat_mode_id", "defeat_difficulty_id", "defeat_issued_at" }
+local defeat_keys = { "defeat_pending", "defeat_token", "defeat_schema_version", "defeat_stage", "defeat_session_id", "defeat_session_nonce", "defeat_mode_id", "defeat_generation_recipe", "defeat_difficulty_id", "defeat_issued_at" }
 local character_write_values = {
     new_game_difficulty = "2",
     new_game_economy = "2",
@@ -226,6 +231,7 @@ local function valid_defeat_context()
         session_id = "ga_session_1",
         session_nonce = "ga_nonce_1",
         mode_id = "skirmish",
+        generation_recipe = "random",
         difficulty_id = "master"
     }
 end
@@ -1838,6 +1844,195 @@ local function prepared_resume_consume_rejects_persisted_drift()
     gamma_arena_test_assert.equals(consumed.value.next_fight_index, 4, "matching prepared continuation is preserved")
 end
 
+local function custom_launch_round_trip_is_bounded_ordered_and_catalog_bound()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local context = gamma_arena_test_custom_config.make_context(catalog)
+    local request = {
+        schema_version = 2,
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        seed_mode = "manual",
+        session_seed = 4242,
+        generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision,
+        catalog_fingerprint = catalog.fingerprint,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+    local backend = fake_backend()
+    local menu_config = fake_config(nil, backend)
+    local menu_store = gamma_arena_session_store.new_store()
+    local issued = menu_store:issue_launch(menu_config, request, {
+        clock = function() return 1000 end,
+        nonce = function() return "custom_round_trip" end,
+        custom_context = context
+    })
+    gamma_arena_test_assert.is_true(issued.ok, "schema-2 custom launch issues")
+    gamma_arena_test_assert.equals(menu_config.data.launch_schema_version, "2", "launch schema is explicit")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_roster_count, "1", "roster count is explicit")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_actor_item_count, "7", "item count is explicit")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_actor_item_6_section, "grenade_f1", "first grenade persists by index")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_actor_item_7_section, "grenade_rgd5", "second grenade persists by index")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_actor_item_65_section, nil, "codec never exceeds 64 item entries")
+    gamma_arena_test_assert.equals(menu_config.data.launch_custom_roster_11_rank, nil, "codec never exceeds ten roster entries")
+    request.custom_config.roster[1].rank = "legend"
+    request.custom_config.actor_items[6].section = "grenade_rgd5"
+    gamma_arena_test_assert.equals(issued.value.request.custom_config.roster[1].rank, "novice", "issued request is a deep copy")
+    gamma_arena_test_assert.is_true(menu_store:write_character_creation(menu_config).ok, "custom launch bridge persists")
+
+    local game_config = fake_config(nil, backend)
+    local consumed = gamma_arena_session_store.new_store():consume_launch(game_config, {
+        clock = function() return 1001 end,
+        custom_context = context
+    })
+    gamma_arena_test_assert.is_true(consumed.ok, "custom launch survives the VM boundary")
+    gamma_arena_test_assert.equals(consumed.value.custom_config.roster[1].rank, "novice", "ordered roster survives")
+    gamma_arena_test_assert.equals(consumed.value.custom_config.actor_items[6].section, "grenade_f1", "first grenade survives")
+    gamma_arena_test_assert.equals(consumed.value.custom_config.actor_items[7].section, "grenade_rgd5", "second grenade survives")
+
+    local stale_catalog = gamma_arena_test_custom_config.make_catalog()
+    stale_catalog.fingerprint = "ga-catalog-v9-changed02"
+    local stale_context = gamma_arena_test_custom_config.make_context(stale_catalog)
+    local stale_backend = fake_backend()
+    local stale_menu = fake_config(nil, stale_backend)
+    local stale_store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(stale_store:issue_launch(stale_menu, {
+        schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+        seed_mode = "manual", session_seed = 9, generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision, catalog_fingerprint = catalog.fingerprint,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }, { clock = function() return 2000 end, nonce = function() return "stale_custom" end, custom_context = context }).ok, "stale fixture issues")
+    gamma_arena_test_assert.is_true(stale_store:write_character_creation(stale_menu).ok, "stale fixture bridge persists")
+    local stale_game = fake_config(nil, stale_backend)
+    local rejected = gamma_arena_session_store.new_store():consume_launch(stale_game, {
+        clock = function() return 2001 end, custom_context = stale_context
+    })
+    gamma_arena_test_assert.is_false(rejected.ok, "catalog drift rejects persisted custom launch")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_START_CATALOG_STALE", "catalog drift code")
+
+    local max_catalog = gamma_arena_test_custom_config.make_catalog()
+    local max_config = gamma_arena_test_custom_config.make_valid_config(max_catalog)
+    for index = 2, 10 do max_config.roster[index] = { rank = index % 2 == 0 and "legend" or "novice" } end
+    for index = #max_config.actor_items + 1, 64 do
+        local section = "max_fixture_" .. tostring(index)
+        max_catalog.items[section] = {
+            section = section, category = "medicine", price = 1, weight_mg = 1,
+            healing = false, ammo_sections = {}, carry_bonus_mg = 0, helmet_allowed = true
+        }
+        max_config.actor_items[index] = { section = section, quantity = 1 }
+    end
+    local max_context = gamma_arena_test_custom_config.make_context(max_catalog)
+    local max_backend = fake_backend()
+    local max_menu = fake_config(nil, max_backend)
+    local max_store = gamma_arena_session_store.new_store()
+    local max_request = {
+        schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+        seed_mode = "manual", session_seed = 64, generator_version = max_catalog.generator_version,
+        catalog_revision = max_catalog.revision, catalog_fingerprint = max_catalog.fingerprint,
+        custom_config = max_config
+    }
+    gamma_arena_test_assert.is_true(max_store:issue_launch(max_menu, max_request, {
+        clock = function() return 3000 end, nonce = function() return "max_custom" end, custom_context = max_context
+    }).ok, "maximum bounded custom payload issues")
+    gamma_arena_test_assert.equals(max_menu.data.launch_custom_roster_count, "10", "maximum roster count persists")
+    gamma_arena_test_assert.equals(max_menu.data.launch_custom_actor_item_count, "64", "maximum item count persists")
+    gamma_arena_test_assert.is_true(max_store:write_character_creation(max_menu).ok, "maximum payload bridge persists")
+    local max_consumed = gamma_arena_session_store.new_store():consume_launch(fake_config(nil, max_backend), {
+        clock = function() return 3001 end, custom_context = max_context
+    })
+    gamma_arena_test_assert.is_true(max_consumed.ok, "maximum bounded custom payload crosses VM")
+    gamma_arena_test_assert.equals(#max_consumed.value.custom_config.roster, 10, "maximum roster round trips")
+    gamma_arena_test_assert.equals(#max_consumed.value.custom_config.actor_items, 64, "maximum items round trip")
+end
+
+local function custom_launch_rejects_mixed_schema_and_recipe_keys()
+    local legacy_config = fake_config()
+    local legacy_store = gamma_arena_session_store.new_store()
+    gamma_arena_test_assert.is_true(legacy_store:issue_launch(legacy_config, valid_request(7), {
+        clock = function() return 100 end, nonce = function() return "legacy_mix" end
+    }).ok, "legacy mix fixture issues")
+    legacy_config:corrupt("gamma_arena", "launch_catalog_fingerprint", "unexpected")
+    gamma_arena_test_assert.equals(legacy_store:validate_launch_ownership(legacy_config, { clock = function() return 101 end }).error.code,
+        "GA_START_PAYLOAD_MIXED", "schema-1 rejects schema-2 provenance")
+
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local context = gamma_arena_test_custom_config.make_context(catalog)
+    local random_config = fake_config()
+    local random_store = gamma_arena_session_store.new_store()
+    local random_request = {
+        schema_version = 2, mode_id = "skirmish", difficulty_id = "stalker", generation_recipe = "random",
+        seed_mode = "manual", session_seed = 8, generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision, catalog_fingerprint = catalog.fingerprint
+    }
+    gamma_arena_test_assert.is_true(random_store:issue_launch(random_config, random_request, {
+        clock = function() return 200 end, nonce = function() return "random_mix" end, custom_context = context
+    }).ok, "random mix fixture issues")
+    random_config:corrupt("gamma_arena", "launch_custom_roster_1_rank", "novice")
+    gamma_arena_test_assert.equals(random_store:validate_launch_ownership(random_config, {
+        clock = function() return 201 end, custom_context = context
+    }).error.code, "GA_START_PAYLOAD_MIXED", "random recipe rejects custom indexed keys")
+
+    local custom_config = fake_config()
+    local custom_store = gamma_arena_session_store.new_store()
+    local custom_request = {
+        schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+        seed_mode = "manual", session_seed = 9, generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision, catalog_fingerprint = catalog.fingerprint,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+    gamma_arena_test_assert.is_true(custom_store:issue_launch(custom_config, custom_request, {
+        clock = function() return 300 end, nonce = function() return "custom_trailing" end, custom_context = context
+    }).ok, "custom trailing fixture issues")
+    custom_config:corrupt("gamma_arena", "launch_custom_roster_2_rank", "legend")
+    gamma_arena_test_assert.equals(custom_store:validate_launch_ownership(custom_config, {
+        clock = function() return 301 end, custom_context = context
+    }).error.code, "GA_CUSTOM_CODEC_TRAILING_KEY", "custom recipe rejects trailing indexed keys")
+end
+
+local function custom_launch_faults_cover_indexed_key_range()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local context = gamma_arena_test_custom_config.make_context(catalog)
+    local request = {
+        schema_version = 2, mode_id = "skirmish", generation_recipe = "custom",
+        seed_mode = "manual", session_seed = 10, generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision, catalog_fingerprint = catalog.fingerprint,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+    for _, position in ipairs({ 14, 110, 220 }) do
+        local config = fake_config()
+        local store = gamma_arena_session_store.new_store()
+        config:arm_fault(position)
+        local failed = store:issue_launch(config, request, {
+            clock = function() return 400 end, nonce = function() return "fault_" .. tostring(position) end, custom_context = context
+        })
+        gamma_arena_test_assert.is_false(failed.ok, "custom indexed mutation fault fails: " .. tostring(position))
+        gamma_arena_test_assert.equals(failed.error.code, "GA_LAUNCH_WRITE_FAILED", "custom indexed mutation fault code")
+        assert_keys_absent(config, launch_keys, "custom indexed mutation fault is fail-closed")
+        assert_keys_absent({ data = config.persisted }, launch_keys, "custom indexed mutation fault persists fail-closed state")
+    end
+
+    local stale = fake_config({ ["launch_custom_actor_item_64_section"] = "prior" })
+    local stale_store = gamma_arena_session_store.new_store()
+    stale:arm_fault(1)
+    local stale_failed = stale_store:issue_launch(stale, request, {
+        clock = function() return 450 end, nonce = function() return "stale_custom" end, custom_context = context
+    })
+    gamma_arena_test_assert.is_false(stale_failed.ok, "stale custom indexed cleanup fault fails")
+    gamma_arena_test_assert.equals(stale_failed.error.code, "GA_LAUNCH_STALE_CLEAR_FAILED", "stale custom indexed cleanup fault code")
+
+    local quarantined = fake_config()
+    local quarantine_store = gamma_arena_session_store.new_store()
+    quarantined:arm_fault(110)
+    quarantined:arm_recovery_fault(1)
+    local failed = quarantine_store:issue_launch(quarantined, request, {
+        clock = function() return 500 end, nonce = function() return "quarantine_custom" end, custom_context = context
+    })
+    gamma_arena_test_assert.is_false(failed.ok, "custom indexed recovery fault fails")
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.is_quarantined(quarantined), "custom indexed recovery fault quarantines")
+    quarantined:clear_fault()
+    gamma_arena_test_assert.is_true(gamma_arena_config_tx.recover(quarantined).ok, "custom indexed quarantine recovers explicitly")
+    assert_keys_absent(quarantined, launch_keys, "custom indexed quarantine recovery stays fail-closed")
+end
+
 local cases = {
     { name = "settings_migrations", fn = migrations_cover_absent_v0_v1_and_future },
     { name = "settings_v1_unknown_addon", fn = schema_v1_without_addon_version_is_incompatible },
@@ -1883,6 +2078,9 @@ local cases = {
     { name = "defeat_main_menu_deferred_fail_open", fn = defeat_main_menu_deferred_failures_fail_open },
     { name = "matching_resume_cleanup", fn = matching_resume_cleanup_is_session_scoped },
     { name = "prepared_resume_consume", fn = prepared_resume_consume_rejects_persisted_drift },
+    { name = "custom_launch_round_trip_is_bounded_ordered_and_catalog_bound", fn = custom_launch_round_trip_is_bounded_ordered_and_catalog_bound },
+    { name = "custom_launch_rejects_mixed_schema_and_recipe_keys", fn = custom_launch_rejects_mixed_schema_and_recipe_keys },
+    { name = "custom_launch_faults_cover_indexed_key_range", fn = custom_launch_faults_cover_indexed_key_range },
     { name = "defeat_intent_cross_vm", fn = defeat_intent_is_transactional_and_cross_vm_safe },
     { name = "defeat_duplicate_arm_persisted_token", fn = defeat_duplicate_arm_uses_persisted_token },
     { name = "defeat_promotion_atomic", fn = defeat_promotion_is_atomic_and_conflict_safe }

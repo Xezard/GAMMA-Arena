@@ -235,89 +235,47 @@ local function normalized_entities(value)
     return entities
 end
 
-local function copy_loadout(loadout)
-    if type(loadout) ~= "table" then return nil end
-    local consumables = {}
-    if type(loadout.consumables) ~= "table" then return nil end
-    for index, section in ipairs(loadout.consumables) do
-        if type(section) ~= "string" or section == "" then return nil end
-        consumables[index] = section
-    end
-    local grenades = {}
-    if type(loadout.grenades) ~= "table" then return nil end
-    local grenade_count, grenade_maximum = 0, 0
-    for key in pairs(loadout.grenades) do
+
+local function copy_items(items)
+    if type(items) ~= "table" then return nil end
+    local result, count, maximum = {}, 0, 0
+    for key in pairs(items) do
         if not finite_integer(key) or key < 1 then return nil end
-        grenade_count = grenade_count + 1
-        grenade_maximum = math.max(grenade_maximum, key)
+        count = count + 1
+        maximum = math.max(maximum, key)
     end
-    if grenade_count ~= grenade_maximum then return nil end
-    for index, section in ipairs(loadout.grenades) do
-        if type(section) ~= "string" or section == "" then return nil end
-        grenades[index] = section
+    if count ~= maximum then return nil end
+    for index = 1, count do
+        local item = items[index]
+        if type(item) ~= "table" or type(item.section) ~= "string" or item.section == ""
+            or not finite_integer(item.quantity) or item.quantity < 1 then return nil end
+        result[index] = { section = item.section, quantity = item.quantity, equipped_slot = item.equipped_slot }
     end
-    if type(loadout.weapon) ~= "string" or loadout.weapon == ""
-        or type(loadout.ammo) ~= "string" or loadout.ammo == ""
-        or type(loadout.outfit) ~= "string" or loadout.outfit == ""
-        or type(loadout.knife) ~= "string" or loadout.knife == ""
-        or not finite_integer(loadout.ammo_boxes) or loadout.ammo_boxes < 1 then return nil end
-    local bonus_ammo = nil
-    if loadout.bonus_ammo ~= nil then
-        if type(loadout.bonus_ammo) ~= "table"
-            or type(loadout.bonus_ammo.section) ~= "string" or loadout.bonus_ammo.section == ""
-            or type(loadout.bonus_ammo.requested_category) ~= "string" or loadout.bonus_ammo.requested_category == ""
-            or type(loadout.bonus_ammo.resolved_category) ~= "string" or loadout.bonus_ammo.resolved_category == ""
-            or not finite_integer(loadout.bonus_ammo.boxes) or loadout.bonus_ammo.boxes < 1 then return nil end
-        bonus_ammo = {
-            section = loadout.bonus_ammo.section,
-            requested_category = loadout.bonus_ammo.requested_category,
-            resolved_category = loadout.bonus_ammo.resolved_category,
-            boxes = loadout.bonus_ammo.boxes
-        }
-    end
-    local device = nil
-    if loadout.device ~= nil then
-        if type(loadout.device) ~= "table"
-            or type(loadout.device.catalog_id) ~= "string" or loadout.device.catalog_id == ""
-            or type(loadout.device.section) ~= "string" or loadout.device.section == ""
-            or type(loadout.device.kind) ~= "string" or loadout.device.kind == ""
-            or not finite_integer(loadout.device.weight) or loadout.device.weight < 1
-            or (loadout.device.nv_effect ~= nil and (type(loadout.device.nv_effect) ~= "string" or loadout.device.nv_effect == "")) then return nil end
-        device = {
-            catalog_id = loadout.device.catalog_id,
-            section = loadout.device.section,
-            kind = loadout.device.kind,
-            weight = loadout.device.weight,
-            nv_effect = loadout.device.nv_effect
-        }
-    end
-    return {
-        weapon = loadout.weapon,
-        ammo = loadout.ammo,
-        ammo_boxes = loadout.ammo_boxes,
-        bonus_ammo = bonus_ammo,
-        outfit = loadout.outfit,
-        knife = loadout.knife,
-        device = device,
-        consumables = consumables,
-        grenades = grenades,
-        cost = loadout.cost
-    }
+    return result
 end
 
 local function copy_participant(participant, expected_slot)
-    if type(participant) ~= "table" or type(participant.spawn_path) ~= "string" or participant.spawn_path == ""
-        or (expected_slot ~= 0 and (type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
-    local loadout = copy_loadout(participant.loadout)
-    if loadout == nil then return nil end
+    if type(participant) ~= "table" or (expected_slot == 0
+        and (type(participant.spawn_path) ~= "string" or participant.spawn_path == ""))
+        or (expected_slot ~= 0 and (not finite_integer(expected_slot) or expected_slot < 1
+            or type(participant.profile) ~= "string" or participant.profile == "")) then return nil end
+    local items = copy_items(participant.items)
+    if items == nil then return nil end
     local copy = {
         slot = expected_slot,
-        spawn_path = participant.spawn_path,
+        spawn_path = expected_slot == 0 and participant.spawn_path or participant.tactical_route,
         look_path = participant.look_path,
         profile = participant.profile,
         community = participant.community,
-        loadout = loadout
+        items = items
     }
+    if participant.rank ~= nil or participant.faction ~= nil then
+        if type(participant.rank) ~= "table" or type(participant.rank.id) ~= "string" or participant.rank.id == ""
+            or not finite_integer(participant.rank.value) or participant.rank.value < 0
+            or type(participant.faction) ~= "string" or participant.faction == "" then return nil end
+        copy.rank = { id = participant.rank.id, value = participant.rank.value }
+        copy.faction = participant.faction
+    end
     if expected_slot ~= 0 then
         local position = type(participant.spawn) == "table" and participant.spawn.position or nil
         if type(participant.spawn_slot_id) ~= "string" or participant.spawn_slot_id == ""
@@ -337,62 +295,29 @@ local function copy_participant(participant, expected_slot)
     return copy
 end
 
-local function preflight_ammo_rounds(target, section, boxes, slot, ammo_box_size, role)
-    local resolved = result_call("GA_ENTITY_AMMO_BOX_SIZE_INVALID", ammo_box_size, section)
-    if not resolved.ok then
-        return fail("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size dependency failed safely", {
-            slot = slot,
-            section = section,
-            role = role,
-            reason = resolved.error and resolved.error.context and resolved.error.context.reason or nil
-        })
+local function summarize_items(items, catalog)
+    local summary = { weapon = nil, ammo = nil, ammo_boxes = nil, outfit = nil, knife = nil }
+    if type(items) ~= "table" or type(catalog) ~= "table" or type(catalog.items) ~= "table" then return summary end
+    for _, item in ipairs(items) do
+        local definition = catalog.items[item.section]
+        if type(definition) == "table" then
+            if definition.category == "weapon" and item.equipped_slot ~= nil then summary.weapon = item.section
+            elseif definition.category == "outfit" and item.equipped_slot ~= nil then summary.outfit = item.section
+            elseif definition.category == "knife" and item.equipped_slot ~= nil then summary.knife = item.section end
+        end
     end
-    local box_size = resolved.value
-    if not finite_integer(box_size) or box_size < 1 or box_size >= UINT32_MOD then
-        return fail("GA_ENTITY_AMMO_BOX_SIZE_INVALID", "Effective ammo box_size must be a positive bounded integer", {
-            slot = slot,
-            section = section,
-            box_size = box_size,
-            role = role
-        })
+    local weapon = summary.weapon and catalog.items[summary.weapon] or nil
+    for _, ammo_section in ipairs(type(weapon) == "table" and weapon.ammo_sections or {}) do
+        for _, item in ipairs(items) do
+            if item.section == ammo_section then
+                summary.ammo = item.section
+                summary.ammo_boxes = item.quantity
+                break
+            end
+        end
+        if summary.ammo ~= nil then break end
     end
-    if not finite_integer(boxes) or boxes < 1 or boxes >= UINT32_MOD then
-        return fail("GA_ENTITY_AMMO_ROUNDS_INVALID", "Ammo boxes must be positive bounded integers", {
-            slot = slot,
-            section = section,
-            ammo_boxes = boxes,
-            role = role
-        })
-    end
-    local rounds = boxes * box_size
-    if not finite_integer(rounds) or rounds < 1 or rounds >= UINT32_MOD then
-        return fail("GA_ENTITY_AMMO_ROUNDS_INVALID", "Ammo boxes cannot be translated to a bounded exact round count", {
-            slot = slot,
-            section = section,
-            ammo_boxes = boxes,
-            box_size = box_size,
-            role = role
-        })
-    end
-    target.ammo_rounds = rounds
-    target.ammo_box_size = box_size
-    return gamma_arena_result.ok(rounds)
-end
-
-local function build_descriptors(loadout)
-    local result = {
-        { section = loadout.weapon, count = 1, ammo = false, role = "weapon" },
-        { section = loadout.ammo, count = loadout.ammo_rounds, ammo = true, role = "ammo", box_size = loadout.ammo_box_size },
-        { section = loadout.outfit, count = 1, ammo = false, role = "outfit" },
-        { section = loadout.knife, count = 1, ammo = false, role = "knife" }
-    }
-    for index, section in ipairs(loadout.consumables) do
-        result[#result + 1] = { section = section, count = 1, ammo = false, role = "consumable", ordinal = index }
-    end
-    for index, section in ipairs(loadout.grenades) do
-        result[#result + 1] = { section = section, count = 1, ammo = false, role = "grenade", ordinal = index }
-    end
-    return result
+    return summary
 end
 
 local function expected_created_quantity(descriptor, index, entity_count)
@@ -409,7 +334,9 @@ function EntityAdapter:__init(deps)
     self.state_value = "IDLE"
     self.session_id = nil
     self.actor_spec = nil
+    self.catalog = nil
     self.opponents = nil
+    self.opponent_by_slot = nil
     self.tactical_routes = nil
     self.opponent_index = 1
     self.current = nil
@@ -824,12 +751,13 @@ function EntityAdapter:persist_death_dropped(record)
     return gamma_arena_result.ok(true)
 end
 
-function EntityAdapter:begin_apply(validated_spec, session_id)
+function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
     if self.state_value ~= "IDLE" and self.state_value ~= "CLEAN" then
         return fail("GA_ENTITY_TRANSACTION_BUSY", "Arena entity transaction is already in progress", { state = self.state_value })
     end
-    if type(validated_spec) ~= "table" or type(session_id) ~= "string" or session_id == "" then
-        return fail("GA_ENTITY_TRANSACTION_INVALID", "Validated FightSpec and session id are required")
+    if type(validated_spec) ~= "table" or type(session_id) ~= "string" or session_id == ""
+        or type(catalog) ~= "table" or type(catalog.items) ~= "table" then
+        return fail("GA_ENTITY_TRANSACTION_INVALID", "Validated FightSpec, session id, and catalog are required")
     end
     local actor_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.actor)
     local opponents_result = result_call("GA_ENTITY_SPEC_INVALID", validated_spec.opponents)
@@ -849,7 +777,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     if actor_spec == nil or type(opponents_result.value) ~= "table" or #opponents_result.value < 1 then
         return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec accessors returned invalid participants")
     end
-    local opponents, tactical_routes, tactical_route_set = {}, {}, {}
+    local opponents, opponent_by_slot, tactical_routes, tactical_route_set = {}, {}, {}, {}
     if type(tactical_routes_result.value) ~= "table" or #tactical_routes_result.value < 1 then
         return fail("GA_ENTITY_SPEC_INVALID", "Validated FightSpec exposes no tactical routes")
     end
@@ -860,24 +788,35 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
         tactical_routes[index] = route
         tactical_route_set[route] = true
     end
+    local actor_descriptors = gamma_arena_item_materializer.descriptors(actor_spec.items, catalog)
+    if not actor_descriptors.ok then return actor_descriptors end
     for index, participant in ipairs(opponents_result.value) do
-        opponents[index] = copy_participant(participant, index)
-        if opponents[index] == nil then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent is invalid", { slot = index }) end
-        if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = index, route = opponents[index].tactical_route }) end
-        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, index, self.deps.profile_runtime, ARENA_RUNTIME_COMMUNITY)
+        opponents[index] = copy_participant(participant, participant.slot)
+        if opponents[index] == nil or opponent_by_slot[opponents[index].slot] ~= nil then
+            return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent or logical slot is invalid", { slot = participant.slot, index = index })
+        end
+        opponent_by_slot[opponents[index].slot] = opponents[index]
+        if tactical_route_set[opponents[index].tactical_route] ~= true then return fail("GA_ENTITY_SPEC_INVALID", "Validated opponent tactical route is unavailable to the tactical director", { slot = opponents[index].slot, route = opponents[index].tactical_route }) end
+        local effective = gamma_arena_validator.validate_effective_profile(opponents[index].profile, opponents[index].slot, self.deps.profile_runtime, ARENA_RUNTIME_COMMUNITY)
         if not effective.ok then return effective end
-    end
-    if actor_spec.loadout.bonus_ammo == nil then
-        return fail("GA_ENTITY_SPEC_INVALID", "Validated actor loadout is missing bonus ammo")
-    end
-    local actor_ammo = preflight_ammo_rounds(actor_spec.loadout, actor_spec.loadout.ammo, actor_spec.loadout.ammo_boxes, 0, self.deps.ammo_box_size, "ammo")
-    if not actor_ammo.ok then return actor_ammo end
-    local actor_bonus_ammo = preflight_ammo_rounds(actor_spec.loadout.bonus_ammo, actor_spec.loadout.bonus_ammo.section, actor_spec.loadout.bonus_ammo.boxes, 0, self.deps.ammo_box_size, "bonus_ammo")
-    if not actor_bonus_ammo.ok then return actor_bonus_ammo end
-    for index, opponent in ipairs(opponents) do
-        if opponent.loadout.bonus_ammo ~= nil then return fail("GA_ENTITY_SPEC_INVALID", "Opponent loadout must not contain bonus ammo", { slot = index }) end
-        local opponent_ammo = preflight_ammo_rounds(opponent.loadout, opponent.loadout.ammo, opponent.loadout.ammo_boxes, index, self.deps.ammo_box_size, "ammo")
-        if not opponent_ammo.ok then return opponent_ammo end
+        local descriptors = gamma_arena_item_materializer.descriptors(opponents[index].items, catalog)
+        if not descriptors.ok then return descriptors end
+        opponents[index].descriptors = {}
+        for descriptor_index, descriptor in ipairs(descriptors.value) do
+            if descriptor.category == 'device' then
+                return fail('GA_ENTITY_OPPONENT_DEVICE_FORBIDDEN', 'Validated opponents may never receive actor lighting devices', {
+                    slot = opponents[index].slot, section = descriptor.section
+                })
+            end
+            opponents[index].descriptors[descriptor_index] = {
+                section = descriptor.section,
+                count = descriptor.category == "ammo" and descriptor.box_size or 1,
+                ammo = descriptor.category == "ammo",
+                box_size = descriptor.box_size,
+                role = descriptor.category,
+                equipped_slot = descriptor.equipped_slot
+            }
+        end
     end
 
     self:__init(self.deps)
@@ -885,10 +824,12 @@ function EntityAdapter:begin_apply(validated_spec, session_id)
     self.fight_key = fight_key_result.value
     self.current_fight_id = fight_id_result.value
     self.actor_spec = actor_spec
+    self.catalog = catalog
     self.opponents = opponents
+    self.opponent_by_slot = opponent_by_slot
     self.tactical_routes = tactical_routes
     self.registry.session_id = session_id
-    local loadout = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "apply_loadout", actor_spec.loadout)
+    local loadout = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "apply_items", actor_spec.items, catalog)
     if not loadout.ok then
         self.terminal_error = loadout
         self.registry.error = copy_plain(loadout.error)
@@ -957,7 +898,7 @@ function EntityAdapter:spawn_current()
     if not tagged.ok then return tagged end
     local death_dropped = self:persist_death_dropped(registered.value)
     if not death_dropped.ok then return death_dropped end
-    self.current = { slot = opponent.slot, npc_id = id, phase = "snapshot", purge_ids = {}, purge_index = 1, descriptors = build_descriptors(opponent.loadout), descriptor_index = 1 }
+    self.current = { slot = opponent.slot, npc_id = id, phase = "snapshot", purge_ids = {}, purge_index = 1, descriptors = opponent.descriptors, descriptor_index = 1 }
     return gamma_arena_result.ok(true)
 end
 
@@ -1286,6 +1227,58 @@ function EntityAdapter:is_alive(object)
     return boolean_query("GA_ENTITY_ALIVE_CHECK_FAILED", method, object)
 end
 
+function EntityAdapter:materialize_items(owner, items, catalog)
+    return method_result("GA_ENTITY_ITEMS_UNAVAILABLE", self.deps.items, "apply", owner, items, catalog)
+end
+
+local function rank_contains(record, value)
+    return type(record) == "table" and finite_integer(record.minimum)
+        and (record.maximum == nil or finite_integer(record.maximum))
+        and value >= record.minimum and (record.maximum == nil or value <= record.maximum)
+end
+
+local function rank_id_for_value(catalog, faction_id, value)
+    local faction = type(catalog) == "table" and type(catalog.factions) == "table" and catalog.factions[faction_id] or nil
+    if type(faction) ~= "table" or type(faction.ranks) ~= "table" or type(catalog.ranks) ~= "table"
+        or type(catalog.rank_ids) ~= "table" then return nil end
+    for _, rank_id in ipairs(catalog.rank_ids) do
+        if rank_contains(catalog.ranks[rank_id], value) and rank_contains(faction.ranks[rank_id], value) then return rank_id end
+    end
+    return nil
+end
+
+function EntityAdapter:stage_exact_rank(npc, opponent)
+    if type(opponent) ~= "table" or type(opponent.rank) ~= "table" or type(opponent.rank.id) ~= "string"
+        or not finite_integer(opponent.rank.value) or opponent.rank.value < 0 or type(opponent.faction) ~= "string" then
+        return fail("GA_ENTITY_RANK_INVALID", "Validated opponent exact rank is unavailable")
+    end
+    local catalog = self.catalog
+    if rank_id_for_value(catalog, opponent.faction, opponent.rank.value) ~= opponent.rank.id then
+        return fail("GA_ENTITY_RANK_INVALID", "Selected exact rank is outside its authoritative RankCatalog intersection", {
+            faction = opponent.faction,
+            rank = opponent.rank.id,
+            value = opponent.rank.value
+        })
+    end
+    local assigned = result_call("GA_ENTITY_RANK_SET_FAILED", self.deps.set_character_rank, npc, opponent.rank.value)
+    if not assigned.ok then return assigned end
+    local readback = result_call("GA_ENTITY_RANK_READ_FAILED", self.deps.character_rank, npc)
+    if not readback.ok then return readback end
+    if not finite_integer(readback.value) or readback.value < 0 then
+        return fail("GA_ENTITY_RANK_READ_FAILED", "NPC character rank readback is not a non-negative integer")
+    end
+    local readback_id = rank_id_for_value(catalog, opponent.faction, readback.value)
+    if readback.value ~= opponent.rank.value or readback_id ~= opponent.rank.id then
+        return fail("GA_ENTITY_RANK_MISMATCH", "NPC exact rank did not round-trip through the engine", {
+            expected_value = opponent.rank.value,
+            actual_value = readback.value,
+            expected_rank = opponent.rank.id,
+            actual_rank = readback_id
+        })
+    end
+    return gamma_arena_result.ok({ value = readback.value, rank_id = readback_id })
+end
+
 function EntityAdapter:drive_online()
     if self.online_started == nil then
         local clock = self:clock()
@@ -1335,6 +1328,12 @@ function EntityAdapter:drive_online()
                 if not held.ok then return held end
                 record.staged_friendly = true
             end
+            local opponent = self.opponent_by_slot[record.slot]
+            if opponent ~= nil and opponent.rank ~= nil and not record.rank_verified then
+                local ranked = self:stage_exact_rank(object.value, opponent)
+                if not ranked.ok then return ranked end
+                record.rank_verified = true
+            end
         end
     end
     if pending_id ~= nil then
@@ -1374,7 +1373,7 @@ function EntityAdapter:drive_online()
         if actor_id == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Arena actor id is unavailable for tactical bind") end
         local tactical_opponents = {}
         for _, record in ipairs(self.registry.npcs) do
-            local opponent = self.opponents[record.slot]
+            local opponent = self.opponent_by_slot[record.slot]
             if opponent == nil then return fail("GA_ENTITY_TACTICAL_BEGIN_FAILED", "Tactical participant slot has no validated opponent", { slot = record.slot }) end
             tactical_opponents[#tactical_opponents + 1] = {
                 slot = record.slot,
@@ -1679,7 +1678,7 @@ function EntityAdapter:update()
     end
     if self.state_value == "CLEANING" or self.state_value == "ROLLING_BACK" then return self:drive_cleanup() end
     if self.state_value == "WAIT_ACTOR_LOADOUT" then
-        local equipped = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "update_loadout")
+        local equipped = method_result("GA_ENTITY_ACTOR_LOADOUT_FAILED", self.deps.actor, "update_items")
         if not equipped.ok then return self:fail_and_rollback(equipped) end
         if type(equipped.value) ~= "table" or equipped.value.ready ~= true then
             return gamma_arena_result.ok({ state = "WAIT_ACTOR_LOADOUT" })
@@ -1762,7 +1761,7 @@ function EntityAdapter:accept_registered_death(record, evidence)
 end
 
 function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, authoritative_owner)
-    local opponent = self.opponents[record.slot] or {}
+    local opponent = self.opponent_by_slot[record.slot] or {}
     local diagnostic = {
         session_id = self.session_id,
         fight_key = self.fight_key,
@@ -1778,13 +1777,7 @@ function EntityAdapter:early_self_death_diagnostic(record, killer_id, elapsed, a
             tactical_route = opponent.tactical_route,
             role = opponent.role or record.role
         },
-        loadout = {
-            weapon = opponent.loadout and opponent.loadout.weapon or nil,
-            ammo = opponent.loadout and opponent.loadout.ammo or nil,
-            ammo_boxes = opponent.loadout and opponent.loadout.ammo_boxes or nil,
-            outfit = opponent.loadout and opponent.loadout.outfit or nil,
-            knife = opponent.loadout and opponent.loadout.knife or nil
-        },
+        loadout = summarize_items(opponent.items, self.catalog),
         spawn_position = copy_plain(record.spawn_position),
         queries = {},
         classification = self:classify_forensics(record),

@@ -1,0 +1,679 @@
+local function clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then error("cyclic fixture") end
+    seen[value] = true
+    local copied = {}
+    for key, child in pairs(value) do copied[key] = clone(child, seen) end
+    seen[value] = nil
+    return copied
+end
+
+function make_catalog()
+    local function item(section, category, price, weight_mg, extra)
+        local value = {
+            section = section, category = category, price = price, weight_mg = weight_mg,
+            ammo_sections = {}, healing = false, helmet_allowed = true, carry_bonus_mg = 0
+        }
+        for key, child in pairs(extra or {}) do value[key] = child end
+        return value
+    end
+    local items = {
+        outfit_field = item("outfit_field", "outfit", 100, 5000, { carry_bonus_mg = 10000 }),
+        helmet_open = item("helmet_open", "helmet", 50, 1000),
+        wpn_knife = item("wpn_knife", "knife", 50, 500),
+        wpn_alpha = item("wpn_alpha", "weapon", 100, 3000, { ltx_slot = 2, ammo_sections = { "ammo_alpha" } }),
+        ammo_alpha = item("ammo_alpha", "ammo", 20, 100),
+        medkit = item("medkit", "medicine", 30, 100, { healing = true }),
+        grenade_f1 = item("grenade_f1", "grenade", 40, 400),
+        grenade_rgd5 = item("grenade_rgd5", "grenade", 70, 500),
+        grenade_gd05 = item("grenade_gd05", "grenade", 30, 300),
+        device_torch_dummy = item("device_torch_dummy", "device", 25, 200),
+        device_torch_nv_1 = item("device_torch_nv_1", "device", 75, 250),
+        device_torch_nv_2 = item("device_torch_nv_2", "device", 150, 300),
+        device_torch_nv_3 = item("device_torch_nv_3", "device", 300, 350)
+    }
+    return {
+        schema_version = 10, revision = 11, generator_version = 11,
+        fingerprint = "ga-catalog-v10-custom001",
+        layouts = { rostok_arena_v1 = { id = "rostok_arena_v1", virtual_capacity = 10 } },
+        base_budget = 600, max_entries = 64, max_physical_items_per_participant = 256,
+        max_selected_grenades = 2, max_quantity_per_grenade = 1,
+        second_grenade_price_multiplier = 2, base_carry_weight = 50000,
+        rank_ids = { "novice", "legend" },
+        ranks = {
+            novice = { id = "novice", threat = 100 },
+            legend = { id = "legend", threat = 400 }
+        },
+        faction_ids = { "stalker" },
+        factions = {
+            stalker = { id = "stalker", ranks = { novice = { id = "novice" }, legend = { id = "legend" } } }
+        },
+        items = items
+    }
+end
+
+function make_context(catalog)
+    return { catalog = catalog or make_catalog(), layout = { id = "rostok_arena_v1", virtual_capacity = 10 } }
+end
+
+function make_valid_config(catalog)
+    catalog = catalog or make_catalog()
+    return {
+        schema_version = 1,
+        faction = "stalker",
+        roster = { { rank = "novice" } },
+        actor_items = {
+            { section = "outfit_field", quantity = 1, equipped_slot = "outfit" },
+            { section = "wpn_alpha", quantity = 1, equipped_slot = "weapon_2" },
+            { section = "ammo_alpha", quantity = 2 },
+            { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+            { section = "medkit", quantity = 1 },
+            { section = "grenade_f1", quantity = 1 },
+            { section = "grenade_rgd5", quantity = 1 }
+        },
+        actor_device = nil,
+        catalog_fingerprint = catalog.fingerprint
+    }
+end
+
+local function assert_code(result, code, message)
+    gamma_arena_test_assert.is_false(result.ok, message)
+    gamma_arena_test_assert.equals(result.error.code, code, message .. " code")
+end
+
+local function custom_config_accepts_and_copies_valid_ordered_input()
+    local catalog = make_catalog()
+    local value = make_valid_config(catalog)
+    local validated = gamma_arena_custom_config.validate(value, make_context(catalog))
+    gamma_arena_test_assert.is_true(validated.ok, "valid custom config")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].section, "grenade_f1", "first grenade order")
+    gamma_arena_test_assert.equals(validated.value.actor_items[7].section, "grenade_rgd5", "second grenade order")
+    value.roster[1].rank = "legend"
+    value.actor_items[6].section = "grenade_rgd5"
+    gamma_arena_test_assert.equals(validated.value.roster[1].rank, "novice", "roster is copied")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].section, "grenade_f1", "items are copied")
+    local budget = gamma_arena_custom_config.budget(validated.value.roster, catalog)
+    local totals = gamma_arena_custom_config.totals(validated.value, catalog)
+    gamma_arena_test_assert.equals(budget.value, 700, "budget is base plus threat")
+    gamma_arena_test_assert.equals(totals.value.points, 500, "second grenade receives multiplier")
+    gamma_arena_test_assert.equals(totals.value.weight_mg, 9700, "physical weight is authoritative")
+    gamma_arena_test_assert.equals(totals.value.weight_limit_mg, 60000, "outfit increases carry limit")
+end
+
+local function custom_config_rejects_roster_catalog_and_shape_matrix()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate, code, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_config.validate(value, context), code, label)
+    end
+    reject(function(value) value.roster = {} end, "GA_CUSTOM_ROSTER_LIMIT", "zero roster")
+    reject(function(value) for index = 2, 11 do value.roster[index] = { rank = "novice" } end end, "GA_CUSTOM_ROSTER_LIMIT", "eleven roster")
+    reject(function(value) value.faction = "unknown" end, "GA_CUSTOM_FACTION_UNKNOWN", "unknown faction")
+    reject(function(value) value.roster[1].rank = "unknown" end, "GA_CUSTOM_RANK_UNKNOWN", "unknown rank")
+    reject(function(value) value.actor_items[5].section = "unknown" end, "GA_CUSTOM_ITEM_UNKNOWN", "unknown section")
+    reject(function(value) value.catalog_fingerprint = "ga-catalog-v9-stale" end, "GA_CUSTOM_CATALOG_STALE", "stale fingerprint")
+    reject(function(value) value.actor_items[7].section = value.actor_items[6].section end, "GA_CUSTOM_ITEM_DUPLICATE", "duplicate section")
+    reject(function(value) value.points = 500 end, "GA_CUSTOM_UNKNOWN_FIELD", "supplied derived total")
+
+    local too_many = make_valid_config(catalog)
+    for index = #too_many.actor_items + 1, 65 do
+        local section = "fixture_item_" .. tostring(index)
+        catalog.items[section] = { section = section, category = "medicine", price = 1, weight_mg = 1, healing = false, ammo_sections = {} }
+        too_many.actor_items[index] = { section = section, quantity = 1 }
+    end
+    assert_code(gamma_arena_custom_config.validate(too_many, context), "GA_CUSTOM_ENTRY_LIMIT", "65 entries")
+
+    reject(function(value) value.actor_items[3].quantity = 251 end, "GA_CUSTOM_PHYSICAL_LIMIT", "257 physical items")
+end
+
+local function custom_config_rejects_equipment_compatibility_and_budget_matrix()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate_config, mutate_catalog, code, label)
+        local local_catalog = clone(catalog)
+        local value = make_valid_config(local_catalog)
+        if mutate_config then mutate_config(value) end
+        if mutate_catalog then mutate_catalog(local_catalog) end
+        assert_code(gamma_arena_custom_config.validate(value, make_context(local_catalog)), code, label)
+    end
+    reject(function(value) value.actor_items[5].equipped_slot = "weapon_1" end, nil, "GA_CUSTOM_SLOT_INVALID", "illegal slot")
+    reject(function(value) table.insert(value.actor_items, 2, { section = "helmet_open", quantity = 1, equipped_slot = "helmet" }) end,
+        function(value) value.items.outfit_field.helmet_allowed = false end, "GA_CUSTOM_HELMET_INCOMPATIBLE", "incompatible helmet")
+    reject(nil, function(value) value.items.wpn_alpha.ammo_sections = { "ammo_other" } end, "GA_CUSTOM_AMMO_INCOMPATIBLE", "incompatible ammo")
+    reject(function(value) table.remove(value.actor_items, 5) end, nil, "GA_CUSTOM_HEALING_REQUIRED", "missing healing")
+    reject(nil, function(value) value.items.medkit.price = 1000 end, "GA_CUSTOM_OVERSPEND", "overspend")
+    reject(nil, function(value)
+        value.items.medkit.price = nil
+        value.items.medkit.price_origin = "zero_grant"
+    end, "GA_CUSTOM_ITEM_INVALID", "zero-grant item cannot enter final Custom config")
+    reject(nil, function(value) value.items.wpn_alpha.weight_mg = 70000 end, "GA_CUSTOM_OVERWEIGHT", "overweight")
+    reject(function(value) value.actor_items[6].quantity = 2 end, nil, "GA_CUSTOM_GRENADE_LIMIT", "grenade quantity two")
+    reject(function(value) value.actor_items[#value.actor_items + 1] = { section = "grenade_gd05", quantity = 1 } end, nil, "GA_CUSTOM_GRENADE_LIMIT", "third grenade")
+end
+
+local function custom_config_rejects_non_unit_physical_equipment()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local function reject(mutate, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_config.validate(value, context), "GA_CUSTOM_EQUIPMENT_QUANTITY", label)
+    end
+    reject(function(value) value.actor_items[1].quantity = 2 end, "outfit quantity two")
+    reject(function(value) value.actor_items[4].quantity = 2 end, "knife quantity two")
+    reject(function(value)
+        table.insert(value.actor_items, 2, { section = "helmet_open", quantity = 2, equipped_slot = "helmet" })
+    end, "helmet quantity two")
+    reject(function(value) value.actor_items[2].quantity = 2 end, "equipped weapon quantity two")
+end
+
+local function custom_config_preserves_legitimate_inventory_stacks()
+    local catalog = make_catalog()
+    catalog.items.wpn_spare = {
+        section = "wpn_spare", category = "weapon", price = 1, weight_mg = 1,
+        ltx_slot = 2, ammo_sections = { "ammo_alpha" }, healing = false,
+        helmet_allowed = true, carry_bonus_mg = 0
+    }
+    local value = make_valid_config(catalog)
+    value.actor_items[5].quantity = 2
+    table.insert(value.actor_items, 6, { section = "wpn_spare", quantity = 2 })
+    local validated = gamma_arena_custom_config.validate(value, make_context(catalog))
+    gamma_arena_test_assert.is_true(validated.ok, "medicine and unequipped weapon stacks remain valid")
+    gamma_arena_test_assert.equals(validated.value.actor_items[5].quantity, 2, "medicine stack is preserved")
+    gamma_arena_test_assert.equals(validated.value.actor_items[6].quantity, 2, "unequipped weapon stack is preserved")
+end
+
+local function custom_config_grenade_order_is_semantic()
+    local catalog = make_catalog()
+    local forward = make_valid_config(catalog)
+    local reverse_order = make_valid_config(catalog)
+    reverse_order.actor_items[6], reverse_order.actor_items[7] = reverse_order.actor_items[7], reverse_order.actor_items[6]
+    local first = gamma_arena_custom_config.totals(forward, catalog)
+    local second = gamma_arena_custom_config.totals(reverse_order, catalog)
+    gamma_arena_test_assert.equals(first.value.points, 500, "RGD5 is multiplied when second")
+    gamma_arena_test_assert.equals(second.value.points, 470, "F1 is multiplied when second")
+end
+
+local function custom_setup_model_preserves_order_and_recalculates_budget()
+    local catalog = make_catalog()
+    catalog.faction_ids = { "stalker", "monolith" }
+    catalog.factions.monolith = clone(catalog.factions.stalker)
+    catalog.factions.monolith.id = "monolith"
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    local initial = model:snapshot()
+    gamma_arena_test_assert.equals(initial.count, 1, "draft starts with one opponent")
+    gamma_arena_test_assert.equals(initial.roster[1].rank, "novice", "draft starts at novice")
+    gamma_arena_test_assert.equals(initial.faction, nil, "draft requires explicit faction")
+    gamma_arena_test_assert.is_false(model:validation().ok, "initial draft is not launchable")
+
+    gamma_arena_test_assert.is_true(model:set_count(3).ok, "count growth is accepted")
+    gamma_arena_test_assert.is_true(model:set_rank(2, "legend").ok, "visible row rank changes")
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "shared faction is selected")
+    local grown = model:snapshot()
+    gamma_arena_test_assert.equals(grown.roster[1].rank, "novice", "first rank survives growth")
+    gamma_arena_test_assert.equals(grown.roster[2].rank, "legend", "changed rank survives growth")
+    gamma_arena_test_assert.equals(grown.roster[3].rank, "novice", "growth appends novice")
+    gamma_arena_test_assert.equals(grown.budget, 1200, "budget is 600 plus ordered threats")
+    gamma_arena_test_assert.equals(grown.config.roster[1].faction, nil, "rows never store faction")
+
+    gamma_arena_test_assert.is_true(model:set_count(2).ok, "tail shrink is accepted")
+    gamma_arena_test_assert.is_true(model:set_count(3).ok, "regrowth is accepted")
+    gamma_arena_test_assert.is_true(model:set_faction("monolith").ok, "one faction changes the whole roster")
+    local regrown = model:snapshot()
+    gamma_arena_test_assert.equals(regrown.roster[1].rank, "novice", "shrink preserves first row")
+    gamma_arena_test_assert.equals(regrown.roster[2].rank, "legend", "shrink preserves second row")
+    gamma_arena_test_assert.equals(regrown.roster[3].rank, "novice", "regrowth creates novice tail")
+    gamma_arena_test_assert.equals(regrown.config.faction, "monolith", "single config faction is authoritative")
+    gamma_arena_test_assert.equals(regrown.budget, 1200, "regrowth recalculates budget")
+    gamma_arena_test_assert.is_false(model:set_count(11).ok, "layout capacity rejects eleventh row")
+    gamma_arena_test_assert.equals(model:snapshot().count, 3, "rejected count does not mutate")
+end
+
+local function custom_setup_model_progressively_assembles_valid_equipment_and_categories()
+    local catalog = make_catalog()
+    catalog.categories = {
+        weapon = { "wpn_alpha" }, ammo = { "ammo_alpha" }, outfit = { "outfit_field" },
+        helmet = { "helmet_open" }, knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    catalog.item_ids = {
+        "ammo_alpha", "grenade_f1", "grenade_gd05", "grenade_rgd5", "helmet_open",
+        "medkit", "outfit_field", "wpn_alpha", "wpn_knife"
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "faction edit commits while draft is incomplete")
+    gamma_arena_test_assert.is_true(model:add_item("outfit_field", 1, "outfit").ok, "outfit is progressively selected and equipped")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_alpha", 1).ok, "weapon is progressively selected")
+    gamma_arena_test_assert.is_true(model:equip("wpn_alpha", "weapon_2").ok, "weapon equips to effective slot")
+    gamma_arena_test_assert.is_true(model:add_item("ammo_alpha", 2).ok, "ammo quantity is selected")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_knife", 1, "knife").ok, "knife is progressively selected and equipped")
+    gamma_arena_test_assert.is_true(model:add_item("medkit", 1).ok, "healing is progressively selected")
+    gamma_arena_test_assert.is_true(model:validation().ok, "complete equipment passes authoritative validation")
+
+    local browsed = model:snapshot()
+    gamma_arena_test_assert.equals(#browsed.categories.weapon, 1, "weapon category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.ammo, 1, "ammo category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.outfit, 1, "outfit category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.helmet, 1, "helmet category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.knife, 1, "knife category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.medicine, 1, "medicine category browses installed item")
+    gamma_arena_test_assert.equals(#browsed.categories.grenade, 3, "grenade category browses curated actor pool")
+    gamma_arena_test_assert.equals(browsed.spent, 320, "progressive equipment points are derived")
+    gamma_arena_test_assert.equals(browsed.physical_count, 6, "physical quantities are derived")
+
+    local illegal = model:equip("medkit", "weapon_1")
+    assert_code(illegal, "GA_CUSTOM_SLOT_INVALID", "medicine cannot equip")
+    gamma_arena_test_assert.equals(model:snapshot().config.actor_items[5].equipped_slot, nil, "rejected equip does not mutate")
+    gamma_arena_test_assert.is_true(model:unequip("outfit_field").ok, "required equipment may be removed from draft")
+    gamma_arena_test_assert.is_false(model:validation().ok, "unequipped outfit disables launch")
+    gamma_arena_test_assert.is_true(model:equip("outfit_field", "outfit").ok, "outfit can be restored")
+    gamma_arena_test_assert.is_true(model:validation().ok, "restored equipment reenables launch")
+end
+
+local function custom_setup_model_rejects_masked_semantic_candidates_atomically()
+    local catalog = make_catalog()
+    catalog.items.ammo_beta = clone(catalog.items.ammo_alpha)
+    catalog.items.ammo_beta.section = "ammo_beta"
+    catalog.items.expensive_medkit = clone(catalog.items.medkit)
+    catalog.items.expensive_medkit.section = "expensive_medkit"
+    catalog.items.expensive_medkit.price = 701
+    catalog.items.heavy_medkit = clone(catalog.items.medkit)
+    catalog.items.heavy_medkit.section = "heavy_medkit"
+    catalog.items.heavy_medkit.weight_mg = 50001
+    catalog.items.outfit_closed = clone(catalog.items.outfit_field)
+    catalog.items.outfit_closed.section = "outfit_closed"
+    catalog.items.outfit_closed.helmet_allowed = false
+    catalog.items.wpn_zero = clone(catalog.items.wpn_alpha)
+    catalog.items.wpn_zero.section = "wpn_zero"
+    catalog.items.wpn_zero.price = nil
+    catalog.items.wpn_zero.price_origin = "zero_grant"
+
+    local incompatible = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(incompatible:add_item("wpn_alpha", 1).ok, "weapon without ammo is an allowed incomplete draft")
+    local before_incompatible = incompatible:snapshot()
+    assert_code(incompatible:add_item("ammo_beta", 1), "GA_CUSTOM_AMMO_INCOMPATIBLE", "incompatible ammo is rejected behind missing faction")
+    local after_incompatible = incompatible:snapshot()
+    gamma_arena_test_assert.equals(#after_incompatible.actor_items, #before_incompatible.actor_items, "incompatible addition does not mutate item count")
+    gamma_arena_test_assert.equals(after_incompatible.actor_items[1].section, before_incompatible.actor_items[1].section, "incompatible addition preserves ordered draft")
+    gamma_arena_test_assert.equals(after_incompatible.validation.error.code, "GA_CUSTOM_FACTION_UNKNOWN", "full current validation remains authoritative")
+
+    local overspend = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    assert_code(overspend:add_item("expensive_medkit", 1), "GA_CUSTOM_OVERSPEND", "overspend is rejected behind missing faction")
+    gamma_arena_test_assert.equals(#overspend:snapshot().actor_items, 0, "overspend rejection does not mutate")
+
+    local overweight = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    assert_code(overweight:add_item("heavy_medkit", 1), "GA_CUSTOM_OVERWEIGHT", "overweight is rejected behind missing faction")
+    gamma_arena_test_assert.equals(#overweight:snapshot().actor_items, 0, "overweight rejection does not mutate")
+
+    local unavailable = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    local unavailable_snapshot = unavailable:snapshot()
+    for _, cell in ipairs(unavailable_snapshot.categories.weapon) do
+        gamma_arena_test_assert.is_false(cell.section == "wpn_zero", "zero grant is hidden from Custom")
+    end
+    assert_code(unavailable:add_item("wpn_zero", 1), "GA_CUSTOM_ITEM_UNAVAILABLE",
+        "direct Custom mutation rejects zero grant")
+    gamma_arena_test_assert.equals(#unavailable:snapshot().actor_items, 0,
+        "zero-grant rejection is atomic")
+
+    local helmet = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(helmet:add_item("outfit_closed", 1, "outfit").ok, "closed outfit is a valid incomplete first edit")
+    assert_code(helmet:add_item("helmet_open", 1, "helmet"), "GA_CUSTOM_HELMET_INCOMPATIBLE", "incompatible helmet is rejected behind missing faction")
+    gamma_arena_test_assert.equals(#helmet:snapshot().actor_items, 1, "helmet rejection preserves outfit-only draft")
+end
+
+local function custom_setup_model_edits_stack_quantities_without_duplicates()
+    local catalog = make_catalog()
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    model:set_faction("stalker")
+    gamma_arena_test_assert.is_true(model:add_item("outfit_field", 1, "outfit").ok, "outfit selected")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_alpha", 1, "weapon_2").ok, "weapon selected")
+    gamma_arena_test_assert.is_true(model:add_item("ammo_alpha", 1).ok, "one ammo box selected")
+    gamma_arena_test_assert.is_true(model:add_item("wpn_knife", 1, "knife").ok, "knife selected")
+    gamma_arena_test_assert.is_true(model:add_item("medkit", 1).ok, "one medicine selected")
+    gamma_arena_test_assert.is_true(model:validation().ok, "quantity-one base loadout is valid")
+
+    gamma_arena_test_assert.is_true(model:increment_item("ammo_alpha").ok, "ammo increments through model")
+    gamma_arena_test_assert.is_true(model:increment_item("medkit").ok, "medicine increments through model")
+    local stacked = model:snapshot()
+    gamma_arena_test_assert.equals(stacked.actor_items[3].quantity, 2, "ammo reaches quantity two")
+    gamma_arena_test_assert.equals(stacked.actor_items[5].quantity, 2, "medicine reaches quantity two")
+    gamma_arena_test_assert.equals(stacked.distinct_count, 5, "stack increments never add duplicate sections")
+
+    gamma_arena_test_assert.is_true(model:decrement_item("ammo_alpha").ok, "ammo decrements to one")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[3].quantity, 1, "ammo quantity returns to one")
+    gamma_arena_test_assert.is_true(model:decrement_item("medkit").ok, "medicine decrements to one")
+    gamma_arena_test_assert.is_true(model:decrement_item("medkit").ok, "medicine removes at zero")
+    gamma_arena_test_assert.equals(#model:snapshot().actor_items, 4, "quantity-one decrement removes the entry")
+
+    local fixed = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(fixed:add_item("outfit_field", 1, "outfit").ok, "fixed item selected")
+    assert_code(fixed:increment_item("outfit_field"), "GA_CUSTOM_EQUIPMENT_QUANTITY", "fixed item cannot increment")
+    gamma_arena_test_assert.equals(fixed:snapshot().actor_items[1].quantity, 1, "fixed increment rejection does not mutate")
+    gamma_arena_test_assert.is_true(fixed:add_item("wpn_alpha", 1, "weapon_2").ok, "equipped weapon selected")
+    assert_code(fixed:increment_item("wpn_alpha"), "GA_CUSTOM_EQUIPMENT_QUANTITY", "equipped weapon cannot increment")
+    gamma_arena_test_assert.equals(fixed:snapshot().actor_items[2].quantity, 1, "equipped weapon increment rejection does not mutate")
+    gamma_arena_test_assert.is_true(fixed:add_item("grenade_f1", 1).ok, "grenade selected")
+    assert_code(fixed:increment_item("grenade_f1"), "GA_CUSTOM_GRENADE_LIMIT", "grenade cannot increment")
+    gamma_arena_test_assert.equals(fixed:snapshot().selected_grenades[1].quantity, 1, "grenade increment rejection does not mutate")
+
+    local capped_catalog = make_catalog()
+    capped_catalog.max_physical_items_per_participant = 5
+    local capped = gamma_arena_custom_setup_model.new(capped_catalog, make_context(capped_catalog).layout)
+    capped:set_faction("stalker")
+    capped:add_item("outfit_field", 1, "outfit")
+    capped:add_item("wpn_alpha", 1, "weapon_2")
+    capped:add_item("ammo_alpha", 1)
+    capped:add_item("wpn_knife", 1, "knife")
+    capped:add_item("medkit", 1)
+    assert_code(capped:increment_item("ammo_alpha"), "GA_CUSTOM_PHYSICAL_LIMIT", "physical cap rejects stack increment")
+    gamma_arena_test_assert.equals(capped:snapshot().actor_items[3].quantity, 1, "cap rejection preserves stack quantity")
+
+    local budget_catalog = make_catalog()
+    budget_catalog.items.ammo_alpha.price = 400
+    local budget_capped = gamma_arena_custom_setup_model.new(budget_catalog, make_context(budget_catalog).layout)
+    budget_capped:set_faction("stalker")
+    budget_capped:add_item("outfit_field", 1, "outfit")
+    budget_capped:add_item("wpn_alpha", 1, "weapon_2")
+    budget_capped:add_item("ammo_alpha", 1)
+    budget_capped:add_item("wpn_knife", 1, "knife")
+    budget_capped:add_item("medkit", 1)
+    gamma_arena_test_assert.is_true(budget_capped:validation().ok, "base quantity fits budget cap")
+    assert_code(budget_capped:increment_item("ammo_alpha"), "GA_CUSTOM_OVERSPEND", "budget cap rejects stack increment")
+    gamma_arena_test_assert.equals(budget_capped:snapshot().actor_items[3].quantity, 1, "budget rejection preserves stack quantity")
+
+    local weight_catalog = make_catalog()
+    weight_catalog.items.ammo_alpha.weight_mg = 26000
+    local weight_capped = gamma_arena_custom_setup_model.new(weight_catalog, make_context(weight_catalog).layout)
+    weight_capped:set_faction("stalker")
+    weight_capped:add_item("outfit_field", 1, "outfit")
+    weight_capped:add_item("wpn_alpha", 1, "weapon_2")
+    weight_capped:add_item("ammo_alpha", 1)
+    weight_capped:add_item("wpn_knife", 1, "knife")
+    weight_capped:add_item("medkit", 1)
+    gamma_arena_test_assert.is_true(weight_capped:validation().ok, "base quantity fits weight cap")
+    assert_code(weight_capped:increment_item("ammo_alpha"), "GA_CUSTOM_OVERWEIGHT", "weight cap rejects stack increment")
+    gamma_arena_test_assert.equals(weight_capped:snapshot().actor_items[3].quantity, 1, "weight rejection preserves stack quantity")
+end
+
+local function custom_setup_model_grenade_selection_removal_and_reorder_are_semantic()
+    local catalog = make_catalog()
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    model:set_faction("stalker")
+    model:add_item("outfit_field", 1, "outfit")
+    model:add_item("wpn_alpha", 1); model:equip("wpn_alpha", "weapon_2")
+    model:add_item("ammo_alpha", 2)
+    model:add_item("wpn_knife", 1, "knife")
+    model:add_item("medkit", 1)
+
+    gamma_arena_test_assert.is_true(model:add_item("grenade_f1", 1).ok, "first grenade is selected")
+    gamma_arena_test_assert.is_true(model:add_item("grenade_rgd5", 1).ok, "second grenade is selected")
+    local selected = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(selected[1].section, "grenade_f1", "F1 remains first")
+    gamma_arena_test_assert.equals(selected[1].base_price, 40, "first grenade exposes base price")
+    gamma_arena_test_assert.equals(selected[1].effective_price, 40, "first grenade uses base price")
+    gamma_arena_test_assert.equals(selected[2].section, "grenade_rgd5", "RGD5 remains second")
+    gamma_arena_test_assert.equals(selected[2].multiplier, 2, "second grenade exposes multiplier")
+    gamma_arena_test_assert.equals(selected[2].effective_price, 140, "second grenade doubles its own base price")
+
+    local rejected = model:add_item("grenade_gd05", 1)
+    assert_code(rejected, "GA_CUSTOM_GRENADE_LIMIT", "third grenade is rejected")
+    gamma_arena_test_assert.equals(#model:snapshot().selected_grenades, 2, "third grenade rejection does not mutate")
+    gamma_arena_test_assert.equals(model:snapshot().last_operation.error.code, "GA_CUSTOM_GRENADE_LIMIT", "rejected attempt stays observable")
+
+    gamma_arena_test_assert.is_true(model:remove_item("grenade_f1").ok, "first grenade removes")
+    local survivor = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(survivor[1].section, "grenade_rgd5", "survivor becomes first")
+    gamma_arena_test_assert.equals(survivor[1].effective_price, 70, "survivor returns to base price")
+    gamma_arena_test_assert.is_true(model:add_item("grenade_f1", 1).ok, "removed grenade can be appended")
+    local reordered = model:snapshot().selected_grenades
+    gamma_arena_test_assert.equals(reordered[1].section, "grenade_rgd5", "survivor retains first order")
+    gamma_arena_test_assert.equals(reordered[1].effective_price, 70, "first remains base price")
+    gamma_arena_test_assert.equals(reordered[2].section, "grenade_f1", "re-added grenade becomes second")
+    gamma_arena_test_assert.equals(reordered[2].effective_price, 80, "new second grenade doubles its base price")
+end
+
+local function custom_codec_round_trip_preserves_bounded_order()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local value = gamma_arena_custom_config.validate(make_valid_config(catalog), context).value
+    local encoded = gamma_arena_custom_codec.encode(value, "launch_custom_")
+    gamma_arena_test_assert.is_true(encoded.ok, "valid config encodes")
+    local persisted = {}
+    for _, operation in ipairs(encoded.value) do
+        if operation.action == "write" then persisted[operation.key] = tostring(operation.value)
+        else persisted[operation.key] = nil end
+    end
+    local decoded = gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context)
+    gamma_arena_test_assert.is_true(decoded.ok, "persisted config decodes")
+    gamma_arena_test_assert.equals(decoded.value.actor_items[6].section, "grenade_f1", "round trip first grenade")
+    gamma_arena_test_assert.equals(decoded.value.actor_items[7].section, "grenade_rgd5", "round trip second grenade")
+    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 208, "codec key space is bounded")
+end
+
+local function custom_codec_rejects_sparse_and_oversized_shapes()
+    local catalog = make_catalog()
+    local context = make_context(catalog)
+    local sparse = make_valid_config(catalog)
+    sparse.actor_items[3] = nil
+    assert_code(gamma_arena_custom_codec.encode(sparse, "launch_custom_"), "GA_CUSTOM_CODEC_INVALID", "sparse encode")
+    local persisted = {
+        launch_custom_schema_version = "1", launch_custom_faction = "stalker",
+        launch_custom_catalog_fingerprint = catalog.fingerprint,
+        launch_custom_roster_count = "1", launch_custom_actor_item_count = "65",
+        launch_custom_roster_1_rank = "novice"
+    }
+    assert_code(gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context),
+        "GA_CUSTOM_CODEC_INVALID", "oversized decode")
+    persisted.launch_custom_actor_item_count = "7"
+    persisted.launch_custom_roster_2_rank = "legend"
+    assert_code(gamma_arena_custom_codec.decode(function(key) return persisted[key] end, "launch_custom_", context),
+        "GA_CUSTOM_CODEC_TRAILING_KEY", "trailing indexed key")
+end
+
+local function custom_codec_encode_rejects_unknown_fields_and_malformed_scalars()
+    local catalog = make_catalog()
+    local function reject(mutate, label)
+        local value = make_valid_config(catalog)
+        mutate(value)
+        assert_code(gamma_arena_custom_codec.encode(value, "launch_custom_"), "GA_CUSTOM_CODEC_INVALID", label)
+    end
+    reject(function(value) value.future = true end, "codec top-level unknown field")
+    reject(function(value) value.roster[1].future = true end, "codec roster unknown field")
+    reject(function(value) value.actor_items[1].future = true end, "codec item unknown field")
+    reject(function(value) value.faction = nil end, "codec missing top-level scalar")
+    reject(function(value) value.roster[1].rank = nil end, "codec missing roster scalar")
+    reject(function(value) value.actor_items[1].section = nil end, "codec missing item section")
+    reject(function(value) value.actor_items[1].quantity = nil end, "codec missing item quantity")
+    reject(function(value) value.faction = "" end, "codec empty faction")
+    reject(function(value) value.catalog_fingerprint = "" end, "codec empty fingerprint")
+    reject(function(value) value.roster[1].rank = {} end, "codec malformed roster rank")
+    reject(function(value) value.actor_items[1].section = false end, "codec malformed item section")
+    reject(function(value) value.actor_items[1].quantity = "1" end, "codec malformed item quantity")
+    reject(function(value) value.actor_items[1].equipped_slot = 1 end, "codec malformed equipped slot")
+end
+
+local function custom_codec_encode_uses_canonical_decimal_quantities()
+    local catalog = make_catalog()
+    local value = make_valid_config(catalog)
+    value.actor_items[3].quantity = 9007199254740991
+    local encoded = gamma_arena_custom_codec.encode(value, "launch_custom_")
+    gamma_arena_test_assert.is_true(encoded.ok, "maximum safe quantity encodes structurally")
+    local quantity
+    for _, operation in ipairs(encoded.value) do
+        if operation.key == "launch_custom_actor_item_3_quantity" then quantity = operation.value; break end
+    end
+    gamma_arena_test_assert.equals(quantity, "9007199254740991", "quantity encoding is canonical decimal text")
+end
+
+local function custom_config_devices_are_optional_budgeted_and_bounded()
+    local c = make_catalog()
+    local v = make_valid_config(c)
+    local plain = gamma_arena_custom_config.validate(v, make_context(c))
+    gamma_arena_test_assert.is_true(plain.ok, "device is optional")
+    gamma_arena_test_assert.equals(plain.value.actor_device, nil, "default has no device")
+    v.actor_device = "device_torch_nv_2"
+    local selected = gamma_arena_custom_config.validate(v, make_context(c))
+    gamma_arena_test_assert.is_true(selected.ok, "NV Gen2 is valid")
+    gamma_arena_test_assert.equals(selected.value.actor_device, "device_torch_nv_2", "device copied separately")
+    gamma_arena_test_assert.equals(#selected.value.actor_items, 7, "device excluded from actor items")
+    local totals = gamma_arena_custom_config.totals(selected.value, c)
+    gamma_arena_test_assert.equals(totals.value.points, 650, "NV Gen2 adds 150 AP")
+    gamma_arena_test_assert.equals(totals.value.weight_mg, 10000, "NV Gen2 adds mass")
+    local hidden = make_valid_config(c)
+    hidden.actor_items[8] = { section = "device_torch_dummy", quantity = 1 }
+    assert_code(gamma_arena_custom_config.validate(hidden, make_context(c)), "GA_CUSTOM_DEVICE_IN_ITEMS", "hidden device")
+    local unknown = make_valid_config(c); unknown.actor_device = "missing"
+    assert_code(gamma_arena_custom_config.validate(unknown, make_context(c)), "GA_CUSTOM_DEVICE_UNKNOWN", "unknown device")
+    local wrong = make_valid_config(c); wrong.actor_device = "medkit"
+    assert_code(gamma_arena_custom_config.validate(wrong, make_context(c)), "GA_CUSTOM_DEVICE_UNKNOWN", "non-device")
+end
+
+local function custom_config_device_counts_and_totals_are_bounded()
+    local c = make_catalog()
+    local many = make_valid_config(c)
+    for i = 8, 64 do
+        local s = "limit_" .. tostring(i)
+        c.items[s] = { section=s, category="medicine", price=1, weight_mg=1, healing=false, ammo_sections={} }
+        many.actor_items[i] = { section=s, quantity=1 }
+    end
+    many.actor_device = "device_torch_dummy"
+    assert_code(gamma_arena_custom_config.validate(many, make_context(c)), "GA_CUSTOM_ENTRY_LIMIT", "device is distinct entry 65")
+    c = make_catalog()
+    local physical = make_valid_config(c); physical.actor_items[3].quantity = 250; physical.actor_device = "device_torch_dummy"
+    assert_code(gamma_arena_custom_config.validate(physical, make_context(c)), "GA_CUSTOM_PHYSICAL_LIMIT", "device is physical entity 257")
+    c = make_catalog()
+    local spend = make_valid_config(c); spend.actor_device = "device_torch_nv_3"; c.items.device_torch_nv_3.price = 301
+    assert_code(gamma_arena_custom_config.validate(spend, make_context(c)), "GA_CUSTOM_OVERSPEND", "device budget")
+    c = make_catalog()
+    local mass = make_valid_config(c); mass.actor_device = "device_torch_dummy"; c.items.device_torch_dummy.weight_mg = 60001
+    assert_code(gamma_arena_custom_config.validate(mass, make_context(c)), "GA_CUSTOM_OVERWEIGHT", "device mass")
+end
+
+local function custom_setup_model_device_selection_is_dedicated()
+    local c = make_catalog()
+    c.categories = { device = { "device_torch_dummy", "device_torch_nv_1", "device_torch_nv_2", "device_torch_nv_3" } }
+    local m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    local initial = m:snapshot()
+    gamma_arena_test_assert.equals(initial.config.actor_device, nil, "model defaults No device")
+    gamma_arena_test_assert.equals(#initial.device_options, 5, "No device plus four physical options")
+    gamma_arena_test_assert.equals(initial.device_options[1].section, nil, "No device is first")
+    gamma_arena_test_assert.is_true(initial.device_options[1].selected, "No device is selected by default")
+    gamma_arena_test_assert.equals(initial.categories.device, nil, "ordinary categories stay device-free")
+    gamma_arena_test_assert.is_true(m:set_device("device_torch_nv_2").ok, "select NV Gen2")
+    local nv2 = m:snapshot()
+    gamma_arena_test_assert.equals(nv2.spent, 150, "NV Gen2 costs 150 AP")
+    gamma_arena_test_assert.equals(nv2.weight_mg, 300, "NV Gen2 contributes mass")
+    gamma_arena_test_assert.equals(nv2.distinct_count, 1, "device is one distinct entry")
+    gamma_arena_test_assert.equals(nv2.physical_count, 1, "device is one physical entity")
+    gamma_arena_test_assert.equals(nv2.device_options[4].section, "device_torch_nv_2", "NV Gen2 remains exact")
+    gamma_arena_test_assert.equals(nv2.device_options[4].selected, true, "NV Gen2 is selected")
+    gamma_arena_test_assert.is_true(m:set_device("device_torch_dummy").ok, "replace with headlamp")
+    local lamp = m:snapshot()
+    gamma_arena_test_assert.equals(lamp.config.actor_device, "device_torch_dummy", "headlamp replaces device")
+    gamma_arena_test_assert.equals(lamp.spent, 25, "replacement costs 25 AP")
+    gamma_arena_test_assert.equals(lamp.distinct_count, 1, "replacement stays one distinct")
+    gamma_arena_test_assert.is_true(m:set_device(nil).ok, "clear device")
+    gamma_arena_test_assert.equals(m:snapshot().physical_count, 0, "clear removes device")
+end
+
+local function device_snapshot_signature(m)
+    local s = m:snapshot()
+    return tostring(s.config.actor_device) .. "|" .. tostring(#s.config.actor_items) .. "|"
+        .. tostring(s.spent) .. "|" .. tostring(s.weight_mg) .. "|"
+        .. tostring(s.distinct_count) .. "|" .. tostring(s.physical_count)
+end
+
+local function reject_device_atomically(m, section, code, label)
+    local before = device_snapshot_signature(m)
+    assert_code(m:set_device(section), code, label)
+    gamma_arena_test_assert.equals(device_snapshot_signature(m), before, label .. " preserves snapshot")
+end
+
+local function custom_setup_model_rejects_device_mutations_atomically()
+    local c = make_catalog()
+    local m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    reject_device_atomically(m, "missing", "GA_CUSTOM_DEVICE_UNKNOWN", "unknown device")
+    reject_device_atomically(m, "medkit", "GA_CUSTOM_DEVICE_UNKNOWN", "non-device")
+    local before = device_snapshot_signature(m)
+    assert_code(m:add_item("device_torch_dummy", 1), "GA_CUSTOM_DEVICE_IN_ITEMS", "hidden device API")
+    gamma_arena_test_assert.equals(device_snapshot_signature(m), before, "hidden device rejection preserves snapshot")
+    c = make_catalog(); c.items.device_torch_nv_3.price = 701
+    reject_device_atomically(gamma_arena_custom_setup_model.new(c, make_context(c).layout),
+        "device_torch_nv_3", "GA_CUSTOM_OVERSPEND", "over-budget device")
+    c = make_catalog(); c.items.device_torch_nv_3.weight_mg = 50001
+    reject_device_atomically(gamma_arena_custom_setup_model.new(c, make_context(c).layout),
+        "device_torch_nv_3", "GA_CUSTOM_OVERWEIGHT", "overweight device")
+    c = make_catalog(); c.max_entries = 1
+    m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    gamma_arena_test_assert.is_true(m:add_item("medkit", 1).ok, "entry cap fixture")
+    reject_device_atomically(m, "device_torch_dummy", "GA_CUSTOM_ENTRY_LIMIT", "distinct cap")
+    c = make_catalog(); c.max_physical_items_per_participant = 1
+    m = gamma_arena_custom_setup_model.new(c, make_context(c).layout)
+    gamma_arena_test_assert.is_true(m:add_item("medkit", 1).ok, "physical cap fixture")
+    reject_device_atomically(m, "device_torch_dummy", "GA_CUSTOM_PHYSICAL_LIMIT", "physical cap")
+end
+
+local function custom_codec_persists_optional_device_with_one_key()
+    local c = make_catalog()
+    local v = make_valid_config(c)
+    local absent = gamma_arena_custom_codec.encode(v, "launch_custom_")
+    gamma_arena_test_assert.is_true(absent.ok, "No device encodes")
+    local absent_action
+    for _, op in ipairs(absent.value) do
+        if op.key == "launch_custom_actor_device" then absent_action = op.action end
+    end
+    gamma_arena_test_assert.equals(absent_action, "remove", "No device removes key")
+    v.actor_device = "device_torch_nv_2"
+    local encoded = gamma_arena_custom_codec.encode(v, "launch_custom_")
+    local values = {}
+    for _, op in ipairs(encoded.value) do
+        if op.action == "write" then values[op.key] = tostring(op.value) end
+    end
+    gamma_arena_test_assert.equals(values.launch_custom_actor_device, "device_torch_nv_2", "one device section key")
+    local decoded = gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c))
+    gamma_arena_test_assert.is_true(decoded.ok, "device decodes")
+    gamma_arena_test_assert.equals(decoded.value.actor_device, "device_torch_nv_2", "device round trips")
+    gamma_arena_test_assert.equals(#gamma_arena_custom_codec.keys("launch_custom_"), 208, "codec adds one bounded key")
+    values.launch_custom_actor_device = string.rep("x", 257)
+    assert_code(gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c)),
+        "GA_CUSTOM_CODEC_INVALID", "malformed stored device")
+    values.launch_custom_actor_device = "removed_device"
+    assert_code(gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c)),
+        "GA_CUSTOM_DEVICE_UNKNOWN", "stale stored device")
+    values.launch_custom_actor_device = nil
+    local cleared = gamma_arena_custom_codec.decode(function(k) return values[k] end, "launch_custom_", make_context(c))
+    gamma_arena_test_assert.is_true(cleared.ok, "absent device decodes")
+    gamma_arena_test_assert.equals(cleared.value.actor_device, nil, "absence restores No device")
+end
+
+local cases = {
+    { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
+    { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
+    { name = "custom_config_rejects_equipment_compatibility_and_budget_matrix", fn = custom_config_rejects_equipment_compatibility_and_budget_matrix },
+    { name = "custom_config_rejects_non_unit_physical_equipment", fn = custom_config_rejects_non_unit_physical_equipment },
+    { name = "custom_config_preserves_legitimate_inventory_stacks", fn = custom_config_preserves_legitimate_inventory_stacks },
+    { name = "custom_config_grenade_order_is_semantic", fn = custom_config_grenade_order_is_semantic },
+    { name = "custom_setup_model_preserves_order_and_recalculates_budget", fn = custom_setup_model_preserves_order_and_recalculates_budget },
+    { name = "custom_setup_model_progressively_assembles_valid_equipment_and_categories", fn = custom_setup_model_progressively_assembles_valid_equipment_and_categories },
+    { name = "custom_setup_model_rejects_masked_semantic_candidates_atomically", fn = custom_setup_model_rejects_masked_semantic_candidates_atomically },
+    { name = "custom_setup_model_edits_stack_quantities_without_duplicates", fn = custom_setup_model_edits_stack_quantities_without_duplicates },
+    { name = "custom_setup_model_grenade_selection_removal_and_reorder_are_semantic", fn = custom_setup_model_grenade_selection_removal_and_reorder_are_semantic },
+    { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
+    ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
+    ,{ name = "custom_codec_encode_rejects_unknown_fields_and_malformed_scalars", fn = custom_codec_encode_rejects_unknown_fields_and_malformed_scalars }
+    ,{ name = "custom_codec_encode_uses_canonical_decimal_quantities", fn = custom_codec_encode_uses_canonical_decimal_quantities }
+    ,{ name = "custom_config_devices_are_optional_budgeted_and_bounded", fn = custom_config_devices_are_optional_budgeted_and_bounded }
+    ,{ name = "custom_config_device_counts_and_totals_are_bounded", fn = custom_config_device_counts_and_totals_are_bounded }
+    ,{ name = "custom_setup_model_device_selection_is_dedicated", fn = custom_setup_model_device_selection_is_dedicated }
+    ,{ name = "custom_setup_model_rejects_device_mutations_atomically", fn = custom_setup_model_rejects_device_mutations_atomically }
+    ,{ name = "custom_codec_persists_optional_device_with_one_key", fn = custom_codec_persists_optional_device_with_one_key }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end

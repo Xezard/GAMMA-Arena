@@ -55,6 +55,7 @@ function New-Task7Fixture([string]$Name) {
             Copy-Item -Path (Join-Path $Source '*') -Destination $Destination -Recurse -Force
         }
     }
+    Write-FixtureFile $Root 'tools\Test-GammaArena.ps1' ([IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1')))
     return $Root
 }
 
@@ -283,13 +284,13 @@ section = gamma_arena_bandit_veteran
 class = AI_STL_S
 community = bandit
 '@
-    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v2.txt' @'
-seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=2|session_seed=1|fight_index=0|diagnostic=FightSpecV2 rookie
-seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=2|session_seed=1|fight_index=0|diagnostic=FightSpecV2 stalker
-seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=2|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV2 veteran
-seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=2|session_seed=3|fight_index=31|diagnostic=FightSpecV2 master
+    Write-FixtureFile $Root 'tests\fixtures\golden-fights-v9.txt' @'
+seed=0,difficulty=rookie,fight=0,stable_encode=schema_version=9|session_seed=1|fight_index=0|diagnostic=FightSpecV9 rookie
+seed=1,difficulty=stalker,fight=0,stable_encode=schema_version=9|session_seed=1|fight_index=0|diagnostic=FightSpecV9 stalker
+seed=3735928559,difficulty=veteran,fight=7,stable_encode=schema_version=9|session_seed=1588444913|fight_index=7|diagnostic=FightSpecV9 veteran
+seed=4294967295,difficulty=master,fight=31,stable_encode=schema_version=9|session_seed=3|fight_index=31|diagnostic=FightSpecV9 master
 '@
-    Write-FixtureFile $Root 'schemas\fight-spec-v2.md' 'fixture'
+    Write-FixtureFile $Root 'schemas\fight-spec-v9.md' 'fixture'
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_config_tx.script' @'
 local function _snapshot_unchecked()
     local value = nil
@@ -767,6 +768,10 @@ function run() end
         'src\gamedata\scripts\gamma_arena_catalog.script',
         'src\gamedata\scripts\gamma_arena_catalog_discovery.script',
         'src\gamedata\scripts\gamma_arena_generator.script',
+        'src\gamedata\scripts\gamma_arena_random_generator.script',
+        'src\gamedata\scripts\gamma_arena_fight_builder.script',
+        'src\gamedata\scripts\gamma_arena_fight_spec.script',
+        'src\gamedata\scripts\gamma_arena_fight_validator_v9.script',
         'src\gamedata\scripts\gamma_arena_validator.script',
         'src\gamedata\scripts\gamma_arena_layout_adapter.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
@@ -778,8 +783,8 @@ function run() end
         'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script',
         'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script',
         'dev\gamedata\scripts\gamma_arena_test_runtime.script',
-        'tests\fixtures\golden-fights-v4.txt',
-        'schemas\fight-spec-v4.md'
+        'tests\fixtures\golden-fights-v9.txt',
+        'schemas\fight-spec-v9.md'
     )
     foreach ($RelativePath in $CurrentContractFiles) {
         $SourcePath = Join-Path $RepoRoot $RelativePath
@@ -817,8 +822,23 @@ try {
             foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
             exit 1
         }
+        $global:LASTEXITCODE = 0
+        if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
         Write-Host 'PASS: isolated positive smoke fixture'
         return
+    }
+
+    $MissingReleaseSurfaceFixture = New-Task7Fixture 'missing-current-release-surface'
+    Write-FixtureFile $MissingReleaseSurfaceFixture '.git' 'gitdir: fixture'
+    Write-FixtureFile $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1' ([IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Build-GammaArena.ps1')))
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'VERSION') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tests\fixtures\custom-catalog-v10.json') -Force
+    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'docs\superpowers\specs\2026-08-28-custom-arena-main-integration-design.md') -Force
+    $MissingReleaseSurfaceResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingReleaseSurfaceFixture) -CaptureOutput
+    Assert-True ($MissingReleaseSurfaceResult.ExitCode -ne 0) 'A real-repo-shaped release surface must fail when current artifacts are missing.'
+    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.','Task 8 current design is missing.')) {
+        Assert-True ($MissingReleaseSurfaceResult.Output.Contains($Diagnostic)) "Currentness gate must report every missing real-repo artifact: $Diagnostic"
     }
 
     $NestedGammaRandomFixture = New-Task7Fixture 'nested-gamma-random'
@@ -904,6 +924,11 @@ end
     $MissingTask2Exit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingTask2Fixture)
     Assert-True ($MissingTask2Exit -ne 0) 'Static policy must reject a missing required Task 2 contract script.'
 
+    $MissingAggregateRunnerFixture = New-Task7Fixture 'missing-aggregate-runner'
+    Remove-Item -LiteralPath (Join-Path $MissingAggregateRunnerFixture 'tools\Test-GammaArena.ps1') -Force
+    $MissingAggregateRunnerExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingAggregateRunnerFixture)
+    Assert-True ($MissingAggregateRunnerExit -ne 0) 'Static policy must reject a missing aggregate runner.'
+
     $LogicalDeathFixture = New-Task7Fixture 'logical-death-cancellation'
     $LogicalDeathPath = Join-Path $LogicalDeathFixture 'src\gamedata\scripts\gamma_arena_orchestrator.script'
     $LogicalDeath = Get-Content -LiteralPath $LogicalDeathPath -Raw
@@ -988,9 +1013,9 @@ end
     Assert-True ($BootstrapEqualityResult.ExitCode -ne 0 -and $BootstrapEqualityResult.Output -match 'Bootstrap actor ownership must not compare native game_object values') 'Static policy must reject bootstrap game_object equality through its intended diagnostic.'
 
     $MaximumCostPlayerFixture = New-Task7Fixture 'maximum-cost-player-selection'
-    $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script'
+    $MaximumCostPlayerPath = Join-Path $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_random_generator.script'
     $MaximumCostPlayer = (Get-Content -LiteralPath $MaximumCostPlayerPath -Raw).Replace('local weapon = stream(request, fight_index, catalogs, "actor_weapon"):pick(weapons)', 'local weapon = pick_affordable_band(stream(request, fight_index, catalogs, "actor_weapon"), weapons, equipment_budget)')
-    Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_generator.script' $MaximumCostPlayer
+    Write-FixtureFile $MaximumCostPlayerFixture 'src\gamedata\scripts\gamma_arena_random_generator.script' $MaximumCostPlayer
     $MaximumCostPlayerResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-CatalogDiscovery.ps1') @('-RepoRoot', $MaximumCostPlayerFixture) -CaptureOutput
     Assert-True ($MaximumCostPlayerResult.ExitCode -ne 0 -and $MaximumCostPlayerResult.Output -match 'Player loadouts must use weighted class selection, not maximum-cost affordable-band selection') 'Static policy must reject maximum-cost player weapon selection through its intended policy failure.'
 
@@ -1211,6 +1236,8 @@ end
             foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
             exit 1
         }
+        $global:LASTEXITCODE = 0
+        if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
         Write-Host 'PASS: static smoke fixtures passed'
         return
     }
@@ -1254,4 +1281,6 @@ if ($script:Failures.Count -gt 0) {
     exit 1
 }
 
+$global:LASTEXITCODE = 0
+if ($global:LASTEXITCODE -ne 0) { throw 'Successful smoke harness did not restore the native exit status.' }
 Write-Host 'PASS: tool regression smoke checks passed'

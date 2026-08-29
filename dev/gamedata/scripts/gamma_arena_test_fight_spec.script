@@ -1,0 +1,716 @@
+local function clone(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, entry in pairs(value) do result[key] = clone(entry) end
+    return result
+end
+
+local layout
+
+local function identity(resolved_layout)
+    local arena = resolved_layout or layout()
+    return {
+        session_seed = 12345, fight_index = 2, generator_version = 11,
+        catalog_schema_version = 10, catalog_revision = 11,
+        catalog_fingerprint = "ga-catalog-v10-1234abcd",
+        layout_version = arena.version, layout_hash = gamma_arena_fight_spec.layout_hash(arena)
+    }
+end
+
+local function catalog()
+    return {
+        schema_version = 10,
+        revision = 11,
+        generator_version = 11,
+        fingerprint = "ga-catalog-v10-1234abcd",
+        max_physical_items_per_participant = 256,
+        items = {
+            stalker_outfit = { category = "outfit", helmet_allowed = true },
+            sealed_outfit = { category = "outfit", helmet_allowed = false },
+            helmet_closed = { category = "helmet" },
+            wpn_knife = { category = "knife" },
+            wpn_ak74 = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_545" } },
+            wpn_ak74_alt = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_545" } },
+            wpn_pm = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_762" } },
+            ammo_545 = { category = "ammo", box_size = 30 },
+            ammo_762 = { category = "ammo", box_size = 20 },
+            bandage = { category = "medicine", healing = false },
+            medkit = { category = "medicine", healing = true },
+            device_torch_dummy = { category = "device", ltx_slot = 9 },
+            device_torch_nv_1 = { category = "device", ltx_slot = 9 },
+            device_torch_nv_2 = { category = "device", ltx_slot = 9 },
+            device_torch_nv_3 = { category = "device", ltx_slot = 9 }
+        },
+        ranks = {
+            master = { id = "master", minimum = 40000, maximum = 49999, threat = 800 }
+        },
+        factions = {
+            stalker = {
+                id = "stalker", community = "stalker",
+                ranks = {
+                    master = {
+                        id = "master", alias = "gamma_arena_stalker_master", profile_section = "sim_default_stalker_4",
+                        community = "stalker", runtime_community = "arena_enemy",
+                        minimum = 41000, maximum = 45000, threat = 800
+                    }
+                }
+            }
+        }
+    }
+end
+
+layout = function()
+    return {
+        id = "rostok_arena_v1", version = 2, level = "l05_bar",
+        tactical_routes = { "route_1", "route_2" },
+        actor_spawn_path = "actor_spawn", actor_look_path = "actor_look",
+        capacity = 2,
+        opponent_spawn_slots = {
+            { id = "virtual_01", base_route = "route_1", native = false, position = { x = 1, y = 0, z = 2 }, level_vertex_id = 123, game_vertex_id = 456 },
+            { id = "virtual_02", base_route = "route_2", native = false, position = { x = 3, y = 0, z = 4 }, level_vertex_id = 124, game_vertex_id = 457 }
+        }
+    }
+end
+
+local function item_by_section(items, section)
+    for index = 1, #items do
+        if items[index].section == section then return items[index] end
+    end
+    return nil
+end
+
+local function legacy_draft()
+    return {
+        arena = { layout_id = "rostok_arena_v1", level = "l05_bar", tactical_routes = { "route_1", "route_2" } },
+        actor = { spawn_path = "actor_spawn", look_path = "actor_look", loadout = { outfit = "stalker_outfit", knife = "wpn_knife", weapon = "wpn_ak74", ammo = "ammo_545", ammo_boxes = 2, bonus_ammo = { section = "ammo_545", boxes = 1 }, consumables = { "medkit", "bandage" } } },
+        opponents = { { slot = 1, faction = "stalker", rank = { id = "master", value = 42731 }, profile = "gamma_arena_stalker_master", role = "leader", spawn_slot_id = "virtual_01", spawn = { position = { x = 1, y = 0, z = 2 }, level_vertex_id = 123, game_vertex_id = 456 }, tactical_route = "route_1", loadout = { weapon = "wpn_ak74", ammo = "ammo_545", ammo_boxes = 2, outfit = "stalker_outfit", knife = "wpn_knife", consumables = { "bandage" } } } }
+    }
+end
+
+local function item_draft()
+    local value = legacy_draft()
+    value.actor.loadout = nil
+    value.actor.items = {
+        { section = "bandage", quantity = 1 }, { section = "ammo_545", quantity = 1 },
+        { section = "wpn_ak74", quantity = 1, equipped_slot = "weapon_2" }, { section = "medkit", quantity = 1 },
+        { section = "stalker_outfit", quantity = 1, equipped_slot = "outfit" }, { section = "ammo_545", quantity = 2 },
+        { section = "wpn_knife", quantity = 1, equipped_slot = "knife" }
+    }
+    value.opponents[1].loadout = nil
+    value.opponents[1].items = {
+        { section = "ammo_545", quantity = 2 }, { section = "wpn_knife", quantity = 1, equipped_slot = "knife" },
+        { section = "stalker_outfit", quantity = 1, equipped_slot = "outfit" }, { section = "wpn_ak74", quantity = 1, equipped_slot = "weapon_2" }, { section = "bandage", quantity = 1 }
+    }
+    return value
+end
+
+local function with_actor_device(section)
+    local value = item_draft()
+    value.actor.items[#value.actor.items + 1] = {
+        section = section or "device_torch_nv_2", quantity = 1, equipped_slot = "device"
+    }
+    return value
+end
+
+local function key_count(value)
+    local count = 0
+    for _ in pairs(value) do count = count + 1 end
+    return count
+end
+
+local function canonicalizes_v9_exact_identity_and_device_order()
+    local without_device = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
+    local ordered = with_actor_device()
+    ordered.actor.items[#ordered.actor.items + 1] = { section = "helmet_closed", quantity = 1, equipped_slot = "helmet" }
+    ordered.actor.items[#ordered.actor.items + 1] = { section = "wpn_pm", quantity = 1, equipped_slot = "weapon_1" }
+    ordered.actor.items[#ordered.actor.items + 1] = { section = "ammo_762", quantity = 1 }
+    local with_device = gamma_arena_fight_spec.canonicalize(ordered, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(without_device.ok and with_device.ok, "v9 accepts zero or one actor device")
+    gamma_arena_test_assert.equals(with_device.value.schema_version, 9, "sole schema version")
+    gamma_arena_test_assert.equals(with_device.value.identity.generator_version, 11, "generator version")
+    gamma_arena_test_assert.equals(with_device.value.identity.catalog_schema_version, 10, "catalog schema version")
+    gamma_arena_test_assert.equals(with_device.value.identity.catalog_revision, 11, "catalog revision")
+    gamma_arena_test_assert.equals(key_count(with_device.value.identity), 9, "identity has exactly nine fields")
+    gamma_arena_test_assert.is_true(string.match(with_device.value.identity.fight_id, "^ga9%-%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x$") ~= nil, "ga9 content id")
+    gamma_arena_test_assert.equals(with_device.value.identity.layout_hash, gamma_arena_fight_spec.layout_hash(layout()), "layout identity hash")
+    gamma_arena_test_assert.equals(with_device.value.identity.mode_id, nil, "identity has no mode")
+    gamma_arena_test_assert.equals(with_device.value.identity.difficulty_id, nil, "identity has no difficulty")
+    gamma_arena_test_assert.equals(with_device.value.identity.content_hash, nil, "content hash is carried only by fight id")
+    local device = item_by_section(with_device.value.actor.items, "device_torch_nv_2")
+    gamma_arena_test_assert.equals(device.quantity, 1, "device quantity")
+    gamma_arena_test_assert.equals(device.equipped_slot, "device", "logical device slot")
+    gamma_arena_test_assert.is_true(item_by_section(with_device.value.opponents[1].items, "device_torch_nv_2") == nil, "opponents have no devices")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[1].equipped_slot, "outfit", "outfit sorts first")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[2].equipped_slot, "helmet", "helmet sorts after outfit")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[3].equipped_slot, "knife", "knife sorts before device")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[4].equipped_slot, "device", "device sorts before weapons")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[5].equipped_slot, "weapon_1", "weapon 1 sorts after device")
+    gamma_arena_test_assert.equals(with_device.value.actor.items[6].equipped_slot, "weapon_2", "weapon 2 sorts last")
+end
+
+local function rejects_legacy_loadouts_and_invalid_devices()
+    local cases = {
+        { name = "untagged legacy", draft = legacy_draft(), code = "GA_FIGHT_SPEC_ITEMS" },
+        { name = "tagged legacy", draft = legacy_draft(), code = "GA_FIGHT_SPEC_ITEMS",
+            prepare = function(value)
+                value.actor.loadout = { kind = "legacy", value = value.actor.loadout }
+                value.opponents[1].loadout = { kind = "legacy", value = value.opponents[1].loadout }
+            end },
+        { name = "non-device section in device slot", draft = item_draft(), code = "GA_FIGHT_SPEC_ITEM_SLOT",
+            prepare = function(value) value.actor.items[1].equipped_slot = "device" end },
+        { name = "device quantity two", draft = with_actor_device(), code = "GA_FIGHT_SPEC_ITEM_QUANTITY",
+            prepare = function(value) item_by_section(value.actor.items, "device_torch_nv_2").quantity = 2 end },
+        { name = "duplicate same device", draft = with_actor_device(), code = "GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT",
+            prepare = function(value) value.actor.items[#value.actor.items + 1] = { section = "device_torch_nv_2", quantity = 1, equipped_slot = "device" } end },
+        { name = "duplicate different device", draft = with_actor_device(), code = "GA_FIGHT_SPEC_ITEM_SLOT_CONFLICT",
+            prepare = function(value) value.actor.items[#value.actor.items + 1] = { section = "device_torch_nv_3", quantity = 1, equipped_slot = "device" } end },
+        { name = "device without slot", draft = with_actor_device(), code = "GA_FIGHT_SPEC_ITEM_SLOT",
+            prepare = function(value) item_by_section(value.actor.items, "device_torch_nv_2").equipped_slot = nil end },
+        { name = "opponent device", draft = item_draft(), code = "GA_FIGHT_SPEC_OPPONENT_DEVICE",
+            prepare = function(value) value.opponents[1].items[#value.opponents[1].items + 1] = { section = "device_torch_dummy", quantity = 1, equipped_slot = "device" } end }
+    }
+    for _, case in ipairs(cases) do
+        if case.prepare then case.prepare(case.draft) end
+        local result = gamma_arena_fight_spec.canonicalize(case.draft, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, "v9 rejects " .. case.name)
+        gamma_arena_test_assert.equals(result.error.code, case.code, "v9 rejection code for " .. case.name)
+    end
+end
+
+local function set_participant_physical_total(participant, total)
+    local retained, retained_total = {}, 0
+    for _, entry in ipairs(participant.items) do
+        if entry.section ~= "ammo_545" then
+            retained[#retained + 1] = entry
+            retained_total = retained_total + entry.quantity
+        end
+    end
+    retained[#retained + 1] = { section = "ammo_545", quantity = total - retained_total }
+    participant.loadout = nil
+    participant.items = retained
+end
+
+local function fight_spec_enforces_per_participant_physical_item_cap()
+    for _, target in ipairs({ "actor", "opponent" }) do
+        local accepted = item_draft()
+        local accepted_participant = target == "actor" and accepted.actor or accepted.opponents[1]
+        set_participant_physical_total(accepted_participant, 256)
+        local result = gamma_arena_fight_spec.canonicalize(accepted, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_true(result.ok, target .. " total 256 canonicalizes")
+
+        local rejected = item_draft()
+        local rejected_participant = target == "actor" and rejected.actor or rejected.opponents[1]
+        set_participant_physical_total(rejected_participant, 257)
+        result = gamma_arena_fight_spec.canonicalize(rejected, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, target .. " total 257 is rejected")
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ITEM_LIMIT", target .. " cap error code")
+    end
+
+    local huge = item_draft()
+    huge.actor.items = { { section = "bandage", quantity = 4294967296 } }
+    local called, result = pcall(function()
+        return gamma_arena_fight_spec.canonicalize(huge, identity(), catalog(), layout())
+    end)
+    gamma_arena_test_assert.is_true(called, "large safe integer quantity returns without allocation")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ITEM_LIMIT", "large safe integer fails by participant cap")
+end
+
+local function rejects_invalid_item_entries_and_positions()
+    local cases = {
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 0 } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_QUANTITY" },
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1, equipped_slot = "belt" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT" },
+        { mutate = function(value) value.actor.items = { { section = "bandage", quantity = 1 }, { section = "bandage", quantity = 1, equipped_slot = "knife" } }; value.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ITEM_SLOT" },
+        { mutate = function(value) value.opponents[1].spawn.position.x = 0 / 0 end, code = "GA_FIGHT_SPEC_POSITION" }
+    }
+    for _, case in ipairs(cases) do
+        local value = item_draft(); case.mutate(value)
+        local result = gamma_arena_fight_spec.canonicalize(value, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, "malformed draft must fail")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "malformed draft error code")
+    end
+end
+
+local function rejects_forbidden_keys_at_every_depth_and_invalid_identity()
+    for _, location in ipairs({ "root", "arena", "actor", "opponent", "item", "rank", "spawn" }) do
+        local value = item_draft()
+        if location == "root" then value.mode_id = "custom" elseif location == "arena" then value.arena.difficulty_id = "master" elseif location == "actor" then value.actor.budget = 1 elseif location == "opponent" then value.opponents[1].mode_id = "custom" elseif location == "item" then value.actor.items[1].price = 1 elseif location == "rank" then value.opponents[1].rank.difficulty_id = "master" else value.opponents[1].spawn.budget = 1 end
+        local result = gamma_arena_fight_spec.canonicalize(value, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, "forbidden key must fail at " .. location)
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_FORBIDDEN_FIELD", "forbidden field code")
+    end
+    local bad = identity(); bad.mode_id = "custom"
+    local result = gamma_arena_fight_spec.canonicalize(item_draft(), bad, catalog(), layout())
+    gamma_arena_test_assert.is_false(result.ok, "identity must be exact")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_IDENTITY", "identity rejects unknown provenance")
+
+    for _, forbidden in ipairs({ "custom_config", "generation_recipe", "generation_rules", "provenance" }) do
+        local root = item_draft(); root[forbidden] = { valid_configuration = true }
+        local nested = item_draft(); nested.actor.items[1][forbidden] = true
+        for _, draft in ipairs({ root, nested }) do
+            local rejected = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+            gamma_arena_test_assert.is_false(rejected.ok, "exact forbidden provenance key must fail")
+            gamma_arena_test_assert.equals(rejected.error.code, "GA_FIGHT_SPEC_FORBIDDEN_FIELD", "provenance key code")
+        end
+    end
+end
+
+local function fight_spec_binds_identity_layout_and_dense_arrays()
+    local cases = {
+        { mutate = function(draft, id) id.generator_version = 7 end, code = "GA_FIGHT_SPEC_IDENTITY" },
+        { mutate = function(draft, id) id.session_seed = -1 end, code = "GA_FIGHT_SPEC_IDENTITY" },
+        { mutate = function(draft, id, cat) id.catalog_fingerprint = cat.fingerprint .. "-wrong" end, code = "GA_FIGHT_SPEC_IDENTITY" },
+        { mutate = function(draft, id, cat, arena) id.layout_version = arena.version + 1 end, code = "GA_FIGHT_SPEC_IDENTITY" },
+        { mutate = function(draft) draft.arena.layout_id = "wrong_layout" end, code = "GA_FIGHT_SPEC_DRAFT" },
+        { mutate = function(draft) draft.arena.level = "wrong_level" end, code = "GA_FIGHT_SPEC_DRAFT" },
+        { mutate = function(draft) draft.actor.spawn_path = "wrong_spawn" end, code = "GA_FIGHT_SPEC_DRAFT" },
+        { mutate = function(draft) draft.actor.look_path = "wrong_look" end, code = "GA_FIGHT_SPEC_DRAFT" },
+        { mutate = function(draft) draft.opponents[1].tactical_route = "wrong_route" end, code = "GA_FIGHT_SPEC_DRAFT" },
+        { mutate = function(draft) draft.actor.items = { [1] = draft.actor.items[1], [3] = draft.actor.items[2] }; draft.actor.loadout = nil end, code = "GA_FIGHT_SPEC_ARRAY" },
+        { mutate = function(draft) draft.actor.loadout = { kind = "items", items = { [1] = draft.actor.items[1], [3] = draft.actor.items[2] } }; draft.actor.items = nil end, code = "GA_FIGHT_SPEC_ARRAY" },
+        { mutate = function(draft) draft.opponents = { [1] = draft.opponents[1], [3] = clone(draft.opponents[1]) } end, code = "GA_FIGHT_SPEC_ARRAY" },
+        { mutate = function(draft) draft.arena.tactical_routes = { [1] = "route_1", [3] = "route_2" } end, code = "GA_FIGHT_SPEC_ARRAY" }
+    }
+    for _, case in ipairs(cases) do
+        local draft, id, cat, arena = item_draft(), identity(), catalog(), layout(); case.mutate(draft, id, cat, arena)
+        local result = gamma_arena_fight_spec.canonicalize(draft, id, cat, arena)
+        gamma_arena_test_assert.is_false(result.ok, "identity and dense-array violations must fail")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "identity and dense-array code")
+    end
+    local draft, arena = item_draft(), layout(); draft.arena.tactical_routes = { "route_2", "route_1" }
+    local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), arena)
+    gamma_arena_test_assert.is_true(result.ok, "layout routes may be provided in a different order")
+    gamma_arena_test_assert.equals(result.value.arena.tactical_routes[1], "route_1", "canonical routes use layout order")
+    local sparse_layout = layout(); sparse_layout.tactical_routes = { [1] = "route_1", [3] = "route_2" }
+    result = gamma_arena_fight_spec.canonicalize(item_draft(), identity(sparse_layout), catalog(), sparse_layout)
+    gamma_arena_test_assert.is_false(result.ok, "sparse layout routes must fail")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_ARRAY", "sparse layout route code")
+end
+
+local function fight_spec_rejects_invalid_resolved_layout_identity_fields()
+    local cases = {
+        { mutate = function(draft, arena) arena.id = nil; draft.arena.layout_id = nil end },
+        { mutate = function(draft, arena) arena.level = false; draft.arena.level = false end },
+        { mutate = function(draft, arena) arena.actor_spawn_path = 17; draft.actor.spawn_path = 17 end },
+        { mutate = function(draft, arena) local invalid = {}; arena.actor_look_path = invalid; draft.actor.look_path = invalid end }
+    }
+    for _, case in ipairs(cases) do
+        local draft, arena = item_draft(), layout(); case.mutate(draft, arena)
+        local result = gamma_arena_fight_spec.canonicalize(draft, identity(arena), catalog(), arena)
+        gamma_arena_test_assert.is_false(result.ok, "matching invalid resolved layout identity must fail")
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHT_SPEC_IDENTITY", "invalid resolved layout identity code")
+    end
+end
+
+local function hash_encoding_and_copy_are_sensitive_and_stable()
+    local first = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout()).value
+    local reordered = item_draft(); reordered.actor.items[1], reordered.actor.items[7] = reordered.actor.items[7], reordered.actor.items[1]
+    local second = gamma_arena_fight_spec.canonicalize(reordered, identity(), catalog(), layout()).value
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(first), gamma_arena_fight_spec.stable_encode(second), "shuffled inputs encode stably")
+    local changed = item_draft(); changed.opponents[1].spawn.position.z = 3
+    local third = gamma_arena_fight_spec.canonicalize(changed, identity(), catalog(), layout()).value
+    gamma_arena_test_assert.is_true(first.identity.fight_id ~= third.identity.fight_id, "fight id is sensitive to fight content")
+    local copied = gamma_arena_fight_spec.copy(first); copied.actor.items[1].section = "medkit"
+    gamma_arena_test_assert.equals(first.actor.items[1].section, "stalker_outfit", "copy isolation")
+    gamma_arena_test_assert.equals(gamma_arena_fight_spec.content_hash("abc"), gamma_arena_fight_spec.content_hash("abc"), "hash is deterministic")
+    gamma_arena_test_assert.is_true(gamma_arena_fight_spec.content_hash("abc") ~= gamma_arena_fight_spec.content_hash("abd"), "hash is content-sensitive")
+end
+
+local function valid_spec()
+    local result = gamma_arena_fight_spec.canonicalize(item_draft(), identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "valid v9 fixture canonicalizes")
+    return result.value
+end
+
+local function validator_enforces_v9_identity_versions_and_devices()
+    local base = valid_spec()
+    gamma_arena_test_assert.is_true(gamma_arena_fight_validator_v9.validate(base, catalog(), layout()).ok, "strict v9 accepts device-free canonical FightSpec")
+    local device = gamma_arena_fight_spec.canonicalize(with_actor_device("device_torch_nv_1"), identity(), catalog(), layout()).value
+    gamma_arena_test_assert.is_true(gamma_arena_fight_validator_v9.validate(device, catalog(), layout()).ok, "strict v9 accepts one actor device")
+
+    for version = 1, 10 do
+        if version ~= 9 then
+            local forged = clone(base); forged.schema_version = version
+            local result = gamma_arena_fight_validator_v9.validate(forged, catalog(), layout())
+            gamma_arena_test_assert.is_false(result.ok, "strict v9 rejects schema " .. tostring(version))
+            gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_VERSION_INVALID", "wrong schema code")
+        end
+    end
+    for _, key in ipairs({ "session_seed", "fight_index", "generator_version", "catalog_schema_version", "catalog_revision", "catalog_fingerprint", "layout_version", "layout_hash", "fight_id" }) do
+        local forged = clone(base); forged.identity[key] = nil
+        gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(forged, catalog(), layout()).ok, "missing exact identity key " .. key)
+    end
+    local unknown = clone(base); unknown.identity.mode_id = "custom"
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(unknown, catalog(), layout()).ok, "unknown identity field fails")
+    local invalid_id = clone(base); invalid_id.identity.fight_id = "foreign-0000000000000000"
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(invalid_id, catalog(), layout()).ok, "foreign fight id fails")
+
+    local opponent_device = clone(base)
+    opponent_device.opponents[1].items[#opponent_device.opponents[1].items + 1] = { section = "device_torch_dummy", quantity = 1, equipped_slot = "device" }
+    gamma_arena_test_assert.equals(gamma_arena_fight_validator_v9.validate(opponent_device, catalog(), layout()).error.code,
+        "GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID", "strict opponent device code")
+    local wrong_slot = clone(device); item_by_section(wrong_slot.actor.items, "device_torch_nv_1").equipped_slot = "weapon_1"
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(wrong_slot, catalog(), layout()).ok, "strict device slot")
+    local wrong_quantity = clone(device); item_by_section(wrong_quantity.actor.items, "device_torch_nv_1").quantity = 2
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(wrong_quantity, catalog(), layout()).ok, "strict device quantity")
+end
+
+local function validator_never_reruns_random_device_selection()
+    local original = gamma_arena_device_generator.generate
+    gamma_arena_device_generator.generate = function() error("validator reran Random device selection") end
+    local called, result = pcall(function()
+        local spec = gamma_arena_fight_spec.canonicalize(with_actor_device("device_torch_nv_3"), identity(), catalog(), layout()).value
+        return gamma_arena_fight_validator_v9.validate(spec, catalog(), layout())
+    end)
+    gamma_arena_device_generator.generate = original
+    gamma_arena_test_assert.is_true(called and result.ok, "universal validation never reruns Random selection")
+end
+
+local function catalog_identity_is_authoritative_for_canonicalization_and_validation()
+    local cases = {
+        { name = "schema version", mutate = function(cat) cat.schema_version = 999 end },
+        { name = "revision", mutate = function(cat) cat.revision = 9 end },
+        { name = "generator version", mutate = function(cat) cat.generator_version = 9 end },
+        { name = "fingerprint domain", mutate = function(cat) cat.fingerprint = "foreign-catalog-1234abcd" end }
+    }
+    for _, case in ipairs(cases) do
+        local cat, id = catalog(), identity()
+        case.mutate(cat)
+        id.catalog_fingerprint = cat.fingerprint
+        local canonical = gamma_arena_fight_spec.canonicalize(item_draft(), id, cat, layout())
+        gamma_arena_test_assert.is_false(canonical.ok, "canonicalization rejects wrong catalog " .. case.name)
+        gamma_arena_test_assert.equals(canonical.error.code, "GA_FIGHT_SPEC_CATALOG", "canonicalization classifies wrong catalog " .. case.name)
+
+        local source = valid_spec()
+        source.identity.catalog_fingerprint = cat.fingerprint
+        local validated = gamma_arena_fight_validator_v9.validate(source, cat, layout())
+        gamma_arena_test_assert.is_false(validated.ok, "strict validation rejects wrong catalog " .. case.name .. " beyond fingerprint self-equality")
+        gamma_arena_test_assert.equals(validated.error.code, "GA_FIGHTSPEC_CATALOG_INVALID", "strict validation classifies wrong catalog " .. case.name)
+    end
+end
+
+local function two_opponent_spec()
+    local draft = item_draft()
+    local second = clone(draft.opponents[1])
+    second.slot = 2
+    second.role = "primary"
+    second.spawn_slot_id = "virtual_02"
+    second.spawn = { position = { x = 3, y = 0, z = 4 }, level_vertex_id = 124, game_vertex_id = 457 }
+    second.tactical_route = "route_2"
+    draft.opponents[2] = second
+    local result = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "two-opponent v9 fixture canonicalizes")
+    return result.value
+end
+
+local function spec_with_vertex(field, value)
+    local draft, arena = item_draft(), layout()
+    draft.opponents[1].spawn[field] = value
+    arena.opponent_spawn_slots[1][field] = value
+    local result = gamma_arena_fight_spec.canonicalize(draft, identity(arena), catalog(), arena)
+    gamma_arena_test_assert.is_true(result.ok, "vertex-boundary v9 fixture canonicalizes")
+    return result.value, arena
+end
+
+local function remove_item(items, section)
+    for index = #items, 1, -1 do
+        if items[index].section == section then table.remove(items, index) end
+    end
+end
+
+local function validator_accepts_valid_v9_and_returns_immutable_copy()
+    local source = valid_spec()
+    local result = gamma_arena_fight_validator_v9.validate(source, catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "strict v9 validator accepts canonical FightSpec")
+    gamma_arena_test_assert.equals(result.value.session_seed(), 12345, "immutable seed accessor")
+    gamma_arena_test_assert.equals(result.value.fight_index(), 2, "immutable fight index accessor")
+    gamma_arena_test_assert.equals(result.value.fight_id(), source.identity.fight_id, "immutable fight id accessor")
+    gamma_arena_test_assert.equals(result.value.stable_encode(), gamma_arena_fight_spec.stable_encode(source), "immutable stable encoding")
+
+    local actor = result.value.actor()
+    local opponents = result.value.opponents()
+    local routes = result.value.tactical_routes()
+    actor.items[1].section = "forged"
+    opponents[1].spawn.position.x = 999
+    routes[1] = "forged"
+    source.actor.items[1].section = "mutated_after_validation"
+    gamma_arena_test_assert.equals(result.value.actor().items[1].section, "stalker_outfit", "actor accessor deep-copies")
+    gamma_arena_test_assert.equals(result.value.opponents()[1].spawn.position.x, 1, "opponent accessor deep-copies")
+    gamma_arena_test_assert.equals(result.value.tactical_routes()[1], "route_1", "route accessor deep-copies")
+
+    local optional_helmet_metadata = catalog()
+    optional_helmet_metadata.items.stalker_outfit.helmet_allowed = nil
+    gamma_arena_test_assert.is_true(
+        gamma_arena_fight_validator_v9.validate(valid_spec(), optional_helmet_metadata, layout()).ok,
+        "outfit without helmet metadata remains valid when no helmet is selected")
+
+    local runtime = { effective_profile = function() return { class = "AI_STL_S", community = "arena_enemy" } end }
+    gamma_arena_test_assert.is_true(
+        gamma_arena_fight_validator_v9.validate(valid_spec(), catalog(), layout(), runtime).ok,
+        "optional runtime confirms the isolated effective profile community")
+    runtime.effective_profile = function() return { class = "AI_STL_S", community = "stalker" } end
+    gamma_arena_test_assert.is_false(
+        gamma_arena_fight_validator_v9.validate(valid_spec(), catalog(), layout(), runtime).ok,
+        "optional runtime rejects the source faction as an effective community")
+end
+
+local function validator_enforces_per_participant_physical_item_cap()
+    for _, target in ipairs({ "actor", "opponent" }) do
+        local draft = item_draft()
+        local participant = target == "actor" and draft.actor or draft.opponents[1]
+        set_participant_physical_total(participant, 256)
+        local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+        gamma_arena_test_assert.is_true(canonical.ok, target .. " boundary fixture canonicalizes")
+        gamma_arena_test_assert.is_true(
+            gamma_arena_fight_validator_v9.validate(canonical.value, catalog(), layout()).ok,
+            target .. " total 256 validates")
+
+        local forged = clone(canonical.value)
+        local forged_ammo = item_by_section(target == "actor" and forged.actor.items or forged.opponents[1].items, "ammo_545")
+        forged_ammo.quantity = forged_ammo.quantity + 1
+        local result = gamma_arena_fight_validator_v9.validate(forged, catalog(), layout())
+        gamma_arena_test_assert.is_false(result.ok, target .. " total 257 is rejected independently")
+        gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", target .. " strict cap error code")
+    end
+
+    local huge = valid_spec()
+    item_by_section(huge.actor.items, "ammo_545").quantity = 4294967296
+    local called, result = pcall(function()
+        return gamma_arena_fight_validator_v9.validate(huge, catalog(), layout())
+    end)
+    gamma_arena_test_assert.is_true(called, "strict validator handles large safe integer without reconstruction")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_ITEM_LIMIT", "strict large integer fails by participant cap")
+
+    local wrong_cap = catalog()
+    wrong_cap.max_physical_items_per_participant = 255
+    result = gamma_arena_fight_validator_v9.validate(valid_spec(), wrong_cap, layout())
+    gamma_arena_test_assert.equals(result.error.code, "GA_FIGHTSPEC_CATALOG_INVALID", "strict validator requires authoritative cap")
+end
+
+local function validator_rejects_unknown_keys_at_every_schema_level()
+    local locations = {
+        function(value) value.unknown_root = true end,
+        function(value) value.identity.unknown_identity = true end,
+        function(value) value.arena.unknown_arena = true end,
+        function(value) value.actor.unknown_actor = true end,
+        function(value) value.arena.tactical_routes.unknown_route_index = true end,
+        function(value) value.actor.items.unknown_item_index = true end,
+        function(value) value.actor.items[1].unknown_item = true end,
+        function(value) value.opponents.unknown_opponent_index = true end,
+        function(value) value.opponents[1].unknown_opponent = true end,
+        function(value) value.opponents[1].rank.unknown_rank = true end,
+        function(value) value.opponents[1].spawn.unknown_spawn = true end,
+        function(value) value.opponents[1].spawn.position.unknown_position = true end
+    }
+    for index, mutate in ipairs(locations) do
+        local forged = valid_spec(); mutate(forged)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v9.validate(forged, catalog(), layout()).ok,
+            "unknown key at schema level " .. tostring(index))
+    end
+end
+
+local function validator_rejects_generation_provenance_recursively()
+    local forbidden_keys = {
+        "mode_id", "difficulty_id", "budget", "price",
+        "weight_total", "custom_config"
+    }
+    local locations = {
+        function(value, key) value[key] = "forbidden" end,
+        function(value, key) value.identity[key] = "forbidden" end,
+        function(value, key) value.arena[key] = "forbidden" end,
+        function(value, key) value.actor[key] = "forbidden" end,
+        function(value, key) value.actor.items[1][key] = "forbidden" end,
+        function(value, key) value.opponents[1][key] = "forbidden" end,
+        function(value, key) value.opponents[1].rank[key] = "forbidden" end,
+        function(value, key) value.opponents[1].spawn[key] = "forbidden" end,
+        function(value, key) value.opponents[1].spawn.position[key] = "forbidden" end
+    }
+    for _, key in ipairs(forbidden_keys) do
+        for index, mutate in ipairs(locations) do
+            local forged = valid_spec(); mutate(forged, key)
+            gamma_arena_test_assert.is_false(
+                gamma_arena_fight_validator_v9.validate(forged, catalog(), layout()).ok,
+                "forbidden key " .. key .. " at schema level " .. tostring(index))
+        end
+    end
+end
+
+local function validator_rejects_mutation_matrix()
+    local cases = {
+        { name = "schema", mutate = function(value) value.schema_version = 5 end },
+        { name = "seed", mutate = function(value) value.identity.session_seed = 0 end },
+        { name = "index", mutate = function(value) value.identity.fight_index = -1 end },
+        { name = "generator version", mutate = function(value) value.identity.generator_version = 7 end },
+        { name = "catalog fingerprint", mutate = function(value) value.identity.catalog_fingerprint = "forged" end },
+        { name = "layout version", mutate = function(value) value.identity.layout_version = 3 end },
+        { name = "content hash", mutate = function(value) value.identity.content_hash = "0000000000000000" end },
+        { name = "fight id", mutate = function(value) value.identity.fight_id = "foreign-forged" end },
+        { name = "layout id", mutate = function(value) value.arena.layout_id = "forged" end },
+        { name = "level", mutate = function(value) value.arena.level = "forged" end },
+        { name = "route order", mutate = function(value) value.arena.tactical_routes[1], value.arena.tactical_routes[2] = value.arena.tactical_routes[2], value.arena.tactical_routes[1] end },
+        { name = "actor spawn path", mutate = function(value) value.actor.spawn_path = "forged" end },
+        { name = "actor look path", mutate = function(value) value.actor.look_path = "forged" end },
+        { name = "item section", mutate = function(value) value.actor.items[1].section = "unknown_item" end },
+        { name = "item quantity", mutate = function(value) value.actor.items[1].quantity = 0 end },
+        { name = "item slot", mutate = function(value) value.actor.items[1].equipped_slot = "weapon_1" end },
+        { name = "item order", mutate = function(value) value.actor.items[1], value.actor.items[2] = value.actor.items[2], value.actor.items[1] end },
+        { name = "duplicate physical item", mutate = function(value) table.insert(value.actor.items, clone(value.actor.items[#value.actor.items])) end },
+        { name = "opponent slot bounds", mutate = function(value) value.opponents[1].slot = 0 end },
+        { name = "opponent faction", mutate = function(value) value.opponents[1].faction = "unknown" end },
+        { name = "opponent named rank", mutate = function(value) value.opponents[1].rank.id = "legend" end },
+        { name = "opponent named rank band", mutate = function(value) value.opponents[1].rank.value = 50000 end },
+        { name = "opponent profile rank band", mutate = function(value) value.opponents[1].rank.value = 40500 end },
+        { name = "opponent profile", mutate = function(value) value.opponents[1].profile = "sim_default_stalker_4" end },
+        { name = "opponent role", mutate = function(value) value.opponents[1].role = "forged" end },
+        { name = "opponent spawn slot", mutate = function(value) value.opponents[1].spawn_slot_id = "virtual_02" end },
+        { name = "opponent spawn position", mutate = function(value) value.opponents[1].spawn.position.x = 2 end },
+        { name = "opponent spawn vertex", mutate = function(value) value.opponents[1].spawn.level_vertex_id = 124 end },
+        { name = "opponent route", mutate = function(value) value.opponents[1].tactical_route = "route_2" end },
+        { name = "duplicate opponent slot", mutate = function(value) value.opponents[2] = clone(value.opponents[1]) end },
+        { name = "duplicate spawn slot", mutate = function(value) value.opponents[2] = clone(value.opponents[1]); value.opponents[2].slot = 2 end }
+    }
+    for _, case in ipairs(cases) do
+        local forged = valid_spec(); case.mutate(forged)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v9.validate(forged, catalog(), layout()).ok,
+            "mutation must fail: " .. case.name)
+    end
+end
+
+local function validator_accepts_unique_nonsequential_logical_slots()
+    local draft = item_draft()
+    draft.opponents[1].slot = 2
+    local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(canonical.ok, "Task 3 canonicalizer accepts a unique logical slot 2")
+    local result = gamma_arena_fight_validator_v9.validate(canonical.value, catalog(), layout())
+    gamma_arena_test_assert.is_true(result.ok, "v9 validator accepts a unique nonsequential logical slot")
+    gamma_arena_test_assert.equals(result.value.opponents()[1].slot, 2, "immutable view retains logical slot")
+end
+
+local function validator_to_entity_adapter_preserves_nonsequential_logical_slot()
+    local draft = item_draft()
+    draft.opponents[1].slot = 2
+    local canonical = gamma_arena_fight_spec.canonicalize(draft, identity(), catalog(), layout())
+    gamma_arena_test_assert.is_true(canonical.ok, "slot-preservation fixture canonicalizes")
+    local validated = gamma_arena_fight_validator_v9.validate(canonical.value, catalog(), layout())
+    gamma_arena_test_assert.is_true(validated.ok, "slot-preservation fixture reaches the strict v9 boundary")
+    local adapter = gamma_arena_entity_adapter.new({
+        actor = { apply_items = function() return gamma_arena_result.ok(true) end },
+        profile_runtime = { effective_profile = function() return { class = "AI_STL_S", community = "arena_enemy" } end }
+    })
+    local begun = adapter:begin_apply(validated.value, "session-logical-slot-2", catalog())
+    gamma_arena_test_assert.is_true(begun.ok, "validated slot 2 reaches the entity adapter")
+    gamma_arena_test_assert.equals(adapter.opponents[1].slot, 2, "entity adapter does not rewrite slot 2 to dense index 1")
+    gamma_arena_test_assert.is_true(adapter.opponent_by_slot[2] == adapter.opponents[1], "entity adapter addresses the opponent by logical slot 2")
+    gamma_arena_test_assert.equals(adapter.opponent_by_slot[1], nil, "dense index 1 is not treated as the logical opponent slot")
+end
+
+local function validator_distinguishes_duplicate_logical_and_physical_slots()
+    local logical = two_opponent_spec()
+    logical.opponents[2].slot = logical.opponents[1].slot
+    local logical_result = gamma_arena_fight_validator_v9.validate(logical, catalog(), layout())
+    gamma_arena_test_assert.is_false(logical_result.ok, "duplicate logical opponent slots fail")
+    gamma_arena_test_assert.equals(logical_result.error.code, "GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE", "logical slot duplicate code")
+
+    local physical = two_opponent_spec()
+    physical.opponents[2].spawn_slot_id = physical.opponents[1].spawn_slot_id
+    physical.opponents[2].spawn = clone(physical.opponents[1].spawn)
+    local physical_result = gamma_arena_fight_validator_v9.validate(physical, catalog(), layout())
+    gamma_arena_test_assert.is_false(physical_result.ok, "duplicate physical spawn slots fail")
+    gamma_arena_test_assert.equals(physical_result.error.code, "GA_FIGHTSPEC_SPAWN_INVALID", "physical spawn duplicate remains distinct")
+end
+
+local function validator_enforces_engine_vertex_uint32_boundaries()
+    for _, case in ipairs({
+        { field = "level_vertex_id", value = 0 },
+        { field = "level_vertex_id", value = 4294967294 },
+        { field = "game_vertex_id", value = 0 },
+        { field = "game_vertex_id", value = 4294967294 }
+    }) do
+        local spec, arena = spec_with_vertex(case.field, case.value)
+        gamma_arena_test_assert.is_true(
+            gamma_arena_fight_validator_v9.validate(spec, catalog(), arena).ok,
+            "engine vertex boundary is valid: " .. case.field .. "=" .. tostring(case.value))
+    end
+
+    for _, case in ipairs({
+        { field = "level_vertex_id", value = 4294967295 },
+        { field = "level_vertex_id", value = 4294967296 },
+        { field = "game_vertex_id", value = 4294967295 },
+        { field = "game_vertex_id", value = 4294967296 }
+    }) do
+        local spec, arena = spec_with_vertex(case.field, case.value)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v9.validate(spec, catalog(), arena).ok,
+            "engine vertex boundary is rejected: " .. case.field .. "=" .. tostring(case.value))
+    end
+end
+
+local function validator_enforces_physical_participant_contracts()
+    local cases = {
+        { name = "outfit required", mutate = function(value) remove_item(value.actor.items, "stalker_outfit") end },
+        { name = "knife required", mutate = function(value) remove_item(value.actor.items, "wpn_knife") end },
+        { name = "firearm required", mutate = function(value) remove_item(value.actor.items, "wpn_ak74") end },
+        { name = "weapon ammunition required", mutate = function(value) remove_item(value.actor.items, "ammo_545") end },
+        { name = "orphan ammunition", mutate = function(value) item_by_section(value.actor.items, "ammo_545").section = "ammo_762" end },
+        { name = "actor healing required", mutate = function(value) remove_item(value.actor.items, "medkit") end },
+        { name = "duplicate equipped slot", mutate = function(value) table.insert(value.actor.items, 5, { section = "wpn_ak74_alt", quantity = 1, equipped_slot = "weapon_2" }) end },
+        { name = "incompatible helmet", mutate = function(value) item_by_section(value.actor.items, "stalker_outfit").section = "sealed_outfit"; table.insert(value.actor.items, 2, { section = "helmet_closed", quantity = 1, equipped_slot = "helmet" }) end }
+    }
+    for _, case in ipairs(cases) do
+        local forged = valid_spec(); case.mutate(forged)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v9.validate(forged, catalog(), layout()).ok,
+            "participant contract must fail: " .. case.name)
+    end
+
+    local opponent = valid_spec(); remove_item(opponent.opponents[1].items, "wpn_knife")
+    gamma_arena_test_assert.is_false(gamma_arena_fight_validator_v9.validate(opponent, catalog(), layout()).ok, "opponents use the same physical item contract")
+end
+
+local function validator_rejects_invalid_catalog_and_layout_without_mutation()
+    local cases = {
+        { name = "catalog item", mutate = function(cat) cat.items.bad_ammo = { category = "ammo", box_size = 0 } end },
+        { name = "catalog ammo compatibility", mutate = function(cat) cat.items.wpn_ak74.ammo_sections = { "unknown_ammo" } end },
+        { name = "catalog named rank band", mutate = function(cat) cat.ranks.master.minimum = 50000 end },
+        { name = "catalog profile community", mutate = function(cat) cat.factions.stalker.ranks.master.community = "bandit" end },
+        { name = "layout capacity", mutate = function(cat, arena) arena.capacity = 3 end },
+        { name = "layout duplicate slot", mutate = function(cat, arena) arena.opponent_spawn_slots[2].id = "virtual_01" end },
+        { name = "layout undeclared base route", mutate = function(cat, arena) arena.opponent_spawn_slots[1].base_route = "forged" end }
+    }
+    for _, case in ipairs(cases) do
+        local cat, arena = catalog(), layout(); case.mutate(cat, arena)
+        gamma_arena_test_assert.is_false(
+            gamma_arena_fight_validator_v9.validate(valid_spec(), cat, arena).ok,
+            "invalid authoritative input must fail: " .. case.name)
+    end
+end
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs({
+        { name = "fight_spec_v9_exact_identity_and_device_order", fn = canonicalizes_v9_exact_identity_and_device_order },
+        { name = "fight_spec_v9_rejects_legacy_and_invalid_devices", fn = rejects_legacy_loadouts_and_invalid_devices },
+        { name = "fight_spec_enforces_per_participant_physical_item_cap", fn = fight_spec_enforces_per_participant_physical_item_cap },
+        { name = "fight_spec_rejects_invalid_item_entries_and_positions", fn = rejects_invalid_item_entries_and_positions },
+        { name = "fight_spec_rejects_forbidden_keys_at_every_depth_and_invalid_identity", fn = rejects_forbidden_keys_at_every_depth_and_invalid_identity },
+        { name = "fight_spec_binds_identity_layout_and_dense_arrays", fn = fight_spec_binds_identity_layout_and_dense_arrays },
+        { name = "fight_spec_rejects_invalid_resolved_layout_identity_fields", fn = fight_spec_rejects_invalid_resolved_layout_identity_fields },
+        { name = "fight_validator_v9_identity_versions_and_devices", fn = validator_enforces_v9_identity_versions_and_devices },
+        { name = "fight_validator_v9_never_reruns_random_device_selection", fn = validator_never_reruns_random_device_selection },
+        { name = "fight_spec_catalog_identity_is_authoritative_for_canonicalization_and_validation", fn = catalog_identity_is_authoritative_for_canonicalization_and_validation },
+        { name = "fight_spec_hash_encoding_and_copy_are_sensitive_and_stable", fn = hash_encoding_and_copy_are_sensitive_and_stable },
+        { name = "fight_validator_v9_accepts_valid_and_returns_immutable_copy", fn = validator_accepts_valid_v9_and_returns_immutable_copy },
+        { name = "fight_validator_v9_enforces_per_participant_physical_item_cap", fn = validator_enforces_per_participant_physical_item_cap },
+        { name = "fight_validator_v9_rejects_unknown_keys_at_every_schema_level", fn = validator_rejects_unknown_keys_at_every_schema_level },
+        { name = "fight_validator_v9_rejects_generation_provenance_recursively", fn = validator_rejects_generation_provenance_recursively },
+        { name = "fight_validator_v9_rejects_mutation_matrix", fn = validator_rejects_mutation_matrix },
+        { name = "fight_validator_v9_accepts_unique_nonsequential_logical_slots", fn = validator_accepts_unique_nonsequential_logical_slots },
+        { name = "validator_to_entity_adapter_preserves_nonsequential_logical_slot", fn = validator_to_entity_adapter_preserves_nonsequential_logical_slot },
+        { name = "fight_validator_v9_distinguishes_duplicate_logical_and_physical_slots", fn = validator_distinguishes_duplicate_logical_and_physical_slots },
+        { name = "fight_validator_v9_enforces_engine_vertex_uint32_boundaries", fn = validator_enforces_engine_vertex_uint32_boundaries },
+        { name = "fight_validator_v9_enforces_physical_participant_contracts", fn = validator_enforces_physical_participant_contracts },
+        { name = "fight_validator_v9_rejects_invalid_catalog_and_layout_without_mutation", fn = validator_rejects_invalid_catalog_and_layout_without_mutation }
+    }) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
+    return all_passed
+end

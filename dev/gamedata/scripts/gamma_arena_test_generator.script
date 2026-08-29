@@ -27,6 +27,12 @@ function fixture_factory(options)
     local difficulties = { sections = { meta=section{schema_version="4",revision="5"}, ga_difficulty_rookie=section{tier="1",enemy_min="2",enemy_max="3",enemy_total_budget=tostring(options.rookie_enemy_budget or 25),player_gear_budget="7",player_medical_budget="4",primary_share_percent="50",medical_weight_bleed="35",medical_weight_health="50",medical_weight_boost="15",medical_weight_rare="0",weapon_weight_pistol="50",weapon_weight_smg="30",weapon_weight_shotgun="15",weapon_weight_rifle="5",weapon_weight_sniper="0",armor_weight_light="55",armor_weight_medium="30",armor_weight_scientific="10",armor_weight_heavy="5",armor_weight_powered_exo="0"}, ga_difficulty_stalker=section{tier="2",enemy_min="3",enemy_max="5",enemy_total_budget="50",player_gear_budget="10",player_medical_budget="5",primary_share_percent="60",medical_weight_bleed="25",medical_weight_health="50",medical_weight_boost="25",medical_weight_rare="0",weapon_weight_pistol="25",weapon_weight_smg="35",weapon_weight_shotgun="20",weapon_weight_rifle="18",weapon_weight_sniper="2",armor_weight_light="30",armor_weight_medium="40",armor_weight_scientific="20",armor_weight_heavy="9",armor_weight_powered_exo="1"}, ga_difficulty_veteran=section{tier="3",enemy_min="5",enemy_max="7",enemy_total_budget="75",player_gear_budget="13",player_medical_budget="6",primary_share_percent="75",medical_weight_bleed="20",medical_weight_health="45",medical_weight_boost="30",medical_weight_rare="5",weapon_weight_pistol="10",weapon_weight_smg="25",weapon_weight_shotgun="20",weapon_weight_rifle="38",weapon_weight_sniper="7",armor_weight_light="15",armor_weight_medium="30",armor_weight_scientific="25",armor_weight_heavy="25",armor_weight_powered_exo="5"}, ga_difficulty_master=section{tier="4",enemy_min="7",enemy_max="10",enemy_total_budget="100",player_gear_budget="15",player_medical_budget="8",primary_share_percent="80",medical_weight_bleed="15",medical_weight_health="40",medical_weight_boost="35",medical_weight_rare="10",weapon_weight_pistol="5",weapon_weight_smg="15",weapon_weight_shotgun="15",weapon_weight_rifle="50",weapon_weight_sniper="15",armor_weight_light="10",armor_weight_medium="25",armor_weight_scientific="25",armor_weight_heavy="35",armor_weight_powered_exo="5"} } }
     local layouts = { sections = { meta=section{schema_version="2",revision="2"}, ga_layout_rostok_arena_v1=section{level="l05_bar",actor_spawn_path="t_way",actor_look_path="t_look",opponent_spawn_paths="bar_arena_walk_3_1,bar_arena_walk_3_2,bar_arena_walk_6_1,bar_arena_walk_6_3,bar_arena_walk_6_6,bar_arena_walk_1_1",virtual_capacity="10",virtual_radii="1.5,2.5",max_height_delta="1.0",min_opponent_separation="1.75",min_actor_separation="8.0",max_base_distance="3.0"} } }
     if type(options.mutate) == "function" then options.mutate(catalog, difficulties, layouts, game_sections, system_sections) end
+    catalog.sections.meta = section{schema_version='10',revision='11',generator_version='11'}
+    for _, id in ipairs({ 'headlamp', 'nv_gen1', 'nv_gen2', 'nv_gen3' }) do
+        local device = catalog.sections['device_' .. id]
+        device.selection_weight, device.weight = device.weight, nil
+    end
+    if type(options.mutate_normalized) == 'function' then options.mutate_normalized(catalog, system_sections) end
     local factory = {
         open=function(path) if options.throw_open then error("fixture open failure") end; if string.find(path,"catalogs") then return catalog elseif string.find(path,"difficulties") then return difficulties else return layouts end end,
         section_exists=function(name) if options.throw_section_exists then error("fixture section failure") end; return game_sections[name] == true or (type(system_sections) == "table" and type(system_sections[name]) == "table") end,
@@ -73,7 +79,12 @@ function fixture_factory(options)
     return factory
 end
 
-local function catalogs() local result = gamma_arena_catalog.load(fixture_factory()); gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load"); return result.value end
+local function catalogs()
+    local result = gamma_arena_catalog.load(fixture_factory())
+    local detail = result.ok and "" or (": " .. tostring(result.error and result.error.code))
+    gamma_arena_test_assert.is_true(result.ok, "catalog fixture must load" .. detail)
+    return result.value
+end
 local function request(seed, difficulty) return { session_seed=seed, mode_id="skirmish", difficulty_id=difficulty, layout_id="rostok_arena_v1" } end
 local function item_by_section(values, section_name)
     for _, item in pairs(values or {}) do if type(item) == "table" and item.section == section_name then return item end end
@@ -142,6 +153,22 @@ end
 
 local function device_catalog_and_probability_boundaries()
     local snapshot = catalogs()
+    gamma_arena_test_assert.equals(snapshot.schema_version, 10, 'catalog schema')
+    gamma_arena_test_assert.equals(snapshot.revision, 11, 'catalog revision')
+    gamma_arena_test_assert.equals(snapshot.generator_version, 11, 'generator version')
+    local expected = {
+        headlamp={section='device_torch_dummy',selection_weight=50,effect=nil},
+        nv_gen1={section='device_torch_nv_1',selection_weight=25,effect='nightvision_1'},
+        nv_gen2={section='device_torch_nv_2',selection_weight=18,effect='nightvision_2'},
+        nv_gen3={section='device_torch_nv_3',selection_weight=7,effect='nightvision_3'}
+    }
+    for id, wanted in pairs(expected) do
+        local semantic = snapshot.devices[id]
+        gamma_arena_test_assert.equals(semantic.section, wanted.section, id .. ' exact section')
+        gamma_arena_test_assert.equals(semantic.selection_weight, wanted.selection_weight, id .. ' selection weight')
+        gamma_arena_test_assert.equals(semantic.weight, nil, id .. ' legacy weight removed')
+        gamma_arena_test_assert.equals(semantic.nv_effect, wanted.effect, id .. ' exact effect')
+    end
     gamma_arena_test_assert.equals(#snapshot.device_list, 4, "actor device allowlist has four entries")
     gamma_arena_test_assert.equals(snapshot.devices.headlamp.nv_effect, nil, "headlamp effect marker normalizes to nil")
     gamma_arena_test_assert.equals(snapshot.devices.nv_gen1.nv_effect, "nightvision_1", "Gen 1 effect remains exact")
@@ -169,6 +196,43 @@ local function device_catalog_and_probability_boundaries()
     gamma_arena_test_assert.equals(counts.device_torch_nv_3, 7, "Gen 3 complete-domain count")
 end
 
+local function device_generator_is_mode_free_and_deterministic()
+    local snapshot = catalogs()
+    local identity = { session_seed=77, fight_index=3, generator_version=11, layout_version=2 }
+    local first = gamma_arena_device_generator.generate(snapshot, identity)
+    local second = gamma_arena_device_generator.generate(snapshot, identity)
+    gamma_arena_test_assert.is_true(first.ok and second.ok, 'mode-free device generation succeeds')
+    gamma_arena_test_assert.equals(first.value.section, second.value.section, 'mode-free device replay is deterministic')
+    identity.generator_version = 10
+    local stale = gamma_arena_device_generator.generate(snapshot, identity)
+    gamma_arena_test_assert.is_false(stale.ok, 'stale generator identity is rejected')
+    gamma_arena_test_assert.equals(stale.error.code, 'GA_DEVICE_ARGUMENT_INVALID', 'stale generator identity code')
+end
+
+local function device_selector_rejects_forged_exact_catalogs()
+    local function forged(mutate)
+        local snapshot, list = catalogs(), {}
+        for index, item in ipairs(snapshot.device_list) do
+            local copy = {}
+            for key, value in pairs(item) do copy[key] = value end
+            list[index] = copy
+        end
+        local catalog = { schema_version=10, revision=11, generator_version=11, device_list=list }
+        mutate(catalog)
+        local selected = gamma_arena_device_generator.select(catalog, sequence_rng({ 1 }))
+        gamma_arena_test_assert.is_false(selected.ok, 'forged exact device catalog is rejected')
+        gamma_arena_test_assert.equals(selected.error.code, 'GA_DEVICE_ARGUMENT_INVALID', 'forged device catalog code')
+    end
+    for _, mutate in ipairs({
+        function(c) c.schema_version=9 end, function(c) c.revision=10 end, function(c) c.generator_version=10 end,
+        function(c) c.device_list[2].id='headlamp' end, function(c) c.device_list[2].id='forged' end,
+        function(c) c.device_list[2].section='device_torch_nv_3' end, function(c) c.device_list[2].kind='gen3' end,
+        function(c) c.device_list[1].selection_weight=49; c.device_list[2].selection_weight=26 end,
+        function(c) c.device_list[4].nv_effect='nightvision_2' end,
+        function(c) c.device_list[4].weight=7 end
+    }) do forged(mutate) end
+end
+
 local function device_generator_rejects_malformed_arguments()
     local snapshot = catalogs()
     for _, result in ipairs({
@@ -182,66 +246,20 @@ local function device_generator_rejects_malformed_arguments()
 end
 
 local function device_catalog_rejects_effective_mismatch()
+    local wrong_class = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_1={class='ARTEFACT',slot='9',nv_effect='nightvision_1'} } }))
+    gamma_arena_test_assert.is_false(wrong_class.ok, 'device catalog rejects non-TORCH_S class')
+    local wrong_effect = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_3={class='TORCH_S',slot='9',nv_effect='nightvision_2'} } }))
+    gamma_arena_test_assert.is_false(wrong_effect.ok, 'device catalog rejects mismatched NV effect')
+    local missing = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.devices.ids='headlamp,nv_gen1,nv_gen2' end }))
+    gamma_arena_test_assert.is_false(missing.ok, 'device catalog rejects missing device')
+    local extra = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.devices.ids='headlamp,nv_gen1,nv_gen2,nv_gen3,extra' end }))
+    gamma_arena_test_assert.is_false(extra.ok, 'device catalog rejects extra device')
+    local legacy = gamma_arena_catalog.load(fixture_factory({ mutate_normalized=function(catalog) catalog.sections.device_headlamp.weight='50' end }))
+    gamma_arena_test_assert.is_false(legacy.ok, 'device catalog rejects legacy weight field')
     local semantic = gamma_arena_catalog.load(fixture_factory({ mutate=function(catalog) catalog.sections.device_nv_gen3.weight="8" end }))
     gamma_arena_test_assert.is_false(semantic.ok, "device catalog rejects altered weight")
     local effective = gamma_arena_catalog.load(fixture_factory({ system_sections={ device_torch_nv_2={class="TORCH_S",slot="10",nv_effect="nightvision_2"} } }))
     gamma_arena_test_assert.is_false(effective.ok, "device catalog rejects altered effective slot")
-end
-
-local function actor_device_is_difficulty_independent_and_stable()
-    local snapshot = catalogs()
-    local selected_section
-    for _, difficulty_id in ipairs({ "rookie", "stalker", "veteran", "master" }) do
-        local generated = generate_fixture(request(777, difficulty_id), 5, snapshot)
-        gamma_arena_test_assert.is_true(generated.ok, "device difficulty-independence fixture generates")
-        local device = generated.value.actor.loadout.device
-        gamma_arena_test_assert.is_true(type(device) == "table", "actor FightSpec contains a device record")
-        selected_section = selected_section or device.section
-        gamma_arena_test_assert.equals(device.section, selected_section, "difficulty does not participate in actor device selection")
-        gamma_arena_test_assert.equals(generated.value.opponents[1].loadout.device, nil, "opponents never receive actor devices")
-        local encoded = gamma_arena_generator.stable_encode(generated.value)
-        gamma_arena_test_assert.is_true(string.find(encoded, ",device:" .. device.catalog_id .. ":" .. device.section, 1, true) ~= nil, "stable encoding contains exact device identity")
-        gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "generated FightSpec v8 validates")
-    end
-    local first = generate_fixture(request(991, "rookie"), 4, snapshot)
-    local second = generate_fixture(request(991, "rookie"), 4, snapshot)
-    gamma_arena_test_assert.equals(first.value.actor.loadout.device.section, second.value.actor.loadout.device.section, "same fight replays the same device")
-end
-
-local function validator_rejects_forged_actor_devices()
-    local snapshot = catalogs()
-    local function generated(seed)
-        local result = generate_fixture(request(seed, "master"), seed % 17, snapshot)
-        gamma_arena_test_assert.is_true(result.ok, "device forgery fixture generates")
-        return result.value
-    end
-    local function rejected(spec, mutate, message)
-        mutate(spec)
-        local result = validate_fixture(spec, snapshot)
-        gamma_arena_test_assert.is_false(result.ok, message)
-        gamma_arena_test_assert.equals(result.error.code, "GA_LOADOUT_DEVICE_INVALID", message .. " code")
-    end
-    rejected(generated(1), function(spec) spec.actor.loadout.device = nil end, "missing actor device is rejected")
-    rejected(generated(2), function(spec) spec.actor.loadout.device.section = "device_torch_nv_3" end, "forged device section is rejected")
-    rejected(generated(3), function(spec) spec.actor.loadout.device.weight = 99 end, "forged device weight is rejected")
-    rejected(generated(4), function(spec) spec.actor.loadout.device.kind = "gen9" end, "forged device kind is rejected")
-    rejected(generated(5), function(spec) spec.actor.loadout.device.nv_effect = "nightvision_3" end, "forged device effect is rejected")
-    rejected(generated(6), function(spec) spec.opponents[1].loadout.device = spec.actor.loadout.device end, "opponent device is rejected")
-    rejected(generated(7), function(spec)
-        local replacement = spec.actor.loadout.device.catalog_id == "headlamp" and snapshot.devices.nv_gen1 or snapshot.devices.headlamp
-        spec.actor.loadout.device = { catalog_id=replacement.id, section=replacement.section, kind=replacement.kind, weight=replacement.weight, nv_effect=replacement.nv_effect }
-    end, "wrong deterministic actor device is rejected")
-end
-
-local function validator_copies_actor_device()
-    local snapshot = catalogs()
-    local generated = generate_fixture(request(441, "veteran"), 8, snapshot)
-    local validated = validate_fixture(generated.value, snapshot)
-    gamma_arena_test_assert.is_true(validated.ok, "device immutable-copy fixture validates")
-    local first = validated.value.actor()
-    local expected = first.loadout.device.section
-    first.loadout.device.section = "mutated_device"
-    gamma_arena_test_assert.equals(validated.value.actor().loadout.device.section, expected, "validated actor device is an immutable copy")
 end
 
 local function all_available_pairs()
@@ -262,13 +280,14 @@ function fixture_resolved_layout(snapshot, capacity)
         id = layout.id,
         version = layout.version,
         level = layout.level,
+        capacity = capacity or 10,
         actor_spawn_path = layout.actor_spawn_path,
         actor_look_path = layout.actor_look_path,
         tactical_routes = {},
         opponent_spawn_slots = {}
     }
     for index, path in ipairs(layout.opponent_spawn_paths) do result.tactical_routes[index] = path end
-    for index = 1, capacity or 10 do
+    for index = 1, result.capacity do
         local route = layout.opponent_spawn_paths[((index - 1) % #layout.opponent_spawn_paths) + 1]
         result.opponent_spawn_slots[index] = {
             id = index <= #layout.opponent_spawn_paths and ("native:" .. route) or ("virtual:" .. (index - #layout.opponent_spawn_paths)),
@@ -306,7 +325,7 @@ end
 
 local function weighted_player_class_pair_selection()
     local snapshot = catalogs()
-    local pair = gamma_arena_generator.select_player_class_pair(
+    local pair = gamma_arena_random_generator.select_player_class_pair(
         { next_int = function(_, minimum, maximum) return maximum end },
         snapshot.difficulties.master,
         all_available_pairs()
@@ -315,7 +334,7 @@ local function weighted_player_class_pair_selection()
     gamma_arena_test_assert.equals(pair.value.weapon_class, "w_sniper", "last weighted bucket is reachable")
     gamma_arena_test_assert.equals(pair.value.armor_class, "powered_exo", "last armor bucket is reachable")
 
-    local renormalized = gamma_arena_generator.select_player_class_pair(
+    local renormalized = gamma_arena_random_generator.select_player_class_pair(
         { next_int = function(_, minimum, maximum) return maximum end },
         snapshot.difficulties.master,
         {
@@ -661,7 +680,7 @@ local function actor_weapon_quarantine_is_exact_and_actor_only()
 
     local no_actor_candidates = catalogs()
     no_actor_candidates.actor_weapon_list = {}
-    local no_fallback = gamma_arena_generator.player_loadout(request(9, "rookie"), 0, no_actor_candidates, no_actor_candidates.difficulties.rookie)
+    local no_fallback = gamma_arena_random_generator.player_loadout(request(9, "rookie"), 0, no_actor_candidates, no_actor_candidates.difficulties.rookie)
     gamma_arena_test_assert.is_false(no_fallback.ok, "empty actor candidate list cannot fall back to full weapon catalog")
     gamma_arena_test_assert.equals(no_fallback.error.code, "GA_NO_VALID_PLAYER_LOADOUT", "empty actor candidate failure is structured")
 end
@@ -855,7 +874,7 @@ local function bonus_ammo_category_boundaries_and_fallback()
         }
     }
     local function select(draw)
-        return gamma_arena_generator.select_bonus_ammo(
+        return gamma_arena_random_generator.select_bonus_ammo(
             { next_int = function() return draw end },
             { pick = function(_, values) return values[#values] end },
             weapon
@@ -869,7 +888,7 @@ local function bonus_ammo_category_boundaries_and_fallback()
     gamma_arena_test_assert.equals(select(100).requested_category, "armor_piercing", "bonus category upper AP boundary")
     gamma_arena_test_assert.equals(select(61).section, "ammo_bonus_hp", "available category selects a compatible variant")
     local fallback_weapon = { ammo = "ammo_bonus_fmj", ammo_variants = { weapon.ammo_variants[1] } }
-    local fallback = gamma_arena_generator.select_bonus_ammo({ next_int = function() return 76 end }, { pick = function(_, values) return values[1] end }, fallback_weapon)
+    local fallback = gamma_arena_random_generator.select_bonus_ammo({ next_int = function() return 76 end }, { pick = function(_, values) return values[1] end }, fallback_weapon)
     gamma_arena_test_assert.equals(fallback.requested_category, "armor_piercing", "fallback preserves requested category")
     gamma_arena_test_assert.equals(fallback.resolved_category, "standard", "missing category resolves to standard")
     gamma_arena_test_assert.equals(fallback.section, "ammo_bonus_fmj", "missing category selects the base ammo")
@@ -881,12 +900,12 @@ local function player_ammo_scaling_policy_is_uncapped_and_prefix_stable()
     local representative_opponent_counts = { 1, 5, 20, 100 }
     for kind, threshold in pairs(rates) do
         for _, opponent_count in ipairs(representative_opponent_counts) do
-            local all_fail = gamma_arena_generator.scaled_ammo_boxes(function()
+            local all_fail = gamma_arena_random_generator.scaled_ammo_boxes(function()
                 return { next_int=function() return threshold + 1 end }
             end, kind, opponent_count)
             gamma_arena_test_assert.is_true(all_fail.ok, kind .. " all-fail policy result")
             gamma_arena_test_assert.equals(all_fail.value, 1, kind .. " retains one guaranteed box at N=" .. opponent_count)
-            local all_pass = gamma_arena_generator.scaled_ammo_boxes(function()
+            local all_pass = gamma_arena_random_generator.scaled_ammo_boxes(function()
                 return { next_int=function() return threshold end }
             end, kind, opponent_count)
             gamma_arena_test_assert.is_true(all_pass.ok, kind .. " all-pass policy result")
@@ -896,7 +915,7 @@ local function player_ammo_scaling_policy_is_uncapped_and_prefix_stable()
 
     local identity = { "skirmish", "master", 3735928559, 7, 6, 2 }
     local function prefix_run(opponent_count, draws, requested)
-        return gamma_arena_generator.scaled_ammo_boxes(function(index)
+        return gamma_arena_random_generator.scaled_ammo_boxes(function(index)
             requested[#requested + 1] = index
             local rng = gamma_arena_rng.new(gamma_arena_rng.derive_seed({ identity[1], identity[2], identity[3], identity[4], identity[5], identity[6], "actor_scaled_ammo:" .. tostring(index) }))
             return { next_int=function(_, minimum, maximum)
@@ -926,7 +945,7 @@ local function player_ammo_scaling_policy_is_uncapped_and_prefix_stable()
     for kind, threshold in pairs(rates) do
         local successes = 0
         for sample = 1, samples do
-            local scaled = gamma_arena_generator.scaled_ammo_boxes(function(index)
+            local scaled = gamma_arena_random_generator.scaled_ammo_boxes(function(index)
                 return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ "player_ammo_rate_sweep", kind, sample, index }))
             end, kind, opponents_per_sample)
             gamma_arena_test_assert.is_true(scaled.ok, kind .. " deterministic rate sweep result")
@@ -949,7 +968,7 @@ local function generated_actor_ammo_is_final_and_outside_budget()
         local outfit = item_by_section(snapshot.outfits, loadout.outfit)
         local budgeted_boxes = (loadout.gear_cost - weapon.cost - outfit.cost) / ammo.cost
         local minimum_boxes = math.ceil(3 * weapon.magazine_size / weapon.ammo_variants[1].box_size)
-        local scaled = gamma_arena_generator.scaled_ammo_boxes(function(index)
+        local scaled = gamma_arena_random_generator.scaled_ammo_boxes(function(index)
             return gamma_arena_rng.new(gamma_arena_rng.derive_seed({ spec.mode_id, spec.difficulty_id, spec.session_seed, spec.fight_index, 6, spec.layout_version, "actor_scaled_ammo:" .. tostring(index) }))
         end, weapon.kind, #spec.opponents)
         gamma_arena_test_assert.is_true(scaled.ok, "generated scaling can be recomputed from immutable identity")
@@ -959,15 +978,15 @@ local function generated_actor_ammo_is_final_and_outside_budget()
 end
 
 local function player_ammo_scaling_is_stream_isolated()
-    local original_scaling = gamma_arena_generator.scaled_ammo_boxes
+    local original_scaling = gamma_arena_random_generator.scaled_ammo_boxes
     local low, high
     local generated_ok, generated_error = pcall(function()
-        gamma_arena_generator.scaled_ammo_boxes = function() return gamma_arena_result.ok(1) end
+        gamma_arena_random_generator.scaled_ammo_boxes = function() return gamma_arena_result.ok(1) end
         low = generate_fixture(request(3735928559, "veteran"), 7, catalogs())
-        gamma_arena_generator.scaled_ammo_boxes = function() return gamma_arena_result.ok(4) end
+        gamma_arena_random_generator.scaled_ammo_boxes = function() return gamma_arena_result.ok(4) end
         high = generate_fixture(request(3735928559, "veteran"), 7, catalogs())
     end)
-    gamma_arena_generator.scaled_ammo_boxes = original_scaling
+    gamma_arena_random_generator.scaled_ammo_boxes = original_scaling
     if not generated_ok then error(generated_error) end
     gamma_arena_test_assert.is_true(low.ok and high.ok, "controlled scaling-isolation fixtures generate")
     gamma_arena_test_assert.equals(high.value.actor.loadout.ammo_boxes, low.value.actor.loadout.ammo_boxes + 3, "controlled scaling changes only the final actor box count")
@@ -1168,7 +1187,7 @@ local function generator_primary_pool_affordability_falls_back()
     gamma_arena_test_assert.is_true(observed_ten, "unaffordable faction primary pool falls back to affordable global primary gear")
 end
 
-local function golden_fights_v8()
+local function golden_fights_v9()
     local snapshot = catalogs()
     for _, expected in ipairs({
         { seed = 0, difficulty = "rookie", fight = 0 },
@@ -1181,10 +1200,355 @@ local function golden_fights_v8()
         gamma_arena_test_assert.is_true(first.ok and second.ok, "golden request must generate")
         local encoded = gamma_arena_generator.stable_encode(first.value)
         gamma_arena_test_assert.equals(encoded, gamma_arena_generator.stable_encode(second.value), "golden fixture stable encoding")
-        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=8", 1, true) ~= nil, "FightSpec v8 is encoded")
+        gamma_arena_test_assert.is_true(string.find(encoded, "schema_version=9", 1, true) ~= nil, "FightSpec v9 is encoded")
         for _, opponent in ipairs(first.value.opponents) do
             gamma_arena_test_assert.equals(opponent.community, nil, "fallback FightSpec encoding remains byte-compatible without a synthetic source community")
         end
+    end
+end
+
+local function random_draft_catalogs()
+    local snapshot = catalogs()
+    local bounds = {
+        novice = { 0, 999 }, trainee = { 1000, 1999 },
+        experienced = { 2000, 2999 }, veteran = { 3000, 3999 }
+    }
+    snapshot.ranks = {}
+    snapshot.factions = { bandit = { id = "bandit", community = "bandit", ranks = {} } }
+    for rank_id, range in pairs(bounds) do
+        snapshot.ranks[rank_id] = { id = rank_id, minimum = range[1], maximum = range[2], threat = 1 }
+        snapshot.factions.bandit.ranks[rank_id] = {
+            id = rank_id,
+            alias = "gamma_arena_bandit_" .. rank_id,
+            profile_section = "sim_default_bandit_" .. rank_id,
+            community = "bandit", runtime_community = "arena_enemy",
+            minimum = range[1],
+            maximum = range[2],
+            threat = 1
+        }
+    end
+    snapshot.fingerprint = "ga-catalog-v10-random-pipeline"
+    snapshot.max_physical_items_per_participant = 256
+    snapshot.items, snapshot.item_ids = {}, {}
+    local function add_item(section_name, value)
+        if snapshot.items[section_name] == nil then snapshot.item_ids[#snapshot.item_ids + 1] = section_name end
+        snapshot.items[section_name] = value
+    end
+    for _, weapon in ipairs(snapshot.weapon_list) do
+        add_item(weapon.section, { category = "weapon", ltx_slot = weapon.slot, ammo_sections = { weapon.ammo } })
+    end
+    for _, ammo in pairs(snapshot.ammo) do add_item(ammo.section, { category = "ammo", box_size = 30 }) end
+    for _, outfit in ipairs(snapshot.outfit_list) do add_item(outfit.section, { category = "outfit", helmet_allowed = true }) end
+    for _, knife in ipairs(snapshot.knife_list) do add_item(knife.section, { category = "knife" }) end
+    for _, medical in ipairs(snapshot.medical_item_list) do
+        add_item(medical.section, { category = "medicine", healing = medical.category == "health" or medical.category == "rare" })
+    end
+    for _, grenade in ipairs(snapshot.actor_grenade_list) do
+        add_item(grenade.section, { category = "grenade" })
+    end
+    for _, device in ipairs(snapshot.device_list) do
+        add_item(device.section, { category = "device", ltx_slot = 9 })
+    end
+    table.sort(snapshot.item_ids)
+    return snapshot
+end
+
+local function random_draft_accepts_unclassified_bonus_ammo()
+    local snapshot = random_draft_catalogs()
+    local weapon = snapshot.weapon_list[1]
+    local extra = snapshot.weapon_list[2].ammo
+    weapon.ammo_variants[#weapon.ammo_variants + 1] = {
+        section = extra,
+        category = nil,
+        box_size = 30
+    }
+    local generated = gamma_arena_random_generator.build_draft(
+        request(1, "stalker"), 0, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.is_true(generated.ok,
+        "Random accepts an optional ammo variant without a special category")
+end
+
+local function catalog_enumerates_effective_system_once_per_load()
+    local enumerations = 0
+    local factory = fixture_factory({
+        system_sections = {
+            wpn_dynamic_fixture = { kind="w_rifle", slot="2", ammo_mag_size="30", ammo_class="ammo_dynamic_fixture" },
+            ammo_dynamic_fixture = { kind="w_ammo", box_size="30" },
+            dynamic_fixture_outfit = { kind="o_medium", slot="6" }
+        }
+    })
+    local enumerate = factory.enumerate_system_sections
+    factory.enumerate_system_sections = function()
+        enumerations = enumerations + 1
+        return enumerate()
+    end
+    local loaded = gamma_arena_catalog.load(factory)
+    gamma_arena_test_assert.is_true(loaded.ok, "memoized effective catalog fixture loads")
+    gamma_arena_test_assert.equals(enumerations, 1,
+        "one catalog load enumerates effective system sections once")
+end
+
+local function catalog_enumeration_failure_is_memoized()
+    local enumerations = 0
+    local factory = fixture_factory({ system_sections = {} })
+    factory.enumerate_system_sections = function()
+        enumerations = enumerations + 1
+        error("fixture enumeration failure")
+    end
+    local loaded = gamma_arena_catalog.load(factory)
+    gamma_arena_test_assert.is_false(loaded.ok, "failed effective enumeration stays fail-closed")
+    gamma_arena_test_assert.equals(enumerations, 1,
+        "one catalog load replays the first enumeration failure without retrying")
+end
+
+local function random_draft_semantics(seed, difficulty, fight_index, draft)
+    local actor = draft.actor.loadout.value
+    local parts = {
+        "seed=" .. seed .. ",difficulty=" .. difficulty .. ",fight=" .. fight_index,
+        "actor=" .. actor.weapon .. "," .. actor.ammo .. "," .. actor.ammo_boxes .. "," .. actor.outfit .. "," .. actor.knife .. ",medical:" .. table.concat(actor.consumables, "+") .. ",bonus:" .. actor.bonus_ammo.section .. ":" .. actor.bonus_ammo.requested_category .. ":" .. actor.bonus_ammo.resolved_category .. ":" .. actor.bonus_ammo.boxes,
+        "opponents="
+    }
+    for index, opponent in ipairs(draft.opponents) do
+        local value = opponent.loadout.value
+        parts[#parts + 1] = index .. ":" .. opponent.faction .. "," .. opponent.profile .. "," .. value.weapon .. "," .. value.ammo .. "," .. value.ammo_boxes .. "," .. value.outfit .. "," .. value.knife .. ",medical:" .. table.concat(value.consumables, "+") .. "," .. opponent.spawn_slot_id .. "," .. opponent.tactical_route
+    end
+    return table.concat(parts, "|")
+end
+
+local function random_draft_pipeline_canonicalizes_and_strictly_validates()
+    local snapshot = random_draft_catalogs()
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local session, fight_index = request(3735928559, "veteran"), 7
+    local generated = gamma_arena_random_generator.build_draft(session, fight_index, snapshot, layout)
+    gamma_arena_test_assert.is_true(generated.ok, "real random draft pipeline generates")
+    local canonical = gamma_arena_fight_spec.canonicalize(generated.value, {
+        session_seed = gamma_arena_rng.normalize_uint32(session.session_seed),
+        fight_index = fight_index,
+        generator_version = 11,
+        catalog_fingerprint = snapshot.fingerprint,
+        layout_version = layout.version
+    }, snapshot, layout)
+    gamma_arena_test_assert.is_true(canonical.ok, "tagged random draft canonicalizes")
+    gamma_arena_test_assert.is_true(#canonical.value.actor.items > 0 and #canonical.value.opponents[1].items > 0, "random pipeline retains nonempty physical items")
+    gamma_arena_test_assert.equals(canonical.value.opponents[1].profile, generated.value.opponents[1].profile, "canonical profile preserves authoritative alias")
+    local strict = gamma_arena_fight_validator_v9.validate(canonical.value, snapshot, layout)
+    gamma_arena_test_assert.is_true(strict.ok, "canonical random draft passes strict v9 validation")
+end
+
+local function random_builder_skips_items_outside_universal_catalog()
+    local snapshot = random_draft_catalogs()
+    local missing = snapshot.outfit_list[1].section
+    snapshot.items[missing] = nil
+    for index, section in ipairs(snapshot.item_ids) do
+        if section == missing then table.remove(snapshot.item_ids, index); break end
+    end
+
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local generated = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, layout)
+
+    gamma_arena_test_assert.is_true(generated.ok,
+        "Random ignores legacy items outside the universal catalog")
+    for _, item in ipairs(generated.value.actor.items) do
+        gamma_arena_test_assert.is_true(snapshot.items[item.section] ~= nil,
+            "actor item is universally cataloged")
+        gamma_arena_test_assert.is_true(item.section ~= missing,
+            "missing legacy outfit is never emitted")
+    end
+    for _, opponent in ipairs(generated.value.opponents) do
+        for _, item in ipairs(opponent.items) do
+            gamma_arena_test_assert.is_true(snapshot.items[item.section] ~= nil,
+                "opponent item is universally cataloged")
+        end
+    end
+end
+
+local function random_builder_uses_effective_universal_weapon_slot()
+    local legacy = { section = "wpn_mp5", slot = 1, cost = 4 }
+    local effective = gamma_arena_random_generator.effective_weapon(legacy, {
+        section = "wpn_mp5", category = "weapon", ltx_slot = 2
+    })
+    gamma_arena_test_assert.is_true(type(effective) == "table",
+        "Random reconciles legacy weapon metadata with the effective universal catalog")
+    gamma_arena_test_assert.equals(effective.slot, 2,
+        "effective universal LTX slot owns Random equipment placement")
+    gamma_arena_test_assert.equals(legacy.slot, 1,
+        "slot reconciliation does not mutate the legacy catalog")
+end
+
+local function random_builder_rejects_incomplete_device_manifest()
+    local snapshot = random_draft_catalogs()
+    snapshot.device_list[4] = nil
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local generated = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, layout)
+    gamma_arena_test_assert.is_false(generated.ok,
+        "Random rejects an incomplete exact device manifest")
+    gamma_arena_test_assert.equals(generated.error.code, "GA_RANDOM_CATALOG_INVALID",
+        "incomplete device manifest fails at the Random catalog boundary")
+end
+
+local function random_catalog_diagnostics_identify_missing_physical_pool()
+    local filled = function() return { { fixture = true } } end
+    local catalog = {
+        profile_list = filled(), weapon_list = filled(), primary_weapon_list = filled(),
+        secondary_weapon_list = filled(), outfit_list = filled(), knife_list = {},
+        actor_grenade_list = filled(), npc_grenade_list = filled(), medical_item_list = filled(),
+        ammo = { ammo_fixture = {} }, consumables = { bandage = {} },
+        medical_items = { medkit = {} }, selection_mode = "staged",
+        difficulties = { stalker = {} }
+    }
+    gamma_arena_test_assert.is_true(type(gamma_arena_random_generator.catalog_failure_context) == "function",
+        "Random catalog diagnostic API exists")
+    local context = gamma_arena_random_generator.catalog_failure_context(catalog, "stalker")
+    gamma_arena_test_assert.equals(context.requirement, "knife_list",
+        "catalog failure identifies missing pool")
+end
+
+local function random_draft_malformed_inputs_are_total_results()
+    local function malformed_route()
+        local snapshot = random_draft_catalogs()
+        local layout = fixture_resolved_layout(snapshot)
+        layout.tactical_routes[1] = { invalid = true }
+        return snapshot, layout
+    end
+    local route_catalog, route_layout = malformed_route()
+    local valid_catalog = random_draft_catalogs()
+    local malformed_profiles = random_draft_catalogs(); malformed_profiles.profile_list = "invalid"
+    local cases = {
+        { catalog = {}, layout = {}, code = "GA_RANDOM_CATALOG_INVALID" },
+        { catalog = valid_catalog, layout = {}, code = "GA_RESOLVED_LAYOUT_INVALID" },
+        { catalog = route_catalog, layout = route_layout, code = "GA_RESOLVED_LAYOUT_INVALID" },
+        { catalog = malformed_profiles, layout = fixture_resolved_layout(malformed_profiles), code = "GA_RANDOM_CATALOG_INVALID" }
+    }
+    for _, case in ipairs(cases) do
+        local called, result = pcall(function()
+            return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, case.catalog, case.layout)
+        end)
+        gamma_arena_test_assert.is_true(called, "malformed random draft input never throws")
+        gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "malformed random draft input returns failed Result")
+        gamma_arena_test_assert.equals(result.error.code, case.code, "malformed random draft Result code")
+    end
+end
+
+local function random_draft_nested_malformed_and_throwing_inputs_are_total_results()
+    local malformed_cases = {
+        {
+            name = "nested difficulty field",
+            mutate = function(snapshot) snapshot.difficulties.stalker.enemy_max = {} end
+        },
+        {
+            name = "profile entry",
+            mutate = function(snapshot) snapshot.profile_list[1] = "invalid-profile" end
+        },
+        {
+            name = "loadout entry",
+            mutate = function(snapshot)
+                snapshot.selection_mode = "combinations"
+                snapshot.combinations = { "invalid-loadout" }
+            end
+        },
+        {
+            name = "weapon entry",
+            mutate = function(snapshot) snapshot.weapon_list[1] = "invalid-weapon" end
+        }
+    }
+    for _, case in ipairs(malformed_cases) do
+        local snapshot = random_draft_catalogs()
+        local layout = fixture_resolved_layout(snapshot)
+        case.mutate(snapshot)
+        local called, result = pcall(function()
+            return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, snapshot, layout)
+        end)
+        gamma_arena_test_assert.is_true(called, "nested malformed " .. case.name .. " never throws")
+        gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "nested malformed " .. case.name .. " returns failed Result")
+        gamma_arena_test_assert.equals(result.error.code, "GA_RANDOM_CATALOG_INVALID", "nested malformed " .. case.name .. " catalog code")
+    end
+
+    local snapshot = random_draft_catalogs()
+    local layout = fixture_resolved_layout(snapshot)
+    local generate_actor = gamma_arena_medical_generator.generate_actor
+    gamma_arena_medical_generator.generate_actor = function() error({ private_payload = snapshot }) end
+    local called, result = pcall(function()
+        return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, snapshot, layout)
+    end)
+    gamma_arena_medical_generator.generate_actor = generate_actor
+    gamma_arena_test_assert.is_true(called, "throwing medical dependency never escapes build_draft")
+    gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "throwing medical dependency returns failed Result")
+    gamma_arena_test_assert.equals(result.error.code, "GA_RANDOM_GENERATION_FAILED", "unexpected generation failure code")
+    gamma_arena_test_assert.equals(result.error.message, "Random fight generation failed", "unexpected generation failure message is deterministic")
+    gamma_arena_test_assert.equals(result.error.context.phase, "build_draft", "unexpected generation failure exposes only a bounded phase")
+    local context_keys = 0
+    for _ in pairs(result.error.context) do context_keys = context_keys + 1 end
+    gamma_arena_test_assert.equals(context_keys, 1, "unexpected generation context cannot leak thrown values")
+end
+
+local function random_draft_malformed_dependency_results_are_normalized()
+    local snapshot = random_draft_catalogs()
+    local malformed_results = {
+        { name = "incomplete failure", value = { ok = false, private_payload = snapshot } },
+        { name = "malformed failure fields", value = { ok = false, error = { code = {}, message = 7, context = { private_payload = snapshot } } } },
+        { name = "failure with extra payload", value = { ok = false, error = { code = "GA_INJECTED", message = "Injected failure", context = {} }, private_payload = snapshot } },
+        { name = "success without draft", value = { ok = true, private_payload = snapshot } }
+    }
+    for _, case in ipairs(malformed_results) do
+        local generate_actor = gamma_arena_medical_generator.generate_actor
+        gamma_arena_medical_generator.generate_actor = function() return case.value end
+        local called, result = pcall(function()
+            return gamma_arena_random_generator.build_draft(request(1, "stalker"), 0, snapshot, fixture_resolved_layout(snapshot))
+        end)
+        gamma_arena_medical_generator.generate_actor = generate_actor
+        gamma_arena_test_assert.is_true(called, "malformed dependency " .. case.name .. " never escapes build_draft")
+        gamma_arena_test_assert.is_true(type(result) == "table" and result.ok == false, "malformed dependency " .. case.name .. " returns failed Result")
+        gamma_arena_test_assert.equals(result.error.code, "GA_RANDOM_GENERATION_FAILED", "malformed dependency " .. case.name .. " uses generic code")
+        gamma_arena_test_assert.equals(result.error.message, "Random fight generation failed", "malformed dependency " .. case.name .. " uses deterministic message")
+        gamma_arena_test_assert.equals(result.error.context.phase, "build_draft", "malformed dependency " .. case.name .. " exposes bounded context")
+        local context_keys = 0
+        for _ in pairs(result.error.context) do context_keys = context_keys + 1 end
+        gamma_arena_test_assert.equals(context_keys, 1, "malformed dependency " .. case.name .. " cannot leak payload fields")
+    end
+end
+
+local function random_draft_matches_frozen_semantic_snapshot()
+    local snapshot = random_draft_catalogs()
+    local reviewed = {
+        { seed = 0, difficulty = "rookie", fight = 0, expected = "seed=0,difficulty=rookie,fight=0|actor=wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:bandage+stimpack+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_wincheaster1300,ammo_12x70_buck,1,novice_outfit,wpn_knife,medical:medkit,native:bar_arena_walk_3_2,bar_arena_walk_3_2|2:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,2,stalker_outfit,wpn_knife5,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1" },
+        { seed = 1, difficulty = "stalker", fight = 0, expected = "seed=1,difficulty=stalker,fight=0|actor=wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife9,medical:bandage+stimpack_army+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife5,medical:bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,banditmerc_outfit,wpn_knife9,medical:medkit,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|4:bandit,gamma_arena_bandit_experienced,wpn_pm,ammo_9x18_fmj,1,stalker_outfit,wpn_knife8,medical:,native:bar_arena_walk_6_6,bar_arena_walk_6_6" },
+        { seed = 3735928559, difficulty = "veteran", fight = 7, expected = "seed=3735928559,difficulty=veteran,fight=7|actor=wpn_mp5,ammo_9x19_fmj,1,stalker_outfit,wpn_knife9,medical:bandage+stimpack_scientic+bandage,bonus:ammo_9x19_fmj:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife2,medical:,native:bar_arena_walk_6_1,bar_arena_walk_6_1|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife9,medical:medkit+bandage,native:bar_arena_walk_3_2,bar_arena_walk_3_2|7:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,1,novice_outfit,wpn_knife4,medical:,virtual:3,bar_arena_walk_3_1" },
+        { seed = 4294967295, difficulty = "master", fight = 31, expected = "seed=4294967295,difficulty=master,fight=31|actor=wpn_wincheaster1300,ammo_12x70_buck,1,stalker_outfit,wpn_knife4,medical:bandage+stimpack_army+medkit+bandage,bonus:ammo_12x70_buck:standard:standard:1|opponents=|1:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,2,novice_outfit,wpn_knife4,medical:bandage,native:bar_arena_walk_6_1,bar_arena_walk_6_1|2:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife8,medical:,native:bar_arena_walk_3_2,bar_arena_walk_3_2|3:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife3,medical:bandage,native:bar_arena_walk_3_1,bar_arena_walk_3_1|4:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife7,medical:,native:bar_arena_walk_6_3,bar_arena_walk_6_3|5:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife2,medical:medkit,native:bar_arena_walk_1_1,bar_arena_walk_1_1|6:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife6,medical:bandage,native:bar_arena_walk_6_6,bar_arena_walk_6_6|7:bandit,gamma_arena_bandit_veteran,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife,medical:bandage,virtual:4,bar_arena_walk_3_1|8:bandit,gamma_arena_bandit_experienced,wpn_mp5,ammo_9x19_fmj,1,novice_outfit,wpn_knife5,medical:medkit+bandage,virtual:3,bar_arena_walk_3_1|9:bandit,gamma_arena_bandit_veteran,wpn_pm,ammo_9x18_fmj,2,novice_outfit,wpn_knife9,medical:,virtual:1,bar_arena_walk_3_1" }
+    }
+    for _, expected in ipairs(reviewed) do
+        local generated = gamma_arena_random_generator.build_draft(request(expected.seed, expected.difficulty), expected.fight, snapshot, fixture_resolved_layout(snapshot))
+        gamma_arena_test_assert.is_true(generated.ok, "reviewed random draft generates")
+        gamma_arena_test_assert.equals(random_draft_semantics(expected.seed, expected.difficulty, expected.fight, generated.value), expected.expected, "random draft matches frozen semantic snapshot")
+        for _, opponent in ipairs(generated.value.opponents) do
+            local faction = snapshot.factions[opponent.faction]
+            local profile
+            for rank_id, candidate in pairs(faction.ranks) do if candidate.alias == opponent.profile then profile = candidate; gamma_arena_test_assert.equals(opponent.rank.id, rank_id, "rank ID derives from selected profile"); break end end
+            gamma_arena_test_assert.is_true(profile ~= nil, "selected profile exists in authoritative RankCatalog")
+            gamma_arena_test_assert.is_true(opponent.rank.value >= profile.minimum and opponent.rank.value <= profile.maximum, "numeric rank remains inside authoritative intersection")
+        end
+    end
+end
+
+local function random_numeric_rank_stream_is_isolated()
+    local baseline, shifted = random_draft_catalogs(), random_draft_catalogs()
+    for rank_id, profile in pairs(shifted.factions.bandit.ranks) do
+        profile.minimum = profile.minimum + 10000
+        profile.maximum = profile.maximum + 10000
+        shifted.ranks[rank_id].minimum = shifted.ranks[rank_id].minimum + 10000
+        shifted.ranks[rank_id].maximum = shifted.ranks[rank_id].maximum + 10000
+    end
+    local session, fight_index = request(4294967295, "master"), 31
+    local first = gamma_arena_random_generator.build_draft(session, fight_index, baseline, fixture_resolved_layout(baseline))
+    local second = gamma_arena_random_generator.build_draft(session, fight_index, shifted, fixture_resolved_layout(shifted))
+    gamma_arena_test_assert.is_true(first.ok and second.ok, "rank stream isolation drafts generate")
+    gamma_arena_test_assert.equals(random_draft_semantics(4294967295, "master", fight_index, first.value), random_draft_semantics(4294967295, "master", fight_index, second.value), "rank bounds cannot reroll frozen random semantics")
+    for index, opponent in ipairs(first.value.opponents) do
+        gamma_arena_test_assert.equals(second.value.opponents[index].rank.value, opponent.rank.value + 10000, "isolated rank stream uses changed intersection without consuming legacy streams")
     end
 end
 
@@ -1316,11 +1680,11 @@ local function medical_generation_100000_fights()
     end
 end
 
-local function fight_spec_v8_separates_gear_medical_and_grenades()
+local function fight_spec_v9_separates_gear_medical_and_grenades()
     local snapshot = catalogs()
     local generated = generate_fixture(request(37, "master"), 5, snapshot)
-    gamma_arena_test_assert.is_true(generated.ok, "FightSpec v8 generation succeeds")
-    gamma_arena_test_assert.equals(generated.value.schema_version, 8, "FightSpec schema advances to v8")
+    gamma_arena_test_assert.is_true(generated.ok, "FightSpec v9 generation succeeds")
+    gamma_arena_test_assert.equals(generated.value.schema_version, 9, "FightSpec schema is v9")
     local actor = generated.value.actor.loadout
     gamma_arena_test_assert.equals(actor.cost, actor.gear_cost + actor.medical_cost, "actor total decomposes exactly")
     gamma_arena_test_assert.is_true(actor.gear_cost <= snapshot.difficulties.master.player_gear_budget, "actor gear budget")
@@ -1331,7 +1695,7 @@ local function fight_spec_v8_separates_gear_medical_and_grenades()
         enemy_medical = enemy_medical + opponent.loadout.medical_cost
     end
     gamma_arena_test_assert.equals(enemy_medical, #generated.value.opponents, "enemy medical team budget equals count")
-    gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "FightSpec v8 validates")
+    gamma_arena_test_assert.is_true(validate_fixture(generated.value, snapshot).ok, "FightSpec v9 validates")
 end
 
 local function dense_array_length(values)
@@ -1444,6 +1808,61 @@ local function validator_rejects_forged_grenade_arrays()
     end, "wrong deterministic opponent section is rejected")
 end
 
+local function universal_v9_random_device_generation()
+    local snapshot = catalogs()
+    local original = gamma_arena_device_generator.generate
+    local calls = 0
+    gamma_arena_device_generator.generate = function(...)
+        calls = calls + 1
+        return original(...)
+    end
+    local completed, generated = pcall(gamma_arena_fight_builder.generate,
+        request(3735928559, "veteran"), 7, snapshot,
+        fixture_resolved_layout(snapshot))
+    gamma_arena_device_generator.generate = original
+    gamma_arena_test_assert.is_true(completed and generated.ok, "v9 random fight generates")
+    gamma_arena_test_assert.equals(calls, 1, "builder and validator do not rerun Random device selection")
+    gamma_arena_test_assert.equals(generated.value.schema_version, 9, "only v9 emits")
+    gamma_arena_test_assert.equals(generated.value.identity.generator_version, 11, "generator identity")
+    gamma_arena_test_assert.is_true(string.sub(generated.value.identity.fight_id, 1, 4) == "ga9-", "v9 fight id")
+    gamma_arena_test_assert.equals(generated.value.mode_id, nil, "mode is erased")
+    gamma_arena_test_assert.is_true(#generated.value.actor.items > 0, "actor uses universal items")
+    gamma_arena_test_assert.is_true(#generated.value.opponents[1].items > 0, "opponent uses universal items")
+    local function selected_device(spec)
+        local count, selected = 0, nil
+        for _, entry in ipairs(spec.actor.items) do
+            if snapshot.items[entry.section].category == "device" then
+                count, selected = count + 1, entry
+            end
+        end
+        gamma_arena_test_assert.equals(count, 1, "Random emits exactly one actor device")
+        gamma_arena_test_assert.equals(selected.quantity, 1, "Random device quantity is exactly one")
+        gamma_arena_test_assert.equals(selected.equipped_slot, "device", "Random device owns the device slot")
+        for _, opponent in ipairs(spec.opponents) do
+            for _, entry in ipairs(opponent.items) do
+                gamma_arena_test_assert.is_false(snapshot.items[entry.section].category == "device", "opponents never receive devices")
+            end
+        end
+        return selected.section
+    end
+    local selected = selected_device(generated.value)
+    local replay = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.equals(selected_device(replay.value), selected, "same Random input reproduces its device")
+    local isolated = gamma_arena_fight_builder.generate(
+        request(3735928559, "rookie"), 7, snapshot, fixture_resolved_layout(snapshot))
+    gamma_arena_test_assert.equals(selected_device(isolated.value), selected, "Random device stream is difficulty independent")
+    local variants = {}
+    for seed = 0, 31 do
+        local changed = gamma_arena_fight_builder.generate(
+            request(seed, "rookie"), 0, snapshot, fixture_resolved_layout(snapshot))
+        variants[selected_device(changed.value)] = true
+    end
+    local variant_count = 0
+    for _ in pairs(variants) do variant_count = variant_count + 1 end
+    gamma_arena_test_assert.is_true(variant_count > 1, "changed Random seeds vary the selected device")
+end
+
 local function medical_tuning_does_not_reroll_core_fight()
     local baseline, tuned = catalogs(), catalogs()
     tuned.difficulties.master.medical_weights = { bleed = 0, health = 100, boost = 0, rare = 0 }
@@ -1465,6 +1884,15 @@ end
 
 function run(run_case_fn)
     local all_passed = true
+    if not run_case_fn("random_draft_pipeline_canonicalizes_and_strictly_validates", random_draft_pipeline_canonicalizes_and_strictly_validates) then all_passed = false end
+    if not run_case_fn("random_builder_skips_items_outside_universal_catalog", random_builder_skips_items_outside_universal_catalog) then all_passed = false end
+    if not run_case_fn("random_builder_uses_effective_universal_weapon_slot", random_builder_uses_effective_universal_weapon_slot) then all_passed = false end
+    if not run_case_fn("random_builder_rejects_incomplete_device_manifest", random_builder_rejects_incomplete_device_manifest) then all_passed = false end
+    if not run_case_fn("random_catalog_diagnostics_identify_missing_physical_pool", random_catalog_diagnostics_identify_missing_physical_pool) then all_passed = false end
+    if not run_case_fn("random_draft_malformed_inputs_are_total_results", random_draft_malformed_inputs_are_total_results) then all_passed = false end
+    if not run_case_fn("random_draft_nested_malformed_and_throwing_inputs_are_total_results", random_draft_nested_malformed_and_throwing_inputs_are_total_results) then all_passed = false end
+    if not run_case_fn("random_draft_malformed_dependency_results_are_normalized", random_draft_malformed_dependency_results_are_normalized) then all_passed = false end
+    if not run_case_fn("universal_v9_random_device_generation", universal_v9_random_device_generation) then all_passed = false end
     local cases = {
         { name="catalog_enforces_max_count_viability", fn=catalog_enforces_max_count_viability },
         { name="catalog_exposes_approved_player_weight_rows", fn=catalog_exposes_approved_player_weight_rows },
@@ -1473,9 +1901,6 @@ function run(run_case_fn)
         { name="device_catalog_and_probability_boundaries", fn=device_catalog_and_probability_boundaries },
         { name="device_generator_rejects_malformed_arguments", fn=device_generator_rejects_malformed_arguments },
         { name="device_catalog_rejects_effective_mismatch", fn=device_catalog_rejects_effective_mismatch },
-        { name="actor_device_is_difficulty_independent_and_stable", fn=actor_device_is_difficulty_independent_and_stable },
-        { name="validator_rejects_forged_actor_devices", fn=validator_rejects_forged_actor_devices },
-        { name="validator_copies_actor_device", fn=validator_copies_actor_device },
         { name="grenade_generator_rejects_malformed_arguments", fn=grenade_generator_rejects_malformed_arguments },
         { name="catalog_exposes_medical_pool_and_budgets", fn=catalog_exposes_medical_pool_and_budgets },
         { name="catalog_skips_optional_missing_medicine", fn=catalog_skips_optional_missing_medicine },
@@ -1483,11 +1908,14 @@ function run(run_case_fn)
         { name="actor_medical_generation_reaches_master_rare", fn=actor_medical_generation_reaches_master_rare },
         { name="enemy_medical_generation_spends_team_budget", fn=enemy_medical_generation_spends_team_budget },
         { name="medical_generation_100000_fights", fn=medical_generation_100000_fights },
-        { name="fight_spec_v8_separates_gear_medical_and_grenades", fn=fight_spec_v8_separates_gear_medical_and_grenades },
+        { name="fight_spec_v9_separates_gear_medical_and_grenades", fn=fight_spec_v9_separates_gear_medical_and_grenades },
         { name="grenade_loadouts_are_deterministic_uncosted_and_prefix_stable", fn=grenade_loadouts_are_deterministic_uncosted_and_prefix_stable },
         { name="validator_rejects_forged_grenade_arrays", fn=validator_rejects_forged_grenade_arrays },
         { name="medical_tuning_does_not_reroll_core_fight", fn=medical_tuning_does_not_reroll_core_fight },
         { name="catalog_augments_effective_system_without_cartesian_product", fn=catalog_augments_from_effective_system_without_cartesian_product },
+        { name="catalog_enumerates_effective_system_once_per_load", fn=catalog_enumerates_effective_system_once_per_load },
+        { name="catalog_enumeration_failure_is_memoized", fn=catalog_enumeration_failure_is_memoized },
+        { name="random_draft_accepts_unclassified_bonus_ammo", fn=random_draft_accepts_unclassified_bonus_ammo },
         { name="actor_weapon_quarantine_is_exact_and_actor_only", fn=actor_weapon_quarantine_is_exact_and_actor_only },
         { name="catalog_rejects_malformed_data", fn=catalog_rejects_malformed_data },
         { name="validator_never_throws_for_malformed_specs", fn=validator_never_throws_for_malformed_specs },
@@ -1501,7 +1929,7 @@ function run(run_case_fn)
         { name="master_powered_exo_rate_is_rare", fn=master_powered_exo_rate_is_rare },
         { name="generator_role_first_balance", fn=generator_role_first_balance },
         { name="generator_primary_pool_affordability_falls_back", fn=generator_primary_pool_affordability_falls_back },
-        { name="stable_encode_v8", fn=stable_and_fight_index },
+        { name="stable_encode_v9", fn=stable_and_fight_index },
         { name="player_ammo_scaling_policy_is_uncapped_and_prefix_stable", fn=player_ammo_scaling_policy_is_uncapped_and_prefix_stable },
         { name="generated_actor_ammo_is_final_and_outside_budget", fn=generated_actor_ammo_is_final_and_outside_budget },
         { name="player_ammo_scaling_is_stream_isolated", fn=player_ammo_scaling_is_stream_isolated },
@@ -1511,8 +1939,10 @@ function run(run_case_fn)
         { name="validator_rejects_invalid_bonus_ammo", fn=validator_rejects_invalid_bonus_ammo },
         { name="validator_rejects_forged_final_actor_ammo", fn=validator_rejects_forged_final_actor_ammo },
         { name="finite_integer_guards", fn=finite_integer_guards },
-        { name="golden_fights_v8", fn=golden_fights_v8 }
+        { name="golden_fights_v9", fn=golden_fights_v9 }
     }
+    if not run_case_fn('device_selector_rejects_forged_exact_catalogs', device_selector_rejects_forged_exact_catalogs) then all_passed = false end
+    if not run_case_fn('device_generator_is_mode_free_and_deterministic', device_generator_is_mode_free_and_deterministic) then all_passed = false end
     for _, case in ipairs(cases) do if not run_case_fn(case.name, case.fn) then all_passed = false end end
     return all_passed
 end
