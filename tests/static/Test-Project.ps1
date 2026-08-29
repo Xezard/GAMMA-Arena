@@ -1006,6 +1006,7 @@ Assert-True ($Task1RankTestContent -match 'rank_catalog_accepts_scalar_spawn_ran
 Assert-True ($Task1RankTestContent -match 'rank_catalog_rejects_incomplete_profile_rank_ranges') 'Task 1 rank tests must reject incomplete explicit rank ranges.'
 Assert-True ($Task1RankCatalogContent -match '(?m)^local function parse_optional_profile_range\s*\(') 'Task 1 rank catalog must distinguish optional spawn rank metadata from explicit bounded ranges.'
 Assert-True ($Task1RankCatalogContent -match 'has_range_separator') 'Task 1 rank catalog must preserve empty explicit CSV endpoints for validation.'
+Assert-True ($Task1RankCatalogContent -match 'bounded_range_pattern') 'Task 1 rank catalog must require exactly one explicit range separator.'
 
 foreach ($Contract in $Task4ScriptContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
