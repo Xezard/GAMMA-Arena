@@ -197,8 +197,10 @@ if (-not $RuntimeTests.Contains($ExactUniversalCleanupCase) -or $UniversalItemPo
 }
 foreach ($CaseName in @(
     'runtime_universal_actor_device_cleanup_accepts_online_actor_parent_proof',
+    'runtime_universal_actor_item_ownership_proof_preserves_boolean_contract',
     'runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token',
-    'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent'
+    'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent',
+    'runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity'
 )) {
     if (-not $RuntimeTests.Contains($CaseName)) {
         throw "Universal actor-device runtime ownership regression is missing: $CaseName"
@@ -208,6 +210,9 @@ if ($UniversalItemPort -notmatch 'ports\.item_parent_id' -or
     $UniversalItemPort -notmatch 'server_parent_matches' -or
     $UniversalItemPort -notmatch 'runtime_parent_matches') {
     throw 'Universal actor-item cleanup must support exact online actor-parent proof'
+}
+if ($UniversalItemPort -notmatch '(?s)verify_ownership\s*=\s*function.*?local\s+exact\s*=\s*exact_current_record\(entity,\s*record\).*?if\s+not\s+exact\.ok\s+then\s+return\s+exact\s+end.*?return\s+gamma_arena_result\.ok\(true\)') {
+    throw 'Universal materializer ownership verification must preserve its exact boolean Result contract'
 }
 
 $UniversalDeviceReadyCase = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready'
