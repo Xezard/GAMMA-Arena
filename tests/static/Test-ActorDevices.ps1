@@ -211,6 +211,10 @@ if ($UniversalItemPort -notmatch 'ports\.item_parent_id' -or
     $UniversalItemPort -notmatch 'runtime_parent_matches') {
     throw 'Universal actor-item cleanup must support exact online actor-parent proof'
 }
+if ($UniversalItemPort -notmatch 'ports\.item_section' -or
+    $Bootstrap -notmatch 'item_section\s*=\s*runtime_game_object_section') {
+    throw 'Universal actor-item cleanup must read online game-object sections through section()'
+}
 if ($UniversalItemPort -notmatch '(?s)verify_ownership\s*=\s*function.*?local\s+exact\s*=\s*exact_current_record\(entity,\s*record\).*?if\s+not\s+exact\.ok\s+then\s+return\s+exact\s+end.*?return\s+gamma_arena_result\.ok\(true\)') {
     throw 'Universal materializer ownership verification must preserve its exact boolean Result contract'
 }
