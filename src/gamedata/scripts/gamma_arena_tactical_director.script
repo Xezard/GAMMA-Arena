@@ -74,16 +74,16 @@ end
 
 local function copy_participants(participants, route_ids)
     if type(participants) ~= "table" or #participants < 1 then return nil end
-    local values, seen_slots, seen_ids = {}, {}, {}
+    local values, participant_by_slot, seen_ids = {}, {}, {}
     for index, participant in ipairs(participants) do
         if type(participant) ~= "table" or not finite_integer(participant.slot) or participant.slot < 1
-            or participant.slot ~= index or not finite_integer(participant.id) or seen_slots[participant.slot] or seen_ids[participant.id]
+            or participant_by_slot[participant.slot] ~= nil or not finite_integer(participant.id) or seen_ids[participant.id]
             or type(participant.spawn_route) ~= "string" or route_ids[participant.spawn_route] ~= true then return nil end
-        seen_slots[participant.slot] = true
         seen_ids[participant.id] = true
         values[index] = { slot = participant.slot, id = participant.id, spawn_route = participant.spawn_route }
+        participant_by_slot[participant.slot] = values[index]
     end
-    return values
+    return values, participant_by_slot
 end
 
 local function elapsed_ms(started, current)
@@ -183,14 +183,16 @@ function Director:begin(fight_key, routes, participants, now_ms)
         return failure("GA_DIRECTOR_BEGIN_INVALID", "Tactical director identity/time is invalid")
     end
     local copied_routes, route_ids = copy_routes(routes)
-    local copied_participants = copied_routes and copy_participants(participants, route_ids) or nil
-    if copied_routes == nil or copied_participants == nil then return failure("GA_DIRECTOR_BEGIN_INVALID", "Tactical routes or participants are invalid") end
+    local copied_participants, participant_by_slot = nil, nil
+    if copied_routes ~= nil then copied_participants, participant_by_slot = copy_participants(participants, route_ids) end
+    if copied_routes == nil or copied_participants == nil or participant_by_slot == nil then return failure("GA_DIRECTOR_BEGIN_INVALID", "Tactical routes or participants are invalid") end
 
     self.state = "ACTIVE"
     self.fight_key = fight_key
     self.routes = copied_routes
     self.route_ids = route_ids
     self.participants = copied_participants
+    self.participant_by_slot = participant_by_slot
     self.assignments = {}
     self.pending_reports = {}
     self.shared_evidence = {}
@@ -223,7 +225,7 @@ end
 function Director:observe(evidence)
     if self.state ~= "ACTIVE" then return failure("GA_DIRECTOR_NOT_ACTIVE", "Tactical evidence requires an active director") end
     if type(evidence) ~= "table" or STRENGTH[evidence.kind] == nil or not finite_integer(evidence.observer_slot)
-        or self.participants[evidence.observer_slot] == nil or not finite_integer(evidence.at_ms) then
+        or self.participant_by_slot[evidence.observer_slot] == nil or not finite_integer(evidence.at_ms) then
         return failure("GA_DIRECTOR_EVIDENCE_INVALID", "Tactical evidence metadata is invalid")
     end
     local position = copy_position(evidence.position)
@@ -416,6 +418,7 @@ function Director:stop()
     self.routes = {}
     self.route_ids = {}
     self.participants = {}
+    self.participant_by_slot = {}
     self.assignments = {}
     self.pending_reports = {}
     self.shared_evidence = {}
@@ -447,5 +450,5 @@ end
 function new(config)
     local validated = copy_config(config)
     if validated == nil then return nil, failure("GA_DIRECTOR_CONFIG_INVALID", "Tactical director configuration is invalid") end
-    return setmetatable({ config = validated, state = "IDLE", participants = {}, routes = {} }, Director), nil
+    return setmetatable({ config = validated, state = "IDLE", participants = {}, participant_by_slot = {}, routes = {} }, Director), nil
 end

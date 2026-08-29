@@ -2520,6 +2520,9 @@ if (Test-Path -LiteralPath $Task11DirectorPath) {
     }
     Assert-True ($Task11DirectorContent -match 'function\s+new\s*\(' -and $Task11DirectorContent -match 'gamma_arena_rng\.derive_seed') 'Tactical director constructor/RNG contract is missing'
     Assert-True ($Task11DirectorContent -notmatch 'db\.actor|xr_logic|make_object_visible_somewhen|set_enemy|math\.random') 'Pure director must not use engine globals or omniscient APIs'
+    Assert-True ($Task11DirectorContent -notmatch 'participant\.slot\s*~=\s*index') 'Tactical director must not require logical participant slots to equal dense array indexes.'
+    Assert-True ($Task11DirectorContent -match 'self\.participant_by_slot\s*=\s*participant_by_slot') 'Tactical director must retain a logical-slot participant map alongside dense iteration order.'
+    Assert-True ($Task11DirectorContent -match 'self\.participant_by_slot\[evidence\.observer_slot\]') 'Tactical evidence validation must address participants by logical slot.'
 }
 $Task11DomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($Task11DomainContent -match 'gamma_arena_test_tactical_director\.run\s*\(\s*run_case_fn\s*\)') 'Dev domain suite must execute tactical director tests'
@@ -2531,6 +2534,14 @@ if (Test-Path -LiteralPath $Task11AdapterTestPath) {
     $Task11LogicalSlotCase = 'adapter_accepts_nonsequential_logical_slots'
     $Task11LogicalSlotRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task11LogicalSlotCase) + '"\s*,\s*fn\s*=\s*accepts_nonsequential_logical_slots\s*\}'
     Assert-True (([regex]::Matches($Task11AdapterTestContent, $Task11LogicalSlotRegistration)).Count -eq 1) 'Tactical adapter regression must register nonsequential logical-slot coverage exactly once.'
+    $Task11RealDirectorSlotCase = 'adapter_real_director_accepts_nonsequential_logical_slots'
+    $Task11RealDirectorSlotRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task11RealDirectorSlotCase) + '"\s*,\s*fn\s*=\s*real_director_accepts_nonsequential_logical_slots\s*\}'
+    Assert-True (([regex]::Matches($Task11AdapterTestContent, $Task11RealDirectorSlotRegistration)).Count -eq 1) 'Real tactical adapter/director regression must register nonsequential logical-slot coverage exactly once.'
+    $Task11RealDirectorSlotBody = [regex]::Match($Task11AdapterTestContent, 'local\s+function\s+real_director_accepts_nonsequential_logical_slots\(\)[\s\S]*?\r?\nend').Value
+    Assert-True ($Task11RealDirectorSlotBody -match 'real_director\s*=\s*true' -and
+        $Task11RealDirectorSlotBody -match 'slot\s*=\s*2' -and
+        $Task11RealDirectorSlotBody -match 'adapter:begin' -and
+        $Task11RealDirectorSlotBody -match 'adapter:update') 'Nonsequential slot integration must cross the real tactical adapter/director begin and evidence-update paths.'
 }
 $Task11AdapterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_tactical_adapter.script'
 Assert-True (Test-Path -LiteralPath $Task11AdapterPath) 'Tactical engine adapter production script is missing'
