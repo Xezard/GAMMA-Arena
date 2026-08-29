@@ -203,6 +203,37 @@ local function entity_id(port, entity)
     return result
 end
 
+local function created_entity_batch(value)
+    if type(value) == "table" then
+        local count, maximum = 0, 0
+        local dense_array = true
+        for key in pairs(value) do
+            if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then
+                dense_array = false
+                break
+            end
+            count = count + 1
+            if key > maximum then maximum = key end
+        end
+        if dense_array and count > 0 and maximum == count then
+            local entries = {}
+            for index = 1, count do entries[index] = { entity = value[index] } end
+            return entries
+        end
+    end
+    return { { entity = value } }
+end
+
+local function active_equipped_entry(equipped)
+    local selected = nil
+    for _, entry in ipairs(equipped) do
+        local slot = entry.descriptor.equipped_slot
+        if slot == "weapon_2" then return entry end
+        if slot == "weapon_1" then selected = entry end
+    end
+    return selected
+end
+
 function Materializer:rollback(created, cause)
     self.pending = nil
     if self.rollback_pending == nil then self.rollback_pending = { created = created, cause = cause } end
@@ -245,11 +276,15 @@ function Materializer:pending_wait(progressed)
         local entry = pending.equipped[pending.index]
         local descriptor = entry and entry.descriptor or nil
         local is_device = descriptor and descriptor.category == 'device'
+        local is_activation = pending.phase == 'VERIFY_ACTIVE'
         return self:rollback(pending.created, failure(
-            is_device and 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT' or 'GA_ITEM_MATERIALIZE_EQUIP_TIMEOUT',
-            'Universal actor equipment made no progress before its bounded deadline',
+            is_activation and 'GA_ITEM_MATERIALIZE_ACTIVATE_TIMEOUT'
+                or (is_device and 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT' or 'GA_ITEM_MATERIALIZE_EQUIP_TIMEOUT'),
+            is_activation and 'Universal actor weapon activation made no progress before its bounded deadline'
+                or 'Universal actor equipment made no progress before its bounded deadline',
             { phase = pending.phase, section = descriptor and descriptor.section or nil, id = entry and entry.id or nil,
                 logical_slot = descriptor and descriptor.equipped_slot or nil, slot = is_device and 10 or nil,
+                active_slot = pending.active_slot, active_id = pending.active_id,
                 elapsed_ms = elapsed_ms(pending.last_progress_at, now.value), timeout_ms = pending.timeout_ms }
         ))
     end
@@ -261,17 +296,25 @@ function Materializer:advance_pending()
     if type(pending) ~= 'table' then return failure('GA_ITEM_MATERIALIZE_STATE_INVALID', 'Universal item materializer has no pending transaction') end
     local entry = pending.equipped[pending.index]
     if entry == nil then
-        local active_slot = nil
-        for _, equipped_entry in ipairs(pending.equipped) do
-            local slot = equipped_entry.descriptor.equipped_slot
-            if slot == 'weapon_2' then active_slot = slot break end
-            if slot == 'weapon_1' then active_slot = slot end
-        end
-        if active_slot ~= nil then
-            local activated = call('GA_ITEM_MATERIALIZE_ACTIVATE_FAILED', self.ports.activate_slot, pending.owner, active_slot)
+        local active_entry = active_equipped_entry(pending.equipped)
+        if active_entry ~= nil and pending.activation_submitted ~= true then
+            pending.active_slot = active_entry.descriptor.equipped_slot
+            pending.active_id = active_entry.id
+            local activated = call('GA_ITEM_MATERIALIZE_ACTIVATE_FAILED', self.ports.activate_slot, pending.owner, pending.active_slot)
             if not activated.ok then return self:rollback(pending.created, activated) end
+            pending.activation_submitted = true
+            pending.phase = 'VERIFY_ACTIVE'
+            return self:pending_wait(true)
         end
-        local result = { records = pending.created, active_slot = active_slot, device = pending.device_summary }
+        if active_entry ~= nil then
+            local active = call('GA_ITEM_MATERIALIZE_ACTIVATE_VERIFY_FAILED', self.ports.active_item, pending.owner)
+            if not active.ok then return self:rollback(pending.created, active) end
+            if active.value == nil then return self:pending_wait(false) end
+            local active_id = entity_id(self.ports, active.value)
+            if not active_id.ok then return self:rollback(pending.created, active_id) end
+            if active_id.value ~= pending.active_id then return self:pending_wait(false) end
+        end
+        local result = { records = pending.created, active_slot = pending.active_slot, device = pending.device_summary }
         self.pending = nil
         return gamma_arena_result.ok(result)
     end
@@ -346,16 +389,29 @@ function Materializer:apply(owner, items, catalog)
         end
         local made = call("GA_ITEM_MATERIALIZE_CREATE_FAILED", self.ports.create_item, descriptor.section, owner, options)
         if not made.ok then return self:rollback(created, made) end
-        local id = entity_id(self.ports, made.value)
-        if not id.ok then
-            created[#created + 1] = { entity = made.value, descriptor = descriptor }
-            return self:rollback(created, id)
+        local batch = created_entity_batch(made.value)
+        for result_index, returned in ipairs(batch) do
+            local entity = returned.entity
+            local id = entity_id(self.ports, entity)
+            if not id.ok then
+                created[#created + 1] = { entity = entity, descriptor = descriptor }
+                return self:rollback(created, id)
+            end
+            local entry = { entity = entity, descriptor = descriptor, id = id.value }
+            created[#created + 1] = entry
+            local registered = call("GA_ITEM_MATERIALIZE_REGISTER_FAILED", self.ports.register, entity, descriptor, index)
+            if not registered.ok then return self:rollback(created, registered) end
+            entry.record = registered.value
         end
-        local entry = { entity = made.value, descriptor = descriptor, id = id.value }
-        created[#created + 1] = entry
-        local registered = call("GA_ITEM_MATERIALIZE_REGISTER_FAILED", self.ports.register, made.value, descriptor, index)
-        if not registered.ok then return self:rollback(created, registered) end
-        entry.record = registered.value
+        if #batch ~= 1 then
+            return self:rollback(created, failure("GA_ITEM_MATERIALIZE_CREATE_CARDINALITY_INVALID",
+                "One universal item descriptor created an unexpected number of entities", {
+                    section = descriptor.section,
+                    index = index,
+                    expected = 1,
+                    actual = #batch
+                }))
+        end
     end
 
     for _, entry in ipairs(created) do
@@ -432,12 +488,8 @@ function Materializer:apply(owner, items, catalog)
         end
     end
 
-    local active_slot = nil
-    for _, entry in ipairs(equipped) do
-        local slot = entry.descriptor.equipped_slot
-        if slot == "weapon_2" then active_slot = slot break end
-        if slot == "weapon_1" then active_slot = slot end
-    end
+    local active_entry = active_equipped_entry(equipped)
+    local active_slot = active_entry and active_entry.descriptor.equipped_slot or nil
     if active_slot ~= nil then
         local activated = call("GA_ITEM_MATERIALIZE_ACTIVATE_FAILED", self.ports.activate_slot, owner, active_slot)
         if not activated.ok then return self:rollback(created, activated) end
