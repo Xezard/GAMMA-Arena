@@ -6,15 +6,8 @@
 
 Gamma Arena turns the classic Rostok Arena into a self-contained combat mode with seeded fights, generated equipment, four difficulty levels, and explicit round cleanup.
 
-<!--
 ## Screenshots
-
-Store the images in `.github/assets/`, then remove this HTML comment.
-
-| Arena setup | Fight HUD | Results |
-|:---:|:---:|:---:|
-| ![Arena setup](.github/assets/arena-setup.webp) | ![Fight HUD](.github/assets/fight-hud.webp) | ![Results](.github/assets/results.webp) |
--->
+![Gamma Arena battle in Rostok](assets/battle_1.png)
 
 ## Features
 
