@@ -82,6 +82,9 @@ local function rank_catalog(options)
         base_budget = 600,
         max_entries = 64,
         max_physical_items_per_participant = options and options.physical_item_cap or 256,
+        max_selected_grenades = 2,
+        max_quantity_per_grenade = 1,
+        second_grenade_price_multiplier = 2,
         rank_ids = { "novice", "legend" },
         ranks = {
             novice = { id = "novice", minimum = 0, maximum = 99, threat = threat },
@@ -153,6 +156,7 @@ local function fixture_source(options)
         device_torch_dummy='25', device_torch_nv_1='75',
         device_torch_nv_2='150', device_torch_nv_3=tostring(options.nv3_price or 300)
     }
+    if options.zero_override ~= nil then price_overrides.wpn_zero = tostring(options.zero_override) end
     if options.missing_nv3_price then price_overrides.device_torch_nv_3 = nil end
     return {
         open_rules = function()
@@ -242,14 +246,24 @@ local function exposes_physical_metadata_and_legacy_fields()
     gamma_arena_test_assert.equals(catalog.items.wpn_alpha.icon.height, 2, "icon height is retained")
     gamma_arena_test_assert.equals(catalog.ranks.novice.threat, 100, "rank metadata is exposed")
     gamma_arena_test_assert.equals(catalog.factions.stalker.community, "stalker", "faction metadata is exposed")
-    gamma_arena_test_assert.equals(#catalog.item_ids, 14, "exact devices join valid combat items")
+    gamma_arena_test_assert.equals(#catalog.item_ids, 15, "zero grant and exact devices join valid combat items")
 end
 
-local function rejects_invalid_and_zero_price_candidates()
+local function retains_zero_grants_and_rejects_invalid_candidates()
     local catalog = assert_item_catalog()
-    for _, section in ipairs({ "wpn_zero", "wpn_no_icon", "wpn_unspawnable", "wpn_weightless" }) do
+    local zero = catalog.items.wpn_zero
+    gamma_arena_test_assert.is_true(type(zero) == "table", "zero grant remains physically cataloged")
+    gamma_arena_test_assert.equals(zero.price, nil, "zero grant has no Custom price")
+    gamma_arena_test_assert.equals(zero.price_origin, "zero_grant", "zero grant origin is explicit")
+    for _, section in ipairs({ "wpn_no_icon", "wpn_unspawnable", "wpn_weightless" }) do
         gamma_arena_test_assert.equals(catalog.items[section], nil, "invalid candidate is rejected: " .. section)
     end
+end
+
+local function explicit_override_prices_zero_grant()
+    local catalog = assert_item_catalog({ zero_override = 45 })
+    gamma_arena_test_assert.equals(catalog.items.wpn_zero.price, 45, "override prices zero grant")
+    gamma_arena_test_assert.equals(catalog.items.wpn_zero.price_origin, "override", "override remains authoritative")
 end
 
 local function excludes_story_items()
@@ -343,7 +357,8 @@ end
 local cases = {
     { name = "item_catalog_prices_and_classifies_installed_items", fn = prices_and_classifies_installed_items },
     { name = "item_catalog_exposes_physical_metadata_and_legacy_fields", fn = exposes_physical_metadata_and_legacy_fields },
-    { name = "item_catalog_rejects_invalid_and_zero_price_candidates", fn = rejects_invalid_and_zero_price_candidates },
+    { name = "item_catalog_retains_zero_grants_and_rejects_invalid_candidates", fn = retains_zero_grants_and_rejects_invalid_candidates },
+    { name = "item_catalog_explicit_override_prices_zero_grant", fn = explicit_override_prices_zero_grant },
     { name = "item_catalog_excludes_story_items", fn = excludes_story_items },
     { name = "item_catalog_fingerprint_changes_for_semantic_mutations", fn = fingerprint_changes_for_semantic_mutations },
     { name = "item_catalog_fingerprint_is_canonical_and_excludes_localized_names", fn = fingerprint_is_canonical_and_excludes_localized_names },

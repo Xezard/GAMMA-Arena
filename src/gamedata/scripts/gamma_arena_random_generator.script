@@ -755,6 +755,36 @@ local function valid_random_catalog(catalog, difficulty_id)
     return true
 end
 
+function catalog_failure_context(catalog, difficulty_id)
+    if type(catalog) ~= "table" then return { requirement = "catalog" } end
+    for _, key in ipairs({
+        "profile_list", "weapon_list", "primary_weapon_list", "secondary_weapon_list",
+        "outfit_list", "knife_list", "actor_grenade_list", "npc_grenade_list",
+        "medical_item_list"
+    }) do
+        if type(catalog[key]) ~= "table" or #catalog[key] == 0 then
+            return { requirement = key }
+        end
+    end
+    local ammo_count = 0
+    for _ in pairs(type(catalog.ammo) == "table" and catalog.ammo or {}) do ammo_count = ammo_count + 1 end
+    if ammo_count == 0 then return { requirement = "ammo" } end
+    if type(catalog.consumables) ~= "table" or type(catalog.consumables.bandage) ~= "table" then
+        return { requirement = "consumables.bandage" }
+    end
+    if type(catalog.medical_items) ~= "table" or type(catalog.medical_items.medkit) ~= "table" then
+        return { requirement = "medical_items.medkit" }
+    end
+    if catalog.selection_mode == "combinations"
+        and (type(catalog.combinations) ~= "table" or #catalog.combinations == 0) then
+        return { requirement = "combinations" }
+    end
+    if type(catalog.difficulties) ~= "table" or catalog.difficulties[difficulty_id] == nil then
+        return { requirement = "difficulties." .. tostring(difficulty_id) }
+    end
+    return { requirement = "catalog_shape" }
+end
+
 local function exact_keys(value, allowed, expected_count)
     if type(value) ~= "table" then return false end
     local count = 0
@@ -784,7 +814,9 @@ local function generate_draft_internal(session, fight_index, catalog, layout)
     local eligible = random_catalog_view(catalog)
     if not eligible.ok then return eligible end
     if not valid_random_catalog(eligible.value, session.difficulty_id) then
-        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog has no universally valid loadout", {})
+        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID",
+            "Random fight catalog has no universally valid loadout",
+            catalog_failure_context(eligible.value, session.difficulty_id))
     end
     catalog = eligible.value
     local validated = gamma_arena_mode_skirmish.validate_session(session); if not validated.ok then return validated end
