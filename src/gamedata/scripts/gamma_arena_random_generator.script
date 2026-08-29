@@ -90,6 +90,126 @@ local function append_item(items, section, quantity, equipped_slot)
     if equipped_slot == nil then items[#items].equipped_slot = nil end
 end
 
+local function catalog_item_matches(catalog, section, category)
+    local item = type(catalog) == "table" and type(catalog.items) == "table"
+        and catalog.items[section] or nil
+    return type(item) == "table" and item.category == category
+end
+
+local function filtered_array(values, predicate)
+    local result = {}
+    for _, value in ipairs(values or {}) do
+        if predicate(value) then result[#result + 1] = value end
+    end
+    return result
+end
+
+local function random_catalog_view(catalog)
+    if type(catalog) ~= "table" or type(catalog.items) ~= "table" then
+        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID",
+            "Random fight catalog has no universal item map", {})
+    end
+
+    local view = {}
+    for key, value in pairs(catalog) do view[key] = value end
+
+    local weapon_by_section = {}
+    view.weapon_list = {}
+    for _, weapon in ipairs(catalog.weapon_list or {}) do
+        local physical = catalog.items[weapon.section]
+        local variants = {}
+        for _, variant in ipairs(type(weapon) == "table" and weapon.ammo_variants or {}) do
+            local compatible = false
+            for _, section in ipairs(type(physical) == "table" and physical.ammo_sections or {}) do
+                if section == variant.section then compatible = true; break end
+            end
+            if compatible and catalog_item_matches(catalog, variant.section, "ammo") then
+                variants[#variants + 1] = variant
+            end
+        end
+        if type(weapon) == "table" and physical and physical.category == "weapon"
+            and variants[1] and variants[1].section == weapon.ammo then
+            local copied = {}
+            for key, value in pairs(weapon) do copied[key] = value end
+            copied.ammo_variants = variants
+            view.weapon_list[#view.weapon_list + 1] = copied
+            weapon_by_section[copied.section] = copied
+        end
+    end
+
+    local function weapons(values)
+        local result = {}
+        for _, weapon in ipairs(values or {}) do
+            local eligible = type(weapon) == "table" and weapon_by_section[weapon.section] or nil
+            if eligible then result[#result + 1] = eligible end
+        end
+        return result
+    end
+    view.primary_weapon_list = weapons(catalog.primary_weapon_list)
+    view.secondary_weapon_list = weapons(catalog.secondary_weapon_list)
+    view.outfit_list = filtered_array(catalog.outfit_list, function(value)
+        return type(value) == "table" and catalog_item_matches(catalog, value.section, "outfit")
+    end)
+    view.knife_list = filtered_array(catalog.knife_list, function(value)
+        return type(value) == "table" and catalog_item_matches(catalog, value.section, "knife")
+    end)
+    view.actor_grenade_list = filtered_array(catalog.actor_grenade_list, function(value)
+        return type(value) == "table" and catalog_item_matches(catalog, value.section, "grenade")
+    end)
+    view.npc_grenade_list = filtered_array(catalog.npc_grenade_list, function(value)
+        return type(value) == "table" and catalog_item_matches(catalog, value.section, "grenade")
+    end)
+    view.ammo = {}
+    for section, ammo in pairs(catalog.ammo or {}) do
+        if catalog_item_matches(catalog, section, "ammo") then view.ammo[section] = ammo end
+    end
+    view.medical_items = {}
+    for key, item in pairs(catalog.medical_items or {}) do
+        if type(item) == "table" and catalog_item_matches(catalog, item.section, "medicine") then
+            view.medical_items[key] = item
+        end
+    end
+    view.medical_item_list = filtered_array(catalog.medical_item_list, function(item)
+        return type(item) == "table" and catalog_item_matches(catalog, item.section, "medicine")
+    end)
+    view.consumables = {}
+    for key, item in pairs(catalog.consumables or {}) do
+        if type(item) == "table" and catalog_item_matches(catalog, item.section, "medicine") then
+            view.consumables[key] = item
+        end
+    end
+    view.combinations = filtered_array(catalog.combinations, function(choice)
+        if type(choice) ~= "table" or weapon_by_section[choice.weapon] == nil
+            or view.ammo[choice.ammo] == nil
+            or not catalog_item_matches(catalog, choice.outfit, "outfit") then return false end
+        for _, section in ipairs(choice.consumables or {}) do
+            if not catalog_item_matches(catalog, section, "medicine") then return false end
+        end
+        return true
+    end)
+    view.weapon_pools_by_profile = {}
+    for profile, pools in pairs(catalog.weapon_pools_by_profile or {}) do
+        view.weapon_pools_by_profile[profile] = {
+            primary = weapons(type(pools) == "table" and pools.primary or nil),
+            secondary = weapons(type(pools) == "table" and pools.secondary or nil)
+        }
+    end
+    view.devices, view.device_list = {}, {}
+    for index, device in ipairs(catalog.device_list or {}) do
+        if type(device) ~= "table" or not catalog_item_matches(catalog, device.section, "device") then
+            return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID",
+                "Random device is outside the universal item catalog", { section = device and device.section })
+        end
+        view.device_list[index] = device
+        if device.id ~= nil then view.devices[device.id] = device end
+    end
+    if #view.device_list ~= 4 then
+        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID",
+            "Random device manifest is incomplete", {})
+    end
+    return gamma_arena_result.ok(view)
+end
+
 local function universal_items(loadout_value, catalogs)
     local weapon
     for _, candidate in ipairs(catalogs.weapon_list or {}) do
@@ -106,6 +226,9 @@ local function universal_items(loadout_value, catalogs)
     end
     for _, section in ipairs(loadout_value.consumables or {}) do append_item(items, section, 1) end
     for _, section in ipairs(loadout_value.grenades or {}) do append_item(items, section, 1) end
+    for _, item in ipairs(items) do
+        if type(catalogs.items) ~= "table" or catalogs.items[item.section] == nil then return nil end
+    end
     return items
 end
 
@@ -655,7 +778,15 @@ end
 
 local function generate_draft_internal(session, fight_index, catalog, layout)
     if type(session) ~= "table" or type(catalog) ~= "table" then return gamma_arena_result.err("GA_GENERATE_ARGUMENT_INVALID", "Fight generation requires session and catalog", {}) end
-    if not valid_random_catalog(catalog, session.difficulty_id) then return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {}) end
+    if not valid_random_catalog(catalog, session.difficulty_id) then
+        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog is incomplete", {})
+    end
+    local eligible = random_catalog_view(catalog)
+    if not eligible.ok then return eligible end
+    if not valid_random_catalog(eligible.value, session.difficulty_id) then
+        return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog has no universally valid loadout", {})
+    end
+    catalog = eligible.value
     local validated = gamma_arena_mode_skirmish.validate_session(session); if not validated.ok then return validated end
     if not gamma_arena_number.is_integer(session.session_seed) or session.session_seed < 0 or session.session_seed > 4294967295 then return gamma_arena_result.err("GA_SESSION_SEED_INVALID", "Session seed must be a finite uint32 integer", { session_seed = session.session_seed }) end
     if not gamma_arena_number.is_integer(fight_index) or fight_index < 0 then return gamma_arena_result.err("GA_FIGHT_INDEX_INVALID", "Fight index must be a finite non-negative integer", { fight_index = fight_index }) end

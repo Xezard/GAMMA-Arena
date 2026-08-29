@@ -410,6 +410,14 @@ if ($Task6ArtifactsPresent) {
     $Task6SnapshotLines = @(Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\golden-random-selections-v9.txt') | Where-Object { $_ -and -not $_.StartsWith('#') })
     Assert-True ($Task6SnapshotLines.Count -eq 4) 'Task 6 semantic snapshot must contain exactly four reviewed random scenarios.'
     $Task6GeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
+    Assert-True ($Task6GeneratorTests -match [regex]::Escape('random_builder_skips_items_outside_universal_catalog')) `
+        'Task 6 Random universal-catalog regression is missing.'
+    $Task6RandomGenerator = Get-Content -LiteralPath `
+        (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_random_generator.script') -Raw
+    foreach ($Marker in @('random_catalog_view', 'catalog_item_matches', '#view.device_list ~= 4')) {
+        Assert-True ($Task6RandomGenerator -match [regex]::Escape($Marker)) `
+            "Task 6 Random universal-catalog boundary is missing: $Marker"
+    }
     foreach ($Marker in @('random_draft_matches_frozen_semantic_snapshot', 'random_numeric_rank_stream_is_isolated', 'random_draft_pipeline_canonicalizes_and_strictly_validates', 'random_draft_malformed_inputs_are_total_results', 'random_draft_nested_malformed_and_throwing_inputs_are_total_results', 'random_draft_malformed_dependency_results_are_normalized', 'random_draft_accepts_unclassified_bonus_ammo', 'catalog_enumerates_effective_system_once_per_load', 'catalog_enumeration_failure_is_memoized', 'bonus_ammo.requested_category', 'bonus_ammo.resolved_category', 'bonus_ammo.boxes')) {
         Assert-True ($Task6GeneratorTests -match [regex]::Escape($Marker)) "Task 6 executable draft test is missing: $Marker"
     }

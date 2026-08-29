@@ -1238,6 +1238,12 @@ local function random_draft_catalogs()
     for _, medical in ipairs(snapshot.medical_item_list) do
         add_item(medical.section, { category = "medicine", healing = medical.category == "health" or medical.category == "rare" })
     end
+    for _, grenade in ipairs(snapshot.actor_grenade_list) do
+        add_item(grenade.section, { category = "grenade" })
+    end
+    for _, device in ipairs(snapshot.device_list) do
+        add_item(device.section, { category = "device", ltx_slot = 9 })
+    end
     table.sort(snapshot.item_ids)
     return snapshot
 end
@@ -1323,6 +1329,48 @@ local function random_draft_pipeline_canonicalizes_and_strictly_validates()
     gamma_arena_test_assert.equals(canonical.value.opponents[1].profile, generated.value.opponents[1].profile, "canonical profile preserves authoritative alias")
     local strict = gamma_arena_fight_validator_v9.validate(canonical.value, snapshot, layout)
     gamma_arena_test_assert.is_true(strict.ok, "canonical random draft passes strict v9 validation")
+end
+
+local function random_builder_skips_items_outside_universal_catalog()
+    local snapshot = random_draft_catalogs()
+    local missing = snapshot.outfit_list[1].section
+    snapshot.items[missing] = nil
+    for index, section in ipairs(snapshot.item_ids) do
+        if section == missing then table.remove(snapshot.item_ids, index); break end
+    end
+
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local generated = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, layout)
+
+    gamma_arena_test_assert.is_true(generated.ok,
+        "Random ignores legacy items outside the universal catalog")
+    for _, item in ipairs(generated.value.actor.items) do
+        gamma_arena_test_assert.is_true(snapshot.items[item.section] ~= nil,
+            "actor item is universally cataloged")
+        gamma_arena_test_assert.is_true(item.section ~= missing,
+            "missing legacy outfit is never emitted")
+    end
+    for _, opponent in ipairs(generated.value.opponents) do
+        for _, item in ipairs(opponent.items) do
+            gamma_arena_test_assert.is_true(snapshot.items[item.section] ~= nil,
+                "opponent item is universally cataloged")
+        end
+    end
+end
+
+local function random_builder_rejects_incomplete_device_manifest()
+    local snapshot = random_draft_catalogs()
+    snapshot.device_list[4] = nil
+    local layout = fixture_resolved_layout(snapshot)
+    layout.capacity = #layout.opponent_spawn_slots
+    local generated = gamma_arena_fight_builder.generate(
+        request(3735928559, "veteran"), 7, snapshot, layout)
+    gamma_arena_test_assert.is_false(generated.ok,
+        "Random rejects an incomplete exact device manifest")
+    gamma_arena_test_assert.equals(generated.error.code, "GA_RANDOM_CATALOG_INVALID",
+        "incomplete device manifest fails at the Random catalog boundary")
 end
 
 local function random_draft_malformed_inputs_are_total_results()
@@ -1802,6 +1850,8 @@ end
 function run(run_case_fn)
     local all_passed = true
     if not run_case_fn("random_draft_pipeline_canonicalizes_and_strictly_validates", random_draft_pipeline_canonicalizes_and_strictly_validates) then all_passed = false end
+    if not run_case_fn("random_builder_skips_items_outside_universal_catalog", random_builder_skips_items_outside_universal_catalog) then all_passed = false end
+    if not run_case_fn("random_builder_rejects_incomplete_device_manifest", random_builder_rejects_incomplete_device_manifest) then all_passed = false end
     if not run_case_fn("random_draft_malformed_inputs_are_total_results", random_draft_malformed_inputs_are_total_results) then all_passed = false end
     if not run_case_fn("random_draft_nested_malformed_and_throwing_inputs_are_total_results", random_draft_nested_malformed_and_throwing_inputs_are_total_results) then all_passed = false end
     if not run_case_fn("random_draft_malformed_dependency_results_are_normalized", random_draft_malformed_dependency_results_are_normalized) then all_passed = false end
