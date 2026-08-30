@@ -10937,6 +10937,92 @@ local function runtime_custom_presenter_refreshes_status_without_catalog_snapsho
     gamma_arena_test_assert.equals(refreshed.weight_mg, 13000, "status refresh updates weight totals")
 end
 
+local function runtime_custom_presenter_status_failures_preserve_catalog_view()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local function assert_preserved(model, name)
+        local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+        local selected_cells = { { section = "medkit", quantity = 2 } }
+        local readiness = { { id = "outfit", complete = true } }
+        local view = {
+            catalog_cells = catalog_cells,
+            selected_cells = selected_cells,
+            readiness = readiness,
+            filter = "weapon",
+            search = "alpha",
+            sort = "name_desc",
+            catalog_page = 2,
+            catalog_page_count = 5,
+            catalog_item_count = 321,
+            catalog_has_previous = true,
+            catalog_has_next = true,
+            actor_device = "device_torch_nv_1",
+            remaining = 444
+        }
+        local refreshed = presenter:refresh_status(model, view)
+        gamma_arena_test_assert.equals(refreshed, view, name .. " failure retains the existing view")
+        gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells, name .. " failure retains catalog cells")
+        gamma_arena_test_assert.equals(refreshed.selected_cells, selected_cells, name .. " failure retains selected cells")
+        gamma_arena_test_assert.equals(refreshed.readiness, readiness, name .. " failure retains readiness")
+        gamma_arena_test_assert.equals(refreshed.filter, "weapon", name .. " failure retains filter")
+        gamma_arena_test_assert.equals(refreshed.search, "alpha", name .. " failure retains search")
+        gamma_arena_test_assert.equals(refreshed.sort, "name_desc", name .. " failure retains sort")
+        gamma_arena_test_assert.equals(refreshed.catalog_page, 2, name .. " failure retains page")
+        gamma_arena_test_assert.equals(refreshed.catalog_page_count, 5, name .. " failure retains navigation")
+        gamma_arena_test_assert.equals(refreshed.actor_device, "device_torch_nv_1", name .. " failure retains device")
+        gamma_arena_test_assert.equals(refreshed.remaining, 444, name .. " failure retains budget")
+        gamma_arena_test_assert.is_false(refreshed.launch_enabled, name .. " failure disables launch")
+        gamma_arena_test_assert.equals(refreshed.infrastructure_error_code, "GA_CUSTOM_MODEL_INVALID",
+            name .. " failure owns infrastructure status")
+        gamma_arena_test_assert.equals(refreshed.summary_code, "GA_CUSTOM_MODEL_INVALID",
+            name .. " failure owns visible status")
+    end
+
+    assert_preserved({}, "missing status_snapshot")
+    assert_preserved({ status_snapshot = function() error("injected status failure") end }, "thrown status_snapshot")
+    assert_preserved({ status_snapshot = function() return true end }, "malformed status_snapshot")
+end
+
+local function runtime_custom_model_status_snapshot_matches_full_status()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "status parity fixture selects faction")
+    gamma_arena_test_assert.is_true(model:set_count(2).ok, "status parity fixture selects opponent count")
+    gamma_arena_test_assert.is_true(model:set_rank(2, "veteran").ok, "status parity fixture selects opponent rank")
+    gamma_arena_test_assert.is_true(model:set_device("device_torch_nv_2").ok, "status parity fixture selects device")
+    model:set_device("missing_device")
+
+    local full = model:snapshot()
+    local status = model:status_snapshot()
+    for _, field in ipairs({
+        "faction", "count", "capacity", "actor_device", "budget", "spent", "remaining",
+        "weight_mg", "weight_limit_mg", "can_start"
+    }) do
+        gamma_arena_test_assert.equals(status[field], full[field], "status snapshot matches full snapshot " .. field)
+    end
+    gamma_arena_test_assert.equals(status.categories, nil, "status snapshot omits catalog categories")
+    gamma_arena_test_assert.equals(#status.roster, #full.roster, "status snapshot matches roster length")
+    for index, row in ipairs(full.roster) do
+        gamma_arena_test_assert.equals(status.roster[index].rank, row.rank, "status snapshot matches roster rank")
+    end
+    gamma_arena_test_assert.equals(status.validation.ok, full.validation.ok, "status snapshot matches validation result")
+    gamma_arena_test_assert.equals(status.validation.error.code, full.validation.error.code,
+        "status snapshot matches validation code")
+    gamma_arena_test_assert.equals(status.last_operation.error.code, full.last_operation.error.code,
+        "status snapshot matches operation code")
+    gamma_arena_test_assert.equals(#status.device_options, #full.device_options,
+        "status snapshot matches device option count")
+    for index, option in ipairs(full.device_options) do
+        local current = status.device_options[index]
+        for _, field in ipairs({ "section", "price", "weight_mg", "selected", "affordable", "disabled", "disabled_reason" }) do
+            gamma_arena_test_assert.equals(current[field], option[field],
+                "status snapshot matches device option " .. tostring(index) .. " " .. field)
+        end
+    end
+end
+
 local function runtime_custom_ui_grenade_projection_disables_cells_at_limit()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     catalog.categories = {
@@ -12348,6 +12434,8 @@ local cases = {
     { name = "runtime_custom_presenter_filters_sorts_and_pages_deterministically", fn = runtime_custom_presenter_filters_sorts_and_pages_deterministically },
     { name = "runtime_custom_presenter_preview_and_readiness_are_authoritative", fn = runtime_custom_presenter_preview_and_readiness_are_authoritative },
     { name = "runtime_custom_presenter_refreshes_status_without_catalog_snapshot", fn = runtime_custom_presenter_refreshes_status_without_catalog_snapshot },
+    { name = "runtime_custom_presenter_status_failures_preserve_catalog_view", fn = runtime_custom_presenter_status_failures_preserve_catalog_view },
+    { name = "runtime_custom_model_status_snapshot_matches_full_status", fn = runtime_custom_model_status_snapshot_matches_full_status },
     { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
     { name = "runtime_universal_items_preflight_enforces_physical_item_cap", fn = runtime_universal_items_preflight_enforces_physical_item_cap },

@@ -3413,6 +3413,14 @@ foreach ($HandlerName in @('OnCount', 'OnRank')) {
 $RefreshStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshStatus\(.*?^end\s*$').Value
 Assert-True ($RefreshStatusBlock -notmatch 'rebuild_panels') 'Custom lightweight refresh must not rebuild item panels.'
 Assert-True ($RefreshStatusBlock -notmatch 'model:snapshot') 'Custom lightweight refresh must not request a full model snapshot.'
+$PrepareViewStart = $RosterRefreshUi.IndexOf('local function prepare_view(self, view)')
+$PrepareViewEnd = if ($PrepareViewStart -ge 0) { $RosterRefreshUi.IndexOf('local function render_status_controls', $PrepareViewStart) } else { -1 }
+Assert-True ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) 'Custom view preparation must remain structurally testable.'
+if ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) {
+    $PrepareViewBlock = $RosterRefreshUi.Substring($PrepareViewStart, $PrepareViewEnd - $PrepareViewStart)
+    Assert-True ($PrepareViewBlock -match 'view\.submission_error\s*=\s*nil') 'Custom view preparation must clear stale submission errors.'
+    Assert-True ($PrepareViewBlock -match 'view\.submission_error_code\s*=\s*nil') 'Custom view preparation must clear stale submission error codes.'
+}
 $RosterRefreshCase = 'runtime_custom_presenter_refreshes_status_without_catalog_snapshot'
 $RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
 Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
