@@ -6,7 +6,7 @@ FightSpec v9 is the sole emitted and accepted runtime fight contract. Its exact 
 
 The root contains exactly `schema_version`, `identity`, `arena`, `actor`, and `opponents`. `schema_version` is exactly `9`.
 
-`identity` contains exactly `session_seed`, `fight_index`, `generator_version`, `catalog_schema_version`, `catalog_revision`, `catalog_fingerprint`, `layout_version`, `layout_hash`, and `fight_id`. `layout_hash` is a lower-case 16-hex hash over the complete resolved layout. `fight_id` is `ga9-` followed by the lower-case 16-hex hash of the canonical FightSpec payload excluding only `fight_id`; no separate content hash field is exposed.
+`identity` contains exactly `session_seed`, `fight_index`, `generator_version`, `catalog_schema_version`, `catalog_revision`, `catalog_fingerprint`, `layout_version`, `layout_hash`, and `fight_id`. `session_seed` preserves the complete uint32 launch domain (`0..4294967295`); its later conversion into an internal deterministic-RNG state does not alter this identity value. `layout_hash` is a lower-case 16-hex hash over the complete resolved layout. `fight_id` is `ga9-` followed by the lower-case 16-hex hash of the canonical FightSpec payload excluding only `fight_id`; no separate content hash field is exposed.
 
 `arena` contains exactly `layout_id`, `level`, and the dense `tactical_routes` array. `actor` contains exactly `spawn_path`, `look_path`, and dense `items`. Each opponent contains exactly `slot`, `faction`, `rank`, `profile`, `role`, `spawn_slot_id`, `spawn`, `tactical_route`, and dense `items`. `rank` contains exactly `id` and the exact numeric `value`. `spawn` contains exactly `position`, `level_vertex_id`, and `game_vertex_id`; `position` contains exactly `x`, `y`, and `z`.
 

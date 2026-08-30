@@ -1025,6 +1025,7 @@ $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedat
 $Task7MasterExoRegistration = '\{\s*name\s*=\s*"master_powered_exo_rate_is_rare"\s*,\s*fn\s*=\s*master_powered_exo_rate_is_rare\s*\}'
 Assert-True (([regex]::Matches($Task7GeneratorTest, $Task7MasterExoRegistration)).Count -eq 1) 'Regression case must be registered exactly: master_powered_exo_rate_is_rare -> master_powered_exo_rate_is_rare.'
 $Task7FightSpecContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_spec.script') -Raw
+$Task7FightValidatorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script') -Raw
 $Task7FightSpecTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script') -Raw
 foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11', 'ga-catalog-v10-')) {
     Assert-True ($Task7FightSpecContent -match $Pattern) "Task 4 canonicalization must enforce catalog identity: $Pattern"
@@ -1032,6 +1033,13 @@ foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s
 foreach ($Marker in @('canonicalizes_v9_exact_identity_and_device_order','validator_enforces_v9_identity_versions_and_devices','validator_never_reruns_random_device_selection')) {
     Assert-True ($Task7FightSpecTestContent -match [regex]::Escape($Marker)) "Task 4 v9 executable contract test is missing: $Marker"
 }
+Assert-True ($Task7FightSpecContent -match 'UINT32_MAX\s*=\s*4294967295') 'FightSpec canonicalization must accept the complete uint32 session-seed domain.'
+Assert-True ($Task7FightValidatorContent -match 'UINT32_MAX\s*=\s*4294967295') 'FightSpec validation must accept the complete uint32 session-seed domain.'
+Assert-True ($Task7FightSpecContent -match 'session_seed\s*>\s*UINT32_MAX' -and $Task7FightSpecContent -notmatch 'session_seed\s*~=\s*gamma_arena_rng\.normalize_uint32') 'FightSpec canonicalization must validate session identity as uint32, not as internal RNG state.'
+Assert-True ($Task7FightValidatorContent -match 'session_seed\s*>\s*UINT32_MAX' -and $Task7FightValidatorContent -notmatch 'session_seed\s*~=\s*gamma_arena_rng\.normalize_uint32') 'FightSpec validation must validate session identity as uint32, not as internal RNG state.'
+$Uint32SeedCase = 'accepts_full_uint32_session_seed_identity'
+$Uint32SeedRegistration = '\{\s*name\s*=\s*"fight_spec_accepts_full_uint32_session_seed_identity"\s*,\s*fn\s*=\s*' + [regex]::Escape($Uint32SeedCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task7FightSpecTestContent, $Uint32SeedRegistration)).Count -eq 1) "Regression case must be registered exactly: fight_spec_accepts_full_uint32_session_seed_identity -> $Uint32SeedCase."
 
 $Task5UniversalRuntimeContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_LIMIT', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
