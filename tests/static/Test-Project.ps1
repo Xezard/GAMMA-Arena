@@ -702,6 +702,12 @@ foreach ($Marker in @('function apply_faction_selection','function handle_escape
 }
 Assert-True ($ReadableCustomUi -notmatch 'faction_combo') `
     'Custom UX must replace the anonymous faction combo with the emblem picker trigger.'
+$CustomKeyboardBlock = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+UICustom:OnKeyboard\(.*?^end\s*$').Value
+Assert-True ($CustomKeyboardBlock -match 'handle_escape\(self\.faction_picker' -and
+    $CustomKeyboardBlock -match 'return\s+true') `
+    'Custom UX keyboard handling must consume modal Escape with an engine-compatible boolean.'
+Assert-True ($CustomKeyboardBlock -notmatch 'return\s+handle_escape') `
+    'Custom UX OnKeyboard must not return a structured Result table across the engine boolean boundary.'
 foreach ($Marker in @('function format_price_text','function arena_price_text','function update_item_hover',
     'utils_ui.UIInfoItem(self)','function UICustom:Update()','pcall(catalog_update, catalog_container, item_info)',
     'pcall(selected_update, selected_container, item_info)')) {
@@ -994,7 +1000,7 @@ foreach ($Marker in @(
     Assert-True ($Task11RuntimeTests -match [regex]::Escape($Marker)) "Task 11 runtime lifecycle tests must cover $Marker"
 }
 $Task11CustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
-Assert-True ($Task11CustomUi -match 'DIK_keys\.DIK_ESCAPE[\s\S]{0,80}self:OnBack\(\)') 'Task 11 custom setup Escape must return through the non-launching back path.'
+Assert-True ($Task11CustomUi -match 'DIK_keys\.DIK_ESCAPE[\s\S]{0,300}handle_escape\(self\.faction_picker[\s\S]{0,160}self:OnBack\(\)') 'Task 11 custom setup Escape must cancel the faction modal before using the non-launching back path.'
 
 $Task12BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
 if (Test-Path -LiteralPath $Task12BuildPath) {
