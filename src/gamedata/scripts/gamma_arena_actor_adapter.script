@@ -1,5 +1,6 @@
 local ActorAdapter = {}
 ActorAdapter.__index = ActorAdapter
+local DEFAULT_WEAPON_HIDE_TIMEOUT_MS = 5000
 
 local function fail(code, message, context)
     return gamma_arena_result.err(code, message, context)
@@ -79,6 +80,8 @@ function ActorAdapter:__init(deps)
     self.inventory_clean = false
     self.victory_reset_started = false
     self.rematch_transients_reset = false
+    self.victory_cleanup = nil
+    self.victory_cleanup_complete = false
 end
 
 function ActorAdapter:begin_update()
@@ -96,6 +99,24 @@ function ActorAdapter:owned_actor()
     local owned_ok, owned = pcall(self.deps.is_actor_owned, actor)
     if not owned_ok or owned ~= true then
         return fail("GA_ACTOR_NOT_OWNED", "Campaign or foreign actor cannot be modified by Gamma Arena")
+    end
+    return gamma_arena_result.ok(actor)
+end
+
+function ActorAdapter:victory_cleanup_actor()
+    local transaction = self.victory_cleanup
+    if type(transaction) ~= "table" or not valid_id(transaction.actor_id) then
+        return fail("GA_ACTOR_VICTORY_CLEANUP_NOT_STARTED", "Victory cleanup has no captured actor identity")
+    end
+    local actor_ok, actor = pcall(self.deps.actor)
+    if not actor_ok or actor == nil then return fail("GA_ACTOR_MISSING", "Arena actor is unavailable during victory cleanup") end
+    local id = call_actor(actor, "id")
+    if not id.ok or not valid_id(id.value) or id.value ~= transaction.actor_id then
+        return fail("GA_ACTOR_NOT_OWNED", "Victory cleanup actor identity changed before inventory absence was proved", {
+            expected_actor_id = transaction.actor_id,
+            observed_actor_id = id.ok and id.value or nil,
+            cause = id.error
+        })
     end
     return gamma_arena_result.ok(actor)
 end
@@ -118,13 +139,117 @@ function ActorAdapter:release_input()
     return gamma_arena_result.ok(true)
 end
 
+function ActorAdapter:interrupt_item_use()
+    if type(self.deps.interrupt_item_use) ~= "function" then return gamma_arena_result.ok(false) end
+    return dependency_result("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", self.deps.interrupt_item_use)
+end
+
 function ActorAdapter:begin_rematch_boundary()
     if self.input_owned then return gamma_arena_result.ok(false) end
-    if type(self.deps.interrupt_item_use) == "function" then
-        local interrupted = dependency_result("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", self.deps.interrupt_item_use)
-        if not interrupted.ok then return interrupted end
-    end
+    local interrupted = self:interrupt_item_use()
+    if not interrupted.ok then return interrupted end
     return self:acquire_input()
+end
+
+function ActorAdapter:begin_victory_cleanup()
+    if self.victory_cleanup_complete then return gamma_arena_result.ok(false) end
+    if self.victory_cleanup ~= nil then
+        return gamma_arena_result.ok({ pending = true, stage = self.victory_cleanup.phase })
+    end
+    local interrupted = self:interrupt_item_use()
+    if not interrupted.ok then return interrupted end
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local clock = self:inventory_clock()
+    if not clock.ok then return clock end
+    local slot = dependency_result("GA_ACTOR_ACTIVE_SLOT_READ_FAILED", self.deps.active_slot, owned.value)
+    if not slot.ok then return slot end
+    if not finite(slot.value) or slot.value ~= math.floor(slot.value) or slot.value < 0 then
+        return fail("GA_ACTOR_ACTIVE_SLOT_INVALID", "Arena actor active slot is invalid", { active_slot = slot.value })
+    end
+    local actor_id = call_actor(owned.value, "id")
+    if not actor_id.ok or not valid_id(actor_id.value) then
+        return fail("GA_ACTOR_ID_INVALID", "Arena actor has no valid numeric id before victory cleanup", { cause = actor_id.error })
+    end
+    self.victory_cleanup = {
+        phase = slot.value == 0 and "loadout" or "weapon_hide",
+        hide_requested_at = clock.value,
+        hide_requested_tick = self.update_tick,
+        actor_id = actor_id.value
+    }
+    if slot.value == 0 then return self:update_victory_cleanup() end
+    local hidden = dependency_result("GA_ACTOR_WEAPON_HIDE_FAILED", self.deps.hide_weapon, owned.value)
+    if not hidden.ok then self.victory_cleanup = nil; return hidden end
+    return gamma_arena_result.ok({ pending = true, stage = "weapon_hide" })
+end
+
+function ActorAdapter:update_victory_cleanup()
+    if self.victory_cleanup_complete then return gamma_arena_result.ok(true) end
+    local transaction = self.victory_cleanup
+    if transaction == nil then return fail("GA_ACTOR_VICTORY_CLEANUP_NOT_STARTED", "Victory cleanup has not been started") end
+    local owned = self:victory_cleanup_actor()
+    if not owned.ok then return owned end
+    local actor = owned.value
+
+    if transaction.phase == "weapon_hide" then
+        if self.update_tick <= transaction.hide_requested_tick then
+            return gamma_arena_result.ok({ pending = true, stage = "weapon_hide" })
+        end
+        local slot = dependency_result("GA_ACTOR_ACTIVE_SLOT_READ_FAILED", self.deps.active_slot, actor)
+        if not slot.ok then return slot end
+        if not finite(slot.value) or slot.value ~= math.floor(slot.value) or slot.value < 0 then
+            return fail("GA_ACTOR_ACTIVE_SLOT_INVALID", "Arena actor active slot is invalid", { active_slot = slot.value })
+        end
+        if slot.value ~= 0 then
+            local clock = self:inventory_clock()
+            if not clock.ok then return clock end
+            local elapsed_ms = elapsed_u32(clock.value, transaction.hide_requested_at)
+            local timeout_ms = self.deps.weapon_hide_timeout_ms or DEFAULT_WEAPON_HIDE_TIMEOUT_MS
+            if not valid_u32(timeout_ms) then
+                return fail("GA_ACTOR_WEAPON_HIDE_TIMEOUT_INVALID", "Actor weapon-hide timeout must be a uint32 duration")
+            end
+            if elapsed_ms >= timeout_ms then
+                return fail("GA_ACTOR_WEAPON_HIDE_TIMEOUT", "Arena actor weapon did not become hidden before cleanup", {
+                    active_slot = slot.value,
+                    elapsed_ms = elapsed_ms,
+                    timeout_ms = timeout_ms
+                })
+            end
+            return gamma_arena_result.ok({ pending = true, stage = "weapon_hide" })
+        end
+        transaction.phase = "loadout"
+    end
+
+    if transaction.phase == "loadout" then
+        local loadout = self:owned_item_cleanup_port()
+        if type(loadout) ~= "table" or type(loadout.cleanup) ~= "function" then
+            return fail("GA_ACTOR_LOADOUT_CLEANUP_FAILED", "Arena actor loadout cleanup port is unavailable after victory")
+        end
+        local cleaned = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
+        if not cleaned.ok then return cleaned end
+        if type(cleaned.value) == "table" and cleaned.value.pending == true then
+            return gamma_arena_result.ok({ pending = true, stage = "loadout" })
+        end
+        local purged = self:purge_inventory(actor)
+        if not purged.ok then return purged end
+        transaction.phase = "inventory_absence"
+        return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" })
+    end
+
+    if transaction.phase == "inventory_absence" then
+        local empty = self:verify_inventory_empty()
+        if not empty.ok then return empty end
+        if empty.value ~= true then return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" }) end
+        transaction.phase = "complete"
+        self.victory_cleanup_complete = true
+        return gamma_arena_result.ok(true)
+    end
+
+    if transaction.phase == "complete" then
+        self.victory_cleanup_complete = true
+        return gamma_arena_result.ok(true)
+    end
+    return fail("GA_ACTOR_VICTORY_CLEANUP_STATE_INVALID", "Victory cleanup entered an invalid state", { phase = transaction.phase })
 end
 
 function ActorAdapter:reset_transient_state(actor)
@@ -205,6 +330,7 @@ end
 
 function ActorAdapter:purge_inventory(actor)
     local owned = self:owned_actor()
+    if not owned.ok and self.victory_cleanup ~= nil then owned = self:victory_cleanup_actor() end
     if not owned.ok then return owned end
     local requested_actor_id_result = call_actor(actor, "id")
     if not requested_actor_id_result.ok or not valid_id(requested_actor_id_result.value) then
@@ -261,6 +387,7 @@ function ActorAdapter:verify_inventory_empty()
     if self.purge_tick == nil or self.inventory_drain == nil then return fail("GA_ACTOR_INVENTORY_NOT_PURGED", "Actor inventory has not been purged") end
     if self.update_tick <= self.purge_tick then return gamma_arena_result.ok(false) end
     local owned = self:owned_actor()
+    if not owned.ok and self.victory_cleanup ~= nil then owned = self:victory_cleanup_actor() end
     if not owned.ok then return owned end
     local clock = self:inventory_clock()
     if not clock.ok then return clock end
@@ -410,6 +537,40 @@ function ActorAdapter:normalize_for_arena(layout, transients_already_reset)
     return gamma_arena_result.ok({ position = position_snapshot })
 end
 
+function ActorAdapter:normalize_after_victory_cleanup(layout)
+    local owned = self:owned_actor()
+    if not owned.ok then return owned end
+    local acquired = self:acquire_input()
+    if not acquired.ok then return acquired end
+    local actor = owned.value
+    local steps = {
+        function() return self:normalize_status(actor) end,
+        function() return self:position_actor(actor, layout) end,
+        function() return self:zero_money(actor) end
+    }
+    for index = 1, #steps do
+        local result = steps[index]()
+        if not result.ok then
+            if acquired.value == true then
+                local released = self:release_input()
+                if not released.ok then
+                    return fail("GA_ACTOR_NORMALIZE_ROLLBACK_FAILED", "Actor normalization and input rollback both failed", { cause = result.error, rollback = released.error })
+                end
+            end
+            return result
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function ActorAdapter:clear_victory_cleanup()
+    self.purge_tick = nil
+    self.inventory_drain = nil
+    self.inventory_clean = false
+    self.victory_cleanup = nil
+    self.victory_cleanup_complete = false
+end
+
 function ActorAdapter:apply_loadout(loadout)
     local owned = self:owned_actor()
     if not owned.ok then return owned end
@@ -454,6 +615,25 @@ function ActorAdapter:cleanup_loadout_for_restore()
 end
 
 function ActorAdapter:reset_for_rematch(layout)
+    if self.victory_cleanup ~= nil or self.victory_cleanup_complete then
+        if not self.victory_cleanup_complete then
+            local cleaned = self:update_victory_cleanup()
+            if not cleaned.ok then return cleaned end
+            if cleaned.value ~= true then return cleaned end
+        end
+        if not self.rematch_transients_reset then
+            local owned = self:owned_actor()
+            if not owned.ok then return owned end
+            local transients = self:reset_transient_state(owned.value)
+            if not transients.ok then return transients end
+            self.rematch_transients_reset = true
+        end
+        local normalized = self:normalize_after_victory_cleanup(layout)
+        if not normalized.ok then return normalized end
+        self:clear_victory_cleanup()
+        self.rematch_transients_reset = false
+        return gamma_arena_result.ok(true)
+    end
     if self.victory_reset_started then
         local empty = self:verify_inventory_empty()
         if not empty.ok then return empty end
@@ -484,13 +664,23 @@ end
 function ActorAdapter:cleanup()
     local errors = {}
     local loadout_pending = false
-    local loadout = self:owned_item_cleanup_port()
-    if type(loadout) == "table" and type(loadout.cleanup) == "function" then
-        local result = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
+    if self.victory_cleanup ~= nil and not self.victory_cleanup_complete then
+        local result = self:update_victory_cleanup()
         if not result.ok then
             errors[#errors + 1] = result.error
-        elseif type(result.value) == "table" and result.value.pending == true then
-            loadout_pending = true
+        elseif result.value ~= true then
+            return gamma_arena_result.ok({ pending = true, stage = result.value.stage or "victory_cleanup" })
+        end
+    end
+    if not self.victory_cleanup_complete then
+        local loadout = self:owned_item_cleanup_port()
+        if type(loadout) == "table" and type(loadout.cleanup) == "function" then
+            local result = dependency_result("GA_ACTOR_LOADOUT_CLEANUP_FAILED", loadout.cleanup)
+            if not result.ok then
+                errors[#errors + 1] = result.error
+            elseif type(result.value) == "table" and result.value.pending == true then
+                loadout_pending = true
+            end
         end
     end
     local input = self:release_input()
@@ -500,6 +690,8 @@ function ActorAdapter:cleanup()
     self.inventory_clean = false
     self.victory_reset_started = false
     self.rematch_transients_reset = false
+    self.victory_cleanup = nil
+    self.victory_cleanup_complete = false
     if #errors > 0 then return fail("GA_ACTOR_CLEANUP_FAILED", "Arena actor cleanup failed", { errors = errors }) end
     if loadout_pending then return gamma_arena_result.ok({ pending = true, stage = "actor_loadout" }) end
     return gamma_arena_result.ok(true)

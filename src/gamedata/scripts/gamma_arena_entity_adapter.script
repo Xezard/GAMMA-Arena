@@ -5,6 +5,8 @@ local OWNER_KEY = "gamma_arena_owner"
 local UINT32_MOD = 4294967296
 local DEFAULT_RELEASE_TIMEOUT_MS = 10000
 local DEFAULT_ONLINE_TIMEOUT_MS = 10000
+local DEFAULT_SPAWN_STEP_BUDGET = 8
+local MAX_SPAWN_STEP_BUDGET = 64
 local MAX_RUNTIME_CHILDREN = 128
 local DEATH_RECONCILE_INTERVAL_MS = 250
 local TERMINAL_GRACE_MS = 1500
@@ -346,7 +348,9 @@ function EntityAdapter:__init(deps)
     self.record_by_id = {}
     self.runtime_child_count = 0
     self.pending_release = nil
+    self.pending_cleanup_releases = {}
     self.release_index = nil
+    self.cleanup_phase = nil
     self.cleanup_errors = nil
     self.cleanup_mode = nil
     self.cleanup_quiesced = false
@@ -367,8 +371,32 @@ function EntityAdapter:__init(deps)
 end
 
 function EntityAdapter:set_state(value)
+    local previous = self.state_value
     self.state_value = value
     self.registry.state = value
+    if previous ~= value and type(self.deps.checkpoint) == "function" then
+        pcall(self.deps.checkpoint, "GA_ENTITY_STAGE_CHANGED", {
+            previous = previous,
+            current = value,
+            session_id = self.session_id,
+            fight_id = self.current_fight_id
+        })
+    end
+end
+
+function EntityAdapter:set_cleanup_phase(value)
+    if self.cleanup_phase == value then return end
+    local previous = self.cleanup_phase
+    self.cleanup_phase = value
+    if type(self.deps.checkpoint) == "function" then
+        pcall(self.deps.checkpoint, "GA_ENTITY_CLEANUP_PHASE_CHANGED", {
+            previous = previous,
+            current = value,
+            mode = self.cleanup_mode,
+            session_id = self.session_id,
+            pending = #self.pending_cleanup_releases
+        })
+    end
 end
 
 function EntityAdapter:disable_tactical(result)
@@ -1051,7 +1079,7 @@ function EntityAdapter:adopt_runtime_children(record)
     return gamma_arena_result.ok({ adopted = adopted })
 end
 
-function EntityAdapter:begin_release(record)
+function EntityAdapter:submit_release(record)
     if self.record_by_id[record.id] ~= record then
         return fail("GA_ENTITY_RELEASE_UNREGISTERED", "Registry is the primary Arena ownership allowlist", { id = record.id })
     end
@@ -1068,19 +1096,25 @@ function EntityAdapter:begin_release(record)
     if not released.ok then return released end
     local clock = self:clock()
     if not clock.ok then return clock end
-    self.pending_release = { record = record, started = clock.value }
+    return gamma_arena_result.ok({ record = record, started = clock.value })
+end
+
+function EntityAdapter:begin_release(record)
+    local submitted = self:submit_release(record)
+    if not submitted.ok then return submitted end
+    self.pending_release = submitted.value
     return gamma_arena_result.ok(true)
 end
 
-function EntityAdapter:poll_release()
-    if self.pending_release == nil then return gamma_arena_result.ok(true) end
-    local pending = self.pending_release
+function EntityAdapter:poll_release_entry(pending)
+    if type(pending) ~= "table" or type(pending.record) ~= "table" then
+        return fail("GA_ENTITY_RELEASE_PENDING_INVALID", "Pending entity release evidence is invalid")
+    end
     local exists = self:entity_exists(pending.record.id)
     if not exists.ok then return exists end
     if not exists.value then
         pending.record.released = true
         if pending.record.kind == "npc" then self:transition_opponent(pending.record, OPPONENT_STATES.RELEASED, "cleanup_released", nil) end
-        self.pending_release = nil
         return gamma_arena_result.ok(true)
     end
     local clock = self:clock()
@@ -1090,8 +1124,22 @@ function EntityAdapter:poll_release()
         return fail("GA_ENTITY_RELEASE_TIMEOUT_INVALID", "Entity release timeout must be a bounded uint32 duration")
     end
     if elapsed_ms(pending.started, clock.value) > timeout then
-        self.pending_release = nil
         return fail("GA_ENTITY_RELEASE_TIMEOUT", "Safe release manager did not remove the entity before the wrap-safe deadline", { id = pending.record.id, timeout_ms = timeout })
+    end
+    return gamma_arena_result.ok(false)
+end
+
+function EntityAdapter:poll_release()
+    if self.pending_release == nil then return gamma_arena_result.ok(true) end
+    local pending = self.pending_release
+    local polled = self:poll_release_entry(pending)
+    if not polled.ok then
+        if polled.error and polled.error.code == "GA_ENTITY_RELEASE_TIMEOUT" then self.pending_release = nil end
+        return polled
+    end
+    if polled.value == true then
+        self.pending_release = nil
+        return gamma_arena_result.ok(true)
     end
     return gamma_arena_result.ok(false)
 end
@@ -1200,6 +1248,23 @@ function EntityAdapter:drive_spawning()
         return gamma_arena_result.ok(true)
     end
     return fail("GA_ENTITY_TRANSACTION_INVALID", "Unknown entity transaction phase", { phase = self.current.phase })
+end
+
+function EntityAdapter:drive_spawning_budgeted()
+    local budget = self.deps.spawn_step_budget
+    if budget == nil then budget = DEFAULT_SPAWN_STEP_BUDGET end
+    if not finite_integer(budget) or budget < 1 or budget > MAX_SPAWN_STEP_BUDGET then
+        return fail("GA_ENTITY_SPAWN_BUDGET_INVALID", "Entity spawn step budget must be a bounded positive integer", {
+            budget = budget,
+            maximum = MAX_SPAWN_STEP_BUDGET
+        })
+    end
+    local result = gamma_arena_result.ok(true)
+    for _ = 1, budget do
+        result = self:drive_spawning()
+        if not result.ok or self.state_value ~= "SPAWNING" or result.value == false then return result end
+    end
+    return result
 end
 
 function EntityAdapter:verify_item_ownership()
@@ -1585,8 +1650,84 @@ function EntityAdapter:finish_cleanup()
     self.registry.items = {}
     self.npc_by_id = {}
     self.record_by_id = {}
+    self.pending_cleanup_releases = {}
+    self.cleanup_phase = nil
     self:set_state("CLEAN")
     return gamma_arena_result.ok({ state = "CLEAN" })
+end
+
+function EntityAdapter:retire_absent_record(record)
+    record.released = true
+    if record.kind == "npc" then self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil) end
+end
+
+function EntityAdapter:adopt_cleanup_children()
+    local adopted = 0
+    for _, record in ipairs(self.registry.npcs) do
+        if not record.released and not record.protected then
+            local exists = self:entity_exists(record.id)
+            if not exists.ok then
+                self:add_cleanup_error(exists, record, "existence")
+                record.protected = true
+            elseif not exists.value then
+                self:retire_absent_record(record)
+            else
+                local runtime_children = self:adopt_runtime_children(record)
+                if not runtime_children.ok then
+                    self:add_cleanup_error(runtime_children, record, "runtime_children")
+                    record.protected = true
+                else
+                    adopted = adopted + runtime_children.value.adopted
+                end
+            end
+        end
+    end
+    return adopted
+end
+
+function EntityAdapter:submit_cleanup_wave(kind, poll_phase)
+    self.pending_cleanup_releases = {}
+    for index = #self.creation_stack, 1, -1 do
+        local record = self.creation_stack[index]
+        if record.kind == kind and not record.released and not record.protected then
+            self.release_index = index
+            local exists = self:entity_exists(record.id)
+            if not exists.ok then
+                self:add_cleanup_error(exists, record, "existence")
+                record.protected = true
+            elseif not exists.value then
+                self:retire_absent_record(record)
+            else
+                local submitted = self:submit_release(record)
+                if not submitted.ok then
+                    self:add_cleanup_error(submitted, record, "begin_release")
+                    record.protected = true
+                else
+                    self.pending_cleanup_releases[#self.pending_cleanup_releases + 1] = submitted.value
+                end
+            end
+        end
+    end
+    self.release_index = nil
+    self:set_cleanup_phase(poll_phase)
+    return gamma_arena_result.ok(#self.pending_cleanup_releases)
+end
+
+function EntityAdapter:poll_cleanup_wave(next_phase)
+    for index = #self.pending_cleanup_releases, 1, -1 do
+        local pending = self.pending_cleanup_releases[index]
+        local polled = self:poll_release_entry(pending)
+        if not polled.ok then
+            self:add_cleanup_error(polled, pending.record, "poll_release")
+            pending.record.protected = true
+            table.remove(self.pending_cleanup_releases, index)
+        elseif polled.value == true then
+            table.remove(self.pending_cleanup_releases, index)
+        end
+    end
+    if #self.pending_cleanup_releases > 0 then return gamma_arena_result.ok(false) end
+    self:set_cleanup_phase(next_phase)
+    return gamma_arena_result.ok(true)
 end
 
 function EntityAdapter:drive_cleanup()
@@ -1597,53 +1738,38 @@ function EntityAdapter:drive_cleanup()
             self:add_cleanup_error(quiesced, self.cleanup_quiesce_record, "quiesce")
             return self:finish_cleanup()
         end
+        self:set_cleanup_phase("ADOPT_INITIAL")
+    elseif self.cleanup_phase == nil then
+        self:set_cleanup_phase("ADOPT_INITIAL")
     end
-    if self.pending_release ~= nil then
-        local record = self.pending_release.record
-        local polled = self:poll_release()
-        if not polled.ok then
-            self:add_cleanup_error(polled, record, "poll_release")
-            if self.pending_release then self.pending_release.record.protected = true end
-            self.pending_release = nil
-            self.release_index = self.release_index - 1
-        elseif polled.value == true then
-            self.release_index = self.release_index - 1
+
+    while true do
+        if self.cleanup_phase == "ADOPT_INITIAL" then
+            self:adopt_cleanup_children()
+            self:set_cleanup_phase("SUBMIT_ITEMS")
+        elseif self.cleanup_phase == "SUBMIT_ITEMS" then
+            local submitted = self:submit_cleanup_wave("item", "POLL_ITEMS")
+            if not submitted.ok then return submitted end
+            if submitted.value > 0 then return gamma_arena_result.ok(false) end
+        elseif self.cleanup_phase == "POLL_ITEMS" then
+            local polled = self:poll_cleanup_wave("ADOPT_LATE")
+            if not polled.ok or polled.value ~= true then return polled end
+        elseif self.cleanup_phase == "ADOPT_LATE" then
+            local adopted = self:adopt_cleanup_children()
+            self:set_cleanup_phase(adopted > 0 and "SUBMIT_ITEMS" or "SUBMIT_NPCS")
+        elseif self.cleanup_phase == "SUBMIT_NPCS" then
+            local submitted = self:submit_cleanup_wave("npc", "POLL_NPCS")
+            if not submitted.ok then return submitted end
+            if submitted.value > 0 then return gamma_arena_result.ok(false) end
+        elseif self.cleanup_phase == "POLL_NPCS" then
+            local polled = self:poll_cleanup_wave("FINISH")
+            if not polled.ok or polled.value ~= true then return polled end
+        elseif self.cleanup_phase == "FINISH" then
+            return self:finish_cleanup()
         else
-            return polled
+            return fail("GA_ENTITY_CLEANUP_PHASE_INVALID", "Entity cleanup entered an invalid phase", { phase = self.cleanup_phase })
         end
     end
-    while self.release_index and self.release_index >= 1 do
-        local record = self.creation_stack[self.release_index]
-        if record.released then
-            self.release_index = self.release_index - 1
-        else
-            local exists = self:entity_exists(record.id)
-            if not exists.ok then
-                self:add_cleanup_error(exists, record, "existence"); record.protected = true; self.release_index = self.release_index - 1
-            elseif not exists.value then
-                record.released = true
-                if record.kind == "npc" then self:transition_opponent(record, OPPONENT_STATES.RELEASED, "cleanup_absent", nil) end
-                self.release_index = self.release_index - 1
-            else
-                local runtime_children = gamma_arena_result.ok({ adopted = 0 })
-                if record.kind == "npc" then runtime_children = self:adopt_runtime_children(record) end
-                if not runtime_children.ok then
-                    self:add_cleanup_error(runtime_children, record, "runtime_children"); record.protected = true; self.release_index = self.release_index - 1
-                elseif runtime_children.value.adopted > 0 then
-                    self.release_index = #self.creation_stack
-                    return gamma_arena_result.ok(false)
-                else
-                    local release = self:begin_release(record)
-                    if not release.ok then
-                        self:add_cleanup_error(release, record, "begin_release"); record.protected = true; self.release_index = self.release_index - 1
-                    else
-                        return gamma_arena_result.ok(false)
-                    end
-                end
-            end
-        end
-    end
-    return self:finish_cleanup()
 end
 
 function EntityAdapter:fail_and_rollback(result)
@@ -1654,6 +1780,8 @@ function EntityAdapter:fail_and_rollback(result)
     self.cleanup_quiesce_record = nil
     self.release_index = #self.creation_stack
     self.pending_release = nil
+    self.pending_cleanup_releases = {}
+    self:set_cleanup_phase("ADOPT_INITIAL")
     local stopped = self:stop_tactical()
     if not stopped.ok then
         self:set_state("STOPPING")
@@ -1688,7 +1816,7 @@ function EntityAdapter:update()
         return gamma_arena_result.ok({ state = "SPAWNING", actor_loadout = copy_plain(equipped.value) })
     end
     local result
-    if self.state_value == "SPAWNING" then result = self:drive_spawning()
+    if self.state_value == "SPAWNING" then result = self:drive_spawning_budgeted()
     elseif self.state_value == "WAIT_ONLINE" then result = self:drive_online()
     elseif self.state_value == "READY" then
         local gate = self:opponent_gate_open()
@@ -2171,7 +2299,6 @@ function EntityAdapter:cleanup()
         -- the in-flight poll, but finish toward CLEAN instead of resurfacing
         -- the superseded transaction error after resources are absent.
         self.cleanup_mode = "cleanup"
-        self.cleanup_quiesced = false
         self.cleanup_quiesce_record = nil
         self.original_error = nil
         self.terminal_error = nil
@@ -2187,6 +2314,8 @@ function EntityAdapter:cleanup()
     self.terminal_error = nil
     self.release_index = #self.creation_stack
     self.pending_release = nil
+    self.pending_cleanup_releases = {}
+    self:set_cleanup_phase("ADOPT_INITIAL")
     local stopped = self:stop_tactical()
     if not stopped.ok then
         self:set_state("STOPPING")

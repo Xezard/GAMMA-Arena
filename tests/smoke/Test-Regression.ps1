@@ -437,7 +437,7 @@ function on_game_start() return new_registrar():register_all() end
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_compat.script' @'
 local function engine_callable_present(value) return value ~= nil end
 local markers = "RegisterScriptCallback UnregisterScriptCallback ini_file system_ini system_ini.r_u32 alife alife().get_children alife().object alife().set_switch_online alife().set_switch_offline alife_create alife_create_item alife_release_id se_save_var se_load_var level.patrol_path_exists level.object_by_id patrol db.actor db.zone_by_name game_object.friend game_object.enemy axr_main.config safe_release_manager.release l05_bar AI_STL_S bandit point level_vertex_id game_vertex_id 4294967295 GA_PREFLIGHT_PATROL_MISSING GA_PREFLIGHT_PATROL_INVALID GA_PREFLIGHT_SECTION_MISSING GA_NPC_CLASS_API_MISSING GA_NPC_CLASS_MISSING GA_NPC_CLASS_READ_FAILED GA_NPC_CLASS_INVALID GA_NPC_COMMUNITY_API_MISSING GA_NPC_COMMUNITY_MISSING GA_NPC_COMMUNITY_READ_FAILED GA_NPC_COMMUNITY_INVALID GA_AMMO_BOX_SIZE_INVALID"
-local task6_markers = "time_global level.disable_input level.enable_input db.actor.iterate_inventory db.actor.power db.actor.radiation db.actor.bleeding db.actor.psy_health db.actor.set_actor_position db.actor.position db.actor.set_invulnerable/invulnerable db.actor.move_to_slot db.actor.item_in_slot db.actor.make_item_active db.actor.active_item GA_PREFLIGHT_DIRECTOR_API_MISSING GA_PREFLIGHT_DIRECTOR_CONFIG_INVALID GA_PREFLIGHT_DIRECTOR_SECTION_MISSING GA_PREFLIGHT_DIRECTOR_LOOK_PATH_MISSING xr_logic.configure_schemes xr_logic.activate_by_section xr_logic.switch_to_section"
+local task6_markers = "time_global level.disable_input level.enable_input db.actor.iterate_inventory db.actor.power db.actor.radiation db.actor.bleeding db.actor.psy_health db.actor.set_actor_position db.actor.position db.actor.set_invulnerable/invulnerable db.actor.move_to_slot db.actor.item_in_slot db.actor.make_item_active db.actor.active_item db.actor.activate_slot db.actor.active_slot GA_PREFLIGHT_DIRECTOR_API_MISSING GA_PREFLIGHT_DIRECTOR_CONFIG_INVALID GA_PREFLIGHT_DIRECTOR_SECTION_MISSING GA_PREFLIGHT_DIRECTOR_LOOK_PATH_MISSING xr_logic.configure_schemes xr_logic.activate_by_section xr_logic.switch_to_section"
 function preflight() return markers end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_orchestrator.script' @'
@@ -446,7 +446,13 @@ local deferred_level_logged = nil
 local function teardown_retry(result, pending) if result.ok and not pending then self.teardown_done = true end end
 local function new_cycle() self.teardown_cycle = self.teardown_cycle + 1 end
 function new() self.cleanup_required = true; return markers end
-function update_runtime() if not self:is_active() and self.cleanup_required then return self:drive_runtime() end end
+function update_runtime()
+    if not self:is_active() and self.cleanup_required then
+        local began = call_method("GA_ACTOR_UPDATE_FAILED", self.deps.actor, "begin_update")
+        if not began.ok then return began end
+        return self:drive_runtime()
+    end
+end
 function drive_runtime() if self.cleanup_required then return self:cleanup_ready_for_disconnect() end end
 local function countdown() return call_method("GA_COUNTDOWN_UI_FAILED", self.deps.result_ui, "show_countdown", { value = 3, on_main_menu = function() end }) end
 local function call_method(code)
@@ -1191,11 +1197,11 @@ end
     Assert-True ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) 'Runtime-child negative fixture must find the drive_cleanup slice.'
     if ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) {
         $RuntimeChildDrive = $RuntimeChildContent.Substring($RuntimeChildDriveStart, $RuntimeChildDriveEnd - $RuntimeChildDriveStart)
-        $RuntimeChildCall = 'self:adopt_runtime_children(record)'
+        $RuntimeChildCall = 'self:adopt_cleanup_children()'
         $RuntimeChildCallCount = ([regex]::Matches($RuntimeChildDrive, [regex]::Escape($RuntimeChildCall))).Count
-        Assert-True ($RuntimeChildCallCount -eq 1) 'Runtime-child negative fixture must find exactly one just-in-time adoption call.'
-        if ($RuntimeChildCallCount -eq 1) {
-            $MutatedRuntimeChildDrive = $RuntimeChildDrive.Replace($RuntimeChildCall, 'gamma_arena_result.ok({ adopted = 0 })')
+        Assert-True ($RuntimeChildCallCount -eq 2) 'Runtime-child negative fixture must find initial and late adoption calls.'
+        if ($RuntimeChildCallCount -eq 2) {
+            $MutatedRuntimeChildDrive = $RuntimeChildDrive.Replace($RuntimeChildCall, '0')
             $MutatedRuntimeChild = $RuntimeChildContent.Substring(0, $RuntimeChildDriveStart) + $MutatedRuntimeChildDrive + $RuntimeChildContent.Substring($RuntimeChildDriveEnd)
             Write-FixtureFile $RuntimeChildFixture 'src\gamedata\scripts\gamma_arena_entity_adapter.script' $MutatedRuntimeChild
             $RuntimeChildResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $RuntimeChildFixture) -CaptureOutput

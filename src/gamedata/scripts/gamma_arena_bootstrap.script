@@ -240,8 +240,8 @@ function step_entity_cleanup(entity_adapter, context, options)
     if context.last_update_at == current.value then
         return gamma_arena_result.ok({ state = snapshot.state, updates = context.updates, pending = true })
     end
-    -- safe_release_manager advances on later engine frames. Exactly one entity
-    -- update is permitted per callback; the composition retains this context.
+    -- safe_release_manager advances on later engine frames. Exactly one adapter
+    -- update is permitted per callback; release waves are polled inside it.
     local updated = teardown_adapter_method(entity_adapter, "update")
     if not updated.ok then return updated end
     context.updates = context.updates + 1
@@ -2071,6 +2071,31 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             if not called then return gamma_arena_result.err("GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "LAM2 item-use interruption failed safely", { reason = tostring(reason) }) end
             return gamma_arena_result.ok(true)
         end,
+        hide_weapon = function(actor)
+            local looked_up, method = pcall(function() return actor and actor.activate_slot end)
+            if not looked_up or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_WEAPON_HIDE_FAILED", "Actor slot activation API is unavailable")
+            end
+            local called, value = pcall(method, actor, 0)
+            if not called or value == false then
+                return gamma_arena_result.err("GA_ACTOR_WEAPON_HIDE_FAILED", "Actor weapon hide request failed safely", {
+                    reason = called and "explicit false" or tostring(value)
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        active_slot = function(actor)
+            local looked_up, method = pcall(function() return actor and actor.active_slot end)
+            if not looked_up or type(method) ~= "function" then
+                return gamma_arena_result.err("GA_ACTOR_ACTIVE_SLOT_READ_FAILED", "Actor active-slot API is unavailable")
+            end
+            local called, value = pcall(method, actor)
+            if not called then
+                return gamma_arena_result.err("GA_ACTOR_ACTIVE_SLOT_READ_FAILED", "Actor active slot could not be read safely", { reason = tostring(value) })
+            end
+            return gamma_arena_result.ok(value)
+        end,
+        weapon_hide_timeout_ms = 5000,
         reset_transient_state = reset_gamma_actor_transients,
         input = input,
         loadout = loadout,
@@ -2573,6 +2598,7 @@ local function default_entity_adapter(actor_adapter, active_instance, diagnostic
             if diagnostics == nil or type(diagnostics.checkpoint) ~= "function" then return gamma_arena_result.ok(false) end
             return diagnostics:checkpoint(code, context)
         end,
+        spawn_step_budget = 8,
         release_timeout_ms = 10000,
         online_timeout_ms = 10000
     })

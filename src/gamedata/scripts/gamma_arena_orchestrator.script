@@ -216,6 +216,9 @@ function Orchestrator:__init(deps)
     self.pending_next_fight_index = nil
     self.pending_continuation_kind = nil
     self.next_cleanup_started = false
+    self.victory_cleanup_started = false
+    self.victory_actor_cleanup_complete = false
+    self.victory_cleanup_completion_logged = false
     self.pending_disconnect = false
     self.pending_callback_error = nil
     self.deferred_level_logged = nil
@@ -619,6 +622,9 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.result_action_locked = true
     self.pending_next_fight_index = nil
     self.pending_continuation_kind = nil
+    self.victory_cleanup_started = false
+    self.victory_actor_cleanup_complete = false
+    self.victory_cleanup_completion_logged = false
     self.pending_disconnect = false
     local teardown = self:teardown_once("fatal", false)
     if not teardown.ok then append_unique_error(errors, teardown) end
@@ -730,6 +736,9 @@ function Orchestrator:on_game_load()
     self.pending_next_fight_index = nil
     self.pending_continuation_kind = nil
     self.next_cleanup_started = false
+    self.victory_cleanup_started = false
+    self.victory_actor_cleanup_complete = false
+    self.victory_cleanup_completion_logged = false
     self.pending_disconnect = false
     self.pending_callback_error = nil
     self.deferred_level_logged = nil
@@ -1144,6 +1153,18 @@ function Orchestrator:show_victory()
     self.result_action_locked = false
     self.pending_next_fight_index = nil
     self:set_runtime_stage("RESULT")
+    local actor_cleanup = call_method("GA_ACTOR_VICTORY_CLEANUP_FAILED", self.deps.actor, "begin_victory_cleanup")
+    if not actor_cleanup.ok then return actor_cleanup end
+    local entity_cleanup = call_method("GA_ENTITY_CLEANUP_FAILED", self.deps.entities, "cleanup")
+    if not entity_cleanup.ok then return entity_cleanup end
+    self.victory_cleanup_started = true
+    self.victory_actor_cleanup_complete = actor_cleanup.value == true
+    self.victory_cleanup_completion_logged = false
+    self.next_cleanup_started = true
+    self:checkpoint("GA_VICTORY_CLEANUP_STARTED", {
+        session_id = self.session and self.session.session_id or nil,
+        fight_index = self.session and self.session.fight_index or nil
+    })
     self:clear_battle_identity("victory")
     self:audio_event("victory", self:audio_context({ duration_ms = duration }))
     local logged = self:emit_log("GA_FIGHT_VICTORY", "duration_ms=" .. tostring(duration)
@@ -1167,6 +1188,23 @@ function Orchestrator:show_victory()
             return self:route_result_action("main_menu", function() return self:request_main_menu_exit() end)
         end
     })
+end
+
+function Orchestrator:drive_victory_actor_cleanup()
+    if not self.victory_cleanup_started then return gamma_arena_result.ok(false) end
+    if self.victory_actor_cleanup_complete then return gamma_arena_result.ok(true) end
+    local cleaned = call_method("GA_ACTOR_VICTORY_CLEANUP_FAILED", self.deps.actor, "update_victory_cleanup")
+    if not cleaned.ok then return cleaned end
+    if cleaned.value ~= true then return gamma_arena_result.ok(cleaned.value) end
+    self.victory_actor_cleanup_complete = true
+    if not self.victory_cleanup_completion_logged then
+        self.victory_cleanup_completion_logged = true
+        self:checkpoint("GA_VICTORY_ACTOR_CLEANUP_COMPLETE", {
+            session_id = self.session and self.session.session_id or nil,
+            fight_index = self.session and self.session.fight_index or nil
+        })
+    end
+    return gamma_arena_result.ok(true)
 end
 
 function Orchestrator:route_result_action(action_name, action)
@@ -1305,7 +1343,6 @@ function Orchestrator:victory_next_action()
     local cleared = call_method("GA_RESULT_UI_FAILED", self.deps.result_ui, "clear_result")
     if not cleared.ok then self.result_action_locked = false; return cleared end
     self:audio_event("stop_all", self:audio_context({ reason = "victory_next" }))
-    self.next_cleanup_started = false
     self.pending_next_fight_index = next_index.value
     self.pending_continuation_kind = "victory_next"
     self:set_runtime_stage("NEXT_CLEANUP")
@@ -1365,6 +1402,10 @@ end
 
 function Orchestrator:drive_continuation()
     if self.runtime_stage == "NEXT_CLEANUP" then
+        if self.victory_cleanup_started then
+            local actor_cleanup = self:drive_victory_actor_cleanup()
+            if not actor_cleanup.ok then return actor_cleanup end
+        end
         if not self.next_cleanup_started then
             local cleanup = call_method("GA_ENTITY_CLEANUP_FAILED", self.deps.entities, "cleanup")
             if not cleanup.ok then return cleanup end
@@ -1381,6 +1422,11 @@ function Orchestrator:drive_continuation()
     local continuation_kind = self.pending_continuation_kind
     local next_index = self.pending_next_fight_index
     if continuation_kind == "victory_next" then
+        if self.victory_cleanup_started and not self.victory_actor_cleanup_complete then
+            local actor_cleanup = self:drive_victory_actor_cleanup()
+            if not actor_cleanup.ok then return actor_cleanup end
+            if actor_cleanup.value ~= true then return gamma_arena_result.ok({ stage = "NEXT_RESET", pending = true, actor = actor_cleanup.value }) end
+        end
         if type(next_index) ~= "number" or next_index ~= math.floor(next_index) or next_index < 0 or next_index >= UINT32_MOD
             or (next_index ~= self.session.fight_index and next_index ~= self.session.fight_index + 1) then
             return fail("GA_MODE_POLICY_FAILED", "Arena victory continuation was not retained exactly across cleanup")
@@ -1421,6 +1467,9 @@ function Orchestrator:drive_continuation()
         self:set_runtime_stage("EQUIPPING")
     end
     self.next_cleanup_started = false
+    self.victory_cleanup_started = false
+    self.victory_actor_cleanup_complete = false
+    self.victory_cleanup_completion_logged = false
     self.pending_next_fight_index = nil
     self.pending_continuation_kind = nil
     return gamma_arena_result.ok({ stage = self.runtime_stage, fight_index = self.session.fight_index })
@@ -1488,12 +1537,21 @@ function Orchestrator:drive_runtime()
     if self.runtime_stage == "COUNTDOWN" then return self:update_countdown() end
     if self.runtime_stage == "ACTIVATING" then return self:observe_entity_activation() end
     if self.runtime_stage == "ACTIVE" and self.pending_victory then return self:show_victory() end
+    if self.runtime_stage == "RESULT" and self.result_kind == "victory" then return self:drive_victory_actor_cleanup() end
     if self.runtime_stage == "NEXT_CLEANUP" or self.runtime_stage == "NEXT_RESET" then return self:drive_continuation() end
     return gamma_arena_result.ok({ stage = self.runtime_stage })
 end
 
 function Orchestrator:update_runtime()
-    if not self:is_active() and self.cleanup_required then return self:drive_runtime() end
+    if not self:is_active() and self.cleanup_required then
+        local actor = self.deps.actor
+        local method_ok, begin_update = pcall(function() return actor and actor.begin_update end)
+        if method_ok and type(begin_update) == "function" then
+            local began = call_method("GA_ACTOR_UPDATE_FAILED", actor, "begin_update")
+            if not began.ok then return began end
+        end
+        return self:drive_runtime()
+    end
     local began = call_method("GA_ACTOR_UPDATE_FAILED", self.deps.actor, "begin_update")
     if not began.ok then return began end
     local activated = self:activate_once()
@@ -1593,6 +1651,9 @@ function Orchestrator:actor_on_death()
     self.pending_next_fight_index = nil
     self.pending_continuation_kind = nil
     self.next_cleanup_started = false
+    self.victory_cleanup_started = false
+    self.victory_actor_cleanup_complete = false
+    self.victory_cleanup_completion_logged = false
     self.pending_disconnect = false
     self.pending_callback_error = nil
     self.fight_spec = nil
