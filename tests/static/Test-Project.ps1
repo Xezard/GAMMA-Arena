@@ -3405,6 +3405,14 @@ $RosterRefreshUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\s
 $RosterRefreshRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 Assert-True ($RosterRefreshModel -match 'function\s+Model:status_snapshot') 'Custom roster refresh model must expose status_snapshot.'
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
+$RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
+$RefreshPresenterEnd = if ($RefreshPresenterStart -ge 0) { $RosterRefreshPresenter.IndexOf('function status_presentation', $RefreshPresenterStart) } else { -1 }
+Assert-True ($RefreshPresenterStart -ge 0 -and $RefreshPresenterEnd -gt $RefreshPresenterStart) 'Custom status refresh presenter must remain structurally testable.'
+if ($RefreshPresenterStart -ge 0 -and $RefreshPresenterEnd -gt $RefreshPresenterStart) {
+    $RefreshPresenterBlock = $RosterRefreshPresenter.Substring($RefreshPresenterStart, $RefreshPresenterEnd - $RefreshPresenterStart)
+    Assert-True ($RefreshPresenterBlock -match 'view\.infrastructure_error_code\s*=\s*nil') `
+        'Successful Custom status refresh must clear transient infrastructure status.'
+}
 foreach ($HandlerName in @('OnCount', 'OnRank')) {
     $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value
     Assert-True ($HandlerBlock -match 'self:RefreshStatus\(\)') "Custom $HandlerName must use the lightweight status refresh."
