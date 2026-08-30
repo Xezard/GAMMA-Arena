@@ -384,7 +384,7 @@ $Task1RankScriptContracts = @(
 )
 
 $Task2ItemScriptContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device', 'candidate_section_name', 'shared_system_sections', 'rank_ids_seen', 'faction_ids_seen') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device', 'candidate_section_name', 'shared_system_sections', 'rank_ids_seen', 'faction_ids_seen', 'pool_seen', 'if not seen\[section\] then') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint', 'item_catalog_prefilters_irrelevant_system_sections', 'item_catalog_reconciles_rank_pools_with_physical_items') }
 )
 
