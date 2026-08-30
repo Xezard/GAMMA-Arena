@@ -604,7 +604,7 @@ try {
     $ChangedCustom = Get-TestGeneratedBlock ([IO.File]::ReadAllText($Document)) 'custom-setup'
     if (-not $ChangedCustom.Contains('| base_budget | 601 Arena points |') -or
         -not $ChangedCustom.Contains('| one novice | novice | 701 |') -or
-        -not $ChangedCustom.Contains('| ten legends | legend x10 | 4601 |')) {
+        -not $ChangedCustom.Contains('| ten legends | legend x10 | 6601 |')) {
         throw 'Custom setup generation does not derive budgets from gamma_arena_custom_rules.ltx'
     }
     [IO.File]::WriteAllText($CustomRules, $CustomRulesOriginal, (New-Object Text.UTF8Encoding($false)))

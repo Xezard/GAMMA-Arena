@@ -521,7 +521,7 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     foreach ($FontId in $Task9CustomFontIds) {
         Assert-True ($Task9KnownEngineFonts -ccontains $FontId) ('Task 9 custom UI XML uses unknown engine font: ' + $FontId)
     }
-    foreach ($Id in @('gamma_arena_custom','faction','count','seed','device','inventory_container','loadout_container',
+    foreach ($Id in @('gamma_arena_custom','faction','count','seed','device','inventory_panel','loadout_panel','inventory_container','loadout_container',
         'catalog_search','catalog_filter','catalog_sort','points_available','points_used','weight','weight_limit',
         'readiness_outfit','readiness_knife','readiness_weapon','readiness_ammo','readiness_healing',
         'validation','start','random','back')) {
@@ -537,11 +537,23 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     }
     $Task9InventoryContainer = $Task9CustomXml.SelectSingleNode("//*[local-name()='inventory_container']")
     $Task9LoadoutContainer = $Task9CustomXml.SelectSingleNode("//*[local-name()='loadout_container']")
+    $Task9CatalogControls = $Task9CustomXml.SelectSingleNode("//*[local-name()='catalog_controls']")
+    foreach ($Id in @('inventory_panel','loadout_panel')) {
+        $Panel = $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")
+        $Texture = if ($null -eq $Panel) { $null } else { $Panel.SelectSingleNode("*[local-name()='texture']") }
+        Assert-True ($null -ne $Panel -and $Panel.GetAttribute('stretch') -eq '1') `
+            "Task 9 Custom $Id must be a stretchable underlay."
+        Assert-True ($null -ne $Texture -and $Texture.InnerText -eq 'ui_inGame2_workshop_upgrade_inv') `
+            "Task 9 Custom $Id must use the stock GAMMA inventory texture."
+    }
     if ($null -ne $Task9InventoryContainer -and $null -ne $Task9LoadoutContainer) {
         Assert-True ([int]$Task9InventoryContainer.width -eq [int]$Task9LoadoutContainer.width) `
             'Task 9 Custom inventory and loadout panels must have equal width.'
         Assert-True ([int]$Task9InventoryContainer.height -eq [int]$Task9LoadoutContainer.height) `
             'Task 9 Custom inventory and loadout panels must have equal height.'
+        Assert-True ($null -ne $Task9CatalogControls -and
+            [int]$Task9CatalogControls.x -eq [int]$Task9InventoryContainer.x) `
+            'Task 9 Custom catalog controls must align with the left inventory catalog.'
     }
 }
 foreach ($Locale in @('eng','rus')) {
@@ -569,7 +581,7 @@ foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget'
     Assert-True ($Task9CustomTests -match [regex]::Escape($Name)) "Task 9 model tests must cover $Name"
 }
 $Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
-foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_custom_ui_projects_rejected_operation_until_success','runtime_custom_presenter_filters_sorts_and_pages_deterministically','runtime_custom_presenter_preview_and_readiness_are_authoritative','runtime_composed_catalog_supports_first_custom_item_edit')) {
+foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_custom_ui_projects_rejected_operation_until_success','runtime_custom_ui_rebuilds_catalog_left_and_selected_right','runtime_custom_presenter_filters_sorts_and_pages_deterministically','runtime_custom_presenter_preview_and_readiness_are_authoritative','runtime_composed_catalog_supports_first_custom_item_edit')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
 }
@@ -605,6 +617,7 @@ Assert-True (([regex]::Matches($Task9RuntimeTests, $TransferRegistration)).Count
 $ReadableCustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
 $CustomIntegrationMarkers = @('self.catalog_state =','self.presenter = gamma_arena_custom_setup_presenter.new',
     'self.inventory_container = utils_ui.UICellContainer','self.loadout_container = utils_ui.UICellContainer',
+    'function rebuild_panels',
     'container.disable_drag = false','container.disable_info = false','function UICustom:OnCatalogSearch',
     'function UICustom:OnCatalogFilter','function UICustom:OnCatalogSort','function UICustom:On_CC_DragDrop',
     'self.inventory_container:IsCursorOverWindow()','self.loadout_container:IsCursorOverWindow()')
@@ -633,8 +646,27 @@ foreach ($Marker in @(
     Assert-True ($DispatchTransferBlock -match [regex]::Escape($Marker)) `
         "Custom transfer direction must spend or refund AP through the correct command: $Marker"
 }
+foreach ($Marker in @(
+    'self.inventory_panel = self.xml:InitStatic("gamma_arena_custom:inventory_panel", self.root)',
+    'self.loadout_panel = self.xml:InitStatic("gamma_arena_custom:loadout_panel", self.root)',
+    'self.inventory_caption = self.xml:InitStatic("gamma_arena_custom:inventory_caption", self.root)',
+    'self.loadout_caption = self.xml:InitStatic("gamma_arena_custom:loadout_caption", self.root)'
+)) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) `
+        "Custom item panel is not initialized: $Marker"
+}
 Assert-True ($ReadableCustomUi -notmatch 'TransferItem') `
     'Two-panel Custom UI must rebuild from the model instead of transferring cells optimistically.'
+$RebuildPanelsBlock = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+rebuild_panels\(.*?^end\s*$').Value
+Assert-True ($RebuildPanelsBlock -match 'rebuild_container\(inventory_container,\s*view\.catalog_cells,\s*false\)') `
+    'Left inventory must render catalog cells.'
+Assert-True ($RebuildPanelsBlock -match 'rebuild_container\(loadout_container,\s*view\.selected_cells,\s*true\)') `
+    'Right loadout must render selected cells.'
+Assert-True ($ReadableCustomUi -match 'rebuild_panels\(self\.inventory_container,\s*self\.loadout_container,\s*view\)') `
+    'Live Custom rebuild must use the behavior-tested panel ownership path.'
+$CustomEquipClickBlock = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+UICustom:On_CC_Mouse2\(.*?^end\s*$').Value
+Assert-True ($CustomEquipClickBlock -match 'container_id\s*~=\s*"loadout"') `
+    'Right-click equip must operate on the selected right loadout.'
 $RebuildContainerBlock = [regex]::Match($ReadableCustomUi, '(?ms)^local\s+function\s+rebuild_container\s*\(.*?^end\s*$').Value
 foreach ($Marker in @('container:Reset()','for _, section in ipairs(sections) do','container:AddItem(nil, section)','container:Scroll_Reinit()')) {
     Assert-True ($RebuildContainerBlock -match [regex]::Escape($Marker)) `
@@ -1118,9 +1150,16 @@ if (Test-Path -LiteralPath $Task1RulesPath) {
         'ids = army, bandit, csky, dolg, ecolog, freedom, greh, isg, killer, monolith, renegade, stalker, zombied',
         'ids = novice, trainee, experienced, professional, veteran, expert, master, legend',
         'threat = 100', 'threat = 120', 'threat = 150', 'threat = 180',
-        'threat = 220', 'threat = 270', 'threat = 330', 'threat = 400', '[price_overrides]'
+        'threat = 220', 'threat = 270', 'threat = 330', 'threat = 600', '[price_overrides]'
     )) {
         Assert-True ($Task1RulesContent.Contains($Marker)) "Task 1 custom rank rules must declare $Marker"
+    }
+    Assert-True ($Task1RulesContent -match '(?ms)^\[rank_legend\]\s*\r?\n\s*threat\s*=\s*600\s*$') `
+        'Custom Legend threat must be exactly 600 AP.'
+    $Task1RankCatalogTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script') -Raw
+    foreach ($Marker in @('1200, "one legend"', '6600, "ten legends"')) {
+        Assert-True ($Task1RankCatalogTests.Contains($Marker)) `
+            "Rank catalog tests must pin the raised Legend budget: $Marker"
     }
 }
 if (Test-Path -LiteralPath $Task1NpcPath) {

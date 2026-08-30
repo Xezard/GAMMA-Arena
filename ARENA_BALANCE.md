@@ -76,14 +76,14 @@ item catalog, layout, FightSpec schema, and catalog identity.
 | veteran | 220 | 820 |
 | expert | 270 | 870 |
 | master | 330 | 930 |
-| legend | 400 | 1000 |
+| legend | 600 | 1200 |
 
 | budget example | roster | Arena points |
 |---|---|---:|
 | one novice | novice | 700 |
-| one legend | legend | 1000 |
+| one legend | legend | 1200 |
 | ten novices | novice x10 | 1600 |
-| ten legends | legend x10 | 4600 |
+| ten legends | legend x10 | 6600 |
 <!-- END GENERATED: custom-setup -->
 
 ## Карта генерации боя
