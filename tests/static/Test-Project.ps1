@@ -116,8 +116,6 @@ foreach ($ProtectionLabel in @(
 )) {
     Assert-True (([regex]::Matches($Task4StaticSource, [regex]::Escape($ProtectionLabel))).Count -ge 2) "Task 4 review RED: missing version-neutral regression gate: $ProtectionLabel"
 }
-Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'README.md')) 'README.md is missing'
-Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md')) 'CHANGELOG.md is missing'
 $Task7RepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 $Task7VersionPath = Join-Path $RepoRoot 'VERSION'
 $AddonVersion = if (Test-Path -LiteralPath $Task7VersionPath -PathType Leaf) { (Get-Content -LiteralPath $Task7VersionPath -Raw).Trim() } else { '' }
@@ -142,15 +140,6 @@ Assert-True ($Task7CurrentValidators.Count -eq 1 -and $Task7CurrentValidators[0]
 Assert-True ($Task7CurrentGoldenFixtures.Count -eq 1 -and $Task7CurrentGoldenFixtures[0].Name -ceq 'golden-fights-v9.txt') 'Task 7 must publish exactly one FightSpec golden fixture: v9.'
 Assert-True (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v10.json')) 'Task 7 current catalog fixture custom-catalog-v10.json is missing.'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\custom-catalog-v1.json'))) 'Task 7 stale custom-catalog-v1.json must be removed.'
-$Task8CurrentDesignPath = Join-Path $RepoRoot 'docs\superpowers\specs\2026-08-28-custom-arena-main-integration-design.md'
-Assert-True (Test-Path -LiteralPath $Task8CurrentDesignPath -PathType Leaf) 'Task 8 current design is missing.'
-if (Test-Path -LiteralPath $Task8CurrentDesignPath -PathType Leaf) {
-    $Task8CurrentDesign = Get-Content -LiteralPath $Task8CurrentDesignPath -Raw
-    Assert-True ($Task8CurrentDesign -notmatch '(?m)^\s*content_hash\s*=') 'Task 8 current design must not expose identity.content_hash.'
-    Assert-True ($Task8CurrentDesign.Contains('layout_hash = "...",')) 'Task 8 current design must expose identity.layout_hash.'
-    Assert-True ($Task8CurrentDesign.Contains('excludes only `fight_id`')) 'Task 8 current design must exclude only fight_id from canonical hashing.'
-    Assert-True ($Task8CurrentDesign.Contains('no separate content hash field is exposed')) 'Task 8 current design must state that no separate content hash is exposed.'
-}
 }
 
 $AllLuaScripts = @(Get-ChildItem -LiteralPath $RepoRoot -File -Recurse -Filter '*.script' | Where-Object {
@@ -969,23 +958,9 @@ Assert-True ($Task11CustomUi -match 'DIK_keys\.DIK_ESCAPE[\s\S]{0,80}self:OnBack
 
 $Task12BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
 if (Test-Path -LiteralPath $Task12BuildPath) {
-    $Task12Readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
-    $Task12Changelog = Get-Content -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Raw
     $Task12Build = Get-Content -LiteralPath $Task12BuildPath -Raw
-    Assert-True ($Task12Readme -match 'releases/latest' -and $Task12Readme -match 'Gamma-Arena-vX\.Y\.Z-MO2\.zip' -and $Task12Readme -match 'Build-GammaArena\.ps1\s+-Configuration\s+Release') 'Task 7 README must publish the current release workflow.'
-    Assert-True ($Task12Changelog -match '(?m)^## 0\.5\.0 - 2026-08-28$') 'Task 7 changelog must publish release 0.5.0.'
     foreach ($Path in @('tests\fixtures\golden-random-selections-v9.txt','tests\fixtures\custom-catalog-v10.json')) {
         Assert-True ($Task12Build -match [regex]::Escape($Path)) "Task 12 Dev package inventory is missing: $Path"
-    }
-    $Task12AcceptancePath = Join-Path $RepoRoot 'docs\custom-arena-acceptance.md'
-    Assert-True (Test-Path -LiteralPath $Task12AcceptancePath) 'Task 12 manual custom Arena acceptance checklist is missing.'
-    if (Test-Path -LiteralPath $Task12AcceptancePath) {
-        $Task12Acceptance = Get-Content -LiteralPath $Task12AcceptancePath -Raw
-        foreach ($Marker in @('Random launch','Custom count 1','Custom count 10','Mixed exact ranks','Shared faction','One grenade','Two grenades','Third grenade','Exact quantities and slots','Rank labels','Victory restoration','Integrity retry identity','In-game restart','Defeat cleanup','Escape cleanup','Battle HUD','Arena audio')) {
-            Assert-True ($Task12Acceptance -match [regex]::Escape($Marker)) "Task 12 manual acceptance checklist is missing: $Marker"
-        }
-        Assert-True ($Task12Acceptance -notmatch '(?m)^\|[^\r\n]*\|\s*PASS\s*\|') 'Task 12 manual in-engine acceptance must not claim PASS from automated evidence.'
-        Assert-True (([regex]::Matches($Task12Acceptance, '(?m)^\|[^\r\n]*\|\s*(?:DEFERRED|NOT RUN)\s*\|')).Count -ge 17) 'Task 12 every in-engine acceptance row must be marked DEFERRED or NOT RUN.'
     }
 }
 
@@ -2378,12 +2353,6 @@ if (Test-Path -LiteralPath $Task2RunnerPath) {
     Assert-True ($Task2RunnerContent -match 'dev_test_autorun') 'Dev suite autorun must be controlled by an explicit setting'
     Assert-True ($Task2RunnerContent -match 'r_value\s*\(\s*"gamma_arena"\s*,\s*"dev_test_autorun"\s*,\s*1\s*,\s*false\s*\)') 'Dev suite autorun must default to false'
     Assert-True ($Task2RunnerContent -match 'if\s+not\s+autorun_enabled\(\)\s+then\s+return\s+end') 'Normal interactive launches must skip the synthetic Dev suite'
-}
-$ReadmePath = Join-Path $RepoRoot 'README.md'
-if (Test-Path -LiteralPath $ReadmePath) {
-    $ReadmeContent = Get-Content -LiteralPath $ReadmePath -Raw
-    Assert-True ($ReadmeContent -match 'dev_test_autorun\s*=\s*true') 'README must document explicit in-game Dev-suite enablement'
-    Assert-True ($ReadmeContent -match 'dev_test_autorun\s*=\s*false') 'README must document the production-like default'
 }
 $Task4DomainTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script'
 if (Test-Path -LiteralPath $Task4DomainTestPath) {

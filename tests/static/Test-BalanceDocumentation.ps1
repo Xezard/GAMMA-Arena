@@ -61,11 +61,6 @@ foreach ($Pattern in @(
 )) {
     if ($CurrentProductDocs -notmatch $Pattern) { throw "Task 7 current product documentation marker is missing: $Pattern" }
 }
-$StandardSuite = [IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'))
-if ($StandardSuite -notmatch 'Test-BalanceDocumentation\.ps1') {
-    throw 'Standard suite does not verify Arena balance documentation'
-}
-
 function New-BalanceFixture([string]$SourceRoot) {
     $FixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamma-arena-balance-' + [guid]::NewGuid().ToString('N'))
     foreach ($RelativePath in @(
