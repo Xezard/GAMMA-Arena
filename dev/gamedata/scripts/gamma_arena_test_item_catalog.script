@@ -78,7 +78,7 @@ end
 
 local function rank_catalog(options)
     local threat = options and options.rank_threat or 100
-    return {
+    local catalog = {
         base_budget = 600,
         max_entries = 64,
         max_physical_items_per_participant = options and options.physical_item_cap or 256,
@@ -111,12 +111,32 @@ local function rank_catalog(options)
             }
         }
     }
+    if options and options.physically_rejected_pool_member then
+        catalog.factions.stalker.ranks.legend.primary_weapons[#catalog.factions.stalker.ranks.legend.primary_weapons + 1] = "wpn_unspawnable"
+    end
+    return catalog
 end
 
 local function legacy_catalog()
+    local function weapon(section, ammo, slot)
+        return {
+            section = section, ammo = ammo, cost = 5, ammo_box_min = 1,
+            ammo_box_max = 2, kind = slot == 1 and "w_pistol" or "w_rifle",
+            slot = slot
+        }
+    end
     return {
         selection_mode = "dynamic",
-        weapon_list = { { section = "wpn_alpha", slot = 2 } },
+        weapon_list = {
+            weapon("wpn_alpha", "ammo_alpha_fmj", 2),
+            weapon("wpn_beta", "ammo_alpha_fmj", 1),
+            weapon("wpn_delta", "ammo_alpha_ap", 2),
+            weapon("wpn_unspawnable", "ammo_alpha_fmj", 2)
+        },
+        ammo = {
+            ammo_alpha_fmj = { section = "ammo_alpha_fmj", cost = 1 },
+            ammo_alpha_ap = { section = "ammo_alpha_ap", cost = 1 }
+        },
         medical_item_list = {
             { section = "medkit", category = "health", actor_cost = 3, npc_cost = 2, min_tier = 1, max_count = 1 }
         },
@@ -354,6 +374,90 @@ local function item_catalog_prefilters_irrelevant_system_sections()
     end
 end
 
+local function item_catalog_reconciles_rank_pools_with_physical_items()
+    local baseline = gamma_arena_item_catalog.load(fixture_source(), legacy_catalog(), rank_catalog())
+    gamma_arena_test_assert.is_true(baseline.ok, "baseline rank catalog loads")
+    local ranks = rank_catalog({ physically_rejected_pool_member = true })
+    local source_pool = ranks.factions.stalker.ranks.legend.primary_weapons
+    gamma_arena_test_assert.equals(#source_pool, 2, "fixture starts with one physically rejected rank weapon")
+
+    local loaded = gamma_arena_item_catalog.load(fixture_source(), legacy_catalog(), ranks)
+    gamma_arena_test_assert.is_true(loaded.ok, "item catalog reconciles a mixed physical rank pool")
+    local published = loaded.value.factions.stalker.ranks.legend.primary_weapons
+    gamma_arena_test_assert.equals(#published, 1,
+        "physically rejected exact-pool member is removed before publication")
+    gamma_arena_test_assert.equals(published[1], "wpn_delta",
+        "compatible exact-pool member remains authoritative")
+    gamma_arena_test_assert.equals(#source_pool, 2,
+        "rank reconciliation does not mutate its input")
+    gamma_arena_test_assert.equals(source_pool[2], "wpn_unspawnable",
+        "input retains the physically rejected pool member")
+    gamma_arena_test_assert.equals(loaded.value.fingerprint, baseline.value.fingerprint,
+        "rejected rank weapon does not change the authoritative fingerprint")
+
+    local empty_legacy = legacy_catalog()
+    local empty_ranks = rank_catalog()
+    empty_ranks.factions.stalker.ranks.legend.primary_weapons = { "wpn_unspawnable" }
+    empty_ranks.factions.stalker.ranks.legend.secondary_weapons = {}
+    local empty = gamma_arena_item_catalog.load(fixture_source(), empty_legacy, empty_ranks)
+    gamma_arena_test_assert.is_true(empty.ok,
+        "empty Custom rank pool does not disable the shared Random catalog")
+    gamma_arena_test_assert.equals(#empty.value.factions.stalker.ranks.legend.primary_weapons, 0,
+        "physically empty primary pool is published for Custom validation")
+    gamma_arena_test_assert.equals(#empty.value.factions.stalker.ranks.legend.secondary_weapons, 0,
+        "physically empty secondary pool is published for Custom validation")
+    gamma_arena_test_assert.equals(empty.value.weapon_list, empty_legacy.weapon_list,
+        "legacy Random weapon catalog remains available unchanged")
+
+    local malformed_legacy = legacy_catalog()
+    malformed_legacy.weapon_list[3].cost = "5"
+    local malformed = gamma_arena_item_catalog.load(fixture_source(), malformed_legacy, rank_catalog())
+    gamma_arena_test_assert.is_false(malformed.ok,
+        "numeric strings in an authoritative legacy weapon fail closed")
+    gamma_arena_test_assert.equals(malformed.error.code, "GA_ITEM_CATALOG_RANK_INVALID",
+        "malformed legacy weapon reports the exact rank catalog error")
+
+    local unsafe_legacy = legacy_catalog()
+    unsafe_legacy.weapon_list[3].cost = 1e20
+    local unsafe = gamma_arena_item_catalog.load(fixture_source(), unsafe_legacy, rank_catalog())
+    gamma_arena_test_assert.is_false(unsafe.ok,
+        "unsafe integer in an authoritative legacy weapon fails closed")
+    gamma_arena_test_assert.equals(unsafe.error.code, "GA_ITEM_CATALOG_RANK_INVALID",
+        "unsafe legacy weapon reports the exact rank catalog error")
+
+    local duplicate_ranks = rank_catalog()
+    duplicate_ranks.factions.stalker.ranks.legend.secondary_weapons[2] = "wpn_delta"
+    local duplicate = gamma_arena_item_catalog.load(fixture_source(), legacy_catalog(), duplicate_ranks)
+    gamma_arena_test_assert.is_false(duplicate.ok,
+        "duplicate weapon across exact rank pools fails closed")
+    gamma_arena_test_assert.equals(duplicate.error.code, "GA_ITEM_CATALOG_RANK_INVALID",
+        "duplicate reconciled rank weapon reports the exact catalog error")
+
+    local function assert_invalid_rank_catalog(mutate, label)
+        local candidate = rank_catalog()
+        mutate(candidate)
+        local result = gamma_arena_item_catalog.load(fixture_source(), legacy_catalog(), candidate)
+        gamma_arena_test_assert.is_false(result.ok, label)
+        gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_CATALOG_RANK_INVALID",
+            label .. " code")
+    end
+    assert_invalid_rank_catalog(function(candidate)
+        candidate.rank_ids[3] = "novice"
+    end, "duplicate named rank id fails closed")
+    assert_invalid_rank_catalog(function(candidate)
+        candidate.faction_ids[2] = "stalker"
+    end, "duplicate faction id fails closed")
+    assert_invalid_rank_catalog(function(candidate)
+        candidate.ranks.legend.id = "novice"
+    end, "named rank id mismatch fails closed")
+    assert_invalid_rank_catalog(function(candidate)
+        candidate.factions.stalker.id = "bandit"
+    end, "faction id mismatch fails closed")
+    assert_invalid_rank_catalog(function(candidate)
+        candidate.factions.stalker.ranks.legend.id = "novice"
+    end, "faction rank id mismatch fails closed")
+end
+
 local cases = {
     { name = "item_catalog_prices_and_classifies_installed_items", fn = prices_and_classifies_installed_items },
     { name = "item_catalog_exposes_physical_metadata_and_legacy_fields", fn = exposes_physical_metadata_and_legacy_fields },
@@ -363,7 +467,8 @@ local cases = {
     { name = "item_catalog_fingerprint_changes_for_semantic_mutations", fn = fingerprint_changes_for_semantic_mutations },
     { name = "item_catalog_fingerprint_is_canonical_and_excludes_localized_names", fn = fingerprint_is_canonical_and_excludes_localized_names },
     { name = "item_catalog_rejects_unavailable_median_anchors", fn = rejects_unavailable_median_anchors },
-    { name = "item_catalog_prefilters_irrelevant_system_sections", fn = item_catalog_prefilters_irrelevant_system_sections }
+    { name = "item_catalog_prefilters_irrelevant_system_sections", fn = item_catalog_prefilters_irrelevant_system_sections },
+    { name = "item_catalog_reconciles_rank_pools_with_physical_items", fn = item_catalog_reconciles_rank_pools_with_physical_items }
 }
 
 function run(run_case_fn)

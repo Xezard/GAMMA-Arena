@@ -33,6 +33,10 @@ function make_catalog()
         device_torch_nv_2 = item("device_torch_nv_2", "device", 150, 300),
         device_torch_nv_3 = item("device_torch_nv_3", "device", 300, 350)
     }
+    local weapon = {
+        section = "wpn_alpha", ammo = "ammo_alpha", cost = 100,
+        slot = 2, ammo_box_min = 1, ammo_box_max = 2
+    }
     return {
         schema_version = 10, revision = 11, generator_version = 11,
         fingerprint = "ga-catalog-v10-custom001",
@@ -47,8 +51,13 @@ function make_catalog()
         },
         faction_ids = { "stalker" },
         factions = {
-            stalker = { id = "stalker", ranks = { novice = { id = "novice" }, legend = { id = "legend" } } }
+            stalker = { id = "stalker", ranks = {
+                novice = { id = "novice", primary_weapons = { "wpn_alpha" }, secondary_weapons = {} },
+                legend = { id = "legend", primary_weapons = { "wpn_alpha" }, secondary_weapons = {} }
+            } }
         },
+        weapon_list = { weapon },
+        ammo = { ammo_alpha = { section = "ammo_alpha", cost = 20 } },
         items = items
     }
 end
@@ -142,6 +151,37 @@ local function custom_config_distinguishes_empty_inventory_from_entry_overflow()
     local overflow = make_valid_config(overflow_catalog)
     assert_code(gamma_arena_custom_config.validate(overflow, make_context(overflow_catalog)),
         "GA_CUSTOM_ENTRY_LIMIT", "real distinct entry overflow keeps limit identity")
+end
+
+local function custom_config_rejects_selected_empty_rank_weapon_pool()
+    local catalog = make_catalog()
+    catalog.factions.stalker.ranks.novice.primary_weapons = {}
+    catalog.factions.stalker.ranks.novice.secondary_weapons = {}
+    assert_code(gamma_arena_custom_config.validate(make_valid_config(catalog), make_context(catalog)),
+        "GA_CUSTOM_WEAPON_POOL_INVALID", "selected rank without physical weapons")
+
+    local malformed_catalog = make_catalog()
+    malformed_catalog.factions.stalker.ranks.novice.primary_weapons = { [2] = "wpn_alpha" }
+    assert_code(gamma_arena_custom_config.validate(make_valid_config(malformed_catalog), make_context(malformed_catalog)),
+        "GA_CUSTOM_WEAPON_POOL_INVALID", "selected rank with malformed physical weapon pool")
+
+    local function reject(mutate, label)
+        local candidate = make_catalog()
+        mutate(candidate)
+        assert_code(gamma_arena_custom_config.validate(make_valid_config(candidate), make_context(candidate)),
+            "GA_CUSTOM_WEAPON_POOL_INVALID", label)
+    end
+    reject(function(candidate) candidate.weapon_list = {} end,
+        "selected physical weapon missing from legacy catalog")
+    reject(function(candidate) candidate.weapon_list[1].slot = 1 end,
+        "selected physical weapon with mismatched slot")
+    reject(function(candidate) candidate.ammo.ammo_alpha.cost = "20" end,
+        "selected physical weapon with malformed legacy ammo")
+    reject(function(candidate) candidate.items.wpn_alpha.ammo_sections = { "ammo_other" } end,
+        "selected physical weapon with incompatible ammo")
+    reject(function(candidate)
+        candidate.factions.stalker.ranks.novice.secondary_weapons = { "wpn_alpha" }
+    end, "selected physical weapon duplicated across pools")
 end
 
 local function custom_config_rejects_equipment_compatibility_and_budget_matrix()
@@ -763,6 +803,7 @@ local cases = {
     { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
     { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
     { name = "custom_config_distinguishes_empty_inventory_from_entry_overflow", fn = custom_config_distinguishes_empty_inventory_from_entry_overflow },
+    { name = "custom_config_rejects_selected_empty_rank_weapon_pool", fn = custom_config_rejects_selected_empty_rank_weapon_pool },
     { name = "custom_config_rejects_equipment_compatibility_and_budget_matrix", fn = custom_config_rejects_equipment_compatibility_and_budget_matrix },
     { name = "custom_config_rejects_non_unit_physical_equipment", fn = custom_config_rejects_non_unit_physical_equipment },
     { name = "custom_config_preserves_legitimate_inventory_stacks", fn = custom_config_preserves_legitimate_inventory_stacks },

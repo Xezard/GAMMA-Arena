@@ -384,8 +384,8 @@ $Task1RankScriptContracts = @(
 )
 
 $Task2ItemScriptContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device', 'candidate_section_name', 'shared_system_sections') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint', 'item_catalog_prefilters_irrelevant_system_sections') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_catalog.script'; Namespace = 'gamma_arena_item_catalog'; Required = @('(?m)^function\s+load\s*\(', 'GA_ITEM_CATALOG_PRICE_ANCHOR_MISSING', 'ga-catalog-v10-', 'base_carry_weight', 'max_physical_items_per_participant', 'carry_bonus_mg', 'grenade', 'device', 'candidate_section_name', 'shared_system_sections', 'rank_ids_seen', 'faction_ids_seen') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_item_catalog.script'; Namespace = 'gamma_arena_test_item_catalog'; Required = @('(?m)^function\s+run\s*\(', 'item_catalog_prices_and_classifies_installed_items', 'item_catalog_fingerprint_changes_for_semantic_mutations', 'item_catalog_rejects_unavailable_median_anchors', 'item_catalog_seeds_exact_physical_devices', 'item_catalog_rejects_invalid_physical_devices', 'item_catalog_device_mutations_change_fingerprint', 'item_catalog_prefilters_irrelevant_system_sections', 'item_catalog_reconciles_rank_pools_with_physical_items') }
 )
 
 $Task6RandomDraftContracts = @(
@@ -442,9 +442,9 @@ $Task7CurrentArtifacts = @(
 )
 
 $Task8CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'exact_fields', 'canonical_integer', 'CONFIG_FIELDS', 'ROSTER_FIELDS', 'ITEM_FIELDS', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities') }
 )
 
 foreach ($Contract in $Task8CustomContracts) {
@@ -713,8 +713,8 @@ foreach ($Locale in @('eng','rus')) {
     }
 }
 $Task9ItemCatalog = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
-foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.max_entries = rank_catalog.max_entries')) {
-    Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate custom rule field: $Marker"
+foreach ($Marker in @('catalog.base_budget = reconciled_ranks.value.base_budget','catalog.max_entries = reconciled_ranks.value.max_entries')) {
+    Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate reconciled custom rule field: $Marker"
 }
 
 $Task3DeviceConfig = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_config.script') -Raw
@@ -821,7 +821,7 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\g
 $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'primary_weapons', 'secondary_weapons', 'validate_exact_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'validate_exact_weapon_pool', 'gamma_arena_custom_config.validate_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
     [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v10.json'; Required = @('"schema_version"\s*:\s*10', '"catalog_fingerprint"\s*:\s*"ga-catalog-v10-', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
 )
@@ -1202,6 +1202,11 @@ if (Test-Path -LiteralPath $Task1SkipPath) {
 $Task1DomainContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($Task1DomainContent -match 'gamma_arena_test_rank_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 1 domain suite must register rank catalog tests'
 Assert-True ($Task1DomainContent -match 'gamma_arena_test_item_catalog\.run\s*\(\s*run_case_fn\s*\)') 'Task 2 domain suite must register universal item catalog tests'
+$Task2ItemCatalogContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
+Assert-True ($Task2ItemCatalogContent -match 'local function\s+reconcile_rank_catalog\s*\(') `
+    'Task 2 item catalog must reconcile exact rank pools with physical item definitions before publication.'
+Assert-True ($Task2ItemCatalogContent -match 'local function\s+exact_rank_weapon_record\s*\(') `
+    'Task 2 rank reconciliation must distinguish malformed legacy metadata from physical ineligibility.'
 $Task1RankCatalogContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_rank_catalog.script') -Raw
 $Task1RankTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_rank_catalog.script') -Raw
 Assert-True ($Task1RankTestContent -match 'rank_catalog_accepts_scalar_spawn_rank_metadata') 'Task 1 rank tests must reproduce effective scalar spawn rank metadata.'

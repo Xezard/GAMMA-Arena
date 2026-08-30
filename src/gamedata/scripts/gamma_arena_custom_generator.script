@@ -117,60 +117,15 @@ local function validate_layout_preflight(layout)
     return gamma_arena_result.ok({ route_count = route_count, slot_count = slot_count })
 end
 
-local function weapon_records(catalog)
-    local records = {}
-    for _, weapon in ipairs(type(catalog.weapon_list) == "table" and catalog.weapon_list or {}) do
-        if type(weapon) == "table" and text(weapon.section) then
-            if records[weapon.section] == nil then records[weapon.section] = weapon else records[weapon.section] = false end
-        end
-    end
-    return records
-end
-
 local function validate_exact_weapon_pool(catalog, rank)
-    local records, result, seen = weapon_records(catalog), {}, {}
-    for _, pool_name in ipairs({ "primary_weapons", "secondary_weapons" }) do
-        local source = rank[pool_name]
-        local count = dense_count(source)
-        if count == nil then
-            return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool must be a dense array", {
-                rank = rank.id, pool = pool_name
-            })
-        end
-        for index = 1, count do
-            local section = source[index]
-            local weapon = text(section) and records[section] or nil
-            local definition = text(section) and type(catalog.items) == "table" and catalog.items[section] or nil
-            local ammo = type(weapon) == "table" and type(catalog.ammo) == "table" and catalog.ammo[weapon.ammo] or nil
-            local ammo_definition = type(weapon) == "table" and type(catalog.items) == "table" and catalog.items[weapon.ammo] or nil
-            local ammo_count = type(definition) == "table" and dense_count(definition.ammo_sections) or nil
-            local compatible = false
-            if ammo_count ~= nil then
-                for ammo_index = 1, ammo_count do
-                    if definition.ammo_sections[ammo_index] == weapon.ammo then compatible = true end
-                end
-            end
-            if not text(section) or seen[section] or type(weapon) ~= "table"
-                or weapon.section ~= section or not text(weapon.ammo) or not finite_integer(weapon.cost, 1)
-                or (weapon.slot ~= 1 and weapon.slot ~= 2) or not finite_integer(weapon.ammo_box_min, 1)
-                or not finite_integer(weapon.ammo_box_max, weapon.ammo_box_min)
-                or type(ammo) ~= "table" or ammo.section ~= weapon.ammo or not finite_integer(ammo.cost, 1)
-                or type(definition) ~= "table" or definition.category ~= "weapon" or definition.ltx_slot ~= weapon.slot
-                or ammo_count == nil or ammo_count == 0 or not compatible
-                or type(ammo_definition) ~= "table" or ammo_definition.category ~= "ammo" then
-                return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool member is invalid", {
-                    rank = rank.id, pool = pool_name, index = index, section = section
-                })
-            end
-            seen[section] = true
-            result[#result + 1] = weapon
-        end
+    if type(gamma_arena_custom_config.validate_weapon_pool) ~= "function" then
+        return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Shared exact weapon-pool validator is unavailable", {
+            rank = type(rank) == "table" and rank.id or nil
+        })
     end
-    if #result == 0 then
-        return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Exact faction-rank weapon pool is empty", { rank = rank.id })
-    end
-    table.sort(result, function(left, right) return left.section < right.section end)
-    return gamma_arena_result.ok(result)
+    return gamma_arena_custom_config.validate_weapon_pool(rank, catalog, {
+        rank = type(rank) == "table" and rank.id or nil
+    })
 end
 
 local function equipment_candidates(catalog, weapons, budget)

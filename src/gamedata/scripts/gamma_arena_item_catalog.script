@@ -1,6 +1,7 @@
 local rules_path = "gamma_arena\\gamma_arena_custom_rules.ltx"
 local new_game_loadout_path = "items\\settings\\new_game_loadouts.ltx"
 local UINT32_MOD = 4294967296
+local MAX_SAFE_INTEGER = 9007199254740991
 
 local CATEGORY_BY_KIND = {
     w_pistol = "weapon", w_smg = "weapon", w_shotgun = "weapon",
@@ -500,6 +501,164 @@ local function prune_compatibility(items)
     end
 end
 
+local function dense_array_count(values)
+    if type(values) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(values) do
+        if type(key) ~= "number" or finite_integer(key, 1) == nil then return nil end
+        count = count + 1
+        maximum = math.max(maximum, key)
+    end
+    if count ~= maximum then return nil end
+    return count
+end
+
+local function copy_record(source)
+    if type(source) ~= "table" then return nil end
+    local copied = {}
+    for key, value in pairs(source) do copied[key] = value end
+    return copied
+end
+
+local function legacy_weapon_records(legacy_catalog)
+    local source = type(legacy_catalog) == "table" and legacy_catalog.weapon_list or nil
+    local count = dense_array_count(source)
+    if count == nil then return nil end
+    local records = {}
+    for index = 1, count do
+        local weapon = source[index]
+        local section = type(weapon) == "table" and trimmed(weapon.section) or nil
+        if section == nil or section ~= weapon.section or records[section] ~= nil then return nil end
+        records[section] = weapon
+    end
+    return records
+end
+
+local function contains_exact(values, expected)
+    local count = dense_array_count(values)
+    if count == nil then return false end
+    for index = 1, count do
+        if values[index] == expected then return true end
+    end
+    return false
+end
+
+local function exact_positive_integer(value, minimum)
+    return type(value) == "number" and value <= MAX_SAFE_INTEGER
+        and finite_integer(value, minimum or 1) ~= nil
+end
+
+local function exact_rank_weapon_record(weapon, legacy_catalog)
+    if type(weapon) ~= "table" or trimmed(weapon.section) ~= weapon.section
+        or trimmed(weapon.ammo) ~= weapon.ammo or not exact_positive_integer(weapon.cost)
+        or (weapon.slot ~= 1 and weapon.slot ~= 2)
+        or not exact_positive_integer(weapon.ammo_box_min)
+        or not exact_positive_integer(weapon.ammo_box_max, weapon.ammo_box_min) then return false end
+    local ammo = type(legacy_catalog) == "table" and type(legacy_catalog.ammo) == "table"
+        and legacy_catalog.ammo[weapon.ammo] or nil
+    return type(ammo) == "table" and ammo.section == weapon.ammo and exact_positive_integer(ammo.cost)
+end
+
+local function physical_rank_weapon(weapon, items)
+    local physical = type(items) == "table" and items[weapon.section] or nil
+    local physical_ammo = type(items) == "table" and items[weapon.ammo] or nil
+    return type(physical) == "table" and physical.category == "weapon" and physical.ltx_slot == weapon.slot
+        and contains_exact(physical.ammo_sections, weapon.ammo)
+        and type(physical_ammo) == "table" and physical_ammo.category == "ammo"
+end
+
+local function reconcile_weapon_pool(source, weapon_records, legacy_catalog, items, seen, context)
+    local count = dense_array_count(source)
+    if count == nil then
+        return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact rank weapon pool must be a dense array", context)
+    end
+    local reconciled = {}
+    for index = 1, count do
+        local section = source[index]
+        local weapon = type(section) == "string" and weapon_records[section] or nil
+        if trimmed(section) ~= section or seen[section] or type(weapon) ~= "table" then
+            return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact rank weapon pool member is malformed", {
+                faction = context.faction, rank = context.rank, pool = context.pool,
+                index = index, section = section
+            })
+        end
+        seen[section] = true
+        if not exact_rank_weapon_record(weapon, legacy_catalog) then
+            return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact rank weapon metadata is malformed", {
+                faction = context.faction, rank = context.rank, pool = context.pool,
+                index = index, section = section
+            })
+        end
+        if physical_rank_weapon(weapon, items) then
+            reconciled[#reconciled + 1] = section
+        end
+    end
+    return gamma_arena_result.ok(reconciled)
+end
+
+local function reconcile_rank_catalog(rank_catalog, legacy_catalog, items)
+    local rank_count = dense_array_count(type(rank_catalog) == "table" and rank_catalog.rank_ids or nil)
+    local faction_count = dense_array_count(type(rank_catalog) == "table" and rank_catalog.faction_ids or nil)
+    local weapon_records = legacy_weapon_records(legacy_catalog)
+    if rank_count == nil or rank_count == 0 or faction_count == nil or faction_count == 0
+        or weapon_records == nil then
+        return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact rank catalog cannot be reconciled")
+    end
+
+    local reconciled = copy_record(rank_catalog)
+    local rank_ids_seen = {}
+    reconciled.rank_ids, reconciled.ranks = {}, {}
+    for index = 1, rank_count do
+        local rank_id = rank_catalog.rank_ids[index]
+        local rank = type(rank_id) == "string" and type(rank_catalog.ranks) == "table" and rank_catalog.ranks[rank_id] or nil
+        if trimmed(rank_id) ~= rank_id or rank_ids_seen[rank_id] or type(rank) ~= "table" or rank.id ~= rank_id then
+            return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact named rank cannot be reconciled", { rank = rank_id })
+        end
+        rank_ids_seen[rank_id] = true
+        reconciled.rank_ids[index] = rank_id
+        reconciled.ranks[rank_id] = copy_record(rank)
+    end
+
+    local faction_ids_seen = {}
+    reconciled.faction_ids, reconciled.factions = {}, {}
+    for faction_index = 1, faction_count do
+        local faction_id = rank_catalog.faction_ids[faction_index]
+        local faction = type(faction_id) == "string" and type(rank_catalog.factions) == "table" and rank_catalog.factions[faction_id] or nil
+        if trimmed(faction_id) ~= faction_id or faction_ids_seen[faction_id]
+            or type(faction) ~= "table" or faction.id ~= faction_id or type(faction.ranks) ~= "table" then
+            return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact faction ranks cannot be reconciled", { faction = faction_id })
+        end
+        faction_ids_seen[faction_id] = true
+        local copied_faction = copy_record(faction)
+        copied_faction.ranks = {}
+        reconciled.faction_ids[faction_index] = faction_id
+        reconciled.factions[faction_id] = copied_faction
+
+        for rank_index = 1, rank_count do
+            local rank_id = rank_catalog.rank_ids[rank_index]
+            local rank = faction.ranks[rank_id]
+            if type(rank) ~= "table" or rank.id ~= rank_id then
+                return failure("GA_ITEM_CATALOG_RANK_INVALID", "Exact faction rank cannot be reconciled", {
+                    faction = faction_id, rank = rank_id
+                })
+            end
+            local copied_rank, seen = copy_record(rank), {}
+            local primary = reconcile_weapon_pool(rank.primary_weapons, weapon_records, legacy_catalog, items, seen, {
+                faction = faction_id, rank = rank_id, pool = "primary_weapons"
+            })
+            if not primary.ok then return primary end
+            local secondary = reconcile_weapon_pool(rank.secondary_weapons, weapon_records, legacy_catalog, items, seen, {
+                faction = faction_id, rank = rank_id, pool = "secondary_weapons"
+            })
+            if not secondary.ok then return secondary end
+            copied_rank.primary_weapons = primary.value
+            copied_rank.secondary_weapons = secondary.value
+            copied_faction.ranks[rank_id] = copied_rank
+        end
+    end
+    return gamma_arena_result.ok(reconciled)
+end
+
 local function canonical_add(parts, tag, value)
     local encoded
     if value == nil then encoded = "nil"
@@ -655,6 +814,8 @@ local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sec
     local items, pricing_error = price_candidates(candidates, overrides, gamma_prices, zero_grants)
     if items == nil then return pricing_error end
     prune_compatibility(items)
+    local reconciled_ranks = reconcile_rank_catalog(rank_catalog, legacy_catalog, items)
+    if not reconciled_ranks.ok then return reconciled_ranks end
 
     local item_ids = {}
     local categories = {}
@@ -672,21 +833,21 @@ local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sec
     catalog.items = items
     catalog.item_ids = item_ids
     catalog.categories = categories
-    catalog.ranks = rank_catalog.ranks
-    catalog.rank_ids = rank_catalog.rank_ids
-    catalog.factions = rank_catalog.factions
-    catalog.faction_ids = rank_catalog.faction_ids
-    catalog.base_budget = rank_catalog.base_budget
-    catalog.max_entries = rank_catalog.max_entries
-    catalog.max_physical_items_per_participant = rank_catalog.max_physical_items_per_participant
-    catalog.max_selected_grenades = rank_catalog.max_selected_grenades
-    catalog.max_quantity_per_grenade = rank_catalog.max_quantity_per_grenade
-    catalog.second_grenade_price_multiplier = rank_catalog.second_grenade_price_multiplier
+    catalog.ranks = reconciled_ranks.value.ranks
+    catalog.rank_ids = reconciled_ranks.value.rank_ids
+    catalog.factions = reconciled_ranks.value.factions
+    catalog.faction_ids = reconciled_ranks.value.faction_ids
+    catalog.base_budget = reconciled_ranks.value.base_budget
+    catalog.max_entries = reconciled_ranks.value.max_entries
+    catalog.max_physical_items_per_participant = reconciled_ranks.value.max_physical_items_per_participant
+    catalog.max_selected_grenades = reconciled_ranks.value.max_selected_grenades
+    catalog.max_quantity_per_grenade = reconciled_ranks.value.max_quantity_per_grenade
+    catalog.second_grenade_price_multiplier = reconciled_ranks.value.second_grenade_price_multiplier
     catalog.schema_version = 10
     catalog.revision = 11
     catalog.generator_version = 11
     catalog.base_carry_weight = base_carry_weight
-    catalog.fingerprint = fingerprint(item_ids, items, rank_catalog, base_carry_weight)
+    catalog.fingerprint = fingerprint(item_ids, items, reconciled_ranks.value, base_carry_weight)
     return gamma_arena_result.ok(catalog)
 end
 

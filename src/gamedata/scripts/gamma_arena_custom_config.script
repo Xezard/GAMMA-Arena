@@ -100,6 +100,70 @@ local function contains(values, expected)
     return false
 end
 
+local function weapon_records(catalog)
+    local source = type(catalog) == "table" and catalog.weapon_list or nil
+    local count = dense_length(source, "GA_CUSTOM_WEAPON_POOL_INVALID", "weapon_list")
+    if count == nil then return nil end
+    local records = {}
+    for index = 1, count do
+        local weapon = source[index]
+        local section = type(weapon) == "table" and weapon.section or nil
+        if text(section) then
+            if records[section] == nil then records[section] = weapon else records[section] = false end
+        end
+    end
+    return records
+end
+
+local function validate_weapon_pool_internal(profile, catalog, context)
+    context = type(context) == "table" and context or {}
+    local records, result, seen = weapon_records(catalog), {}, {}
+    if type(profile) ~= "table" or type(catalog) ~= "table" or type(catalog.items) ~= "table"
+        or type(catalog.ammo) ~= "table" or records == nil then
+        return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Selected faction rank weapon catalog is invalid", context)
+    end
+    for _, pool_name in ipairs({ "primary_weapons", "secondary_weapons" }) do
+        local pool = profile[pool_name]
+        local count, pool_error = dense_length(pool, "GA_CUSTOM_WEAPON_POOL_INVALID", pool_name)
+        if count == nil then return pool_error end
+        for pool_index = 1, count do
+            local section = pool[pool_index]
+            local weapon = text(section) and records[section] or nil
+            local definition = text(section) and catalog.items[section] or nil
+            local ammo = type(weapon) == "table" and catalog.ammo[weapon.ammo] or nil
+            local ammo_definition = type(weapon) == "table" and catalog.items[weapon.ammo] or nil
+            local ammo_count = type(definition) == "table"
+                and dense_length(definition.ammo_sections, "GA_CUSTOM_WEAPON_POOL_INVALID", "ammo_sections") or nil
+            local compatible = false
+            if ammo_count ~= nil and type(weapon) == "table" then
+                for ammo_index = 1, ammo_count do
+                    if definition.ammo_sections[ammo_index] == weapon.ammo then compatible = true end
+                end
+            end
+            if not text(section) or seen[section] or type(weapon) ~= "table"
+                or weapon.section ~= section or not text(weapon.ammo) or not finite_integer(weapon.cost, 1)
+                or (weapon.slot ~= 1 and weapon.slot ~= 2) or not finite_integer(weapon.ammo_box_min, 1)
+                or not finite_integer(weapon.ammo_box_max, weapon.ammo_box_min)
+                or type(ammo) ~= "table" or ammo.section ~= weapon.ammo or not finite_integer(ammo.cost, 1)
+                or type(definition) ~= "table" or definition.category ~= "weapon" or definition.ltx_slot ~= weapon.slot
+                or ammo_count == nil or ammo_count == 0 or not compatible
+                or type(ammo_definition) ~= "table" or ammo_definition.category ~= "ammo" then
+                return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Selected faction rank has an invalid physical weapon", {
+                    index = context.index, faction = context.faction, rank = context.rank,
+                    pool = pool_name, pool_index = pool_index, section = section
+                })
+            end
+            seen[section] = true
+            result[#result + 1] = weapon
+        end
+    end
+    if #result == 0 then
+        return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Selected faction rank has no physical weapon", context)
+    end
+    table.sort(result, function(left, right) return left.section < right.section end)
+    return gamma_arena_result.ok(result)
+end
+
 local function totals_internal(config, catalog)
     if type(config) ~= "table" or type(config.actor_items) ~= "table" or type(catalog) ~= "table"
         or type(catalog.items) ~= "table" or not finite_positive(catalog.base_carry_weight) then
@@ -199,6 +263,12 @@ local function validate_internal(value, context, editable)
         if not text(entry.rank) or type(catalog.ranks[entry.rank]) ~= "table"
             or (faction ~= nil and type(faction.ranks[entry.rank]) ~= "table") then
             return failure("GA_CUSTOM_RANK_UNKNOWN", "Custom rank is unavailable for the selected faction", { index = index, rank = entry.rank })
+        end
+        if faction ~= nil then
+            local pool_result = validate_weapon_pool(faction.ranks[entry.rank], catalog, {
+                index = index, faction = value.faction, rank = entry.rank
+            })
+            if not pool_result.ok then return pool_result end
         end
     end
 
@@ -342,6 +412,14 @@ function totals(config, catalog)
     local succeeded, result = pcall(totals_internal, config, catalog)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     return failure("GA_CUSTOM_TOTAL_INVALID", "Custom totals calculation failed safely", { reason = tostring(result) })
+end
+
+function validate_weapon_pool(profile, catalog, context)
+    local succeeded, result = pcall(validate_weapon_pool_internal, profile, catalog, context)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Selected faction rank weapon validation failed safely", {
+        reason = tostring(result)
+    })
 end
 
 function validate(value, context)
