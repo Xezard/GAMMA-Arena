@@ -573,6 +573,18 @@ foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runt
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
 }
+$PresenterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'
+$PresenterContent = Get-Content -LiteralPath $PresenterPath -Raw
+$PresenterLessBlock = [regex]::Match($PresenterContent, '(?ms)^local\s+function\s+less\s*\(.*?^end\s*$').Value
+Assert-True ($PresenterLessBlock -match [regex]::Escape('if descending then return left_value > right_value end')) `
+    'Custom descending sort must use an explicit branch so the false comparison cannot fall through to ascending.'
+Assert-True ($PresenterLessBlock -notmatch 'return\s+descending\s+and') `
+    'Custom descending sort must not use Lua and/or as a ternary comparator.'
+$PresenterSortCase = [regex]::Match($Task9RuntimeTests, '(?ms)^local\s+function\s+runtime_custom_presenter_filters_sorts_and_pages_deterministically\(\).*?^end\s*$').Value
+foreach ($SortId in @('price_desc','name_desc')) {
+    Assert-True ($PresenterSortCase -match ('sort\s*=\s*"' + [regex]::Escape($SortId) + '"')) `
+        "Custom presenter regression must execute $SortId through the real project path."
+}
 $ReadableCustomCases = @(
     'runtime_custom_ui_initializes_one_authoritative_faction',
     'runtime_custom_ui_distinguishes_incomplete_and_failed_status'
