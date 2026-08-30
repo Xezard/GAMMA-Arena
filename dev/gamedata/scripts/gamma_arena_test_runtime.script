@@ -10610,6 +10610,38 @@ local function task11_custom_request(catalog)
     }
 end
 
+local function task11_resolved_layout(logical_layout)
+    local tactical_routes = {
+        "arena_route_1",
+        "arena_route_2",
+        "arena_route_3",
+        "arena_route_4",
+        "arena_route_5",
+        "arena_route_6"
+    }
+    local opponent_spawn_slots = {}
+    for index, route in ipairs(tactical_routes) do
+        opponent_spawn_slots[index] = {
+            id = "native:" .. route,
+            base_route = route,
+            native = true,
+            position = { x = index * 4, y = 0, z = index * 3 },
+            level_vertex_id = 1000 + index,
+            game_vertex_id = 77
+        }
+    end
+    return {
+        id = logical_layout.id,
+        version = 2,
+        level = "l05_bar",
+        actor_spawn_path = "t_way",
+        actor_look_path = "t_look",
+        capacity = 6,
+        opponent_spawn_slots = opponent_spawn_slots,
+        tactical_routes = tactical_routes
+    }
+end
+
 local function task11_memory_config()
     local values = {}
     local config = {
@@ -10648,10 +10680,13 @@ end
 
 local function runtime_custom_session_creation_copies_validated_recipe()
     local catalog = gamma_arena_test_custom_config.make_catalog()
-    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local logical_layout = catalog.layouts.rostok_arena_v1
+    local resolved_layout = task11_resolved_layout(logical_layout)
     local request = task11_custom_request(catalog)
     local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(fake_store()))
-    local created = orchestrator:create_session(request, catalog, layout)
+    gamma_arena_test_assert.equals(resolved_layout.virtual_capacity, nil,
+        "resolved layout intentionally has no virtual_capacity")
+    local created = orchestrator:create_session(request, catalog, resolved_layout)
     gamma_arena_test_assert.is_true(created.ok, "custom launch creates a validated ArenaSession")
     gamma_arena_test_assert.equals(created.value.schema_version, 2, "current ArenaSession schema is v2")
     gamma_arena_test_assert.equals(created.value.generation_recipe, "custom", "custom recipe lives in ArenaSession")
@@ -10729,13 +10764,14 @@ end
 
 local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store()
     local catalog = gamma_arena_test_custom_config.make_catalog()
-    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local logical_layout = catalog.layouts.rostok_arena_v1
+    local resolved_layout = task11_resolved_layout(logical_layout)
     local config = task11_memory_config()
     local store = gamma_arena_session_store.new_store()
     local issue_options = {
         clock = function() return 1000 end,
         nonce = function() return "task11_launch" end,
-        custom_context = { catalog = catalog, layout = layout }
+        custom_context = { catalog = catalog, layout = logical_layout }
     }
     local issued = store:issue_launch(config, task11_custom_request(catalog), issue_options)
     gamma_arena_test_assert.is_true(issued.ok, "real Store persists the custom launch fixture")
@@ -10754,6 +10790,7 @@ local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_s
 
     local deps = fake_orchestrator_deps(store)
     local catalog_loads, actor_mutations = 0, 0
+    local generated_layout, validated_layout = nil, nil
     local sentinel = {}
     local injected_options = { clock = function() return 1001 end, sentinel = sentinel }
     deps.config = config
@@ -10765,9 +10802,15 @@ local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_s
     deps.layout = function(layout_id, received_catalog)
         gamma_arena_test_assert.equals(layout_id, "rostok_arena_v1", "activation resolves the exact Arena layout")
         gamma_arena_test_assert.is_true(received_catalog == catalog, "layout receives the activation catalog object")
-        return gamma_arena_result.ok(layout)
+        return gamma_arena_result.ok(resolved_layout)
     end
-    deps.validator = function()
+    local generate = deps.generator
+    deps.generator = function(session, fight_index, active_catalog, physical_layout)
+        generated_layout = physical_layout
+        return generate(session, fight_index, active_catalog, physical_layout)
+    end
+    deps.validator = function(_, _, physical_layout)
+        validated_layout = physical_layout
         return gamma_arena_result.err("GA_TEST_AFTER_STORE_SNAPSHOT", "stop after real Store consume")
     end
     deps.actor.normalize_for_arena = function()
@@ -10784,10 +10827,71 @@ local function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_s
     gamma_arena_test_assert.is_true(validated_options == consumed_options, "Store ownership and consume receive the same merged options object")
     gamma_arena_test_assert.is_true(validated_options ~= injected_options, "merged launch options do not alias the injected table")
     gamma_arena_test_assert.is_true(validated_options.custom_context.catalog == catalog, "real Store validates against the activation catalog object")
-    gamma_arena_test_assert.is_true(validated_options.custom_context.layout == layout, "real Store validates against the activation layout object")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.layout == logical_layout,
+        "real Store validates Custom config against the catalog logical layout")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.layout ~= resolved_layout,
+        "real Store never validates Custom config against the physical resolved layout")
     gamma_arena_test_assert.equals(injected_options.custom_context, nil, "injected launch options are not mutated")
     gamma_arena_test_assert.is_true(injected_options.sentinel == sentinel and validated_options.sentinel == sentinel, "unrelated injected option identity is preserved")
+    gamma_arena_test_assert.is_true(generated_layout == resolved_layout,
+        "fight generator receives the physical resolved layout")
+    gamma_arena_test_assert.is_true(validated_layout == resolved_layout,
+        "fight validator receives the physical resolved layout")
     gamma_arena_test_assert.equals(actor_mutations, 0, "Store snapshot verification and later failure precede actor mutation")
+end
+
+local function runtime_custom_rejects_unbound_resolved_layout_before_store_ownership()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local cases = {
+        { label = "missing layout table", layout = nil },
+        { label = "missing layout id", layout = { level = "l05_bar" } },
+        { label = "non-string layout id", layout = { id = 42, level = "l05_bar" } },
+        { label = "unknown layout id", layout = { id = "forged_arena", level = "l05_bar" } }
+    }
+
+    for _, case in ipairs(cases) do
+        local direct_deps = fake_orchestrator_deps(fake_store())
+        local direct = gamma_arena_orchestrator.new(direct_deps):create_session(
+            task11_custom_request(catalog), catalog, case.layout)
+        gamma_arena_test_assert.is_false(direct.ok,
+            "session creation rejects an unbound physical layout: " .. case.label)
+        gamma_arena_test_assert.equals(direct.error.code, "GA_ACTOR_LAYOUT_INVALID",
+            "session creation reports exact layout identity failure: " .. case.label)
+
+        local request = task11_custom_request(catalog)
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        store.launch_result = gamma_arena_result.ok(clone(request))
+        store.launch_validation_result = gamma_arena_result.ok(clone(request))
+        local deps = fake_orchestrator_deps(store)
+        local generated, actor_mutations = 0, 0
+        deps.catalogs = function() return gamma_arena_result.ok(catalog) end
+        deps.layout = function() return gamma_arena_result.ok(case.layout) end
+        deps.generator = function()
+            generated = generated + 1
+            return gamma_arena_result.err("GA_TEST_UNREACHABLE", "generation must remain unreachable")
+        end
+        deps.actor.normalize_for_arena = function()
+            actor_mutations = actor_mutations + 1
+            return gamma_arena_result.ok(true)
+        end
+
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok,
+            "unbound layout fixture observes game-load boundary: " .. case.label)
+        local rejected = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(rejected.ok,
+            "activation rejects an unbound physical layout: " .. case.label)
+        gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_LAYOUT_INVALID",
+            "activation reports exact layout identity failure: " .. case.label)
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 0,
+            "layout identity rejects before Store ownership: " .. case.label)
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0,
+            "layout identity rejects before launch consumption: " .. case.label)
+        gamma_arena_test_assert.equals(generated, 0,
+            "layout identity rejects before fight generation: " .. case.label)
+        gamma_arena_test_assert.equals(actor_mutations, 0,
+            "layout identity rejects before actor mutation: " .. case.label)
+    end
 end
 
 local function task6_drive_items_ready(items, initial)
@@ -11788,6 +11892,7 @@ local cases = {
     { name = "runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership", fn = runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership },
     { name = "runtime_custom_stale_catalog_rejects_before_actor_mutation", fn = runtime_custom_stale_catalog_rejects_before_actor_mutation },
     { name = "runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store", fn = runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store },
+    { name = "runtime_custom_rejects_unbound_resolved_layout_before_store_ownership", fn = runtime_custom_rejects_unbound_resolved_layout_before_store_ownership },
     { name = "runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type", fn = runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type },
     { name = "runtime_composed_actor_tag_failures_rollback_provisional_items_exactly", fn = runtime_composed_actor_tag_failures_rollback_provisional_items_exactly },
     { name = "runtime_composed_default_actor_materializes_universal_inventory_and_restores_template", fn = runtime_composed_default_actor_materializes_universal_inventory_and_restores_template },

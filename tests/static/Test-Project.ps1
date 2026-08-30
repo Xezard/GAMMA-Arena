@@ -874,6 +874,7 @@ foreach ($Name in @(
     'runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership',
     'runtime_custom_stale_catalog_rejects_before_actor_mutation',
     'runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store',
+    'runtime_custom_rejects_unbound_resolved_layout_before_store_ownership',
     'runtime_composed_actor_sets_and_verifies_real_weapon_ammo_type',
     'runtime_composed_actor_tag_failures_rollback_provisional_items_exactly',
     'runtime_composed_default_actor_materializes_universal_inventory_and_restores_template',
@@ -889,6 +890,12 @@ Assert-True ($Task11Session -match 'gamma_arena_custom_config\.validate\s*\(\s*s
 $Task11Orchestrator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
 $Task11Bootstrap = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
 Assert-True ($Task11Orchestrator -match 'function\s+Orchestrator:create_session\s*\(\s*request\s*,\s*catalog\s*,\s*layout\s*\)') 'Task 11 session creation must consume the active catalog and layout.'
+Assert-True ($Task11Orchestrator -match 'local function\s+custom_validation_context\s*\(') `
+    'Custom activation must separate logical catalog layout validation from the physical resolved layout.'
+Assert-True ($Task11Orchestrator -match 'custom_validation_context\s*\(\s*catalog\s*,\s*layout\s*\)[\s\S]{0,500}if\s+not\s+context\.ok\s+then\s+return\s+context\s+end[\s\S]{0,900}validate_arena_session') `
+    'Custom session creation must fail closed before validating against the catalog logical layout.'
+Assert-True ($Task11Orchestrator -match 'GA_ACTOR_LAYOUT_INVALID[\s\S]{0,700}layouts\s*\[\s*resolved_layout\.id\s*\]') `
+    'Custom validation context must require an exact resolved-to-logical layout identity.'
 Assert-True ($Task11Orchestrator -match 'catalog_fingerprint\s*=\s*catalog\.fingerprint') 'Task 11 session creation must bind the loaded catalog fingerprint.'
 Assert-True ($Task11Orchestrator -match 'local\s+layout\s*=\s*self:layout_snapshot\(self\.catalog_snapshot\)') 'Task 11 continuation actor reset must resolve layout from the same validated catalog snapshot as its FightSpec.'
 Assert-True (([regex]::Matches($Task11Orchestrator, 'self:layout_snapshot\(self\.catalog_snapshot\)')).Count -ge 2) 'Task 11 initial normalization and continuation reset must both retain the FightSpec catalog snapshot.'
@@ -896,6 +903,15 @@ $Task11IdentityIndex = $Task11Orchestrator.IndexOf('validate_session_catalog_ide
 $Task11GenerateIndex = $Task11Orchestrator.IndexOf('self.deps.generator')
 Assert-True ($Task11IdentityIndex -ge 0 -and $Task11GenerateIndex -gt $Task11IdentityIndex) 'Task 11 catalog identity validation must precede fight generation and actor mutation.'
 Assert-True ($Task11Orchestrator -match 'local function\s+plain_table_shape' -and $Task11Orchestrator -match 'dense positive-integer') 'Task 11 ArenaSession copy must distinguish dense arrays from string-key records.'
+foreach ($Marker in @('resolved layout intentionally has no virtual_capacity',
+    'real Store validates Custom config against the catalog logical layout',
+    'real Store never validates Custom config against the physical resolved layout',
+    'fight generator receives the physical resolved layout',
+    'fight validator receives the physical resolved layout',
+    'layout identity rejects before launch consumption')) {
+    Assert-True ($Task11Runtime -match [regex]::Escape($Marker)) `
+        "Custom logical/resolved layout regression is missing: $Marker"
+}
 Assert-True ($Task11Bootstrap -match 'function\s+new_actor_item_port\s*\(' -and $Task11Bootstrap -match 'gamma_arena_item_materializer\.new\s*\(') 'Task 11 production actor path must construct the universal item materializer.'
 Assert-True ($Task11Bootstrap -notmatch 'local value = \{ consumables = \{\}, grenades = \{\} \}') 'Task 11 production actor path must not flatten universal items into a legacy single-weapon loadout.'
 Assert-True ($Task11Bootstrap -match 'weapon:set_ammo_type\s*\(' -and $Task11Bootstrap -match 'weapon:get_ammo_type\s*\(') 'Task 11 production actor path must set and verify the real engine ammunition type.'

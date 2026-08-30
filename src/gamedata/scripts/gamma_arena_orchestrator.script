@@ -70,6 +70,22 @@ local function copy_plain(value, seen)
     return copy
 end
 
+local function custom_validation_context(catalog, resolved_layout)
+    if type(resolved_layout) ~= "table"
+        or type(resolved_layout.id) ~= "string"
+        or resolved_layout.id == "" then
+        return fail("GA_ACTOR_LAYOUT_INVALID", "Resolved Arena layout identity is invalid")
+    end
+    local layouts = type(catalog) == "table" and catalog.layouts or nil
+    local logical_layout = type(layouts) == "table" and layouts[resolved_layout.id] or nil
+    if type(logical_layout) ~= "table" or logical_layout.id ~= resolved_layout.id then
+        return fail("GA_ACTOR_LAYOUT_INVALID", "Resolved Arena layout has no exact catalog definition", {
+            layout_id = resolved_layout.id
+        })
+    end
+    return gamma_arena_result.ok({ catalog = catalog, layout = logical_layout })
+end
+
 local function merge_launch_options(options, catalog, layout)
     if options ~= nil and type(options) ~= "table" then
         return fail("GA_LAUNCH_OPTIONS_INVALID", "Arena launch options must be a table")
@@ -81,7 +97,9 @@ local function merge_launch_options(options, catalog, layout)
         end
         merged[key] = value
     end
-    merged.custom_context = { catalog = catalog, layout = layout }
+    local context = custom_validation_context(catalog, layout)
+    if not context.ok then return context end
+    merged.custom_context = context.value
     return gamma_arena_result.ok(merged)
 end
 
@@ -772,6 +790,8 @@ end
 
 function Orchestrator:create_session(request, catalog, layout)
     if type(request) ~= "table" then return fail("GA_SESSION_INVALID", "Arena launch request is unavailable") end
+    local context = custom_validation_context(catalog, layout)
+    if not context.ok then return context end
     if request.schema_version == 2 then
         local bound = validate_session_catalog_identity(request, catalog)
         if not bound.ok then return bound end
@@ -793,10 +813,10 @@ function Orchestrator:create_session(request, catalog, layout)
         catalog_revision = catalog.revision,
         catalog_fingerprint = catalog.fingerprint,
         custom_config = request.custom_config,
-        layout_id = type(layout) == "table" and layout.id or "rostok_arena_v1",
+        layout_id = layout.id,
         checkpoint_name = "_gamma_arena_checkpoint",
         phase = gamma_arena_state_machine.states.PREPARING
-    }, { catalog = catalog, layout = layout })
+    }, context.value)
 end
 
 function Orchestrator:run_preflight(catalog)
