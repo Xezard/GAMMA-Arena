@@ -601,6 +601,13 @@ foreach ($Marker in $CustomIntegrationMarkers) {
 }
 Assert-True ($ReadableCustomUi -notmatch 'TransferItem') `
     'Two-panel Custom UI must rebuild from the model instead of transferring cells optimistically.'
+$RebuildContainerBlock = [regex]::Match($ReadableCustomUi, '(?ms)^local\s+function\s+rebuild_container\s*\(.*?^end\s*$').Value
+foreach ($Marker in @('container:Reset()','for _, section in ipairs(sections) do','container:AddItem(nil, section)','container:Scroll_Reinit()')) {
+    Assert-True ($RebuildContainerBlock -match [regex]::Escape($Marker)) `
+        "Two-panel Custom native rebuild must preserve presenter order: $Marker"
+}
+Assert-True ($RebuildContainerBlock -notmatch 'container:Reinit\(') `
+    'Two-panel Custom native rebuild must not re-sort presenter pages by GAMMA item size.'
 $HoverHelper = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+update_item_hover\s*\(.*?^end\s*$').Value
 Assert-True ($HoverHelper -notmatch 'type\s*\(\s*(?:catalog_container|selected_container|inventory_container|loadout_container|item_info)\s*\)\s*~=\s*"table"') `
     'Readable Custom hover must use live capabilities instead of rejecting X-Ray userdata.'
