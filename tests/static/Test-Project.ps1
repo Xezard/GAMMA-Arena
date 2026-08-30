@@ -696,7 +696,7 @@ foreach ($Marker in @('function initialize_faction','function status_presentatio
 }
 foreach ($Marker in @('function apply_faction_selection','function handle_escape','function readiness_presentation',
     'gamma_arena_ui_faction_picker.new','function UICustom:OpenFactionPicker','function UICustom:ApplyFaction',
-    'self.faction_picker:open(view.faction_ids, view.faction)','self.faction_button:SetText(faction_text(view.faction))',
+    'self.faction_picker:open(view.faction_ids, view.faction)','self.faction_button:TextControl():SetText(faction_text(view.faction))',
     'texture_id(view.faction)','handle_escape(self.faction_picker')) {
     Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Custom UX integration is missing $Marker"
 }
@@ -1689,6 +1689,14 @@ if (Test-Path -LiteralPath $Task9UiXmlPath) {
         }
         Assert-True ($null -eq $Task9UiXml.SelectSingleNode("/*[local-name()='w']/*[local-name()='gamma_arena_result']/*[local-name()='texture']")) 'Task 9 UI root must not stretch or tile a widget texture across the screen'
     } catch { Assert-True $false "Task 9 UI XML must parse: $($_.Exception.Message)" }
+}
+
+$CustomSetupUiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script'
+Assert-True (Test-Path -LiteralPath $CustomSetupUiScriptPath) 'Custom setup UI adapter is missing'
+if (Test-Path -LiteralPath $CustomSetupUiScriptPath) {
+    $CustomSetupUiContent = Get-Content -LiteralPath $CustomSetupUiScriptPath -Raw
+    Assert-True (([regex]::Matches($CustomSetupUiContent, 'self\.faction_button:TextControl\(\):SetText\s*\(')).Count -eq 2) 'Custom setup faction label branches must use the native CUI3tButton text control API'
+    Assert-True ($CustomSetupUiContent -notmatch 'self\.faction_button:SetText\s*\(') 'Custom setup faction labels must not call the unavailable CUI3tButton SetText method directly'
 }
 
 $BattleUiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_battle.script'
