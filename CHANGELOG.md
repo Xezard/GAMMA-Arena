@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Reworked Custom Arena Setup into labeled opponent and fight-condition groups, added a GAMMA-style enemy-faction emblem picker, explained fight seed, player device, ranks, and catalog search, made launch requirements explicit, and clarified navigation back to Random mode.
+
 ## 0.5.0 - 2026-08-28
 
 - Published FightSpec v9 as the sole emitted, accepted, documented, and packaged fight contract with exact catalog identity `10/11/11` and generator 11.
