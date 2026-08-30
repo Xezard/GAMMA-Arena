@@ -6,6 +6,32 @@ local DEVICE_LABEL_KEYS = {
     device_torch_nv_2 = "st_gamma_arena_custom_device_nv_gen2",
     device_torch_nv_3 = "st_gamma_arena_custom_device_nv_gen3"
 }
+local INCOMPLETE_STATUS_KEYS = {
+    GA_CUSTOM_FACTION_UNKNOWN = "st_gamma_arena_custom_incomplete_faction",
+    GA_CUSTOM_OUTFIT_REQUIRED = "st_gamma_arena_custom_incomplete_outfit",
+    GA_CUSTOM_KNIFE_REQUIRED = "st_gamma_arena_custom_incomplete_knife",
+    GA_CUSTOM_WEAPON_REQUIRED = "st_gamma_arena_custom_incomplete_weapon",
+    GA_CUSTOM_AMMO_INCOMPATIBLE = "st_gamma_arena_custom_incomplete_ammo",
+    GA_CUSTOM_HEALING_REQUIRED = "st_gamma_arena_custom_incomplete_healing"
+}
+local ACTION_STATUS_KEYS = {
+    GA_CUSTOM_OVERSPEND = "st_gamma_arena_custom_error_budget",
+    GA_CUSTOM_OVERWEIGHT = "st_gamma_arena_custom_error_weight",
+    GA_CUSTOM_AMMO_INCOMPATIBLE = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_AMMO_ORPHAN = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_HELMET_INCOMPATIBLE = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_SLOT_INVALID = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_ENTRY_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_PHYSICAL_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_GRENADE_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_EQUIPMENT_QUANTITY = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_ROSTER_LIMIT = "st_gamma_arena_custom_error_limit"
+}
+local STATUS_COLORS = {
+    incomplete = { 185, 185, 185 },
+    error = { 220, 110, 90 },
+    ready = { 170, 210, 160 }
+}
 
 local function translated(string_id)
     if game and type(game.translate_string) == "function" then
@@ -26,12 +52,96 @@ local function protected_result(code, message, callback)
     return result
 end
 
+function initialize_faction(model, picker)
+    if type(model) ~= "table" or type(model.snapshot) ~= "function" or type(model.set_faction) ~= "function" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup model is unavailable")
+    end
+    local called, snapshot = pcall(model.snapshot, model)
+    if not called or type(snapshot) ~= "table" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup snapshot is unavailable")
+    end
+    if type(snapshot.faction) == "string" and snapshot.faction ~= "" then
+        return gamma_arena_result.ok(snapshot.faction)
+    end
+    local faction_ids = snapshot.faction_ids
+    if type(faction_ids) ~= "table" or #faction_ids == 0 then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Custom setup has no available factions")
+    end
+    picker = picker or function(count)
+        if type(gamma_arena_rng) == "table" and type(gamma_arena_rng.new) == "function"
+            and type(gamma_arena_rng.random_session_seed) == "function" then
+            return gamma_arena_rng.new(gamma_arena_rng.random_session_seed()):next_int(1, count)
+        end
+        return 1
+    end
+    if type(picker) ~= "function" then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction picker is unavailable")
+    end
+    local picked, index = pcall(picker, #faction_ids)
+    index = picked and tonumber(index) or nil
+    if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > #faction_ids then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Custom faction picker returned an invalid index")
+    end
+    return model:set_faction(faction_ids[index])
+end
+
+function status_presentation(view)
+    view = type(view) == "table" and view or {}
+    local action_code = view.submission_error_code or view.operation_error_code
+    if action_code then
+        return {
+            state = "error",
+            string_id = ACTION_STATUS_KEYS[action_code] or "st_gamma_arena_custom_error_action",
+            code = action_code,
+            source = "action"
+        }
+    end
+    if view.infrastructure_error_code then
+        return {
+            state = "error",
+            string_id = "st_gamma_arena_custom_error_setup",
+            code = view.infrastructure_error_code,
+            source = "infrastructure"
+        }
+    end
+    if view.validation_code then
+        local string_id = INCOMPLETE_STATUS_KEYS[view.validation_code]
+        return {
+            state = string_id and "incomplete" or "error",
+            string_id = string_id or "st_gamma_arena_custom_error_setup",
+            code = view.validation_code,
+            source = "validation"
+        }
+    end
+    return { state = "ready", string_id = "st_gamma_arena_custom_ready", source = "validation" }
+end
+
 local function custom_trace(code, message, context)
     pcall(gamma_arena_log.info, code, message, context or {})
 end
 
 local function format_weight(weight_mg)
     return string.format("%.2f kg", (tonumber(weight_mg) or 0) / 1000)
+end
+
+function format_price_text(value)
+    return tostring(value or 0) .. " AP"
+end
+
+function arena_price_text(value, translator)
+    translator = translator or translated
+    return translator("st_gamma_arena_custom_arena_price") .. ": " .. format_price_text(value)
+end
+
+function update_item_hover(catalog_container, selected_container, item_info)
+    if type(catalog_container) ~= "table" or type(catalog_container.Update) ~= "function"
+        or type(selected_container) ~= "table" or type(selected_container.Update) ~= "function"
+        or type(item_info) ~= "table" or type(item_info.Update) ~= "function" then return false end
+    local catalog_hovered = catalog_container:Update(item_info) == true
+    local selected_hovered = selected_container:Update(item_info) == true
+    local hovered = catalog_hovered or selected_hovered
+    if not hovered then item_info:Update() end
+    return hovered
 end
 
 local function device_option_text(option)
@@ -68,6 +178,7 @@ local function projection_failure(code)
     return {
         launch_enabled = false,
         validation_code = code or "GA_CUSTOM_INVALID",
+        infrastructure_error_code = code or "GA_CUSTOM_INVALID",
         operation_error_code = nil,
         summary_code = code or "GA_CUSTOM_INVALID",
         category = "weapon",
@@ -88,6 +199,7 @@ function apply_catalog_result(view, catalog_result)
     local code = type(detail) == 'table' and detail.code or 'GA_START_CATALOG_UNAVAILABLE'
     view.launch_enabled = false
     view.validation_code = code
+    view.infrastructure_error_code = code
     view.summary_code = code
     return view
 end
@@ -299,6 +411,7 @@ function UICustom:__init(owner, ports) super()
     local catalog = self.catalog_result.ok and self.catalog_result.value or {}
     local layout = self.ports.layout or (type(catalog.layouts) == "table" and catalog.layouts.rostok_arena_v1 or nil) or {}
     self.model = self.ports.model or gamma_arena_custom_setup_model.new(catalog, layout)
+    self.initial_faction_result = initialize_faction(self.model, self.ports.initial_faction_index)
     self:InitControls()
     self:InitCallbacks()
     self:Rebuild()
@@ -369,6 +482,7 @@ function UICustom:InitControls()
         container.disable_stack = true
         container:SetGridSpecs(41, 2)
     end
+    self.item_info = utils_ui.UIInfoItem(self)
 end
 
 function UICustom:InitCallbacks()
@@ -402,18 +516,17 @@ local function rebuild_container(container, cells, selected)
         if cell:IsShown() then
             local view = by_section[cell.section]
             if view then
+                local price_text = view.price_text or view.effective_price or view.base_price or 0
                 cell.flags.disabled = view.disabled == true
                 cell.flags.selected = view.selected == true
                 cell.flags.value = view.effective_price or view.base_price or 0
-                cell.flags.value_str = translated(view.name_key or view.section) .. " | "
-                    .. tostring(view.price_text or view.effective_price or view.base_price or 0) .. " AP | "
-                    .. format_weight(view.weight_mg)
+                cell.flags.value_str = arena_price_text(price_text)
                 cell.flags.name_key = view.name_key
                 cell.flags.weight_mg = view.weight_mg
                 local suffix = selected and (" q" .. tostring(view.quantity or 1)
                     .. (view.equipped_slot and (" " .. tostring(view.equipped_slot)) or "")) or ""
-                cell:Add_CustomText(tostring(view.price_text or view.effective_price or view.base_price or 0) .. suffix)
-                if cell.cell and type(cell.cell.Enable) == "function" then cell.cell:Enable(not cell.flags.disabled) end
+                cell:Add_CustomText(format_price_text(price_text) .. suffix)
+                if cell.cell and type(cell.cell.Enable) == "function" then cell.cell:Enable(true) end
             end
         end
     end
@@ -425,6 +538,10 @@ function UICustom:Rebuild()
     })
     local view = project(self.model, self.selected_category, self.catalog_page)
     view = apply_catalog_result(view, self.catalog_result)
+    if self.catalog_result.ok and not self.initial_faction_result.ok then
+        view.infrastructure_error_code = self.initial_faction_result.error
+            and self.initial_faction_result.error.code or "GA_CUSTOM_FACTION_UNKNOWN"
+    end
     if self.submission_error and self.submission_error.error then
         view.submission_error_code = self.submission_error.error.code
         view.summary_code = view.submission_error_code
@@ -450,12 +567,20 @@ function UICustom:Rebuild()
     self.remaining_text:SetText(tostring(view.remaining))
     self.weight_text:SetText(format_weight(view.weight_mg))
     self.weight_limit_text:SetText(format_weight(view.weight_limit_mg))
-    if view.summary_code then
-        self.validation_text:SetText(translated("st_gamma_arena_custom_invalid") .. " [" .. tostring(view.summary_code) .. "]")
-        self.validation_text:Show(true)
+    local status = status_presentation(view)
+    local color = STATUS_COLORS[status.state] or STATUS_COLORS.error
+    self.validation_text:SetText(translated(status.string_id))
+    self.validation_text:SetTextColor(GetARGB(255, color[1], color[2], color[3]))
+    self.validation_text:Show(true)
+    if status.state == "error" and status.code then
+        if self.last_reported_status_code ~= status.code then
+            pcall(gamma_arena_log.error, status.code, "Custom Setup interaction failed", {
+                source = status.source
+            })
+            self.last_reported_status_code = status.code
+        end
     else
-        self.validation_text:SetText(translated("st_gamma_arena_custom_ready"))
-        self.validation_text:Show(true)
+        self.last_reported_status_code = nil
     end
     self.start_button:Enable(view.launch_enabled)
     self.catalog_page_text:SetText(tostring(view.catalog_page) .. " / " .. tostring(view.catalog_page_count))
@@ -617,6 +742,11 @@ function UICustom:OnStart()
         self.owner:ShowFatal({ started })
     end
     return started
+end
+
+function UICustom:Update()
+    CUIScriptWnd.Update(self)
+    update_item_hover(self.catalog_container, self.selected_container, self.item_info)
 end
 
 function UICustom:OnKeyboard(dik, keyboard_action)

@@ -10109,6 +10109,85 @@ local function runtime_battle_identity_visibility_failure_reporting_is_bounded()
     gamma_arena_test_assert.equals(#reports, 2, "post-recovery visibility error reports once again")
 end
 
+local function runtime_custom_ui_initializes_one_authoritative_faction()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.faction_ids = { "stalker", "bandit" }
+    catalog.factions.bandit = clone(catalog.factions.stalker)
+    catalog.factions.bandit.id = "bandit"
+    local model = gamma_arena_custom_setup_model.new(
+        catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    local calls = 0
+    local initialized = gamma_arena_ui_custom.initialize_faction(model, function(count)
+        calls = calls + 1
+        gamma_arena_test_assert.equals(count, #catalog.faction_ids, "picker sees authoritative factions")
+        return 2
+    end)
+    gamma_arena_test_assert.is_true(initialized.ok, "initial faction selection succeeds")
+    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "picker chooses exact faction")
+    gamma_arena_test_assert.equals(calls, 1, "uninitialized model is picked once")
+
+    local preserved = gamma_arena_ui_custom.initialize_faction(model, function()
+        error("preselected model must not consume another random choice")
+    end)
+    gamma_arena_test_assert.is_true(preserved.ok, "preselected faction is preserved")
+    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "second initialization is inert")
+end
+
+local function runtime_custom_ui_distinguishes_incomplete_and_failed_status()
+    local incomplete = gamma_arena_ui_custom.status_presentation({
+        validation_code = "GA_CUSTOM_OUTFIT_REQUIRED"
+    })
+    gamma_arena_test_assert.equals(incomplete.state, "incomplete", "missing outfit is guidance")
+    gamma_arena_test_assert.equals(incomplete.string_id,
+        "st_gamma_arena_custom_incomplete_outfit", "missing outfit has localized guidance")
+
+    local rejected = gamma_arena_ui_custom.status_presentation({
+        validation_code = "GA_CUSTOM_AMMO_INCOMPATIBLE",
+        operation_error_code = "GA_CUSTOM_OVERSPEND"
+    })
+    gamma_arena_test_assert.equals(rejected.state, "error", "rejected edit is an error")
+    gamma_arena_test_assert.equals(rejected.string_id,
+        "st_gamma_arena_custom_error_budget", "operation error owns the visible message")
+
+    local infrastructure = gamma_arena_ui_custom.status_presentation({
+        infrastructure_error_code = "GA_ITEM_CATALOG_INVALID"
+    })
+    gamma_arena_test_assert.equals(infrastructure.state, "error", "catalog failure is an error")
+    gamma_arena_test_assert.equals(infrastructure.string_id,
+        "st_gamma_arena_custom_error_setup", "catalog failure has bounded fallback")
+
+    local ready = gamma_arena_ui_custom.status_presentation({})
+    gamma_arena_test_assert.equals(ready.state, "ready", "valid projection is ready")
+    gamma_arena_test_assert.equals(ready.string_id, "st_gamma_arena_custom_ready", "ready text is preserved")
+end
+
+local function runtime_custom_ui_formats_ap_and_routes_native_hover()
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.format_price_text("775"),
+        "775 AP", "ordinary price has explicit unit")
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.format_price_text("x2 140"),
+        "x2 140 AP", "doubled grenade price has explicit unit")
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.arena_price_text("775", function()
+        return "Arena price"
+    end), "Arena price: 775 AP", "native value line contains only labeled Arena price")
+
+    local panel = { resets = 0 }
+    function panel:Update() self.resets = self.resets + 1 end
+    local calls = {}
+    local catalog = { Update = function(_, received) calls[#calls + 1] = received; return false end }
+    local selected = { Update = function(_, received) calls[#calls + 1] = received; return true end }
+    gamma_arena_test_assert.is_true(
+        gamma_arena_ui_custom.update_item_hover(catalog, selected, panel), "either hovered container owns panel")
+    gamma_arena_test_assert.equals(calls[1], panel, "catalog receives shared native panel")
+    gamma_arena_test_assert.equals(calls[2], panel, "selected container receives shared native panel")
+    gamma_arena_test_assert.equals(panel.resets, 0, "owned hover does not reset panel")
+
+    catalog.Update = function() return false end
+    selected.Update = function() return false end
+    gamma_arena_test_assert.is_false(
+        gamma_arena_ui_custom.update_item_hover(catalog, selected, panel), "absent hover returns false")
+    gamma_arena_test_assert.equals(panel.resets, 1, "absent hover resets native panel")
+end
+
 local function runtime_custom_ui_launch_projection_is_authoritative()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     local layout = gamma_arena_test_custom_config.make_context(catalog).layout
@@ -11501,6 +11580,9 @@ local cases = {
     { name = "runtime_custom_integrity_retry_is_object_identical_and_restart_preserves_policy", fn = runtime_custom_integrity_retry_is_object_identical_and_restart_preserves_policy },
     { name = "runtime_custom_recipe_failures_are_exact_before_world_mutation", fn = runtime_custom_recipe_failures_are_exact_before_world_mutation },
     { name = "runtime_random_recipe_session_remains_difficulty_only", fn = runtime_random_recipe_session_remains_difficulty_only },
+    { name = "runtime_custom_ui_initializes_one_authoritative_faction", fn = runtime_custom_ui_initializes_one_authoritative_faction },
+    { name = "runtime_custom_ui_distinguishes_incomplete_and_failed_status", fn = runtime_custom_ui_distinguishes_incomplete_and_failed_status },
+    { name = "runtime_custom_ui_formats_ap_and_routes_native_hover", fn = runtime_custom_ui_formats_ap_and_routes_native_hover },
     { name = "runtime_custom_ui_launch_projection_is_authoritative", fn = runtime_custom_ui_launch_projection_is_authoritative },
     { name = "runtime_custom_ui_grenade_projection_disables_cells_at_limit", fn = runtime_custom_ui_grenade_projection_disables_cells_at_limit },
     { name = "runtime_custom_ui_device_projection_round_trips_all_choices", fn = runtime_custom_ui_device_projection_round_trips_all_choices },

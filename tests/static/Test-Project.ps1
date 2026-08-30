@@ -561,6 +561,45 @@ foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runt
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
 }
+$ReadableCustomCases = @(
+    'runtime_custom_ui_initializes_one_authoritative_faction',
+    'runtime_custom_ui_distinguishes_incomplete_and_failed_status'
+)
+foreach ($Name in $ReadableCustomCases) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) `
+        "Readable Custom runtime case must be registered exactly: $Name"
+}
+$HoverCase = 'runtime_custom_ui_formats_ap_and_routes_native_hover'
+$HoverRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($HoverCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($HoverCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task9RuntimeTests, $HoverRegistration)).Count -eq 1) `
+    "Readable Custom runtime case must be registered exactly: $HoverCase"
+$ReadableCustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+foreach ($Marker in @('function initialize_faction','function status_presentation',
+    'self.ports.initial_faction_index','infrastructure_error_code','last_reported_status_code')) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Readable Custom UI is missing $Marker"
+}
+foreach ($Marker in @('function format_price_text','function arena_price_text','function update_item_hover',
+    'utils_ui.UIInfoItem(self)','function UICustom:Update()','catalog_container:Update(item_info)',
+    'selected_container:Update(item_info)')) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Readable Custom hover is missing $Marker"
+}
+Assert-True ($ReadableCustomUi -match 'Add_CustomText\(\s*format_price_text\(') `
+    'Readable Custom cell price must be formatted with an explicit AP unit'
+foreach ($Locale in @('eng','rus')) {
+    $ReadableTextPath = Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena_custom_readability.xml"
+    Assert-True (Test-Path -LiteralPath $ReadableTextPath) "Readable Custom $Locale localization companion is missing"
+    $Text = if (Test-Path -LiteralPath $ReadableTextPath) { Get-Content -LiteralPath $ReadableTextPath -Raw } else { '' }
+    foreach ($Id in @('st_gamma_arena_custom_incomplete_faction','st_gamma_arena_custom_incomplete_outfit',
+        'st_gamma_arena_custom_incomplete_knife','st_gamma_arena_custom_incomplete_weapon',
+        'st_gamma_arena_custom_incomplete_ammo','st_gamma_arena_custom_incomplete_healing',
+        'st_gamma_arena_custom_error_budget','st_gamma_arena_custom_error_weight',
+        'st_gamma_arena_custom_error_compatibility','st_gamma_arena_custom_error_limit',
+        'st_gamma_arena_custom_error_action','st_gamma_arena_custom_error_setup',
+        'st_gamma_arena_custom_arena_price')) {
+        Assert-True ($Text -match ('id="' + [regex]::Escape($Id) + '"')) "Readable Custom $Locale localization is missing $Id"
+    }
+}
 $Task9ItemCatalog = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
 foreach ($Marker in @('catalog.base_budget = rank_catalog.base_budget','catalog.max_entries = rank_catalog.max_entries')) {
     Assert-True ($Task9ItemCatalog -match [regex]::Escape($Marker)) "Task 9 composed catalog must propagate custom rule field: $Marker"
