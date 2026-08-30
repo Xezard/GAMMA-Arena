@@ -1374,7 +1374,7 @@ $Task4DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_m
 if (Test-Path -LiteralPath $Task4DevTestPath) {
     $Task4DevTestContent = Get-Content -LiteralPath $Task4DevTestPath -Raw
     Assert-True ($Task4DevTestContent -match 'character_creation_bridge_accepts_engine_nil_for_present_empty_values') 'Task 4 Dev tests must cover engine nil for present empty character-creation values'
-    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_both_arena_menu_clicks','main_menu_restart_is_acceptance_gated','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
+    foreach ($Marker in @('stale_launch_is_recovered_by_new_store','launch_survives_vm_reload_with_matching_bridge_lease','launch_handoff_rejects_mismatched_or_expired_lease','serialized_launch_requires_fake_start_phase_proof','same_store_corrupt_launch_is_replaced','resume_rejects_tampered_expected_session','mutation_failure_matrix_is_crash_safe','recovery_failure_quarantines_transaction','read_and_false_return_faults_are_safe','stale_cleanup_and_conflict_faults_are_safe','matching_resume_cleanup_is_session_scoped','custom_session_cleanup_without_resume_skips_catalog_validation','prepared_resume_consume_rejects_persisted_drift','dxml_accepts_canonical_callback_path','dxml_registers_both_arena_menu_clicks','main_menu_restart_is_acceptance_gated','dxml_registration_failures_are_structured','dxml_places_arena_after_new_game','dxml_placement_failures_are_structured','character_creation_bridge_restores_exactly_from_fresh_store','ordinary_character_creation_without_lease_is_untouched','character_creation_bridge_restores_on_every_launch_terminal_route','character_creation_bridge_faults_fail_closed','start_game_failures_restore_bridge_immediately','arm_fault','arm_read_fault','arm_recovery_fault','persisted')) {
         Assert-True ($Task4DevTestContent -match $Marker) "Task 4 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('defeat_intent_is_transactional_and_cross_vm_safe','defeat_promotion_is_atomic_and_conflict_safe','gad1:1000:death_1','issue_launch_from_defeat')) {
@@ -1615,6 +1615,10 @@ if (Test-Path -LiteralPath $Task5StorePath) {
     Assert-True ($Task5StoreContent -match 'function Store:inspect_intents') 'Session store must expose non-mutating intent inspection'
     Assert-True ($Task5StoreContent -match 'function Store:prepare_resume') 'Session store must validate a resume route before checkpoint re-hide'
     Assert-True ($Task5StoreContent -match 'function Store:clear_resume_if_matches') 'Checkpoint cleanup must clear only a ResumeIntent bound to its ArenaSession'
+    $ClearResumeStart = $Task5StoreContent.IndexOf('function Store:clear_resume_if_matches')
+    $ClearResumeEnd = $Task5StoreContent.IndexOf('function Store:clear_transient', $ClearResumeStart)
+    $ClearResumeContent = $Task5StoreContent.Substring($ClearResumeStart, $ClearResumeEnd - $ClearResumeStart)
+    Assert-True ($ClearResumeContent.IndexOf('if not pending.value then return gamma_arena_result.ok(false) end') -lt $ClearResumeContent.IndexOf('validate_expected_session(expected)')) 'Resume cleanup must skip Custom catalog validation when no resume intent exists.'
     Assert-True ($Task5StoreContent -match 'function Store:consume_resume\s*\(\s*config\s*,\s*expected\s*,\s*prepared') 'Resume consumption must compare the persisted intent with its prepared snapshot'
     Assert-True ($Task5StoreContent -match 'launch_handoff') 'Launch consumption must expose non-secret handoff metadata for diagnostics'
     foreach ($Marker in @('launch_stage','function Store:mark_launch_deferred','function Store:validate_launch_activation')) {
@@ -1722,9 +1726,11 @@ foreach ($Marker in @('gamma_arena_ui_battle.new','battle_ui')) {
     Assert-True ($BattleBootstrapContent -match [regex]::Escape($Marker)) "Battle identity bootstrap must cover $Marker"
 }
 Assert-True ($BattleBootstrapContent -match 'GA_BATTLE_UI_VISIBILITY_UPDATE_FAILED') 'Battle identity visibility failures must reach bounded runtime diagnostics'
-foreach ($Marker in @('runtime_battle_identity_lifecycle_is_active_only','runtime_battle_identity_failures_are_classified','runtime_battle_identity_mismatch_fails_before_active')) {
+foreach ($Marker in @('runtime_battle_identity_lifecycle_is_active_only','runtime_battle_identity_failures_are_classified','runtime_battle_identity_mismatch_fails_before_active','runtime_battle_identity_accepts_full_uint32_session_seed')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity lifecycle tests must cover $Marker"
 }
+Assert-True ($BattleOrchestratorContent -match 'seed\.value\s*<\s*0[\s\S]{0,80}seed\.value\s*>=\s*UINT32_MOD' -and $BattleOrchestratorContent -notmatch 'seed\.value\s*<\s*1') 'Battle identity runtime must accept the full uint32 ArenaSession seed domain.'
+Assert-True ($BattleUiContent -match 'model\.session_seed\s*<\s*0[\s\S]{0,80}model\.session_seed\s*>\s*UINT32_MAX' -and $BattleUiContent -notmatch 'PARK_MILLER_MAX') 'Battle identity HUD must format the full uint32 ArenaSession seed domain.'
 
 $Task6MainMenuPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_main_menu.script'
 $Task6UiStartPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_start.script'
