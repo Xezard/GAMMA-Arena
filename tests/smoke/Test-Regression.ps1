@@ -823,6 +823,26 @@ try {
     Write-FixtureFile $DevFixture 'dev\gamedata\scripts\gamma_arena_test_dev.script' 'dev fixture'
     $DevFixtureExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DevFixture)
     Assert-True ($DevFixtureExit -eq 0) 'Static release policy must ignore dev/gamedata gamma_arena_test_* fixtures.'
+
+    $DocumentationFreeFixture = New-Task7Fixture 'documentation-free-checkout'
+    Write-FixtureFile $DocumentationFreeFixture '.git' 'gitdir: fixture'
+    Write-FixtureFile $DocumentationFreeFixture 'tools\Build-GammaArena.ps1' ([IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\Build-GammaArena.ps1')))
+    foreach ($RequiredStaticArtifact in @(
+        'tests\reference\New-GammaArenaRandomSemanticSnapshot.ps1',
+        'tests\reference\New-GammaArenaGoldenFights.ps1',
+        'tools\New-CompatibilityReport.ps1'
+    )) {
+        Write-FixtureFile $DocumentationFreeFixture $RequiredStaticArtifact ([IO.File]::ReadAllText((Join-Path $RepoRoot $RequiredStaticArtifact)))
+    }
+    $DocumentationFreePath = Join-Path $DocumentationFreeFixture 'docs'
+    if (Test-Path -LiteralPath $DocumentationFreePath) {
+        Remove-Item -LiteralPath $DocumentationFreePath -Recurse -Force
+    }
+    $DocumentationFreeExit = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $DocumentationFreeFixture)
+    Assert-True ($DocumentationFreeExit -eq 0) 'Static project checks must not require the local documentation tree.'
+
+    $AggregateRunnerContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'tools\Test-GammaArena.ps1') -Raw
+    Assert-True ($AggregateRunnerContent -notmatch 'Test-BalanceDocumentation\.ps1') 'Standard build checks must not invoke documentation validation.'
     if ($PositiveFixtureOnly) {
         if ($script:Failures.Count -gt 0) {
             foreach ($Failure in $script:Failures) { Write-Host "FAIL: $Failure" }
@@ -840,10 +860,9 @@ try {
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'VERSION') -Force
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tools\Build-GammaArena.ps1') -Force
     Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'tests\fixtures\custom-catalog-v10.json') -Force
-    Remove-Item -LiteralPath (Join-Path $MissingReleaseSurfaceFixture 'docs\superpowers\specs\2026-08-28-custom-arena-main-integration-design.md') -Force
     $MissingReleaseSurfaceResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingReleaseSurfaceFixture) -CaptureOutput
     Assert-True ($MissingReleaseSurfaceResult.ExitCode -ne 0) 'A real-repo-shaped release surface must fail when current artifacts are missing.'
-    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.','Task 8 current design is missing.')) {
+    foreach ($Diagnostic in @('VERSION is missing','Task 7 release build script is missing.','Task 7 current catalog fixture custom-catalog-v10.json is missing.')) {
         Assert-True ($MissingReleaseSurfaceResult.Output.Contains($Diagnostic)) "Currentness gate must report every missing real-repo artifact: $Diagnostic"
     }
 

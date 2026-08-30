@@ -498,7 +498,14 @@ function new_actor_item_port(ports)
                 else
                     exact = actor_loadout_failure('GA_ACTOR_DEVICE_OWNERSHIP_INVALID', 'Universal actor device lacks exact rollback ownership')
                 end
-                if not exact.ok then return exact end
+                if not exact.ok then
+                    if record.authorized == true and exact.error
+                        and exact.error.code == 'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH' then
+                        return actor_loadout_call('GA_ACTOR_DEVICE_SHUTDOWN_FAILED',
+                            ports.shutdown_device, nil, nil, record.section)
+                    end
+                    return exact
+                end
                 if exact.value and exact.value.item ~= nil then
                     item = exact.value.item
                 else
@@ -537,6 +544,15 @@ function new_actor_item_port(ports)
         context.field = field
         return actor_loadout_failure('GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH',
             'Current universal actor item differs from its durable ownership record', context)
+    end
+
+    local function quarantine_current_record(record)
+        if type(record) ~= 'table' or record.authorized ~= true then
+            return actor_loadout_failure('GA_ACTOR_ITEMS_OWNERSHIP_INVALID',
+                'Only an authorized current actor-item record can be quarantined')
+        end
+        record.cleanup_quarantined = true
+        return gamma_arena_result.ok(true)
     end
 
     local function runtime_owner_proof(entity, record, server_parent)
@@ -849,6 +865,7 @@ function new_actor_item_port(ports)
                 errors[#errors + 1] = resolved.error
                 table.insert(remaining, 1, record)
             elseif resolved.value ~= nil then
+                local keep_record = true
                 local exact
                 if record.authorized == true then
                     exact = exact_current_record(resolved.value, record)
@@ -858,12 +875,22 @@ function new_actor_item_port(ports)
                     exact = actor_loadout_failure("GA_ACTOR_ITEMS_OWNERSHIP_INVALID", "Universal actor item lacks durable ownership and a submitted transaction release", { id = record.id })
                 end
                 if not exact.ok then
-                    errors[#errors + 1] = exact.error
+                    if record.authorized == true and exact.error
+                        and exact.error.code == 'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH' then
+                        local quarantined = quarantine_current_record(record)
+                        if quarantined.ok then
+                            keep_record = false
+                        else
+                            errors[#errors + 1] = quarantined.error
+                        end
+                    else
+                        errors[#errors + 1] = exact.error
+                    end
                 elseif record.authorized == true and record.release_submitted ~= true then
                     local released = actor_loadout_call("GA_ACTOR_ITEMS_RELEASE_FAILED", ports.release_item, record.id)
                     if released.ok then record.release_submitted = true else errors[#errors + 1] = released.error end
                 end
-                table.insert(remaining, 1, record)
+                if keep_record then table.insert(remaining, 1, record) end
             end
         end
         owned_records = remaining

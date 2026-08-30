@@ -200,11 +200,15 @@ foreach ($CaseName in @(
     'runtime_universal_actor_item_ownership_proof_preserves_boolean_contract',
     'runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token',
     'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent',
-    'runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity'
+    'runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity',
+    'runtime_universal_actor_cleanup_quarantines_mismatched_non_device'
 )) {
     if (-not $RuntimeTests.Contains($CaseName)) {
         throw "Universal actor-device runtime ownership regression is missing: $CaseName"
     }
+}
+if ($UniversalItemPort -notmatch 'local\s+function\s+quarantine_current_record\s*\(') {
+    throw 'Universal actor-item cleanup must quarantine mismatched current records without releasing them'
 }
 if ($UniversalItemPort -notmatch 'ports\.item_parent_id' -or
     $UniversalItemPort -notmatch 'server_parent_matches' -or
