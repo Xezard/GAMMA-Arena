@@ -599,6 +599,28 @@ $CustomIntegrationMarkers = @('self.catalog_state =','self.presenter = gamma_are
 foreach ($Marker in $CustomIntegrationMarkers) {
     Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Two-panel Custom integration is missing $Marker"
 }
+$GroupedControlMarkers = @(
+    'self.enemy_setup = self.xml:InitStatic("gamma_arena_custom:enemy_setup", self.root)',
+    'self.roster_panel = self.xml:InitStatic("gamma_arena_custom:roster", self.root)',
+    'self.catalog_controls = self.xml:InitStatic("gamma_arena_custom:catalog_controls", self.root)',
+    'self.footer_panel = self.xml:InitStatic("gamma_arena_custom:footer", self.root)',
+    '"gamma_arena_custom:enemy_setup:faction", self.enemy_setup',
+    '"gamma_arena_custom:catalog_controls:catalog_search", self.catalog_controls',
+    'self.xml:InitStatic(row_path, self.roster_panel)',
+    '"gamma_arena_custom:footer:weight", self.footer_panel'
+)
+foreach ($Marker in $GroupedControlMarkers) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) `
+        "Custom grouped control is not anchored to its XML parent: $Marker"
+}
+$DispatchTransferBlock = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+dispatch_transfer\s*\(.*?^end\s*$').Value
+foreach ($Marker in @(
+    'direction == "inventory_to_loadout" and callable(model, "add_one")',
+    'direction == "loadout_to_inventory" and callable(model, "remove_one")'
+)) {
+    Assert-True ($DispatchTransferBlock -match [regex]::Escape($Marker)) `
+        "Custom transfer direction must spend or refund AP through the correct command: $Marker"
+}
 Assert-True ($ReadableCustomUi -notmatch 'TransferItem') `
     'Two-panel Custom UI must rebuild from the model instead of transferring cells optimistically.'
 $RebuildContainerBlock = [regex]::Match($ReadableCustomUi, '(?ms)^local\s+function\s+rebuild_container\s*\(.*?^end\s*$').Value
