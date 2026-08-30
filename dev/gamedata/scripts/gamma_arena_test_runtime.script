@@ -11590,27 +11590,23 @@ local function runtime_universal_actor_device_cleanup_runtime_parent_never_repla
         local issued_token = env.tags[device.runtime_id]
         device.parent_runtime_id = 65535
         env.tags[device.runtime_id] = replacement == false and nil or replacement
-        local rejected = items:cleanup()
-        gamma_arena_test_assert.is_false(rejected.ok,
-            'runtime actor parent cannot replace a missing or foreign token')
-        gamma_arena_test_assert.equals(rejected.error.code,
-            'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', 'token mismatch keeps the public code')
-        gamma_arena_test_assert.equals(rejected.error.context.field, 'owner_tag',
-            'token mismatch names the safe diagnostic field')
-        gamma_arena_test_assert.is_false(rejected.error.context.tag_matches,
-            'token diagnostics expose no token value')
-        for key, value in pairs(rejected.error.context) do
-            gamma_arena_test_assert.is_false(value == issued_token,
-                'token diagnostics never expose the issued token through ' .. tostring(key))
-            if type(replacement) == 'string' then
-                gamma_arena_test_assert.is_false(value == replacement,
-                    'token diagnostics never expose the observed token through ' .. tostring(key))
-            end
-        end
-        gamma_arena_test_assert.equals(#env.shutdown_calls, 0,
-            'token mismatch never reaches device shutdown')
+        local cleaned = items:cleanup()
+        gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value == true,
+            'runtime actor parent cannot authorize release after token drift, but cleanup continues')
+        gamma_arena_test_assert.equals(#env.shutdown_calls, 1,
+            'token drift uses one global-only device shutdown')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].item, nil,
+            'token drift never passes the mismatched object to shutdown')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].id, nil,
+            'token drift never passes the reused id to shutdown')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].section, 'device_torch_dummy',
+            'token drift retains only the issued device section for global NV shutdown')
         gamma_arena_test_assert.equals(#env.releases, 0,
-            'token mismatch never releases an item')
+            'token drift quarantines the record without releasing a current object')
+        gamma_arena_test_assert.equals(#items:records_snapshot(), 0,
+            'token drift retires the stale ownership record for actor inventory drain')
+        gamma_arena_test_assert.is_true(issued_token ~= replacement,
+            'fixture changes the issued ownership proof')
     end
 end
 
@@ -11627,20 +11623,19 @@ local function runtime_universal_actor_device_cleanup_rejects_foreign_runtime_pa
     local device = env.created[1]
     device.parent_runtime_id = 999
     device.runtime_parent_object = { id = function() return 999 end }
-    local rejected = items:cleanup()
-    gamma_arena_test_assert.is_false(rejected.ok, 'two foreign parent views fail closed')
-    gamma_arena_test_assert.equals(rejected.error.code,
-        'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', 'foreign parent keeps the public code')
-    gamma_arena_test_assert.equals(rejected.error.context.field, 'parent_id',
-        'foreign parent names the failed field')
-    gamma_arena_test_assert.is_false(rejected.error.context.server_parent_matches,
-        'diagnostics reject the server parent')
-    gamma_arena_test_assert.is_false(rejected.error.context.runtime_parent_matches,
-        'diagnostics reject the runtime parent')
-    gamma_arena_test_assert.equals(#env.shutdown_calls, 0,
-        'foreign parent never reaches device shutdown')
+    local cleaned = items:cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value == true,
+        'two foreign parent views quarantine the stale record without blocking victory')
+    gamma_arena_test_assert.equals(#env.shutdown_calls, 1,
+        'foreign parent uses one global-only device shutdown')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].item, nil,
+        'foreign parent never exposes the mismatched object to shutdown')
+    gamma_arena_test_assert.equals(env.shutdown_calls[1].id, nil,
+        'foreign parent never exposes the mismatched id to shutdown')
     gamma_arena_test_assert.equals(#env.releases, 0,
         'foreign parent never releases an item')
+    gamma_arena_test_assert.equals(#items:records_snapshot(), 0,
+        'foreign parent retires only the stale ownership record')
 end
 
 local function runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity()
@@ -11661,18 +11656,40 @@ local function runtime_universal_actor_device_cleanup_rejects_changed_runtime_id
         local runtime_device = runtime_items[server_device.runtime_id]
         server_device.parent_runtime_id = 65535
         case.mutate(runtime_device)
-        local rejected = items:cleanup()
-        gamma_arena_test_assert.is_false(rejected.ok,
-            case.field .. ' mismatch fails closed')
-        gamma_arena_test_assert.equals(rejected.error.code,
-            'GA_ACTOR_ITEMS_OWNERSHIP_MISMATCH', case.field .. ' keeps the public code')
-        gamma_arena_test_assert.equals(rejected.error.context.field, case.field,
-            case.field .. ' diagnostics identify the exact runtime field')
-        gamma_arena_test_assert.equals(#env.shutdown_calls, 0,
-            case.field .. ' mismatch never reaches device shutdown')
+        local cleaned = items:cleanup()
+        gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value == true,
+            case.field .. ' mismatch quarantines the stale record without blocking victory')
+        gamma_arena_test_assert.equals(#env.shutdown_calls, 1,
+            case.field .. ' mismatch uses one global-only shutdown')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].item, nil,
+            case.field .. ' mismatch never exposes the changed runtime object')
+        gamma_arena_test_assert.equals(env.shutdown_calls[1].id, nil,
+            case.field .. ' mismatch never exposes the reused id')
         gamma_arena_test_assert.equals(#env.releases, 0,
             case.field .. ' mismatch never releases an item')
+        gamma_arena_test_assert.equals(#items:records_snapshot(), 0,
+            case.field .. ' mismatch retires only the stale ownership record')
     end
+end
+
+local function runtime_universal_actor_cleanup_quarantines_mismatched_non_device()
+    local owner = { id = function() return 77 end }
+    local env, ports = task11_production_item_ports()
+    local items = gamma_arena_bootstrap.new_actor_item_port(ports)
+    local applied = items:apply(owner, {
+        { section = 'medkit', quantity = 1 }
+    }, universal_catalog())
+    gamma_arena_test_assert.is_true(applied.ok and applied.value.ready == true,
+        'non-device quarantine fixture materializes')
+    local record = items:records_snapshot()[1]
+    env.tags[record.id] = 'foreign-token'
+    local cleaned = items:cleanup()
+    gamma_arena_test_assert.is_true(cleaned.ok and cleaned.value == true,
+        'non-device token drift cannot block victory cleanup')
+    gamma_arena_test_assert.equals(#env.releases, 0,
+        'non-device token drift never releases the mismatched current object')
+    gamma_arena_test_assert.equals(#items:records_snapshot(), 0,
+        'non-device token drift retires the stale record for actor inventory drain')
 end
 
 local function runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback()
@@ -12118,6 +12135,7 @@ local cases = {
     { name = 'runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token', fn = runtime_universal_actor_device_cleanup_runtime_parent_never_replaces_token },
     { name = 'runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent', fn = runtime_universal_actor_device_cleanup_rejects_foreign_runtime_parent },
     { name = 'runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity', fn = runtime_universal_actor_device_cleanup_rejects_changed_runtime_identity },
+    { name = 'runtime_universal_actor_cleanup_quarantines_mismatched_non_device', fn = runtime_universal_actor_cleanup_quarantines_mismatched_non_device },
     { name = 'runtime_entity_rejects_opponent_device_before_actor_mutation', fn = runtime_entity_rejects_opponent_device_before_actor_mutation },
     { name = 'runtime_universal_actor_device_is_exact_equipped_charged_and_ready', fn = runtime_universal_actor_device_is_exact_equipped_charged_and_ready },
     { name = "runtime_custom_session_creation_copies_validated_recipe", fn = runtime_custom_session_creation_copies_validated_recipe },
