@@ -10909,7 +10909,12 @@ local function runtime_custom_presenter_refreshes_status_without_catalog_snapsho
                 count = 2,
                 capacity = 10,
                 actor_device = "device_torch_nv_2",
-                device_options = { { section = "device_torch_nv_2", selected = true } },
+                device_options = {
+                    {
+                        section = "device_torch_nv_2", price = 120, weight_mg = 900,
+                        selected = true, affordable = true, disabled = false, disabled_reason = nil
+                    }
+                },
                 budget = 900,
                 spent = 240,
                 remaining = 660,
@@ -11039,6 +11044,120 @@ local function runtime_custom_presenter_success_clears_transient_infrastructure_
         "successful status refresh clears transient infrastructure status")
     gamma_arena_test_assert.equals(refreshed.summary_code, "GA_CUSTOM_FACTION_UNKNOWN",
         "successful status refresh returns validation status")
+end
+
+local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomically()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local function valid_status()
+        return {
+            validation = gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction is required"),
+            roster = { { rank = "veteran" } },
+            count = 1,
+            capacity = 10,
+            faction = "stalker",
+            actor_device = nil,
+            device_options = {},
+            budget = 600,
+            spent = 100,
+            remaining = 500,
+            weight_mg = 1000,
+            weight_limit_mg = 50000,
+            can_start = false,
+            last_operation = nil
+        }
+    end
+    local scenarios = {
+        { name = "partial table", mutate = function(status) for key in pairs(status) do status[key] = nil end end },
+        { name = "roster row missing rank", mutate = function(status) status.roster = { {} } end },
+        { name = "roster row wrong type", mutate = function(status) status.roster = { false } end },
+        { name = "device options wrong type", mutate = function(status) status.device_options = false end },
+        { name = "device option wrong element", mutate = function(status) status.device_options = { false } end }
+    }
+    for _, scenario in ipairs(scenarios) do
+        local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+        local selected_cells = { { section = "medkit", quantity = 1 } }
+        local readiness = { { id = "outfit", complete = true } }
+        local view = {
+            catalog_cells = catalog_cells,
+            selected_cells = selected_cells,
+            readiness = readiness,
+            filter = "weapon",
+            search = "alpha",
+            sort = "name_desc",
+            catalog_page = 2,
+            catalog_page_count = 5,
+            catalog_has_previous = true,
+            catalog_has_next = true,
+            actor_device = "device_torch_nv_1",
+            remaining = 444
+        }
+        local status = valid_status()
+        scenario.mutate(status)
+        local called, refreshed = pcall(presenter.refresh_status, presenter, {
+            status_snapshot = function() return status end
+        }, view)
+        gamma_arena_test_assert.is_true(called, scenario.name .. " status refresh is crash-safe")
+        gamma_arena_test_assert.equals(refreshed, view, scenario.name .. " retains the existing view")
+        gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells,
+            scenario.name .. " retains catalog cells")
+        gamma_arena_test_assert.equals(refreshed.selected_cells, selected_cells,
+            scenario.name .. " retains selected cells")
+        gamma_arena_test_assert.equals(refreshed.readiness, readiness,
+            scenario.name .. " retains readiness")
+        gamma_arena_test_assert.equals(refreshed.filter, "weapon", scenario.name .. " retains filter")
+        gamma_arena_test_assert.equals(refreshed.catalog_page, 2, scenario.name .. " retains navigation")
+        gamma_arena_test_assert.equals(refreshed.actor_device, "device_torch_nv_1",
+            scenario.name .. " preserves device before shape validation")
+        gamma_arena_test_assert.equals(refreshed.remaining, 444,
+            scenario.name .. " preserves budget before shape validation")
+        gamma_arena_test_assert.is_false(refreshed.launch_enabled, scenario.name .. " disables launch")
+        gamma_arena_test_assert.equals(refreshed.infrastructure_error_code, "GA_CUSTOM_MODEL_INVALID",
+            scenario.name .. " owns infrastructure status")
+    end
+end
+
+local function runtime_custom_ui_refresh_helpers_preserve_native_cells()
+    local preview_calls = 0
+    local model = {
+        preview_add_one = function(_, section)
+            preview_calls = preview_calls + 1
+            if section == "wpn_alpha" then return gamma_arena_result.ok({}) end
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Too expensive")
+        end
+    }
+    local cells = { { section = "wpn_alpha" }, { section = "wpn_beta" } }
+    gamma_arena_ui_custom.refresh_catalog_cells(model, cells)
+    gamma_arena_test_assert.equals(preview_calls, 2, "status refresh previews each projected cell once")
+    gamma_arena_test_assert.is_false(cells[1].disabled, "affordable projected cell remains enabled")
+    gamma_arena_test_assert.equals(cells[1].disabled_reason, nil, "enabled projected cell clears reason")
+    gamma_arena_test_assert.is_true(cells[2].disabled, "unaffordable projected cell becomes disabled")
+    gamma_arena_test_assert.equals(cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "disabled projected cell keeps exact reason")
+
+    local colors = {}
+    local alpha = {
+        section = "wpn_alpha", flags = {}, IsShown = function() return true end,
+        Colorize = function(_, color) colors.wpn_alpha = color end
+    }
+    local beta = {
+        section = "wpn_beta", flags = {}, IsShown = function() return true end,
+        Colorize = function(_, color) colors.wpn_beta = color end
+    }
+    local container = {
+        cell = { alpha, beta },
+        Reset = function() error("Reset must not run during status refresh") end,
+        AddItem = function() error("AddItem must not run during status refresh") end,
+        Scroll_Reinit = function() error("Scroll_Reinit must not run during status refresh") end
+    }
+    gamma_arena_ui_custom.refresh_inventory_cells(container, cells)
+    gamma_arena_test_assert.equals(container.cell[1], alpha, "status refresh preserves first native cell identity")
+    gamma_arena_test_assert.equals(container.cell[2], beta, "status refresh preserves second native cell identity")
+    gamma_arena_test_assert.is_false(alpha.flags.disabled, "enabled native cell flag updates in place")
+    gamma_arena_test_assert.is_true(beta.flags.disabled, "disabled native cell flag updates in place")
+    gamma_arena_test_assert.equals(colors.wpn_alpha, "def", "enabled native cell receives default color")
+    gamma_arena_test_assert.equals(colors.wpn_beta, "hide", "disabled native cell receives muted color")
 end
 
 local function runtime_custom_model_status_snapshot_matches_full_status()
@@ -12493,6 +12612,8 @@ local cases = {
     { name = "runtime_custom_presenter_refreshes_status_without_catalog_snapshot", fn = runtime_custom_presenter_refreshes_status_without_catalog_snapshot },
     { name = "runtime_custom_presenter_status_failures_preserve_catalog_view", fn = runtime_custom_presenter_status_failures_preserve_catalog_view },
     { name = "runtime_custom_presenter_success_clears_transient_infrastructure_status", fn = runtime_custom_presenter_success_clears_transient_infrastructure_status },
+    { name = "runtime_custom_presenter_rejects_malformed_status_snapshots_atomically", fn = runtime_custom_presenter_rejects_malformed_status_snapshots_atomically },
+    { name = "runtime_custom_ui_refresh_helpers_preserve_native_cells", fn = runtime_custom_ui_refresh_helpers_preserve_native_cells },
     { name = "runtime_custom_model_status_snapshot_matches_full_status", fn = runtime_custom_model_status_snapshot_matches_full_status },
     { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },

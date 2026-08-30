@@ -3405,6 +3405,9 @@ $RosterRefreshUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\s
 $RosterRefreshRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 Assert-True ($RosterRefreshModel -match 'function\s+Model:status_snapshot') 'Custom roster refresh model must expose status_snapshot.'
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
+Assert-True ($RosterRefreshPresenter -match 'local\s+function\s+valid_status_snapshot') 'Custom status refresh must validate snapshot shape before mutation.'
+Assert-True ($RosterRefreshUi -match 'function\s+refresh_catalog_cells') 'Custom status refresh must expose current-page preview helper.'
+Assert-True ($RosterRefreshUi -match 'function\s+refresh_inventory_cells') 'Custom status refresh must expose in-place inventory helper.'
 $RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
 $RefreshPresenterEnd = if ($RefreshPresenterStart -ge 0) { $RosterRefreshPresenter.IndexOf('function status_presentation', $RefreshPresenterStart) } else { -1 }
 Assert-True ($RefreshPresenterStart -ge 0 -and $RefreshPresenterEnd -gt $RefreshPresenterStart) 'Custom status refresh presenter must remain structurally testable.'
