@@ -4,16 +4,16 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
-- Reworked Custom Arena Setup into labeled opponent and fight-condition groups, added a GAMMA-style enemy-faction emblem picker, explained fight seed, player device, ranks, and catalog search, made launch requirements explicit, and clarified navigation back to Random mode.
 
-## 0.5.0 - 2026-08-28
+## 0.5.0 - 2026-08-31
 
-- Published FightSpec v9 as the sole emitted, accepted, documented, and packaged fight contract with exact catalog identity `10/11/11` and generator 11.
-- Kept Random and Custom as generation recipes for one mode-neutral physical item shape without mode, difficulty, budget, price, weight-total, or provenance fields.
-- Made the Custom lighting device optional and budgeted with exact prices 25/75/150/300 AP while Random still issues one deterministic 50/25/18/7 device outside its loadout budgets.
-- Preserved one shared faction, 1-10 individually selected exact ranks, the `600 + sum(rank threat)` budget, the two-distinct-grenade surcharge, and the 64-distinct/256-physical limits.
-- Recorded NPC appearance as deliberately nondeterministic deferred work until it becomes observable or mechanically relevant.
-- Removed active FightSpec v1-v8 validators, schemas, golden artifacts, aliases, and package branches; Dev references now target only v9/current fixtures.
+- Added the first complete Custom Setup alongside Random mode, with an enemy-faction emblem picker and one to ten individually selected, exact opponent ranks.
+- Built a two-panel loadout builder from your active installed GAMMA combat catalog, with localized search, filtering, sorting, pagination, native item details, and direct item interaction.
+- Organized setup into labeled opponent and fight-condition groups, with seed, device, and rank guidance; live AP and weight feedback; and a clear checklist for an outfit, knife, equipped firearm, compatible ammunition, and healing.
+- Choose a random or manual fight seed, then optionally equip a budgeted player headlamp or Gen 1, Gen 2, or Gen 3 NVG.
+- Set loadouts within a rank-derived `600 + sum(rank threat)` AP budget, including the two-distinct-grenade surcharge and limits of 64 distinct items and 256 physical items.
+- Keep your custom roster and actor template after victories while enemy equipment regenerates, then receive a fresh default Custom Setup after defeat.
+- Stay responsive with catalogs of 4,000 or more installed items, including lightweight opponent-count and rank editing.
 
 ## 0.4.0 - 2026-08-27
 
