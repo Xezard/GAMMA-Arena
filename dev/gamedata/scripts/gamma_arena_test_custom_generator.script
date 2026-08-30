@@ -399,6 +399,53 @@ local function custom_generation_is_deterministic_and_exact()
     gamma_arena_test_assert.equals(first.value.actor.loadout.items[1].section, "outfit_field", "actor template is deep copied")
 end
 
+local function custom_generation_skips_enemy_equipment_outside_universal_catalog()
+    local clean, snapshot, arena = catalog(), catalog(), layout()
+    snapshot.outfit_list[#snapshot.outfit_list + 1] = {
+        section = "merc_ace_outfit", cost = 1, armor_class = "scientific"
+    }
+    snapshot.knife_list[#snapshot.knife_list + 1] = { section = "wpn_knife_npc_only" }
+
+    local current = session({ "novice" }, 54321)
+    for fight_index = 0, 31 do
+        local expected = gamma_arena_fight_builder.generate(current, fight_index, clean, arena)
+        local generated = gamma_arena_fight_builder.generate(current, fight_index, snapshot, arena)
+        gamma_arena_test_assert.is_true(expected.ok and generated.ok,
+            "Custom ignores legacy enemy equipment outside the universal catalog")
+        gamma_arena_test_assert.equals(gamma_arena_fight_spec.stable_encode(generated.value),
+            gamma_arena_fight_spec.stable_encode(expected.value),
+            "non-physical legacy equipment does not perturb deterministic selection")
+        for _, opponent in ipairs(generated.value.opponents) do
+            for _, entry in ipairs(opponent.items) do
+                gamma_arena_test_assert.is_true(snapshot.items[entry.section] ~= nil,
+                    "Custom enemy item is universally cataloged")
+                gamma_arena_test_assert.is_true(entry.section ~= "merc_ace_outfit"
+                    and entry.section ~= "wpn_knife_npc_only",
+                    "non-spawnable legacy equipment is never emitted")
+            end
+        end
+    end
+end
+
+local function custom_generation_fails_without_physical_enemy_equipment()
+    for _, missing_category in ipairs({ "outfit", "knife" }) do
+        local snapshot = catalog()
+        if missing_category == "outfit" then
+            snapshot.outfit_list = { { section = "merc_ace_outfit", cost = 1, armor_class = "scientific" } }
+        else
+            snapshot.knife_list = { { section = "wpn_knife_npc_only" } }
+        end
+        local generated = gamma_arena_custom_generator.build_draft(
+            session({ "novice" }, 54321), 0, snapshot, layout())
+        gamma_arena_test_assert.is_false(generated.ok,
+            "Custom fails closed without physical enemy " .. missing_category)
+        gamma_arena_test_assert.equals(generated.error.code, "GA_CUSTOM_EQUIPMENT_UNAVAILABLE",
+            "missing physical enemy equipment has an exact error")
+        gamma_arena_test_assert.equals(generated.value, nil,
+            "missing physical enemy equipment emits no partial draft")
+    end
+end
+
 local function custom_actor_device_is_optional_exact_and_prebudgeted()
     local snapshot, arena = catalog(), layout()
     local choices = {
@@ -666,6 +713,8 @@ end
 
 local cases = {
     { name = "custom_generation_is_deterministic_and_exact", fn = custom_generation_is_deterministic_and_exact },
+    { name = "custom_generation_skips_enemy_equipment_outside_universal_catalog", fn = custom_generation_skips_enemy_equipment_outside_universal_catalog },
+    { name = "custom_generation_fails_without_physical_enemy_equipment", fn = custom_generation_fails_without_physical_enemy_equipment },
     { name = "custom_actor_device_is_optional_exact_and_prebudgeted", fn = custom_actor_device_is_optional_exact_and_prebudgeted },
     { name = "custom_fight_index_rerolls_only_enemy_random_fields", fn = fight_index_rerolls_only_enemy_random_fields },
     { name = "custom_builder_erases_recipe_provenance_and_accepts_carried_weapons", fn = builder_erases_recipe_provenance_and_accepts_carried_weapons },

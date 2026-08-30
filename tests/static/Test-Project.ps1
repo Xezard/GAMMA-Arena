@@ -821,8 +821,8 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\fixtures\g
 $Task10ArtifactsPresent = Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\reference\New-GammaArenaGoldenFights.ps1')
 if ($Task10ArtifactsPresent) {
 $Task10CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'validate_exact_weapon_pool', 'gamma_arena_custom_config.validate_weapon_pool', 'validate_layout_preflight', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_generator.script'; Namespace = 'gamma_arena_custom_generator'; Required = @('(?m)^function\s+build_draft\s*\(\s*session\s*,\s*fight_index\s*,\s*catalog\s*,\s*layout\s*\)', '"custom-v1"', 'catalog_fingerprint', 'validate_exact_weapon_pool', 'gamma_arena_custom_config.validate_weapon_pool', 'validate_layout_preflight', 'catalog_item_matches', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'GA_CUSTOM_LAYOUT_INVALID', 'enemy_grenade_presence', 'enemy_grenade_section', 'kind\s*=\s*"items"', 'GA_CUSTOM_GENERATION_FAILED') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script'; Namespace = 'gamma_arena_test_custom_generator'; Required = @('(?m)^function\s+run\s*\(', 'custom_generation_is_deterministic_and_exact', 'custom_generation_skips_enemy_equipment_outside_universal_catalog', 'custom_generation_fails_without_physical_enemy_equipment', 'merc_ace_outfit', 'GA_CUSTOM_EQUIPMENT_UNAVAILABLE', 'custom_fight_index_rerolls_only_enemy_random_fields', 'custom_builder_erases_recipe_provenance_and_accepts_carried_weapons', 'custom_generation_fails_closed_for_capacity_and_corruption', 'custom_generation_preflights_every_pool_member', 'custom_generation_preflights_every_layout_entry', 'custom_generation_rejects_noncanonical_profile_alias', 'ordered_items_signature', 'enemy weapon comes from exact faction-rank pool', 'expert', 'master', 'legend', 'arena_enemy') },
     [PSCustomObject]@{ Path = 'tests\fixtures\custom-catalog-v10.json'; Required = @('"schema_version"\s*:\s*10', '"catalog_fingerprint"\s*:\s*"ga-catalog-v10-', '"rank_ids"', '"equipment_pools"', '"actor_cases"') }
 )
 foreach ($Contract in $Task10CustomContracts) {
@@ -912,6 +912,15 @@ foreach ($Marker in @('resolved layout intentionally has no virtual_capacity',
     Assert-True ($Task11Runtime -match [regex]::Escape($Marker)) `
         "Custom logical/resolved layout regression is missing: $Marker"
 }
+$Task10CustomGeneratorTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_generator.script') -Raw
+$CustomPhysicalCatalogCase = 'custom_generation_skips_enemy_equipment_outside_universal_catalog'
+$CustomPhysicalCatalogRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($CustomPhysicalCatalogCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($CustomPhysicalCatalogCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task10CustomGeneratorTests, $CustomPhysicalCatalogRegistration)).Count -eq 1) `
+    "Regression case must be registered exactly: $CustomPhysicalCatalogCase -> $CustomPhysicalCatalogCase."
+$CustomPhysicalFailureCase = 'custom_generation_fails_without_physical_enemy_equipment'
+$CustomPhysicalFailureRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($CustomPhysicalFailureCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($CustomPhysicalFailureCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task10CustomGeneratorTests, $CustomPhysicalFailureRegistration)).Count -eq 1) `
+    "Regression case must be registered exactly: $CustomPhysicalFailureCase -> $CustomPhysicalFailureCase."
 Assert-True ($Task11Bootstrap -match 'function\s+new_actor_item_port\s*\(' -and $Task11Bootstrap -match 'gamma_arena_item_materializer\.new\s*\(') 'Task 11 production actor path must construct the universal item materializer.'
 Assert-True ($Task11Bootstrap -notmatch 'local value = \{ consumables = \{\}, grenades = \{\} \}') 'Task 11 production actor path must not flatten universal items into a legacy single-weapon loadout.'
 Assert-True ($Task11Bootstrap -match 'weapon:set_ammo_type\s*\(' -and $Task11Bootstrap -match 'weapon:get_ammo_type\s*\(') 'Task 11 production actor path must set and verify the real engine ammunition type.'
