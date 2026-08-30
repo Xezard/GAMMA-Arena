@@ -98,6 +98,25 @@ local function commit(self, candidate)
     return result
 end
 
+local function commit_allowing_incomplete_budget(self, candidate, allow_overweight)
+    local validated = gamma_arena_custom_config.validate(candidate, {
+        catalog = self.catalog, layout = self.layout
+    })
+    local accepted = gamma_arena_custom_config.validate_draft(candidate, {
+        catalog = self.catalog, layout = self.layout
+    })
+    local code = not accepted.ok and accepted.error and accepted.error.code or nil
+    if not accepted.ok and code ~= "GA_CUSTOM_OVERSPEND"
+        and not (allow_overweight and code == "GA_CUSTOM_OVERWEIGHT") then
+        return reject(self, accepted)
+    end
+    self.draft = candidate
+    self.current_validation = validated
+    local result = gamma_arena_result.ok({ validation = deep_copy(validated) })
+    self.last_operation = deep_copy(result)
+    return result
+end
+
 local function item_definition(self, section)
     if type(section) ~= "string" or section == "" or #section > 256
         or type(self.catalog) ~= "table" or type(self.catalog.items) ~= "table"
@@ -177,7 +196,18 @@ function Model:add_one(section)
 end
 
 function Model:remove_one(section)
-    return self:decrement_item(section)
+    local index, entry = selected_index(self.draft, section)
+    if index == nil then
+        return reject(self, failure("GA_CUSTOM_ITEM_NOT_SELECTED",
+            "Custom item is not selected", { section = section }))
+    end
+    local candidate = copy_config(self.draft)
+    if entry.quantity == 1 then
+        table.remove(candidate.actor_items, index)
+    else
+        candidate.actor_items[index].quantity = entry.quantity - 1
+    end
+    return commit_allowing_incomplete_budget(self, candidate, true)
 end
 
 function Model:equip_replacing(section)
@@ -232,7 +262,7 @@ function Model:set_count(count)
     local candidate = copy_config(self.draft)
     while #candidate.roster > count do table.remove(candidate.roster) end
     while #candidate.roster < count do candidate.roster[#candidate.roster + 1] = { rank = "novice" } end
-    return commit(self, candidate)
+    return commit_allowing_incomplete_budget(self, candidate, false)
 end
 
 function Model:set_rank(index, rank)
@@ -253,7 +283,7 @@ function Model:set_rank(index, rank)
     end
     local candidate = copy_config(self.draft)
     candidate.roster[index].rank = rank
-    return commit(self, candidate)
+    return commit_allowing_incomplete_budget(self, candidate, false)
 end
 
 function Model:set_device(section)

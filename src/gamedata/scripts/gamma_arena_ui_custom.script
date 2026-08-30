@@ -1,5 +1,21 @@
 local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
 local CATALOG_PAGE_SIZE = 80
+local FILTER_IDS = { "all", "weapon", "ammo", "armor", "medicine", "other" }
+local SORT_IDS = { "price_asc", "price_desc", "name_asc", "name_desc" }
+local FILTER_LABEL_KEYS = {
+    all = "st_gamma_arena_custom_filter_all",
+    weapon = "st_gamma_arena_custom_filter_weapon",
+    ammo = "st_gamma_arena_custom_filter_ammo",
+    armor = "st_gamma_arena_custom_filter_armor",
+    medicine = "st_gamma_arena_custom_filter_medicine",
+    other = "st_gamma_arena_custom_filter_other"
+}
+local SORT_LABEL_KEYS = {
+    price_asc = "st_gamma_arena_custom_sort_price_asc",
+    price_desc = "st_gamma_arena_custom_sort_price_desc",
+    name_asc = "st_gamma_arena_custom_sort_name_asc",
+    name_desc = "st_gamma_arena_custom_sort_name_desc"
+}
 local DEVICE_LABEL_KEYS = {
     device_torch_dummy = "st_gamma_arena_custom_device_headlamp",
     device_torch_nv_1 = "st_gamma_arena_custom_device_nv_gen1",
@@ -86,34 +102,7 @@ function initialize_faction(model, picker)
 end
 
 function status_presentation(view)
-    view = type(view) == "table" and view or {}
-    local action_code = view.submission_error_code or view.operation_error_code
-    if action_code then
-        return {
-            state = "error",
-            string_id = ACTION_STATUS_KEYS[action_code] or "st_gamma_arena_custom_error_action",
-            code = action_code,
-            source = "action"
-        }
-    end
-    if view.infrastructure_error_code then
-        return {
-            state = "error",
-            string_id = "st_gamma_arena_custom_error_setup",
-            code = view.infrastructure_error_code,
-            source = "infrastructure"
-        }
-    end
-    if view.validation_code then
-        local string_id = INCOMPLETE_STATUS_KEYS[view.validation_code]
-        return {
-            state = string_id and "incomplete" or "error",
-            string_id = string_id or "st_gamma_arena_custom_error_setup",
-            code = view.validation_code,
-            source = "validation"
-        }
-    end
-    return { state = "ready", string_id = "st_gamma_arena_custom_ready", source = "validation" }
+    return gamma_arena_custom_setup_presenter.status_presentation(view)
 end
 
 local function custom_trace(code, message, context)
@@ -418,6 +407,14 @@ local function category_text(id)
     return translated("st_gamma_arena_custom_category_" .. tostring(id))
 end
 
+local function filter_text(id)
+    return translated(FILTER_LABEL_KEYS[id] or tostring(id))
+end
+
+local function sort_text(id)
+    return translated(SORT_LABEL_KEYS[id] or tostring(id))
+end
+
 local function set_combo(combo, ids, selected, formatter, placeholder)
     if selected == nil then combo:SetText(placeholder or "") return end
     for index, id in ipairs(ids or {}) do
@@ -442,6 +439,11 @@ function UICustom:__init(owner, ports) super()
     self.ports = ports or {}
     self.selected_category = "weapon"
     self.catalog_page = 1
+    self.catalog_state = { filter = "all", search = "", sort = "price_asc", page = 1 }
+    self.presenter = gamma_arena_custom_setup_presenter.new({
+        translate = translated,
+        page_size = CATALOG_PAGE_SIZE
+    })
     custom_trace("GA_DEBUG_CUSTOM_CATALOG_BEGIN", "Custom Arena catalog loading began")
     self.catalog_result = load_catalog(self.ports)
     custom_trace("GA_DEBUG_CUSTOM_CATALOG_RESULT", "Custom Arena catalog loading returned", {
@@ -474,22 +476,34 @@ function UICustom:InitControls()
     self.count_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:count", self.root)
     self.device_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:device", self.root)
     self.seed_edit = self.xml:InitEditBox("gamma_arena_custom:enemy_setup:seed", self.root)
-    self.budget_text = self.xml:InitTextWnd("gamma_arena_custom:totals:budget", self.root)
-    self.spent_text = self.xml:InitTextWnd("gamma_arena_custom:totals:spent", self.root)
-    self.remaining_text = self.xml:InitTextWnd("gamma_arena_custom:totals:remaining", self.root)
-    self.weight_text = self.xml:InitTextWnd("gamma_arena_custom:totals:weight", self.root)
-    self.weight_limit_text = self.xml:InitTextWnd("gamma_arena_custom:totals:weight_limit", self.root)
+    self.catalog_search = self.xml:InitEditBox("gamma_arena_custom:catalog_controls:catalog_search", self.root)
+    self.catalog_filter = self.xml:InitComboBox("gamma_arena_custom:catalog_controls:catalog_filter", self.root)
+    self.catalog_sort = self.xml:InitComboBox("gamma_arena_custom:catalog_controls:catalog_sort", self.root)
+    self.catalog_previous = self.xml:Init3tButton("gamma_arena_custom:catalog_controls:catalog_previous", self.root)
+    self.catalog_page_text = self.xml:InitTextWnd("gamma_arena_custom:catalog_controls:catalog_page", self.root)
+    self.catalog_next = self.xml:Init3tButton("gamma_arena_custom:catalog_controls:catalog_next", self.root)
+    self.points_available = self.xml:InitTextWnd("gamma_arena_custom:points_available", self.root)
+    self.points_used = self.xml:InitTextWnd("gamma_arena_custom:points_used", self.root)
+    self.weight_text = self.xml:InitTextWnd("gamma_arena_custom:footer:weight", self.root)
+    self.weight_limit_text = self.xml:InitTextWnd("gamma_arena_custom:footer:weight_limit", self.root)
+    self.readiness_windows = {
+        outfit = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_outfit", self.root),
+        knife = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_knife", self.root),
+        weapon = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_weapon", self.root),
+        ammo = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_ammo", self.root),
+        healing = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_healing", self.root)
+    }
     self.validation_text = self.xml:InitTextWnd("gamma_arena_custom:validation", self.root)
     self.start_button = self.xml:Init3tButton("gamma_arena_custom:start", self.root)
     self.random_button = self.xml:Init3tButton("gamma_arena_custom:random", self.root)
     self.back_button = self.xml:Init3tButton("gamma_arena_custom:back", self.root)
-    self.catalog_previous = self.xml:Init3tButton("gamma_arena_custom:catalog_previous", self.root)
-    self.catalog_page_text = self.xml:InitTextWnd("gamma_arena_custom:catalog_page", self.root)
-    self.catalog_next = self.xml:Init3tButton("gamma_arena_custom:catalog_next", self.root)
     self:Register(self.faction_combo, "faction")
     self:Register(self.count_combo, "count")
     self:Register(self.device_combo, "device")
     self:Register(self.seed_edit, "seed")
+    self:Register(self.catalog_search, "catalog_search")
+    self:Register(self.catalog_filter, "catalog_filter")
+    self:Register(self.catalog_sort, "catalog_sort")
     self:Register(self.start_button, "start")
     self:Register(self.random_button, "random")
     self:Register(self.back_button, "back")
@@ -503,6 +517,11 @@ function UICustom:InitControls()
     end
     for index, faction_id in ipairs(snapshot.faction_ids or {}) do self.faction_combo:AddItem(faction_text(faction_id), index) end
     for count = 1, snapshot.capacity do self.count_combo:AddItem(tostring(count), count) end
+    for index, filter_id in ipairs(FILTER_IDS) do self.catalog_filter:AddItem(filter_text(filter_id), index) end
+    for index, sort_id in ipairs(SORT_IDS) do self.catalog_sort:AddItem(sort_text(sort_id), index) end
+    self.catalog_search:SetText("")
+    self.catalog_filter:SetText(filter_text(self.catalog_state.filter))
+    self.catalog_sort:SetText(sort_text(self.catalog_state.sort))
     self.roster_rows, self.rank_combos = {}, {}
     for index = 1, 10 do
         local row_path = "gamma_arena_custom:roster:roster_row_" .. tostring(index)
@@ -514,18 +533,15 @@ function UICustom:InitControls()
         end
     end
 
-    self.category_buttons = {}
-    for _, category in ipairs(CATEGORY_IDS) do
-        local id = "category_" .. category
-        self.category_buttons[category] = self.xml:Init3tButton("gamma_arena_custom:categories:" .. id, self.root)
-        self:Register(self.category_buttons[category], id)
-    end
-    self.catalog_container = utils_ui.UICellContainer("catalog", self, nil, "gamma_arena_custom:catalog_container", self.root)
-    self.selected_container = utils_ui.UICellContainer("selected", self, nil, "gamma_arena_custom:selected_container", self.root)
-    for _, container in pairs({ self.catalog_container, self.selected_container }) do
+    self.inventory_container = utils_ui.UICellContainer("inventory", self, nil,
+        "gamma_arena_custom:inventory_container", self.root)
+    self.loadout_container = utils_ui.UICellContainer("loadout", self, nil,
+        "gamma_arena_custom:loadout_container", self.root)
+    for _, container in pairs({ self.inventory_container, self.loadout_container }) do
         container.showcase = true
-        container.disable_drag = true
+        container.disable_drag = false
         container.disable_stack = true
+        container.disable_info = false
         container:SetGridSpecs(41, 2)
     end
     self.item_info = utils_ui.UIInfoItem(self)
@@ -535,19 +551,18 @@ function UICustom:InitCallbacks()
     self:AddCallback("faction", ui_events.LIST_ITEM_SELECT, self.OnFaction, self)
     self:AddCallback("count", ui_events.LIST_ITEM_SELECT, self.OnCount, self)
     self:AddCallback("device", ui_events.LIST_ITEM_SELECT, self.OnDevice, self)
+    self:AddCallback("catalog_search", ui_events.EDIT_TEXT_COMMIT, self.OnCatalogSearch, self)
+    self:AddCallback("catalog_filter", ui_events.LIST_ITEM_SELECT, self.OnCatalogFilter, self)
+    self:AddCallback("catalog_sort", ui_events.LIST_ITEM_SELECT, self.OnCatalogSort, self)
     self:AddCallback("start", ui_events.BUTTON_CLICKED, self.OnStart, self)
     self:AddCallback("random", ui_events.BUTTON_CLICKED, self.OnRandom, self)
     self:AddCallback("back", ui_events.BUTTON_CLICKED, self.OnBack, self)
     self:AddCallback("catalog_previous", ui_events.BUTTON_CLICKED, self.OnCatalogPrevious, self)
     self:AddCallback("catalog_next", ui_events.BUTTON_CLICKED, self.OnCatalogNext, self)
-    self.rank_callbacks, self.category_callbacks = {}, {}
+    self.rank_callbacks = {}
     for index = 1, 10 do
         self.rank_callbacks[index] = function() self:OnRank(index) end
         self:AddCallback("rank_" .. tostring(index), ui_events.LIST_ITEM_SELECT, self.rank_callbacks[index], self)
-    end
-    for _, category in ipairs(CATEGORY_IDS) do
-        self.category_callbacks[category] = function() self:OnCategory(category) end
-        self:AddCallback("category_" .. category, ui_events.BUTTON_CLICKED, self.category_callbacks[category], self)
     end
 end
 
@@ -569,9 +584,13 @@ local function rebuild_container(container, cells, selected)
                 cell.flags.value_str = arena_price_text(price_text)
                 cell.flags.name_key = view.name_key
                 cell.flags.weight_mg = view.weight_mg
-                local suffix = selected and (" q" .. tostring(view.quantity or 1)
-                    .. (view.equipped_slot and (" " .. tostring(view.equipped_slot)) or "")) or ""
+                local equipped = view.equipped_slot == "weapon_1" and " W1"
+                    or (view.equipped_slot == "weapon_2" and " W2"
+                    or (view.equipped_slot and " E" or ""))
+                local suffix = selected and (" x" .. tostring(view.quantity or 1) .. equipped) or ""
                 cell:Add_CustomText(format_price_text(price_text) .. suffix)
+                local colorize = callable(cell, "Colorize")
+                if colorize then pcall(colorize, cell, view.disabled and "hide" or "def") end
                 if cell.cell and type(cell.cell.Enable) == "function" then cell.cell:Enable(true) end
             end
         end
@@ -580,20 +599,30 @@ end
 
 function UICustom:Rebuild()
     custom_trace("GA_DEBUG_CUSTOM_REBUILD_BEGIN", "Custom Arena UI rebuild began", {
-        category = self.selected_category
+        filter = self.catalog_state.filter,
+        search = self.catalog_state.search,
+        sort = self.catalog_state.sort,
+        page = self.catalog_state.page
     })
-    local view = project(self.model, self.selected_category, self.catalog_page)
+    local view = self.presenter:project(self.model, self.catalog_state)
     view = apply_catalog_result(view, self.catalog_result)
+    local device_view = project(self.model, self.selected_category, 1)
+    view.device_options = device_view.device_options
+    view.actor_device = device_view.actor_device
     if self.catalog_result.ok and not self.initial_faction_result.ok then
         view.infrastructure_error_code = self.initial_faction_result.error
             and self.initial_faction_result.error.code or "GA_CUSTOM_FACTION_UNKNOWN"
     end
     if self.submission_error and self.submission_error.error then
+        view.submission_error = self.submission_error.error
         view.submission_error_code = self.submission_error.error.code
         view.summary_code = view.submission_error_code
     end
     self.projection = view
-    self.catalog_page = view.catalog_page
+    self.catalog_state.filter = view.filter or self.catalog_state.filter
+    self.catalog_state.search = view.search or self.catalog_state.search
+    self.catalog_state.sort = view.sort or self.catalog_state.sort
+    self.catalog_state.page = view.catalog_page or 1
     set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
     set_combo(self.count_combo, {}, nil, tostring, tostring(view.count))
     self.count_combo:SetText(tostring(view.count))
@@ -608,14 +637,27 @@ function UICustom:Rebuild()
         self.roster_rows[index]:Show(visible)
         if visible then set_combo(self.rank_combos[index], view.rank_ids, view.roster[index].rank, rank_text) end
     end
-    self.budget_text:SetText(tostring(view.budget))
-    self.spent_text:SetText(tostring(view.spent))
-    self.remaining_text:SetText(tostring(view.remaining))
-    self.weight_text:SetText(format_weight(view.weight_mg))
-    self.weight_limit_text:SetText(format_weight(view.weight_limit_mg))
+    self.catalog_search:SetText(self.catalog_state.search)
+    set_combo(self.catalog_filter, FILTER_IDS, self.catalog_state.filter, filter_text)
+    set_combo(self.catalog_sort, SORT_IDS, self.catalog_state.sort, sort_text)
+    self.points_available:SetText(translated("st_gamma_arena_custom_points_available") .. ": "
+        .. tostring(view.remaining) .. " AP")
+    self.points_used:SetText(translated("st_gamma_arena_custom_points_used") .. ": "
+        .. tostring(view.spent) .. " AP")
+    self.weight_text:SetText(translated("st_gamma_arena_custom_weight") .. ": " .. format_weight(view.weight_mg))
+    self.weight_limit_text:SetText(translated("st_gamma_arena_custom_weight_limit") .. ": "
+        .. format_weight(view.weight_limit_mg))
+    for _, check in ipairs(view.readiness or {}) do
+        local window = self.readiness_windows[check.id]
+        if window then
+            window:SetText((check.complete and "[+] " or "[ ] ") .. translated(check.string_id))
+            window:SetTextColor(check.complete and GetARGB(255, 170, 210, 160)
+                or GetARGB(255, 185, 185, 185))
+        end
+    end
     local status = status_presentation(view)
     local color = STATUS_COLORS[status.state] or STATUS_COLORS.error
-    self.validation_text:SetText(translated(status.string_id))
+    self.validation_text:SetText(gamma_arena_custom_setup_presenter.format_status(status, translated))
     self.validation_text:SetTextColor(GetARGB(255, color[1], color[2], color[3]))
     self.validation_text:Show(true)
     if status.state == "error" and status.code then
@@ -632,10 +674,11 @@ function UICustom:Rebuild()
     self.catalog_page_text:SetText(tostring(view.catalog_page) .. " / " .. tostring(view.catalog_page_count))
     self.catalog_previous:Enable(view.catalog_has_previous)
     self.catalog_next:Enable(view.catalog_has_next)
-    rebuild_container(self.catalog_container, view.catalog_cells, false)
-    rebuild_container(self.selected_container, view.selected_cells, true)
+    rebuild_container(self.inventory_container, view.selected_cells, true)
+    rebuild_container(self.loadout_container, view.catalog_cells, false)
     custom_trace("GA_DEBUG_CUSTOM_REBUILD_RESULT", "Custom Arena UI rebuild completed", {
-        category = self.selected_category,
+        filter = self.catalog_state.filter,
+        page = self.catalog_state.page,
         catalog_cells = #view.catalog_cells,
         selected_cells = #view.selected_cells
     })
@@ -679,67 +722,85 @@ function UICustom:OnCategory(category)
     self:Rebuild()
 end
 
+function UICustom:OnCatalogSearch()
+    self.submission_error = nil
+    self.catalog_state.search = tostring(self.catalog_search:GetText() or "")
+    self.catalog_state.page = 1
+    self:Rebuild()
+end
+
+function UICustom:OnCatalogFilter()
+    self.submission_error = nil
+    local selected = combo_value(self.catalog_filter, FILTER_IDS, filter_text)
+    if selected then self.catalog_state.filter = selected end
+    self.catalog_state.page = 1
+    self:Rebuild()
+end
+
+function UICustom:OnCatalogSort()
+    self.submission_error = nil
+    local selected = combo_value(self.catalog_sort, SORT_IDS, sort_text)
+    if selected then self.catalog_state.sort = selected end
+    self.catalog_state.page = 1
+    self:Rebuild()
+end
+
 function UICustom:OnCatalogPrevious()
-    self.catalog_page = math.max(1, self.catalog_page - 1)
+    self.catalog_state.page = math.max(1, self.catalog_state.page - 1)
     self:Rebuild()
 end
 
 function UICustom:OnCatalogNext()
-    self.catalog_page = self.catalog_page + 1
+    self.catalog_state.page = self.catalog_state.page + 1
     self:Rebuild()
 end
 
-local function automatic_slot(definition)
-    if definition.category == "weapon" then
-        if definition.ltx_slot == 1 then return "weapon_1" end
-        if definition.ltx_slot == 2 then return "weapon_2" end
-    elseif definition.category == "outfit" or definition.category == "helmet" or definition.category == "knife" then
-        return definition.category
+function UICustom:CellSection(container_id, index)
+    local container = container_id == "inventory" and self.inventory_container
+        or (container_id == "loadout" and self.loadout_container or nil)
+    local cell = container and container.cell and container.cell[index] or nil
+    return cell and cell.section or nil
+end
+
+function UICustom:ApplyAction(result)
+    if valid_result(result) and result.ok then
+        self.submission_error = nil
+    elseif valid_result(result) then
+        self.submission_error = result
+    else
+        self.submission_error = gamma_arena_result.err("GA_CUSTOM_ACTION_FAILED",
+            "Custom loadout action returned an invalid result")
     end
-    return nil
+    self:Rebuild()
+    return result
 end
 
 function UICustom:On_CC_Mouse1(container_id, index)
-    self.submission_error = nil
-    local container = container_id == "catalog" and self.catalog_container
-        or (container_id == "selected" and self.selected_container or nil)
-    local cell = container and container.cell and container.cell[index] or nil
-    if not cell or not cell.section or (cell.flags and cell.flags.disabled) then return end
-    if container_id == "catalog" then
-        if cell.flags and cell.flags.selected then
-            self.model:increment_item(cell.section)
-        else
-            local definition = self.model.catalog.items[cell.section]
-            local slot = definition and automatic_slot(definition) or nil
-            local fixed = definition and (definition.category == "outfit" or definition.category == "helmet"
-                or definition.category == "knife")
-            local added = self.model:add_item(cell.section, 1, fixed and slot or nil)
-            if added.ok and slot and not fixed then self.model:equip(cell.section, slot) end
-        end
-    else
-        self.model:decrement_item(cell.section)
-    end
-    self:Rebuild()
+    local section = self:CellSection(container_id, index)
+    if not section then return end
+    local direction = container_id == "loadout" and "loadout_to_inventory"
+        or (container_id == "inventory" and "inventory_to_loadout" or nil)
+    if not direction then return end
+    return self:ApplyAction(dispatch_transfer(self.model, direction, section))
 end
 
 function UICustom:On_CC_Mouse2(container_id, index)
-    self.submission_error = nil
-    if container_id ~= "selected" then return end
-    local cell = self.selected_container.cell and self.selected_container.cell[index] or nil
-    if not cell or not cell.section then return end
-    local snapshot = self.model:snapshot()
-    for _, entry in ipairs(snapshot.actor_items or {}) do
-        if entry.section == cell.section then
-            if entry.equipped_slot then self.model:unequip(cell.section)
-            else
-                local definition = self.model.catalog.items[cell.section]
-                local slot = definition and automatic_slot(definition) or nil
-                if slot then self.model:equip(cell.section, slot) end
-            end
-            break
-        end
-    end
-    self:Rebuild()
+    if container_id ~= "inventory" then return end
+    local section = self:CellSection(container_id, index)
+    local definition = section and self.model.catalog and self.model.catalog.items
+        and self.model.catalog.items[section] or nil
+    if not definition or definition.category ~= "weapon" then return end
+    return self:ApplyAction(dispatch_equip(self.model, section))
+end
+
+function UICustom:On_CC_DragDrop(source_id, index)
+    local section = self:CellSection(source_id, index)
+    if not section then return end
+    local result = dispatch_drop(self.model, source_id, section,
+        self.inventory_container:IsCursorOverWindow(),
+        self.loadout_container:IsCursorOverWindow())
+    if result.ok and result.value and result.value.changed == false then return result end
+    return self:ApplyAction(result)
 end
 
 function UICustom:HideSelf()
@@ -792,14 +853,14 @@ end
 
 function UICustom:Update()
     CUIScriptWnd.Update(self)
-    update_item_hover(self.catalog_container, self.selected_container, self.item_info)
+    update_item_hover(self.inventory_container, self.loadout_container, self.item_info)
 end
 
 function UICustom:OnKeyboard(dik, keyboard_action)
     local result = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
     if result == false then
-        self.catalog_container:OnKeyboard(dik, keyboard_action)
-        self.selected_container:OnKeyboard(dik, keyboard_action)
+        self.inventory_container:OnKeyboard(dik, keyboard_action)
+        self.loadout_container:OnKeyboard(dik, keyboard_action)
         if keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then self:OnBack() end
     end
     return result

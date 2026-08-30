@@ -474,9 +474,9 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 }
 
 $Task9CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', '(?m)^local\s+function\s+commit_allowing_incomplete_budget\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'gamma_arena_custom_setup_presenter\.new', 'utils_ui\.UICellContainer', 'inventory_container', 'loadout_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'EDIT_TEXT_COMMIT', 'LIST_ITEM_SELECT', 'OnCatalogSearch', 'OnCatalogFilter', 'OnCatalogSort', 'On_CC_Mouse1', 'On_CC_DragDrop', 'dispatch_transfer', 'dispatch_drop', 'equip_replacing', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
 foreach ($Contract in $Task9CustomContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
@@ -501,7 +501,7 @@ Assert-True ($Task9UiDiagnostic -match '(?m)^function\s+apply_catalog_result\s*\
 foreach ($Marker in @(
     'CATALOG_PAGE_SIZE = 80', 'catalog_page_count', 'catalog_has_previous',
     'function UICustom:OnCatalogPrevious', 'function UICustom:OnCatalogNext',
-    'self.catalog_page = 1'
+    'self.catalog_state.page = 1'
 )) {
     Assert-True ($Task9UiDiagnostic -match [regex]::Escape($Marker)) `
         "Task 9 bounded catalog UI is missing: $Marker"
@@ -565,7 +565,7 @@ foreach ($Locale in @('eng','rus')) {
     }
 }
 $Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
-foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_one_unit_commands_are_atomic','custom_setup_model_auto_equips_and_replaces_weapon_atomically','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
+foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_one_unit_commands_are_atomic','custom_setup_model_auto_equips_and_replaces_weapon_atomically','custom_setup_model_preserves_overbudget_inventory_for_repair','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
     Assert-True ($Task9CustomTests -match [regex]::Escape($Name)) "Task 9 model tests must cover $Name"
 }
 $Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
@@ -591,6 +591,16 @@ $TransferRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($TransferCase) + '
 Assert-True (([regex]::Matches($Task9RuntimeTests, $TransferRegistration)).Count -eq 1) `
     "Readable Custom runtime case must be registered exactly: $TransferCase"
 $ReadableCustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+$CustomIntegrationMarkers = @('self.catalog_state =','self.presenter = gamma_arena_custom_setup_presenter.new',
+    'self.inventory_container = utils_ui.UICellContainer','self.loadout_container = utils_ui.UICellContainer',
+    'container.disable_drag = false','container.disable_info = false','function UICustom:OnCatalogSearch',
+    'function UICustom:OnCatalogFilter','function UICustom:OnCatalogSort','function UICustom:On_CC_DragDrop',
+    'self.inventory_container:IsCursorOverWindow()','self.loadout_container:IsCursorOverWindow()')
+foreach ($Marker in $CustomIntegrationMarkers) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Two-panel Custom integration is missing $Marker"
+}
+Assert-True ($ReadableCustomUi -notmatch 'TransferItem') `
+    'Two-panel Custom UI must rebuild from the model instead of transferring cells optimistically.'
 $HoverHelper = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+update_item_hover\s*\(.*?^end\s*$').Value
 Assert-True ($HoverHelper -notmatch 'type\s*\(\s*(?:catalog_container|selected_container|inventory_container|loadout_container|item_info)\s*\)\s*~=\s*"table"') `
     'Readable Custom hover must use live capabilities instead of rejecting X-Ray userdata.'
