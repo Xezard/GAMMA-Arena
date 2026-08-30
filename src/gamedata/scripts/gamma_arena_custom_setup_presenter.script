@@ -1,0 +1,363 @@
+local FILTER_IDS = { "all", "weapon", "ammo", "armor", "medicine", "other" }
+local SORT_IDS = { "price_asc", "price_desc", "name_asc", "name_desc" }
+local FILTER_CATEGORIES = {
+    weapon = { weapon = true },
+    ammo = { ammo = true },
+    armor = { outfit = true, helmet = true },
+    medicine = { medicine = true },
+    other = { knife = true, grenade = true }
+}
+local READINESS = {
+    { id = "outfit", string_id = "st_gamma_arena_custom_readiness_outfit" },
+    { id = "knife", string_id = "st_gamma_arena_custom_readiness_knife" },
+    { id = "weapon", string_id = "st_gamma_arena_custom_readiness_weapon" },
+    { id = "ammo", string_id = "st_gamma_arena_custom_readiness_ammo" },
+    { id = "healing", string_id = "st_gamma_arena_custom_readiness_healing" }
+}
+local INCOMPLETE_STATUS_KEYS = {
+    GA_CUSTOM_FACTION_UNKNOWN = "st_gamma_arena_custom_incomplete_faction",
+    GA_CUSTOM_ITEM_REQUIRED = "st_gamma_arena_custom_incomplete_items",
+    GA_CUSTOM_OUTFIT_REQUIRED = "st_gamma_arena_custom_incomplete_outfit",
+    GA_CUSTOM_KNIFE_REQUIRED = "st_gamma_arena_custom_incomplete_knife",
+    GA_CUSTOM_WEAPON_REQUIRED = "st_gamma_arena_custom_incomplete_weapon",
+    GA_CUSTOM_AMMO_INCOMPATIBLE = "st_gamma_arena_custom_incomplete_ammo",
+    GA_CUSTOM_HEALING_REQUIRED = "st_gamma_arena_custom_incomplete_healing"
+}
+local ACTION_STATUS_KEYS = {
+    GA_CUSTOM_OVERSPEND = "st_gamma_arena_custom_error_budget",
+    GA_CUSTOM_OVERWEIGHT = "st_gamma_arena_custom_error_weight",
+    GA_CUSTOM_AMMO_INCOMPATIBLE = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_AMMO_ORPHAN = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_HELMET_INCOMPATIBLE = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_SLOT_INVALID = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_SLOT_DUPLICATE = "st_gamma_arena_custom_error_compatibility",
+    GA_CUSTOM_ENTRY_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_PHYSICAL_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_GRENADE_LIMIT = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_EQUIPMENT_QUANTITY = "st_gamma_arena_custom_error_limit",
+    GA_CUSTOM_ROSTER_LIMIT = "st_gamma_arena_custom_error_limit"
+}
+local CYRILLIC_LOWER = {
+    ["А"] = "а", ["Б"] = "б", ["В"] = "в", ["Г"] = "г", ["Д"] = "д", ["Е"] = "е",
+    ["Ё"] = "ё", ["Ж"] = "ж", ["З"] = "з", ["И"] = "и", ["Й"] = "й", ["К"] = "к",
+    ["Л"] = "л", ["М"] = "м", ["Н"] = "н", ["О"] = "о", ["П"] = "п", ["Р"] = "р",
+    ["С"] = "с", ["Т"] = "т", ["У"] = "у", ["Ф"] = "ф", ["Х"] = "х", ["Ц"] = "ц",
+    ["Ч"] = "ч", ["Ш"] = "ш", ["Щ"] = "щ", ["Ъ"] = "ъ", ["Ы"] = "ы", ["Ь"] = "ь",
+    ["Э"] = "э", ["Ю"] = "ю", ["Я"] = "я"
+}
+local Presenter = {}
+Presenter.__index = Presenter
+
+local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value) and value >= (minimum or 0)
+end
+
+local function contains(values, expected)
+    for _, value in ipairs(values or {}) do if value == expected then return true end end
+    return false
+end
+
+local function copy_array(values)
+    local copied = {}
+    for index, value in ipairs(values or {}) do copied[index] = value end
+    return copied
+end
+
+local function normalized_text(value)
+    local result = string.lower(tostring(value or ""))
+    for upper, lower in pairs(CYRILLIC_LOWER) do result = string.gsub(result, upper, lower) end
+    return result
+end
+
+local function localized_name(translate, name_key, section)
+    if type(name_key) ~= "string" or name_key == "" then return tostring(section or "") end
+    local called, value = pcall(translate, name_key)
+    if called and type(value) == "string" and value ~= "" then return value end
+    return tostring(section or name_key)
+end
+
+local function normalize_choice(value, choices, fallback)
+    return contains(choices, value) and value or fallback
+end
+
+local function normalize_state(state)
+    state = type(state) == "table" and state or {}
+    return {
+        filter = normalize_choice(state.filter, FILTER_IDS, "all"),
+        search = type(state.search) == "string" and state.search or "",
+        sort = normalize_choice(state.sort, SORT_IDS, "price_asc"),
+        page = finite_integer(state.page, 1) and state.page or 1
+    }
+end
+
+local function matches(row, state)
+    local allowed = FILTER_CATEGORIES[state.filter]
+    if allowed and not allowed[row.category] then return false end
+    local query = normalized_text(state.search)
+    return query == ""
+        or string.find(normalized_text(row.name), query, 1, true) ~= nil
+        or string.find(normalized_text(row.section), query, 1, true) ~= nil
+end
+
+local function less(left, right, sort_id)
+    local by_name = sort_id == "name_asc" or sort_id == "name_desc"
+    local descending = sort_id == "price_desc" or sort_id == "name_desc"
+    local left_value = by_name and normalized_text(left.name) or left.effective_price
+    local right_value = by_name and normalized_text(right.name) or right.effective_price
+    if left_value == right_value then return left.section < right.section end
+    return descending and left_value > right_value or left_value < right_value
+end
+
+local function collect_rows(snapshot, translate)
+    local rows = {}
+    local seen = {}
+    for _, category in ipairs({ "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }) do
+        for _, cell in ipairs(snapshot.categories and snapshot.categories[category] or {}) do
+            if type(cell.section) == "string" and not seen[cell.section] then
+                seen[cell.section] = true
+                local multiplier = tonumber(cell.preview_multiplier) or 1
+                local effective_price = tonumber(cell.preview_effective_price)
+                    or ((tonumber(cell.base_price) or 0) * multiplier)
+                rows[#rows + 1] = {
+                    section = cell.section,
+                    category = cell.category or category,
+                    name_key = cell.name_key,
+                    name = localized_name(translate, cell.name_key, cell.section),
+                    base_price = tonumber(cell.base_price) or 0,
+                    weight_mg = tonumber(cell.weight_mg) or 0,
+                    selected = cell.selected == true,
+                    selected_quantity = tonumber(cell.selected_quantity) or 0,
+                    preview_multiplier = multiplier,
+                    effective_price = effective_price,
+                    price_text = multiplier == 2 and ("x2 " .. tostring(effective_price))
+                        or tostring(effective_price)
+                }
+            end
+        end
+    end
+    return rows
+end
+
+local function selected_cells(snapshot, translate)
+    local cells = {}
+    for index, cell in ipairs(snapshot.actor_items or {}) do
+        local multiplier = tonumber(cell.multiplier) or 1
+        local effective_price = tonumber(cell.effective_price) or 0
+        cells[index] = {
+            section = cell.section,
+            category = cell.category,
+            name_key = cell.name_key,
+            name = localized_name(translate, cell.name_key, cell.section),
+            quantity = tonumber(cell.quantity) or 1,
+            equipped_slot = cell.equipped_slot,
+            base_price = tonumber(cell.base_price) or 0,
+            weight_mg = tonumber(cell.weight_mg) or 0,
+            multiplier = multiplier,
+            effective_price = effective_price,
+            price_text = multiplier == 2 and ("x2 " .. tostring(effective_price))
+                or tostring(effective_price)
+        }
+    end
+    return cells
+end
+
+local function error_detail(result)
+    return type(result) == "table" and type(result.error) == "table" and result.error or nil
+end
+
+function Presenter:readiness(snapshot, catalog)
+    snapshot = type(snapshot) == "table" and snapshot or {}
+    catalog = type(catalog) == "table" and catalog or {}
+    local items = type(catalog.items) == "table" and catalog.items or {}
+    local outfit_count, knife_count = 0, 0
+    local outfit_equipped, knife_equipped, weapon_equipped, healing = false, false, false, false
+    local weapons, ammunition = {}, {}
+    for _, entry in ipairs(snapshot.actor_items or {}) do
+        local definition = items[entry.section] or {}
+        local category = definition.category or entry.category
+        if category == "outfit" then
+            outfit_count = outfit_count + 1
+            outfit_equipped = outfit_equipped or entry.equipped_slot == "outfit"
+        elseif category == "knife" then
+            knife_count = knife_count + 1
+            knife_equipped = knife_equipped or entry.equipped_slot == "knife"
+        elseif category == "weapon" then
+            weapons[#weapons + 1] = definition
+            weapon_equipped = weapon_equipped or entry.equipped_slot == "weapon_1"
+                or entry.equipped_slot == "weapon_2"
+        elseif category == "ammo" then
+            ammunition[#ammunition + 1] = entry.section
+        elseif category == "medicine" and definition.healing == true then
+            healing = true
+        end
+    end
+    local compatible_ammo = #weapons > 0
+    for _, weapon in ipairs(weapons) do
+        local compatible = false
+        for _, ammo_section in ipairs(ammunition) do
+            if contains(weapon.ammo_sections, ammo_section) then compatible = true; break end
+        end
+        if not compatible then compatible_ammo = false; break end
+    end
+    local complete = {
+        outfit = outfit_count == 1 and outfit_equipped,
+        knife = knife_count == 1 and knife_equipped,
+        weapon = weapon_equipped,
+        ammo = compatible_ammo,
+        healing = healing
+    }
+    local projected = {}
+    for index, definition in ipairs(READINESS) do
+        projected[index] = {
+            id = definition.id,
+            string_id = definition.string_id,
+            complete = complete[definition.id] == true
+        }
+    end
+    return projected
+end
+
+function Presenter:project(model, state)
+    if type(model) ~= "table" or type(model.snapshot) ~= "function"
+        or type(model.preview_add_one) ~= "function" then
+        return {
+            launch_enabled = false, infrastructure_error_code = "GA_CUSTOM_MODEL_INVALID",
+            summary_code = "GA_CUSTOM_MODEL_INVALID", catalog_cells = {}, selected_cells = {},
+            readiness = self:readiness({}, {}), catalog_page = 1, catalog_page_count = 1,
+            catalog_item_count = 0, catalog_has_previous = false, catalog_has_next = false,
+            filter_ids = copy_array(FILTER_IDS), sort_ids = copy_array(SORT_IDS)
+        }
+    end
+    local called, snapshot = pcall(model.snapshot, model)
+    if not called or type(snapshot) ~= "table" then
+        return {
+            launch_enabled = false, infrastructure_error_code = "GA_CUSTOM_MODEL_INVALID",
+            summary_code = "GA_CUSTOM_MODEL_INVALID", catalog_cells = {}, selected_cells = {},
+            readiness = self:readiness({}, {}), catalog_page = 1, catalog_page_count = 1,
+            catalog_item_count = 0, catalog_has_previous = false, catalog_has_next = false,
+            filter_ids = copy_array(FILTER_IDS), sort_ids = copy_array(SORT_IDS)
+        }
+    end
+
+    local normalized = normalize_state(state)
+    local rows = collect_rows(snapshot, self.translate)
+    local filtered = {}
+    for _, row in ipairs(rows) do if matches(row, normalized) then filtered[#filtered + 1] = row end end
+    table.sort(filtered, function(left, right) return less(left, right, normalized.sort) end)
+    local page_count = math.max(1, math.ceil(#filtered / self.page_size))
+    local page = math.max(1, math.min(normalized.page, page_count))
+    local first = (page - 1) * self.page_size + 1
+    local last = math.min(#filtered, first + self.page_size - 1)
+    local cells = {}
+    for index = first, last do
+        local source = filtered[index]
+        local cell = {}
+        for key, value in pairs(source) do cell[key] = value end
+        local preview_called, preview = pcall(model.preview_add_one, model, cell.section)
+        local detail = preview_called and error_detail(preview) or nil
+        cell.disabled = not preview_called or type(preview) ~= "table" or preview.ok ~= true
+        cell.disabled_reason = cell.disabled and (detail and detail.code or "GA_CUSTOM_ACTION_FAILED") or nil
+        cell.disabled_context = cell.disabled and detail and detail.context or nil
+        cells[#cells + 1] = cell
+    end
+
+    local validation_error = error_detail(snapshot.validation)
+    local operation_error = error_detail(snapshot.last_operation)
+    return {
+        launch_enabled = snapshot.can_start == true,
+        validation = snapshot.validation,
+        validation_code = validation_error and validation_error.code or nil,
+        operation_error = operation_error,
+        operation_error_code = operation_error and operation_error.code or nil,
+        summary_code = operation_error and operation_error.code or (validation_error and validation_error.code or nil),
+        filter = normalized.filter,
+        filter_ids = copy_array(FILTER_IDS),
+        search = normalized.search,
+        sort = normalized.sort,
+        sort_ids = copy_array(SORT_IDS),
+        catalog_cells = cells,
+        catalog_page = page,
+        catalog_page_count = page_count,
+        catalog_item_count = #filtered,
+        catalog_has_previous = page > 1,
+        catalog_has_next = page < page_count,
+        selected_cells = selected_cells(snapshot, self.translate),
+        readiness = self:readiness(snapshot, model.catalog),
+        actor_device = snapshot.actor_device,
+        device_options = snapshot.device_options or {},
+        roster = snapshot.roster or {},
+        count = snapshot.count or 0,
+        capacity = snapshot.capacity or 0,
+        faction = snapshot.faction,
+        faction_ids = snapshot.faction_ids or {},
+        rank_ids = snapshot.rank_ids or {},
+        budget = snapshot.budget or 0,
+        spent = snapshot.spent or 0,
+        remaining = snapshot.remaining or 0,
+        weight_mg = snapshot.weight_mg or 0,
+        weight_limit_mg = snapshot.weight_limit_mg or 0,
+        last_operation = snapshot.last_operation
+    }
+end
+
+function status_presentation(view)
+    view = type(view) == "table" and view or {}
+    local action_error = type(view.submission_error) == "table" and view.submission_error
+        or (type(view.operation_error) == "table" and view.operation_error or nil)
+    local action_code = action_error and action_error.code
+        or view.submission_error_code or view.operation_error_code
+    if action_code then
+        local context = action_error and type(action_error.context) == "table" and action_error.context or {}
+        local points, budget = tonumber(context.points), tonumber(context.budget)
+        local deficit = action_code == "GA_CUSTOM_OVERSPEND" and points and budget
+            and math.max(0, points - budget) or nil
+        return {
+            state = "error",
+            string_id = deficit and deficit > 0 and "st_gamma_arena_custom_error_points_deficit"
+                or (ACTION_STATUS_KEYS[action_code] or "st_gamma_arena_custom_error_action"),
+            code = action_code,
+            source = "action",
+            deficit = deficit
+        }
+    end
+    if view.infrastructure_error_code then
+        return {
+            state = "error", string_id = "st_gamma_arena_custom_error_setup",
+            code = view.infrastructure_error_code, source = "infrastructure"
+        }
+    end
+    local validation_error = type(view.validation) == "table" and error_detail(view.validation) or nil
+    local validation_code = validation_error and validation_error.code or view.validation_code
+    if validation_code then
+        local string_id = INCOMPLETE_STATUS_KEYS[validation_code]
+        return {
+            state = string_id and "incomplete" or "error",
+            string_id = string_id or "st_gamma_arena_custom_error_setup",
+            code = validation_code,
+            source = "validation"
+        }
+    end
+    return { state = "ready", string_id = "st_gamma_arena_custom_ready", source = "validation" }
+end
+
+function format_status(status, translate)
+    status = type(status) == "table" and status or {}
+    translate = type(translate) == "function" and translate or tostring
+    local called, value = pcall(translate, status.string_id or "st_gamma_arena_custom_error_setup")
+    local text = called and type(value) == "string" and value
+        or tostring(status.string_id or "st_gamma_arena_custom_error_setup")
+    if status.deficit and status.deficit > 0 then
+        text = string.gsub(text, "%%s", tostring(status.deficit), 1)
+    end
+    return text
+end
+
+function new(options)
+    options = type(options) == "table" and options or {}
+    local page_size = finite_integer(options.page_size, 1) and math.min(options.page_size, 80) or 80
+    return setmetatable({
+        translate = type(options.translate) == "function" and options.translate or tostring,
+        page_size = page_size
+    }, Presenter)
+end

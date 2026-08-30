@@ -10311,6 +10311,93 @@ local function runtime_custom_ui_catalog_projection_is_bounded_and_complete()
         "all valid Custom catalog items remain reachable")
 end
 
+local function runtime_custom_presenter_filters_sorts_and_pages_deterministically()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.wpn_alpha.name_key = "fixture_wpn_alpha"
+    catalog.items.ammo_alpha.name_key = "fixture_ammo_alpha"
+    catalog.items.wpn_beta = clone(catalog.items.wpn_alpha)
+    catalog.items.wpn_beta.section = "wpn_beta"
+    catalog.items.wpn_beta.name_key = "fixture_wpn_beta"
+    catalog.categories = {
+        weapon = { "wpn_beta", "wpn_alpha" }, ammo = { "ammo_alpha" },
+        outfit = { "outfit_field" }, helmet = { "helmet_open" },
+        knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    local names = {
+        fixture_wpn_alpha = "Alpha Rifle",
+        fixture_wpn_beta = "Alpha Rifle",
+        fixture_ammo_alpha = "Alpha Ammo"
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        page_size = 1,
+        translate = function(key) return names[key] or key end
+    })
+
+    local searched = presenter:project(model, {
+        filter = "all", search = "alpha rifle", sort = "price_asc", page = 1
+    })
+    gamma_arena_test_assert.equals(searched.catalog_item_count, 2,
+        "localized search retains both exact weapon variants")
+    gamma_arena_test_assert.equals(#searched.catalog_cells, 1, "page size is bounded")
+    gamma_arena_test_assert.equals(searched.catalog_cells[1].section, "wpn_alpha",
+        "same-name same-price ties use exact section")
+    gamma_arena_test_assert.is_true(searched.catalog_has_next, "second stable page remains reachable")
+
+    local second = presenter:project(model, {
+        filter = "weapon", search = "alpha rifle", sort = "price_asc", page = 2
+    })
+    gamma_arena_test_assert.equals(second.catalog_cells[1].section, "wpn_beta",
+        "second page preserves deterministic tie order")
+    local section_search = presenter:project(model, {
+        filter = "all", search = "ammo_alpha", sort = "name_asc", page = 1
+    })
+    gamma_arena_test_assert.equals(section_search.catalog_cells[1].section, "ammo_alpha",
+        "exact section fallback remains searchable")
+end
+
+local function runtime_custom_presenter_preview_and_readiness_are_authoritative()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.wpn_alpha.price = 701
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local before = model:snapshot()
+    local view = presenter:project(model, {
+        filter = "weapon", search = "", sort = "price_asc", page = 1
+    })
+    gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
+        "unaffordable preview is muted")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason,
+        "GA_CUSTOM_OVERSPEND", "preview exposes exact reason")
+    gamma_arena_test_assert.equals(#model:snapshot().actor_items, #before.actor_items,
+        "page preview never mutates draft")
+    gamma_arena_test_assert.equals(#view.readiness, 5, "readiness has five fixed checks")
+    for _, check in ipairs(view.readiness) do
+        gamma_arena_test_assert.is_false(check.complete, "empty draft keeps every requirement incomplete")
+    end
+
+    catalog = gamma_arena_test_custom_config.make_catalog()
+    model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    presenter = gamma_arena_custom_setup_presenter.new({ translate = function(key) return key end })
+    model:add_one("outfit_field")
+    model:add_one("wpn_knife")
+    model:add_one("wpn_alpha")
+    model:add_one("ammo_alpha")
+    model:add_one("medkit")
+    view = presenter:project(model, { filter = "all", sort = "price_asc", page = 1 })
+    for _, check in ipairs(view.readiness) do
+        gamma_arena_test_assert.is_true(check.complete, "complete inventory satisfies " .. check.id)
+    end
+    gamma_arena_test_assert.is_false(view.launch_enabled,
+        "checklist completion never bypasses missing faction validation")
+end
+
 local function runtime_custom_ui_grenade_projection_disables_cells_at_limit()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     catalog.categories = {
@@ -11589,6 +11676,8 @@ local cases = {
     { name = "runtime_custom_ui_projects_rejected_operation_until_success", fn = runtime_custom_ui_projects_rejected_operation_until_success },
     { name = 'runtime_custom_ui_catalog_failure_owns_summary', fn = runtime_custom_ui_catalog_failure_owns_summary },
     { name = "runtime_custom_ui_catalog_projection_is_bounded_and_complete", fn = runtime_custom_ui_catalog_projection_is_bounded_and_complete },
+    { name = "runtime_custom_presenter_filters_sorts_and_pages_deterministically", fn = runtime_custom_presenter_filters_sorts_and_pages_deterministically },
+    { name = "runtime_custom_presenter_preview_and_readiness_are_authoritative", fn = runtime_custom_presenter_preview_and_readiness_are_authoritative },
     { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },
     { name = "runtime_universal_items_preflight_enforces_physical_item_cap", fn = runtime_universal_items_preflight_enforces_physical_item_cap },
