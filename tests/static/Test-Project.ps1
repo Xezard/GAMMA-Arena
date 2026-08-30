@@ -510,11 +510,21 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     foreach ($FontId in $Task9CustomFontIds) {
         Assert-True ($Task9KnownEngineFonts -ccontains $FontId) ('Task 9 custom UI XML uses unknown engine font: ' + $FontId)
     }
-    foreach ($Id in @('gamma_arena_custom','faction','count','seed','device','inventory_panel','loadout_panel','inventory_container','loadout_container',
+    foreach ($Id in @('gamma_arena_custom','faction_button','count','seed','device','inventory_panel','loadout_panel','inventory_container','loadout_container',
         'catalog_search','catalog_filter','catalog_sort','points_available','points_used','weight','weight_limit',
         'readiness_outfit','readiness_knife','readiness_weapon','readiness_ammo','readiness_healing',
         'validation','start','random','back')) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 custom UI XML is missing control $Id"
+    }
+    foreach ($Id in @('opponents_caption','conditions_caption','faction_button','faction_icon','faction_label','count_label',
+        'seed_label','seed_helper','device_label','device_helper','roster_caption','readiness_caption',
+        'faction_popup','faction_popup_blocker','faction_popup_frame','faction_cancel')) {
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) `
+            "Custom UX XML is missing explicit setup control $Id"
+    }
+    foreach ($Index in 1..13) {
+        Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='faction_slot_$Index']")) `
+            "Custom faction picker XML is missing bounded slot $Index"
     }
     foreach ($Id in @('catalog_previous','catalog_page','catalog_next')) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) `
@@ -697,7 +707,14 @@ foreach ($Locale in @('eng','rus')) {
         'st_gamma_arena_custom_points_available','st_gamma_arena_custom_points_used',
         'st_gamma_arena_custom_readiness_outfit','st_gamma_arena_custom_readiness_knife',
         'st_gamma_arena_custom_readiness_weapon','st_gamma_arena_custom_readiness_ammo',
-        'st_gamma_arena_custom_readiness_healing','st_gamma_arena_custom_error_points_deficit')) {
+        'st_gamma_arena_custom_readiness_healing','st_gamma_arena_custom_error_points_deficit',
+        'st_gamma_arena_custom_opponents_group','st_gamma_arena_custom_conditions_group',
+        'st_gamma_arena_custom_fight_seed','st_gamma_arena_custom_player_device',
+        'st_gamma_arena_custom_seed_helper','st_gamma_arena_custom_device_helper',
+        'st_gamma_arena_custom_roster_helper','st_gamma_arena_custom_required_to_start',
+        'st_gamma_arena_custom_ready_to_start','st_gamma_arena_custom_faction_picker_title',
+        'st_gamma_arena_custom_faction_picker_hint','st_gamma_arena_custom_cancel',
+        'st_gamma_arena_custom_random_mode')) {
         Assert-True ($Text -match ('id="' + [regex]::Escape($Id) + '"')) "Readable Custom $Locale localization is missing $Id"
     }
 }
