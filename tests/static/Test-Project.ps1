@@ -3399,6 +3399,25 @@ if ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartStart) {
     Assert-True ($ArenaRestartBlock -match 'audio_event\s*\(\s*"stop_all"') 'Arena manual restart must stop every owned audio channel before cleanup.'
 }
 
+$RosterRefreshModel = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_model.script') -Raw
+$RosterRefreshPresenter = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script') -Raw
+$RosterRefreshUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+$RosterRefreshRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+Assert-True ($RosterRefreshModel -match 'function\s+Model:status_snapshot') 'Custom roster refresh model must expose status_snapshot.'
+Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
+foreach ($HandlerName in @('OnCount', 'OnRank')) {
+    $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value
+    Assert-True ($HandlerBlock -match 'self:RefreshStatus\(\)') "Custom $HandlerName must use the lightweight status refresh."
+    Assert-True ($HandlerBlock -notmatch 'self:Rebuild\(\)') "Custom $HandlerName must not rebuild the catalog."
+}
+$RefreshStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshStatus\(.*?^end\s*$').Value
+Assert-True ($RefreshStatusBlock -notmatch 'rebuild_panels') 'Custom lightweight refresh must not rebuild item panels.'
+Assert-True ($RefreshStatusBlock -notmatch 'model:snapshot') 'Custom lightweight refresh must not request a full model snapshot.'
+$RosterRefreshCase = 'runtime_custom_presenter_refreshes_status_without_catalog_snapshot'
+$RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
+Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterRefreshRegistration)).Count -eq 1) 'Custom roster refresh runtime regression must be registered exactly once.'
+
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
 if (Test-Path -LiteralPath $SmokeHarnessPath) {
     $SmokeHarnessContent = Get-Content -LiteralPath $SmokeHarnessPath -Raw

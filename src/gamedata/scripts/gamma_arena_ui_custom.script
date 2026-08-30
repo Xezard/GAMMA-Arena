@@ -246,6 +246,26 @@ local function device_option_text(option)
     return label .. " | " .. tostring(option.price or 0) .. " AP | " .. format_weight(option.weight_mg)
 end
 
+local function normalize_device_options(options)
+    local normalized = {}
+    for index, option in ipairs(options or {}) do
+        local projected = {
+            section = option.section,
+            label_key = option.section == nil and "st_gamma_arena_custom_device_none"
+                or DEVICE_LABEL_KEYS[option.section],
+            price = option.price,
+            weight_mg = option.weight_mg,
+            selected = option.selected == true,
+            affordable = option.affordable == true,
+            disabled = option.disabled == true,
+            disabled_reason = option.disabled_reason
+        }
+        projected.display_text = device_option_text(projected)
+        normalized[index] = projected
+    end
+    return normalized
+end
+
 function resolve_device_option(options, display_text)
     if type(display_text) ~= "string" then return nil end
     for _, option in ipairs(options or {}) do
@@ -353,22 +373,7 @@ function project(model, category, page)
                 or tostring(cell.effective_price)
         }
     end
-    local device_options = {}
-    for index, option in ipairs(snapshot.device_options or {}) do
-        local projected = {
-            section = option.section,
-            label_key = option.section == nil and "st_gamma_arena_custom_device_none"
-                or DEVICE_LABEL_KEYS[option.section],
-            price = option.price,
-            weight_mg = option.weight_mg,
-            selected = option.selected == true,
-            affordable = option.affordable == true,
-            disabled = option.disabled == true,
-            disabled_reason = option.disabled_reason
-        }
-        projected.display_text = device_option_text(projected)
-        device_options[index] = projected
-    end
+    local device_options = normalize_device_options(snapshot.device_options)
     local validation_code = snapshot.validation and snapshot.validation.error and snapshot.validation.error.code or nil
     local operation_error_code = snapshot.last_operation and snapshot.last_operation.error
         and snapshot.last_operation.error.code or nil
@@ -696,18 +701,34 @@ function rebuild_panels(inventory_container, loadout_container, view)
     rebuild_container(loadout_container, view.selected_cells, true)
 end
 
-function UICustom:Rebuild()
-    custom_trace("GA_DEBUG_CUSTOM_REBUILD_BEGIN", "Custom Arena UI rebuild began", {
-        filter = self.catalog_state.filter,
-        search = self.catalog_state.search,
-        sort = self.catalog_state.sort,
-        page = self.catalog_state.page
-    })
-    local view = self.presenter:project(self.model, self.catalog_state)
+local function refresh_catalog_cells(model, cells)
+    for _, cell in ipairs(cells or {}) do
+        local called, preview = pcall(model.preview_add_one, model, cell.section)
+        local detail = called and type(preview) == "table" and type(preview.error) == "table" and preview.error or nil
+        cell.disabled = not called or type(preview) ~= "table" or preview.ok ~= true
+        cell.disabled_reason = cell.disabled and (detail and detail.code or "GA_CUSTOM_ACTION_FAILED") or nil
+        cell.disabled_context = cell.disabled and detail and detail.context or nil
+    end
+end
+
+local function refresh_inventory_cells(container, cells)
+    local by_section = {}
+    for _, view in ipairs(cells or {}) do by_section[view.section] = view end
+    for _, cell in pairs(container.cell or {}) do
+        if cell:IsShown() then
+            local view = by_section[cell.section]
+            if view then
+                cell.flags.disabled = view.disabled == true
+                local colorize = callable(cell, "Colorize")
+                if colorize then pcall(colorize, cell, view.disabled and "hide" or "def") end
+            end
+        end
+    end
+end
+
+local function prepare_view(self, view)
     view = apply_catalog_result(view, self.catalog_result)
-    local device_view = project(self.model, self.selected_category, 1)
-    view.device_options = device_view.device_options
-    view.actor_device = device_view.actor_device
+    view.device_options = normalize_device_options(view.device_options)
     if self.catalog_result.ok and not self.initial_faction_result.ok then
         view.infrastructure_error_code = self.initial_faction_result.error
             and self.initial_faction_result.error.code or "GA_CUSTOM_FACTION_UNKNOWN"
@@ -717,11 +738,10 @@ function UICustom:Rebuild()
         view.submission_error_code = self.submission_error.error.code
         view.summary_code = view.submission_error_code
     end
-    self.projection = view
-    self.catalog_state.filter = view.filter or self.catalog_state.filter
-    self.catalog_state.search = view.search or self.catalog_state.search
-    self.catalog_state.sort = view.sort or self.catalog_state.sort
-    self.catalog_state.page = view.catalog_page or 1
+    return view
+end
+
+local function render_status_controls(self, view)
     if view.faction then
         self.faction_button:TextControl():SetText(faction_text(view.faction))
     else
@@ -785,6 +805,22 @@ function UICustom:Rebuild()
     self.catalog_page_text:SetText(tostring(view.catalog_page) .. " / " .. tostring(view.catalog_page_count))
     self.catalog_previous:Enable(view.catalog_has_previous)
     self.catalog_next:Enable(view.catalog_has_next)
+end
+
+function UICustom:Rebuild()
+    custom_trace("GA_DEBUG_CUSTOM_REBUILD_BEGIN", "Custom Arena UI rebuild began", {
+        filter = self.catalog_state.filter,
+        search = self.catalog_state.search,
+        sort = self.catalog_state.sort,
+        page = self.catalog_state.page
+    })
+    local view = prepare_view(self, self.presenter:project(self.model, self.catalog_state))
+    self.projection = view
+    self.catalog_state.filter = view.filter or self.catalog_state.filter
+    self.catalog_state.search = view.search or self.catalog_state.search
+    self.catalog_state.sort = view.sort or self.catalog_state.sort
+    self.catalog_state.page = view.catalog_page or 1
+    render_status_controls(self, view)
     rebuild_panels(self.inventory_container, self.loadout_container, view)
     custom_trace("GA_DEBUG_CUSTOM_REBUILD_RESULT", "Custom Arena UI rebuild completed", {
         filter = self.catalog_state.filter,
@@ -792,6 +828,14 @@ function UICustom:Rebuild()
         catalog_cells = #view.catalog_cells,
         selected_cells = #view.selected_cells
     })
+end
+
+function UICustom:RefreshStatus()
+    local view = prepare_view(self, self.presenter:refresh_status(self.model, self.projection))
+    refresh_catalog_cells(self.model, view.catalog_cells)
+    self.projection = view
+    render_status_controls(self, view)
+    refresh_inventory_cells(self.inventory_container, view.catalog_cells)
 end
 
 function UICustom:OpenFactionPicker()
@@ -817,7 +861,7 @@ function UICustom:OnCount()
     self.submission_error = nil
     local count = tonumber(self.count_combo:GetText())
     self.model:set_count(count)
-    self:Rebuild()
+    self:RefreshStatus()
 end
 
 function UICustom:OnDevice()
@@ -830,10 +874,10 @@ end
 
 function UICustom:OnRank(index)
     self.submission_error = nil
-    local view = self.projection or project(self.model, self.selected_category)
+    local view = self.projection or {}
     local rank = combo_value(self.rank_combos[index], view.rank_ids, rank_text)
     if rank then self.model:set_rank(index, rank) end
-    self:Rebuild()
+    self:RefreshStatus()
 end
 
 function UICustom:OnCategory(category)

@@ -473,6 +473,66 @@ local function sorted_category_sections(catalog, category)
     return sections
 end
 
+local function projected_device_options(self)
+    local device_options = {
+        {
+            section = nil,
+            category = "device",
+            price = 0,
+            weight_mg = 0,
+            selected = self.draft.actor_device == nil,
+            affordable = true,
+            disabled = false,
+            disabled_reason = nil
+        }
+    }
+    for _, section in ipairs(DEVICE_SECTIONS) do
+        local definition = self.catalog.items and self.catalog.items[section] or {}
+        local candidate = copy_config(self.draft)
+        candidate.actor_device = section
+        local accepted = gamma_arena_custom_config.validate_draft(candidate, {
+            catalog = self.catalog, layout = self.layout
+        })
+        device_options[#device_options + 1] = {
+            section = section,
+            category = "device",
+            name_key = definition.name_key,
+            price = definition.price,
+            weight_mg = definition.weight_mg,
+            selected = self.draft.actor_device == section,
+            affordable = accepted.ok == true,
+            disabled = accepted.ok ~= true,
+            disabled_reason = accepted.ok and nil or (accepted.error and accepted.error.code or "GA_CUSTOM_INVALID")
+        }
+    end
+    return device_options
+end
+
+function Model:status_snapshot()
+    local validated = self:validation()
+    local budget_result = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
+    local totals_result = gamma_arena_custom_config.totals(self.draft, self.catalog)
+    local spent = totals_result.ok and totals_result.value.points or 0
+    local budget = budget_result.ok and budget_result.value or 0
+    return {
+        faction = self.draft.faction,
+        roster = deep_copy(self.draft.roster),
+        count = #self.draft.roster,
+        capacity = self.layout and self.layout.virtual_capacity or 0,
+        actor_device = self.draft.actor_device,
+        device_options = projected_device_options(self),
+        budget = budget,
+        spent = spent,
+        remaining = budget - spent,
+        weight_mg = totals_result.ok and totals_result.value.weight_mg or 0,
+        weight_limit_mg = totals_result.ok and totals_result.value.weight_limit_mg
+            or (self.catalog.base_carry_weight or 0),
+        validation = validated,
+        can_start = validated.ok == true,
+        last_operation = deep_copy(self.last_operation)
+    }
+end
+
 function Model:snapshot()
     local validated = self:validation()
     local budget_result = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
@@ -525,37 +585,7 @@ function Model:snapshot()
             }
         end
     end
-    local device_options = {
-        {
-            section = nil,
-            category = "device",
-            price = 0,
-            weight_mg = 0,
-            selected = self.draft.actor_device == nil,
-            affordable = true,
-            disabled = false,
-            disabled_reason = nil
-        }
-    }
-    for _, section in ipairs(DEVICE_SECTIONS) do
-        local definition = self.catalog.items and self.catalog.items[section] or {}
-        local candidate = copy_config(self.draft)
-        candidate.actor_device = section
-        local accepted = gamma_arena_custom_config.validate_draft(candidate, {
-            catalog = self.catalog, layout = self.layout
-        })
-        device_options[#device_options + 1] = {
-            section = section,
-            category = "device",
-            name_key = definition.name_key,
-            price = definition.price,
-            weight_mg = definition.weight_mg,
-            selected = self.draft.actor_device == section,
-            affordable = accepted.ok == true,
-            disabled = accepted.ok ~= true,
-            disabled_reason = accepted.ok and nil or (accepted.error and accepted.error.code or "GA_CUSTOM_INVALID")
-        }
-    end
+    local device_options = projected_device_options(self)
     local spent = totals_result.ok and totals_result.value.points or 0
     local budget = budget_result.ok and budget_result.value or 0
     return {
