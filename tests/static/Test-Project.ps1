@@ -465,6 +465,7 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 $Task9CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', '(?m)^local\s+function\s+commit_allowing_incomplete_budget\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_faction_picker.script'; Namespace = 'gamma_arena_ui_faction_picker'; Required = @('(?m)^function\s+new\s*\(', '(?m)^function\s+layout\s*\(', '(?m)^function\s+texture_id\s*\(', 'function\s+Picker:open', 'function\s+Picker:close', 'function\s+Picker:is_open', 'function\s+Picker:select', 'MAX_FACTIONS\s*=\s*13', 'COLUMN_COUNT\s*=\s*4', 'GA_CUSTOM_FACTION_UNKNOWN', 'ui_mm_faction_', 'ui_new_game_flair_zombied') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'gamma_arena_custom_setup_presenter\.new', 'utils_ui\.UICellContainer', 'inventory_container', 'loadout_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'EDIT_TEXT_COMMIT', 'LIST_ITEM_SELECT', 'OnCatalogSearch', 'OnCatalogFilter', 'OnCatalogSort', 'On_CC_Mouse1', 'On_CC_DragDrop', 'dispatch_transfer', 'dispatch_drop', 'equip_replacing', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
 foreach ($Contract in $Task9CustomContracts) {
@@ -598,7 +599,9 @@ foreach ($SortId in @('price_desc','name_desc')) {
 }
 $ReadableCustomCases = @(
     'runtime_custom_ui_initializes_one_authoritative_faction',
-    'runtime_custom_ui_distinguishes_incomplete_and_failed_status'
+    'runtime_custom_ui_distinguishes_incomplete_and_failed_status',
+    'runtime_custom_faction_picker_layout_and_textures_are_bounded',
+    'runtime_custom_faction_picker_select_and_cancel_are_atomic'
 )
 foreach ($Name in $ReadableCustomCases) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'

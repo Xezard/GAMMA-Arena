@@ -1,0 +1,206 @@
+local MAX_FACTIONS = 13
+local COLUMN_COUNT = 4
+local PATCH_TEXTURE_FACTIONS = {
+    army = true,
+    bandit = true,
+    csky = true,
+    dolg = true,
+    ecolog = true,
+    freedom = true,
+    greh = true,
+    isg = true,
+    killer = true,
+    monolith = true,
+    renegade = true,
+    stalker = true
+}
+
+local Picker = {}
+Picker.__index = Picker
+
+local function copy_array(values)
+    local copied = {}
+    for index, value in ipairs(values or {}) do copied[index] = value end
+    return copied
+end
+
+local function contains(values, expected)
+    for _, value in ipairs(values or {}) do
+        if value == expected then return true end
+    end
+    return false
+end
+
+local function translated(translate, string_id)
+    local called, value = pcall(translate, string_id)
+    if called and type(value) == "string" and value ~= "" then return value end
+    return tostring(string_id or "")
+end
+
+function layout(faction_ids)
+    if type(faction_ids) ~= "table" then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction picker requires an ordered faction list")
+    end
+    if #faction_ids > MAX_FACTIONS then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_LIMIT", "Faction picker exceeds its bounded XML slots", {
+            count = #faction_ids,
+            limit = MAX_FACTIONS
+        })
+    end
+
+    local entries, seen = {}, {}
+    for index, id in ipairs(faction_ids) do
+        if type(id) ~= "string" or id == "" or seen[id] then
+            return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction picker received an invalid faction id", {
+                index = index,
+                faction = id
+            })
+        end
+        seen[id] = true
+        entries[index] = {
+            id = id,
+            slot = index,
+            row = math.floor((index - 1) / COLUMN_COUNT) + 1,
+            column = ((index - 1) % COLUMN_COUNT) + 1
+        }
+    end
+    if #entries == 0 then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction picker has no available factions")
+    end
+    return gamma_arena_result.ok(entries)
+end
+
+function texture_id(faction_id)
+    if faction_id == "zombied" then return "ui_new_game_flair_zombied" end
+    if PATCH_TEXTURE_FACTIONS[faction_id] then return "ui_mm_faction_" .. faction_id end
+    return nil
+end
+
+function Picker:_set_visible(state)
+    if self.popup and type(self.popup.Show) == "function" then self.popup:Show(state == true) end
+end
+
+function Picker:_render()
+    for index = 1, MAX_FACTIONS do
+        local slot = self.slots[index]
+        local entry = self.entries[index]
+        if slot then
+            slot.root:Show(entry ~= nil)
+            if entry then
+                slot.label:SetText(translated(self.translate,
+                    "st_gamma_arena_custom_faction_" .. entry.id))
+                slot.label:SetTextColor(entry.id == self.selected_id
+                    and GetARGB(255, 175, 215, 150) or GetARGB(255, 210, 210, 205))
+                local texture = texture_id(entry.id)
+                if texture then pcall(slot.icon.InitTexture, slot.icon, texture) end
+                slot.icon:Show(texture ~= nil)
+                slot.button:Enable(true)
+            end
+        end
+    end
+end
+
+function Picker:_init_windows(options)
+    local owner, xml, root = options.owner, options.xml, options.root
+    if owner == nil or xml == nil or root == nil then return end
+
+    self.popup = xml:InitStatic("gamma_arena_custom:faction_popup", root)
+    self.blocker = xml:Init3tButton("gamma_arena_custom:faction_popup:faction_popup_blocker", self.popup)
+    self.frame = xml:InitStatic("gamma_arena_custom:faction_popup:faction_popup_frame", self.popup)
+    self.title = xml:InitStatic("gamma_arena_custom:faction_popup:faction_popup_frame:title", self.frame)
+    self.hint = xml:InitStatic("gamma_arena_custom:faction_popup:faction_popup_frame:hint", self.frame)
+    self.slots, self.slot_callbacks = {}, {}
+    for index = 1, MAX_FACTIONS do
+        local path = "gamma_arena_custom:faction_popup:faction_popup_frame:faction_slot_" .. tostring(index)
+        local root_slot = xml:InitStatic(path, self.frame)
+        local button = xml:Init3tButton(path .. ":button", root_slot)
+        local icon = xml:InitStatic(path .. ":icon", root_slot)
+        local label = xml:InitTextWnd(path .. ":label", root_slot)
+        local callback_name = "faction_picker_slot_" .. tostring(index)
+        self.slots[index] = { root = root_slot, button = button, icon = icon, label = label }
+        self.slot_callbacks[index] = function() return self:select_slot(index) end
+        owner:Register(button, callback_name)
+        owner:AddCallback(callback_name, ui_events.BUTTON_CLICKED, self.slot_callbacks[index], self)
+    end
+    self.cancel = xml:Init3tButton(
+        "gamma_arena_custom:faction_popup:faction_popup_frame:faction_cancel", self.frame)
+    self.cancel_callback = function() return self:close() end
+    self.blocker_callback = function() return gamma_arena_result.ok(false) end
+    owner:Register(self.cancel, "faction_picker_cancel")
+    owner:AddCallback("faction_picker_cancel", ui_events.BUTTON_CLICKED, self.cancel_callback, self)
+    owner:Register(self.blocker, "faction_picker_blocker")
+    owner:AddCallback("faction_picker_blocker", ui_events.BUTTON_CLICKED, self.blocker_callback, self)
+    self:_set_visible(false)
+end
+
+function Picker:open(faction_ids, selected_id)
+    local arranged = layout(faction_ids)
+    if not arranged.ok then return arranged end
+    if selected_id ~= nil and not contains(faction_ids, selected_id) then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Selected faction is not available", {
+            faction = selected_id
+        })
+    end
+    self.faction_ids = copy_array(faction_ids)
+    self.entries = arranged.value
+    self.selected_id = selected_id
+    self.opened = true
+    self:_render()
+    self:_set_visible(true)
+    return gamma_arena_result.ok(true)
+end
+
+function Picker:close()
+    self.opened = false
+    self:_set_visible(false)
+    return gamma_arena_result.ok(true)
+end
+
+function Picker:is_open()
+    return self.opened == true
+end
+
+function Picker:select(faction_id)
+    if not self.opened or not contains(self.faction_ids, faction_id) then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction picker selection is unavailable", {
+            faction = faction_id
+        })
+    end
+    local called, result = pcall(self.on_select, faction_id)
+    if not called then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_APPLY_FAILED", "Faction picker callback failed safely", {
+            faction = faction_id,
+            reason = tostring(result)
+        })
+    end
+    if type(result) == "table" and type(result.ok) == "boolean" and not result.ok then return result end
+    self.selected_id = faction_id
+    self:close()
+    return gamma_arena_result.ok(faction_id)
+end
+
+function Picker:select_slot(index)
+    local entry = self.entries[index]
+    if not entry then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction picker slot is unavailable", {
+            slot = index
+        })
+    end
+    return self:select(entry.id)
+end
+
+function new(options)
+    options = type(options) == "table" and options or {}
+    local picker = setmetatable({
+        opened = false,
+        faction_ids = {},
+        entries = {},
+        slots = {},
+        translate = type(options.translate) == "function" and options.translate or tostring,
+        on_select = type(options.on_select) == "function" and options.on_select or function()
+            return gamma_arena_result.ok(true)
+        end
+    }, Picker)
+    picker:_init_windows(options)
+    return picker
+end
