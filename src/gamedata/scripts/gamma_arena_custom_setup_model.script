@@ -113,6 +113,97 @@ local function item_definition(self, section)
     return definition, nil
 end
 
+local function add_one_candidate(self, section)
+    local definition, item_error = item_definition(self, section)
+    if item_error then return item_error end
+    if definition.category == "device" then
+        return failure("GA_CUSTOM_DEVICE_IN_ITEMS", "Custom devices require set_device", {
+            section = section
+        })
+    end
+
+    local candidate = copy_config(self.draft)
+    local index, entry = selected_index(candidate, section)
+    if index ~= nil then
+        if not finite_positive(entry.quantity) or entry.quantity >= 9007199254740991 then
+            return failure("GA_CUSTOM_QUANTITY_INVALID", "Custom item quantity exceeds the safe integer range", {
+                section = section, quantity = entry.quantity
+            })
+        end
+        candidate.actor_items[index].quantity = entry.quantity + 1
+    else
+        local slot = expected_slot(definition)
+        local fixed = definition.category == "outfit" or definition.category == "helmet"
+            or definition.category == "knife"
+        local occupied = false
+        if slot ~= nil then
+            for _, selected in ipairs(candidate.actor_items) do
+                if selected.equipped_slot == slot then occupied = true; break end
+            end
+        end
+        candidate.actor_items[#candidate.actor_items + 1] = {
+            section = section,
+            quantity = 1,
+            equipped_slot = fixed and slot
+                or (definition.category == "weapon" and not occupied and slot or nil)
+        }
+    end
+
+    local accepted = gamma_arena_custom_config.validate_draft(candidate, {
+        catalog = self.catalog, layout = self.layout
+    })
+    if not accepted.ok then return accepted end
+    return gamma_arena_result.ok(candidate)
+end
+
+function Model:preview_add_one(section)
+    local built = add_one_candidate(self, section)
+    if not built.ok then return built end
+    local full = gamma_arena_custom_config.validate(built.value, {
+        catalog = self.catalog, layout = self.layout
+    })
+    local _, entry = selected_index(built.value, section)
+    return gamma_arena_result.ok({
+        selected_quantity = entry and entry.quantity or 0,
+        equipped_slot = entry and entry.equipped_slot or nil,
+        validation = full
+    })
+end
+
+function Model:add_one(section)
+    local built = add_one_candidate(self, section)
+    if not built.ok then return reject(self, built) end
+    return commit(self, built.value)
+end
+
+function Model:remove_one(section)
+    return self:decrement_item(section)
+end
+
+function Model:equip_replacing(section)
+    local index, entry = selected_index(self.draft, section)
+    local definition = index and self.catalog.items and self.catalog.items[section] or nil
+    local slot = definition and expected_slot(definition) or nil
+    if index == nil or type(definition) ~= "table" or definition.category ~= "weapon"
+        or slot == nil or entry.quantity ~= 1 then
+        return reject(self, failure("GA_CUSTOM_SLOT_INVALID",
+            "Selected Custom firearm cannot occupy a weapon slot", { section = section }))
+    end
+
+    local candidate = copy_config(self.draft)
+    local replaced = nil
+    for other_index, other in ipairs(candidate.actor_items) do
+        if other_index ~= index and other.equipped_slot == slot then
+            replaced = other.section
+            other.equipped_slot = nil
+        end
+    end
+    candidate.actor_items[index].equipped_slot = slot
+    local committed = commit(self, candidate)
+    if committed.ok then committed.value.replaced_section = replaced end
+    return committed
+end
+
 function Model:set_faction(faction)
     if type(faction) ~= "string" or faction == "" or type(self.catalog.factions) ~= "table"
         or type(self.catalog.factions[faction]) ~= "table" then

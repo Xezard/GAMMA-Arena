@@ -413,6 +413,68 @@ local function custom_setup_model_edits_stack_quantities_without_duplicates()
     gamma_arena_test_assert.equals(weight_capped:snapshot().actor_items[3].quantity, 1, "weight rejection preserves stack quantity")
 end
 
+local function custom_setup_model_one_unit_commands_are_atomic()
+    local catalog = make_catalog()
+    catalog.items.expensive_medkit = clone(catalog.items.medkit)
+    catalog.items.expensive_medkit.section = "expensive_medkit"
+    catalog.items.expensive_medkit.price = 701
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "fixture faction is selected")
+
+    local before = model:snapshot()
+    local preview = model:preview_add_one("medkit")
+    gamma_arena_test_assert.is_true(preview.ok, "preview accepts one medicine unit")
+    gamma_arena_test_assert.equals(preview.value.selected_quantity, 1, "preview exposes candidate quantity")
+    local after_preview = model:snapshot()
+    gamma_arena_test_assert.equals(#after_preview.actor_items, #before.actor_items,
+        "preview never mutates inventory")
+    gamma_arena_test_assert.equals(after_preview.spent, before.spent, "preview never mutates points")
+    gamma_arena_test_assert.equals(after_preview.weight_mg, before.weight_mg, "preview never mutates weight")
+
+    gamma_arena_test_assert.is_true(model:add_one("medkit").ok, "add one succeeds")
+    gamma_arena_test_assert.is_true(model:add_one("medkit").ok, "second add stacks")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[1].quantity, 2,
+        "two adds produce quantity two")
+    gamma_arena_test_assert.is_true(model:remove_one("medkit").ok, "remove decrements")
+    gamma_arena_test_assert.is_true(model:remove_one("medkit").ok, "remove at one deletes")
+    gamma_arena_test_assert.equals(#model:snapshot().actor_items, 0,
+        "quantity zero removes the exact section")
+
+    local rejected_before = model:snapshot()
+    assert_code(model:add_one("expensive_medkit"), "GA_CUSTOM_OVERSPEND",
+        "unaffordable one-unit add is rejected")
+    local rejected_after = model:snapshot()
+    gamma_arena_test_assert.equals(#rejected_after.actor_items, #rejected_before.actor_items,
+        "rejected add preserves inventory")
+    gamma_arena_test_assert.equals(rejected_after.spent, rejected_before.spent,
+        "rejected add preserves points")
+    gamma_arena_test_assert.equals(rejected_after.weight_mg, rejected_before.weight_mg,
+        "rejected add preserves weight")
+end
+
+local function custom_setup_model_auto_equips_and_replaces_weapon_atomically()
+    local catalog = make_catalog()
+    catalog.items.wpn_beta = clone(catalog.items.wpn_alpha)
+    catalog.items.wpn_beta.section = "wpn_beta"
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:add_one("wpn_alpha").ok, "first weapon adds")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[1].equipped_slot,
+        "weapon_2", "first weapon auto-equips")
+    gamma_arena_test_assert.is_true(model:add_one("wpn_beta").ok, "second weapon is carried")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[2].equipped_slot, nil,
+        "occupied slot prevents implicit replacement")
+
+    local replaced = model:equip_replacing("wpn_beta")
+    gamma_arena_test_assert.is_true(replaced.ok, "explicit replacement succeeds")
+    gamma_arena_test_assert.equals(replaced.value.replaced_section, "wpn_alpha",
+        "replacement reports exact prior occupant")
+    local snapshot = model:snapshot()
+    gamma_arena_test_assert.equals(snapshot.actor_items[1].equipped_slot, nil,
+        "prior occupant is unequipped")
+    gamma_arena_test_assert.equals(snapshot.actor_items[2].equipped_slot, "weapon_2",
+        "requested weapon owns the slot")
+end
+
 local function custom_setup_model_grenade_selection_removal_and_reorder_are_semantic()
     local catalog = make_catalog()
     local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
@@ -676,6 +738,8 @@ local cases = {
     { name = "custom_setup_model_progressively_assembles_valid_equipment_and_categories", fn = custom_setup_model_progressively_assembles_valid_equipment_and_categories },
     { name = "custom_setup_model_rejects_masked_semantic_candidates_atomically", fn = custom_setup_model_rejects_masked_semantic_candidates_atomically },
     { name = "custom_setup_model_edits_stack_quantities_without_duplicates", fn = custom_setup_model_edits_stack_quantities_without_duplicates },
+    { name = "custom_setup_model_one_unit_commands_are_atomic", fn = custom_setup_model_one_unit_commands_are_atomic },
+    { name = "custom_setup_model_auto_equips_and_replaces_weapon_atomically", fn = custom_setup_model_auto_equips_and_replaces_weapon_atomically },
     { name = "custom_setup_model_grenade_selection_removal_and_reorder_are_semantic", fn = custom_setup_model_grenade_selection_removal_and_reorder_are_semantic },
     { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
     ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
