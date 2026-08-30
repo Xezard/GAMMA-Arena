@@ -8,6 +8,7 @@ Gamma Arena turns the classic Rostok Arena into a self-contained combat mode wit
 
 ## Screenshots
 ![Gamma Arena battle in Rostok](assets/battle_1.png)
+![Gamma Arena custom setup](assets/custom_setup.png)
 
 ## Features
 
