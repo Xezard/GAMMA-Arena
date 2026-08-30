@@ -10186,6 +10186,51 @@ local function runtime_custom_ui_formats_ap_and_routes_native_hover()
     gamma_arena_test_assert.is_false(
         gamma_arena_ui_custom.update_item_hover(catalog, selected, panel), "absent hover returns false")
     gamma_arena_test_assert.equals(panel.resets, 1, "absent hover resets native panel")
+
+    local updates = 0
+    local capability = { Update = function(_, received) updates = updates + 1; return received == panel end }
+    local proxy = setmetatable({}, { __index = capability })
+    gamma_arena_test_assert.is_true(
+        gamma_arena_ui_custom.update_item_hover(proxy, proxy, panel),
+        "hover uses capabilities instead of concrete Lua table identity")
+    gamma_arena_test_assert.equals(updates, 2, "both capability-backed containers update")
+end
+
+local function runtime_custom_ui_click_and_drag_dispatch_identical_commands()
+    local calls = {}
+    local model = {
+        add_one = function(_, section)
+            calls[#calls + 1] = "add:" .. section
+            return gamma_arena_result.ok({})
+        end,
+        remove_one = function(_, section)
+            calls[#calls + 1] = "remove:" .. section
+            return gamma_arena_result.ok({})
+        end,
+        equip_replacing = function(_, section)
+            calls[#calls + 1] = "equip:" .. section
+            return gamma_arena_result.ok({})
+        end
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_transfer(
+        model, "loadout_to_inventory", "wpn_alpha").ok, "loadout click dispatches add")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_drop(
+        model, "loadout", "wpn_alpha", true, false).ok, "loadout drop dispatches add")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_transfer(
+        model, "inventory_to_loadout", "wpn_alpha").ok, "inventory click dispatches remove")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_drop(
+        model, "inventory", "wpn_alpha", false, true).ok, "inventory drop dispatches remove")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_equip(
+        model, "wpn_alpha").ok, "right click dispatches atomic equip")
+    gamma_arena_test_assert.equals(table.concat(calls, ","),
+        "add:wpn_alpha,add:wpn_alpha,remove:wpn_alpha,remove:wpn_alpha,equip:wpn_alpha",
+        "click, valid drops, and equip route exact commands")
+
+    local outside = gamma_arena_ui_custom.dispatch_drop(
+        model, "loadout", "wpn_alpha", false, false)
+    gamma_arena_test_assert.is_true(outside.ok, "outside drop is safe")
+    gamma_arena_test_assert.is_false(outside.value.changed, "outside drop is an explicit no-op")
+    gamma_arena_test_assert.equals(#calls, 5, "outside drop never mutates model")
 end
 
 local function runtime_custom_ui_launch_projection_is_authoritative()
@@ -11670,6 +11715,7 @@ local cases = {
     { name = "runtime_custom_ui_initializes_one_authoritative_faction", fn = runtime_custom_ui_initializes_one_authoritative_faction },
     { name = "runtime_custom_ui_distinguishes_incomplete_and_failed_status", fn = runtime_custom_ui_distinguishes_incomplete_and_failed_status },
     { name = "runtime_custom_ui_formats_ap_and_routes_native_hover", fn = runtime_custom_ui_formats_ap_and_routes_native_hover },
+    { name = "runtime_custom_ui_click_and_drag_dispatch_identical_commands", fn = runtime_custom_ui_click_and_drag_dispatch_identical_commands },
     { name = "runtime_custom_ui_launch_projection_is_authoritative", fn = runtime_custom_ui_launch_projection_is_authoritative },
     { name = "runtime_custom_ui_grenade_projection_disables_cells_at_limit", fn = runtime_custom_ui_grenade_projection_disables_cells_at_limit },
     { name = "runtime_custom_ui_device_projection_round_trips_all_choices", fn = runtime_custom_ui_device_projection_round_trips_all_choices },

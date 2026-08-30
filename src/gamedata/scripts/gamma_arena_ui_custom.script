@@ -133,15 +133,61 @@ function arena_price_text(value, translator)
     return translator("st_gamma_arena_custom_arena_price") .. ": " .. format_price_text(value)
 end
 
+local function callable(value, method)
+    if value == nil then return nil end
+    local called, callback = pcall(function() return value[method] end)
+    return called and type(callback) == "function" and callback or nil
+end
+
 function update_item_hover(catalog_container, selected_container, item_info)
-    if type(catalog_container) ~= "table" or type(catalog_container.Update) ~= "function"
-        or type(selected_container) ~= "table" or type(selected_container.Update) ~= "function"
-        or type(item_info) ~= "table" or type(item_info.Update) ~= "function" then return false end
-    local catalog_hovered = catalog_container:Update(item_info) == true
-    local selected_hovered = selected_container:Update(item_info) == true
+    local catalog_update = callable(catalog_container, "Update")
+    local selected_update = callable(selected_container, "Update")
+    local item_info_update = callable(item_info, "Update")
+    if not catalog_update or not selected_update or not item_info_update then return false end
+    local catalog_called, catalog_result = pcall(catalog_update, catalog_container, item_info)
+    local selected_called, selected_result = pcall(selected_update, selected_container, item_info)
+    local catalog_hovered = catalog_called and catalog_result == true
+    local selected_hovered = selected_called and selected_result == true
     local hovered = catalog_hovered or selected_hovered
-    if not hovered then item_info:Update() end
+    if not hovered then pcall(item_info_update, item_info) end
     return hovered
+end
+
+function dispatch_transfer(model, direction, section)
+    local method = direction == "loadout_to_inventory" and callable(model, "add_one")
+        or (direction == "inventory_to_loadout" and callable(model, "remove_one") or nil)
+    if not method then
+        return gamma_arena_result.err("GA_CUSTOM_TRANSFER_INVALID",
+            "Custom loadout transfer direction is unavailable", { direction = direction })
+    end
+    return protected_result("GA_CUSTOM_TRANSFER_FAILED", "Custom loadout transfer failed safely",
+        function() return method(model, section) end)
+end
+
+function dispatch_drop(model, source_id, section, over_inventory, over_loadout)
+    local direction = nil
+    if source_id == "loadout" and over_inventory == true then
+        direction = "loadout_to_inventory"
+    elseif source_id == "inventory" and over_loadout == true then
+        direction = "inventory_to_loadout"
+    end
+    if direction == nil then return gamma_arena_result.ok({ changed = false }) end
+    local result = dispatch_transfer(model, direction, section)
+    if result.ok then
+        if type(result.value) ~= "table" then result.value = {} end
+        result.value.changed = true
+    end
+    return result
+end
+
+function dispatch_equip(model, section)
+    local method = callable(model, "equip_replacing")
+    if not method then
+        return gamma_arena_result.err("GA_CUSTOM_SLOT_INVALID",
+            "Custom loadout equip action is unavailable", { section = section })
+    end
+    return protected_result("GA_CUSTOM_SLOT_INVALID", "Custom loadout equip action failed safely",
+        function() return method(model, section) end)
 end
 
 local function device_option_text(option)

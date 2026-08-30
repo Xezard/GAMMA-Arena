@@ -476,7 +476,7 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 $Task9CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'utils_ui\.UICellContainer', 'catalog_container', 'selected_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'LIST_ITEM_SELECT', 'On_CC_Mouse1', 'increment_item', 'decrement_item', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
 foreach ($Contract in $Task9CustomContracts) {
     $ScriptPath = Join-Path $RepoRoot $Contract.Path
@@ -575,14 +575,21 @@ $HoverCase = 'runtime_custom_ui_formats_ap_and_routes_native_hover'
 $HoverRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($HoverCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($HoverCase) + '\s*\}'
 Assert-True (([regex]::Matches($Task9RuntimeTests, $HoverRegistration)).Count -eq 1) `
     "Readable Custom runtime case must be registered exactly: $HoverCase"
+$TransferCase = 'runtime_custom_ui_click_and_drag_dispatch_identical_commands'
+$TransferRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($TransferCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($TransferCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task9RuntimeTests, $TransferRegistration)).Count -eq 1) `
+    "Readable Custom runtime case must be registered exactly: $TransferCase"
 $ReadableCustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
+$HoverHelper = [regex]::Match($ReadableCustomUi, '(?ms)^function\s+update_item_hover\s*\(.*?^end\s*$').Value
+Assert-True ($HoverHelper -notmatch 'type\s*\(\s*(?:catalog_container|selected_container|inventory_container|loadout_container|item_info)\s*\)\s*~=\s*"table"') `
+    'Readable Custom hover must use live capabilities instead of rejecting X-Ray userdata.'
 foreach ($Marker in @('function initialize_faction','function status_presentation',
     'self.ports.initial_faction_index','infrastructure_error_code','last_reported_status_code')) {
     Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Readable Custom UI is missing $Marker"
 }
 foreach ($Marker in @('function format_price_text','function arena_price_text','function update_item_hover',
-    'utils_ui.UIInfoItem(self)','function UICustom:Update()','catalog_container:Update(item_info)',
-    'selected_container:Update(item_info)')) {
+    'utils_ui.UIInfoItem(self)','function UICustom:Update()','pcall(catalog_update, catalog_container, item_info)',
+    'pcall(selected_update, selected_container, item_info)')) {
     Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Readable Custom hover is missing $Marker"
 }
 Assert-True ($ReadableCustomUi -match 'Add_CustomText\(\s*format_price_text\(') `
