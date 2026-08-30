@@ -1974,7 +1974,7 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
 $Task6CompatPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_compat.script'
 if (Test-Path -LiteralPath $Task6CompatPath) {
     $Task6CompatContent = Get-Content -LiteralPath $Task6CompatPath -Raw
-    foreach ($Marker in @('time_global','level.disable_input','level.enable_input','db.actor.iterate_inventory','db.actor.power','db.actor.radiation','db.actor.bleeding','db.actor.psy_health','db.actor.set_actor_position')) {
+    foreach ($Marker in @('time_global','level.disable_input','level.enable_input','db.actor.iterate_inventory','db.actor.power','db.actor.radiation','db.actor.bleeding','db.actor.psy_health','db.actor.set_actor_position','db.actor.activate_slot','db.actor.active_slot')) {
         Assert-True ($Task6CompatContent -match [regex]::Escape($Marker)) "Task 6 preflight must require $Marker"
     }
     foreach ($Forbidden in @('GA_PREFLIGHT_BOUNDARY_MISSING','GA_PREFLIGHT_BOUNDARY_INVALID')) {
@@ -2189,7 +2189,9 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     foreach ($Marker in @('entities','on_npc_death','living_opponent_count','GA_ENTITY_COUNT_UNAVAILABLE','GA_ENTITY_COUNT_STATE_INVALID')) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Task 7 orchestration integration must cover $Marker"
     }
-    Assert-True ($Task5OrchestratorContent -match 'if\s+not\s+self:is_active\(\)\s+and\s+self\.cleanup_required\s+then\s+return\s+self:drive_runtime\(\)\s+end') 'Inactive cleanup polling must not bypass launch/resume activation while awaiting_activation is set'
+    $InactiveCleanupPoll = [regex]::Match($Task5OrchestratorContent, 'if\s+not\s+self:is_active\(\)\s+and\s+self\.cleanup_required\s+then[\s\S]{0,700}?return\s+self:drive_runtime\(\)').Value
+    Assert-True ($InactiveCleanupPoll.Length -gt 0) 'Inactive cleanup polling must not bypass launch/resume activation while awaiting_activation is set'
+    Assert-True ($InactiveCleanupPoll -match 'begin_update') 'Inactive cleanup polling must advance actor absence proofs on the later engine update'
     Assert-True ($Task5OrchestratorContent -match 'if\s+self\.cleanup_required\s+then[\s\S]{0,500}self:cleanup_ready_for_disconnect\(\)') 'A later loaded Arena must consume exact cleanup readiness before launch/resume activation'
     $Task7LaunchBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:activate_once[\s\S]*?function\s+Orchestrator:layout_snapshot').Value
     $Task7PreflightIndex = $Task7LaunchBlock.IndexOf('preflight_fight')
@@ -3061,8 +3063,8 @@ $RuntimeChildDriveEnd = if ($RuntimeChildDriveStart -ge 0) { $RuntimeChildEntity
 $RuntimeChildAdoptionOrdered = $false
 if ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDriveStart) {
     $RuntimeChildDrive = $RuntimeChildEntityContent.Substring($RuntimeChildDriveStart, $RuntimeChildDriveEnd - $RuntimeChildDriveStart)
-    $RuntimeChildAdoptIndex = $RuntimeChildDrive.IndexOf('self:adopt_runtime_children(record)')
-    $RuntimeChildReleaseIndex = $RuntimeChildDrive.IndexOf('self:begin_release(record)')
+    $RuntimeChildAdoptIndex = $RuntimeChildDrive.IndexOf('self:adopt_cleanup_children()')
+    $RuntimeChildReleaseIndex = $RuntimeChildDrive.IndexOf('self:submit_cleanup_wave("npc"')
     $RuntimeChildAdoptionOrdered = $RuntimeChildAdoptIndex -ge 0 -and $RuntimeChildReleaseIndex -gt $RuntimeChildAdoptIndex
 }
 Assert-True $RuntimeChildAdoptionOrdered 'Entity cleanup must adopt current runtime children before NPC release.'

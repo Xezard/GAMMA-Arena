@@ -142,6 +142,8 @@ local function valid_preflight_probes()
     function actor:item_in_slot() return nil end
     function actor:make_item_active() return true end
     function actor:active_item() return nil end
+    function actor:activate_slot() return true end
+    function actor:active_slot() return 0 end
     local arena_zone = {}
     function arena_zone:inside() return true end
 
@@ -333,6 +335,8 @@ local function preflight_requires_task6_actor_checkpoint_ports()
         { capability = "exec_console_cmd", mutate = function(probes) probes.exec_console_cmd = nil end },
         { capability = "level.disable_input", mutate = function(probes) probes.level.disable_input = nil end },
         { capability = "db.actor.iterate_inventory", mutate = function(probes) probes.db.actor.iterate_inventory = nil end },
+        { capability = "db.actor.activate_slot", mutate = function(probes) probes.db.actor.activate_slot = nil end },
+        { capability = "db.actor.active_slot", mutate = function(probes) probes.db.actor.active_slot = nil end },
         { capability = "getFS.file_rename", mutate = function(probes) probes.getFS = function() return {} end end }
     }
     for _, case in ipairs(cases) do
@@ -1954,6 +1958,10 @@ local function fake_actor_adapter_env()
         input_releases = 0,
         ordered_calls = {},
         interrupt_calls = 0,
+        hide_weapon_calls = 0,
+        active_slot_reads = 0,
+        active_slot = 2,
+        hide_weapon_failure = false,
         transient_reset_calls = 0,
         interrupt_failure = false,
         interrupt_throw = false,
@@ -2091,6 +2099,19 @@ local function fake_actor_adapter_env()
             if env.interrupt_failure then return gamma_arena_result.err("GA_TEST_INTERRUPT", "injected item-use interrupt failure") end
             return gamma_arena_result.ok(true)
         end,
+        hide_weapon = function(candidate)
+            env.hide_weapon_calls = env.hide_weapon_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "hide_weapon"
+            gamma_arena_test_assert.is_true(candidate == actor, "weapon hide only touches the owned Arena actor")
+            if env.hide_weapon_failure then return gamma_arena_result.err("GA_TEST_HIDE_WEAPON", "injected weapon-hide failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        active_slot = function(candidate)
+            env.active_slot_reads = env.active_slot_reads + 1
+            gamma_arena_test_assert.is_true(candidate == actor, "active-slot proof only reads the owned Arena actor")
+            return gamma_arena_result.ok(env.active_slot)
+        end,
+        weapon_hide_timeout_ms = 5000,
         reset_transient_state = function(candidate)
             env.transient_reset_calls = env.transient_reset_calls + 1
             env.ordered_calls[#env.ordered_calls + 1] = "transients"
@@ -2147,6 +2168,107 @@ local function runtime_actor_rematch_boundary_failure_never_acquires_input()
     gamma_arena_test_assert.is_false(rejected.ok, "failed required input acquisition rejects rematch boundary")
     gamma_arena_test_assert.equals(rejected.error.code, "GA_TEST_INPUT", "input acquisition failure identity is preserved")
     gamma_arena_test_assert.equals(input_env.input_releases, 0, "failed acquisition owns no lease to release")
+end
+
+local function runtime_actor_victory_cleanup_hides_weapon_before_release()
+    local env, adapter = fake_actor_adapter_env()
+    local loadout_cleanup_calls = 0
+    env:add_item(12, { section = "wpn_lr300" })
+    adapter.deps.loadout = {
+        cleanup = function()
+            loadout_cleanup_calls = loadout_cleanup_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "loadout"
+            return gamma_arena_result.ok(true)
+        end
+    }
+
+    adapter:begin_update()
+    local started = adapter:begin_victory_cleanup()
+    gamma_arena_test_assert.is_true(started.ok and started.value.pending, "victory cleanup begins asynchronously")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "interrupt", "item animation is interrupted first")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "hide_weapon", "slot zero is requested without taking modal UI input")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "early victory cleanup leaves result-modal input available")
+
+    local same_update = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(same_update.ok and same_update.value.pending, "same-update active-slot observation cannot authorize release")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 0, "equipped loadout remains intact before a later hide proof")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "inventory release is not submitted before hide proof")
+
+    env.active_slot = 0
+    adapter:begin_update()
+    local draining = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(draining.ok and draining.value.pending, "proved hidden weapon advances into inventory drain")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 1, "owned loadout cleanup starts after slot-zero proof")
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "remaining inventory is released once after the loadout cleanup")
+
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().value == true, "later absence proof completes early cleanup")
+    local reset = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(reset.ok and reset.value == true, "rematch normalization reuses completed early cleanup")
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "rematch reset never resubmits an early inventory release")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 1, "rematch reset never repeats early loadout cleanup")
+    gamma_arena_test_assert.equals(env.transient_reset_calls, 1, "remaining rematch transients reset after the button boundary")
+end
+
+local function runtime_actor_victory_cleanup_hide_wait_is_bounded_and_wrap_safe()
+    local env, adapter = fake_actor_adapter_env()
+    env.now = 4294967294
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "weapon hide begins near uint32 wrap")
+    env:advance(4999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().ok, "weapon hide remains pending below deadline across wrap")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_false(timed_out.ok, "weapon hide fails at the exact bounded deadline")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_WEAPON_HIDE_TIMEOUT", "weapon-hide timeout identity is stable")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_ms, 5000, "weapon-hide timeout reports wrap-safe elapsed time")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "timed-out equipped weapon is never submitted for inventory release")
+end
+
+local function runtime_actor_victory_cleanup_is_idempotent()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "first victory-cleanup start succeeds")
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "duplicate victory-cleanup start is benign")
+    gamma_arena_test_assert.equals(env.interrupt_calls, 1, "duplicate start never repeats item interruption")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "duplicate early cleanup never acquires result-modal input")
+    gamma_arena_test_assert.equals(env.hide_weapon_calls, 1, "duplicate start never repeats slot-zero request")
+end
+
+local function runtime_actor_victory_cleanup_survives_session_deactivation()
+    local env, adapter = fake_actor_adapter_env()
+    env:add_item(33, { section = "wpn_ak74" })
+    adapter.deps.loadout = { cleanup = function() return gamma_arena_result.ok(true) end }
+
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "victory cleanup captures the active Arena actor")
+    env.active = false
+    env.active_slot = 0
+    adapter:begin_update()
+    local draining = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(draining.ok and draining.value.pending, "captured victory cleanup continues after session deactivation")
+    gamma_arena_test_assert.equals(env.release_requests[33], 1, "deactivated-session cleanup releases the captured actor inventory once")
+
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().value == true, "deactivated-session cleanup completes after authoritative absence")
+end
+
+local function runtime_actor_victory_cleanup_rejects_changed_actor_identity()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "victory cleanup captures the original actor identity")
+    env.active = false
+    env.actor.actor_id = env.actor.actor_id + 1
+    env.active_slot = 0
+    adapter:begin_update()
+    local rejected = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_false(rejected.ok, "victory cleanup fails closed when the actor identity changes")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_NOT_OWNED", "changed actor identity has a stable failure code")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "changed actor identity is never mutated")
 end
 
 local function runtime_actor_preowned_input_survives_normalize_failure()
@@ -3821,6 +3943,8 @@ local function entity_spec(opponent_count)
         stable_encode = function() return "stable:ga9-entity-test" end
     }
 end
+
+local function fake_entity_environment(options)
     options = options or {}
     local env = {
         now = options.now or 100,
@@ -4195,6 +4319,7 @@ end
             if options.fail_phase == "hostile" and env.hostile_calls == (options.fail_hostile_at or 1) then return gamma_arena_result.err("GA_TEST_HOSTILE_FAIL", "injected hostility failure") end
             return gamma_arena_result.ok(true)
         end,
+        spawn_step_budget = options.spawn_step_budget,
         release_timeout_ms = options.release_timeout_ms or 20,
         online_timeout_ms = options.online_timeout_ms or 20
     }
@@ -5654,8 +5779,18 @@ local function runtime_entity_partial_failures_rollback_in_reverse()
                 gamma_arena_test_assert.is_true(final_hold ~= nil, "late hostility failure reapplies the friendly hold before yielding")
             end
         end
-        for index = 2, #env.release_requests do
-            gamma_arena_test_assert.is_true(env.release_requests[index - 1] > env.release_requests[index], "rollback release requests must follow reverse creation order")
+        local npc_wave_started, last_item_id, last_npc_id = false, nil, nil
+        for _, id in ipairs(env.release_requests) do
+            local record = adapter.record_by_id[id]
+            if record and record.kind == "npc" then
+                npc_wave_started = true
+                if last_npc_id ~= nil then gamma_arena_test_assert.is_true(last_npc_id > id, "NPC rollback wave retains reverse creation order") end
+                last_npc_id = id
+            else
+                gamma_arena_test_assert.is_false(npc_wave_started, "every item rollback submission precedes NPC parent waves")
+                if last_item_id ~= nil then gamma_arena_test_assert.is_true(last_item_id > id, "item rollback wave retains reverse creation order") end
+                last_item_id = id
+            end
         end
     end
     local actor_env, actor_deps = fake_entity_environment({ fail_phase = "actor" })
@@ -5714,6 +5849,59 @@ local function runtime_entity_supports_real_get_children_iterator()
     gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "real GAMMA get_children iterator is snapshotted safely")
     gamma_arena_test_assert.equals(env.release_requests[1], 101, "iterator snapshot purges the first default child")
     gamma_arena_test_assert.equals(env.release_requests[2], 102, "iterator snapshot purges the second default child")
+end
+
+local function runtime_entity_cleanup_submits_item_release_wave_concurrently()
+    local env, deps = fake_entity_environment({ release_delay = 5 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, entity_spec(1), "session-release-wave")
+    local active, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(active.ok and snapshot.state == "ACTIVE", "release-wave fixture reaches ACTIVE")
+    local item_ids = {}
+    for index, record in ipairs(snapshot.items) do item_ids[index] = record.id end
+    local npc_id = snapshot.npcs[1].id
+    env.release_requests = {}
+
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "release-wave cleanup starts")
+    local first = adapter:update()
+    gamma_arena_test_assert.is_true(first.ok, "first cleanup update submits a safe item wave")
+    gamma_arena_test_assert.equals(#env.release_requests, #item_ids, "all independent owned items are submitted in one update")
+    for index = 1, #item_ids do
+        gamma_arena_test_assert.equals(env.release_requests[index], item_ids[#item_ids - index + 1], "item wave retains reverse creation submission order")
+    end
+    for _, id in ipairs(env.release_requests) do gamma_arena_test_assert.is_true(id ~= npc_id, "NPC parent is excluded from the item wave") end
+    gamma_arena_test_assert.equals(adapter:registry_snapshot().state, "CLEANING", "release wave remains asynchronously polled")
+
+    local cleaned, final_snapshot = pump_entity(adapter, env, 100)
+    gamma_arena_test_assert.is_true(cleaned.ok and final_snapshot.state == "CLEAN", "concurrent item wave converges before the NPC wave")
+    local npc_position = release_request_position(env, npc_id)
+    gamma_arena_test_assert.is_true(npc_position ~= nil and npc_position > #item_ids, "NPC release is submitted only after every child release wave")
+end
+
+local function runtime_entity_spawn_pump_is_bounded_and_yields_on_release_wait()
+    local fast_env, fast_deps = fake_entity_environment({ spawn_step_budget = 8 })
+    local fast = gamma_arena_entity_adapter.new(fast_deps)
+    begin_entity_apply(fast, fast_env, entity_spec(1), "session-spawn-budget-fast")
+    gamma_arena_test_assert.is_true(fast:update().ok, "actor readiness opens bounded spawning")
+    gamma_arena_test_assert.is_true(fast:update().ok, "bounded spawn pump advances synchronous work")
+    gamma_arena_test_assert.equals(fast_env.create_npc_count, 1, "spawn pump creates one opponent")
+    gamma_arena_test_assert.equals(#fast_env.create_item_calls, 5, "default budget performs five descriptor creations after setup steps")
+
+    local slow_env, slow_deps = fake_entity_environment({ spawn_step_budget = 1 })
+    local slow = gamma_arena_entity_adapter.new(slow_deps)
+    begin_entity_apply(slow, slow_env, entity_spec(1), "session-spawn-budget-slow")
+    slow:update(); slow:update()
+    gamma_arena_test_assert.equals(slow_env.create_npc_count, 1, "single-step budget creates the opponent")
+    gamma_arena_test_assert.equals(#slow_env.create_item_calls, 0, "single-step budget cannot exceed one synchronous spawn step")
+
+    local wait_env, wait_deps = fake_entity_environment({ spawn_step_budget = 64, default_children = true, release_delay = 5 })
+    local waiting = gamma_arena_entity_adapter.new(wait_deps)
+    begin_entity_apply(waiting, wait_env, entity_spec(1), "session-spawn-budget-wait")
+    waiting:update(); waiting:update()
+    gamma_arena_test_assert.equals(#wait_env.release_requests, 1, "large budget submits only the first asynchronous child release")
+    gamma_arena_test_assert.equals(#wait_env.create_item_calls, 0, "spawn pump yields before assigned items while child release is pending")
+    waiting:update()
+    gamma_arena_test_assert.equals(#wait_env.release_requests, 1, "polling without engine progress never duplicates the pending release")
 end
 
 local function runtime_entity_multi_return_ammo_is_exact()
@@ -6833,7 +7021,7 @@ local function runtime_entity_max_cardinality_cleanup_fits_default_budget()
         env:advance(1)
     end
     gamma_arena_test_assert.is_true(result.ok and result.value.pending == false, "maximum-cardinality deferred cleanup completes within the default entity budget")
-    gamma_arena_test_assert.is_true(context.updates > 64 and context.updates <= 256, "coverage proves the legacy shared 64-update default was insufficient but the entity cap is bounded")
+    gamma_arena_test_assert.is_true(context.updates >= 6 and context.updates <= 16, "batched item and NPC waves keep maximum-cardinality cleanup within a small bounded update count")
 end
 
 local function runtime_entity_relations_friend_first_then_actor_hostile()
@@ -7074,11 +7262,17 @@ local function task8_environment(options)
         applied_specs = {},
         generated_sessions = {},
         boundary_calls = 0,
+        victory_cleanup_starts = 0,
+        victory_cleanup_updates = 0,
         ordered_calls = {},
-        entity_stage_updates = 0
+        entity_stage_updates = 0,
+        actor_update_ticks = 0
     }
     local actor = {
-        begin_update = function() return gamma_arena_result.ok(true) end,
+        begin_update = function()
+            env.actor_update_ticks = env.actor_update_ticks + 1
+            return gamma_arena_result.ok(true)
+        end,
         normalize_for_arena = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function()
             env.inventory_verify_calls = env.inventory_verify_calls + 1
@@ -7091,6 +7285,16 @@ local function task8_environment(options)
             env.ordered_calls[#env.ordered_calls + 1] = "boundary"
             if options.boundary_error then return gamma_arena_result.err("GA_ACTOR_INPUT_DISABLE_FAILED", "injected rematch boundary failure") end
             env.acquired_input = env.acquired_input + 1
+            return gamma_arena_result.ok(true)
+        end,
+        begin_victory_cleanup = function()
+            env.victory_cleanup_starts = env.victory_cleanup_starts + 1
+            if options.victory_cleanup_error then return gamma_arena_result.err("GA_TEST_VICTORY_CLEANUP", "injected victory cleanup failure") end
+            return gamma_arena_result.ok({ pending = true, stage = "weapon_hide" })
+        end,
+        update_victory_cleanup = function()
+            env.victory_cleanup_updates = env.victory_cleanup_updates + 1
+            if options.victory_cleanup_pending then return gamma_arena_result.ok({ pending = true, stage = "inventory_absence" }) end
             return gamma_arena_result.ok(true)
         end,
         cleanup_loadout_for_restore = function()
@@ -7727,8 +7931,23 @@ local function runtime_result_modal_releases_global_input()
     local victory_acquired = victory.acquired_input
     victory.orchestrator:npc_on_death_callback({ id = function() return victory.registry.npcs[1].id end })
     victory.orchestrator:actor_on_update()
-    gamma_arena_test_assert.equals(victory.acquired_input, victory_acquired, "victory result never globally disables mouse input")
+    gamma_arena_test_assert.equals(victory.acquired_input, victory_acquired, "victory cleanup never globally disables result-modal input")
     gamma_arena_test_assert.equals(#victory.victory_dialogs, 1, "victory modal is shown with engine input available")
+end
+
+local function runtime_victory_starts_parallel_cleanup_before_next_action()
+    local env = task8_environment(); task8_pump_to_active(env)
+    local generated_before = env.generated
+    env.orchestrator:npc_on_death_callback({ id = function() return env.registry.npcs[1].id end })
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "victory transition starts early cleanup")
+    gamma_arena_test_assert.equals(env.victory_cleanup_starts, 1, "actor cleanup starts immediately at victory")
+    gamma_arena_test_assert.equals(env.cleanup_calls, 1, "entity cleanup starts immediately at victory")
+    gamma_arena_test_assert.equals(env.generated, generated_before, "early cleanup never generates the next fight")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "RESULT", "early cleanup retains the result stage")
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "result UI remains available during early cleanup")
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "result update advances actor cleanup")
+    gamma_arena_test_assert.equals(env.victory_cleanup_updates, 1, "actor cleanup advances independently while Result is open")
+    gamma_arena_test_assert.equals(env.generated, generated_before, "background cleanup still cannot generate without the button")
 end
 
 local function runtime_task8_victory_next_cleans_heals_and_increments_once()
@@ -7783,7 +8002,7 @@ local function runtime_victory_next_boundary_failure_retains_result()
     gamma_arena_test_assert.is_true(env.result_visible, "failed boundary retains Result UI")
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "RESULT", "failed boundary starts no continuation")
     gamma_arena_test_assert.is_false(env.orchestrator.result_action_locked, "failed boundary rolls back duplicate-action latch")
-    gamma_arena_test_assert.equals(env.cleanup_calls, 0, "failed boundary starts no cleanup")
+    gamma_arena_test_assert.equals(env.cleanup_calls, 1, "failed boundary does not restart the already running cleanup")
     gamma_arena_test_assert.equals(env.fatal_shown, 0, "recoverable boundary failure does not replace Result UI with fatal UI")
 end
 
@@ -8000,8 +8219,10 @@ local function runtime_task8_inactive_cleanup_failures_route_to_fatal()
     gamma_arena_test_assert.is_true(requested.ok, "ordinary cross-frame cleanup pending remains a success Result")
     gamma_arena_test_assert.equals(env.fatal_shown, 0, "pending cleanup never opens fatal UI")
     local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local ticks_before_inactive_poll = env.actor_update_ticks
     local failed = callbacks.actor_on_update()
     gamma_arena_test_assert.is_false(failed.ok, "later inactive cleanup failure remains observable")
+    gamma_arena_test_assert.equals(env.actor_update_ticks, ticks_before_inactive_poll + 1, "inactive cleanup advances the actor proof on its later engine update")
     gamma_arena_test_assert.equals(env.fatal_shown, 1, "inactive Arena cleanup failure routes to fatal UI")
     gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "inactive cleanup failure enters ERROR")
 end
@@ -12015,6 +12236,11 @@ local cases = {
     ,{ name = "runtime_actor_rematch_resets_gamma_body_health", fn = runtime_actor_rematch_resets_gamma_body_health }
     ,{ name = "runtime_actor_rematch_boundary_aborts_before_input_lock", fn = runtime_actor_rematch_boundary_aborts_before_input_lock }
     ,{ name = "runtime_actor_rematch_boundary_failure_never_acquires_input", fn = runtime_actor_rematch_boundary_failure_never_acquires_input }
+    ,{ name = "runtime_actor_victory_cleanup_hides_weapon_before_release", fn = runtime_actor_victory_cleanup_hides_weapon_before_release }
+    ,{ name = "runtime_actor_victory_cleanup_hide_wait_is_bounded_and_wrap_safe", fn = runtime_actor_victory_cleanup_hide_wait_is_bounded_and_wrap_safe }
+    ,{ name = "runtime_actor_victory_cleanup_is_idempotent", fn = runtime_actor_victory_cleanup_is_idempotent }
+    ,{ name = "runtime_actor_victory_cleanup_survives_session_deactivation", fn = runtime_actor_victory_cleanup_survives_session_deactivation }
+    ,{ name = "runtime_actor_victory_cleanup_rejects_changed_actor_identity", fn = runtime_actor_victory_cleanup_rejects_changed_actor_identity }
     ,{ name = "runtime_actor_preowned_input_survives_normalize_failure", fn = runtime_actor_preowned_input_survives_normalize_failure }
     ,{ name = "runtime_actor_rematch_transients_clear_once_before_loadout_cleanup", fn = runtime_actor_rematch_transients_clear_once_before_loadout_cleanup }
     ,{ name = "runtime_actor_transient_failure_prevents_loadout_cleanup", fn = runtime_actor_transient_failure_prevents_loadout_cleanup }
@@ -12089,6 +12315,8 @@ local cases = {
     ,{ name = "runtime_entity_creates_physical_grenade_and_rolls_back_failure", fn = runtime_entity_creates_physical_grenade_and_rolls_back_failure }
     ,{ name = "runtime_entity_purges_only_snapshot_children_still_parented", fn = runtime_entity_purges_only_snapshot_children_still_parented }
     ,{ name = "runtime_entity_supports_real_get_children_iterator", fn = runtime_entity_supports_real_get_children_iterator }
+    ,{ name = "runtime_entity_cleanup_submits_item_release_wave_concurrently", fn = runtime_entity_cleanup_submits_item_release_wave_concurrently }
+    ,{ name = "runtime_entity_spawn_pump_is_bounded_and_yields_on_release_wait", fn = runtime_entity_spawn_pump_is_bounded_and_yields_on_release_wait }
     ,{ name = "runtime_entity_multi_return_ammo_is_exact", fn = runtime_entity_multi_return_ammo_is_exact }
     ,{ name = "runtime_entity_derives_unreadable_server_ammo_quantity", fn = runtime_entity_derives_unreadable_server_ammo_quantity }
     ,{ name = "runtime_entity_death_dropped_is_persisted_and_round_tripped", fn = runtime_entity_death_dropped_is_persisted_and_round_tripped }
@@ -12164,6 +12392,7 @@ local cases = {
     ,{ name = "runtime_orchestrator_integrity_retries_same_spec_twice", fn = runtime_orchestrator_integrity_retries_same_spec_twice }
     ,{ name = "runtime_orchestrator_integrity_retry_exhaustion_fails", fn = runtime_orchestrator_integrity_retry_exhaustion_fails }
     ,{ name = "runtime_result_modal_releases_global_input", fn = runtime_result_modal_releases_global_input }
+    ,{ name = "runtime_victory_starts_parallel_cleanup_before_next_action", fn = runtime_victory_starts_parallel_cleanup_before_next_action }
     ,{ name = "runtime_task8_victory_next_cleans_heals_and_increments_once", fn = runtime_task8_victory_next_cleans_heals_and_increments_once }
     ,{ name = "runtime_victory_continuation_preflights_before_actor_reset", fn = runtime_victory_continuation_preflights_before_actor_reset }
     ,{ name = "runtime_victory_next_locks_before_result_ui_closes", fn = runtime_victory_next_locks_before_result_ui_closes }
