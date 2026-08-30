@@ -44,7 +44,7 @@ local ACTION_STATUS_KEYS = {
     GA_CUSTOM_ROSTER_LIMIT = "st_gamma_arena_custom_error_limit"
 }
 local STATUS_COLORS = {
-    incomplete = { 185, 185, 185 },
+    incomplete = { 205, 170, 135 },
     error = { 220, 110, 90 },
     ready = { 170, 210, 160 }
 }
@@ -103,6 +103,67 @@ end
 
 function status_presentation(view)
     return gamma_arena_custom_setup_presenter.status_presentation(view)
+end
+
+function apply_faction_selection(model, faction_id)
+    if type(model) ~= "table" or type(model.set_faction) ~= "function" or type(faction_id) ~= "string" then
+        return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Custom enemy faction selection is unavailable", {
+            faction = faction_id
+        })
+    end
+    return protected_result("GA_CUSTOM_FACTION_UNKNOWN", "Custom enemy faction selection failed safely",
+        function() return model:set_faction(faction_id) end)
+end
+
+function handle_escape(picker, on_back)
+    local method_called, is_open = pcall(function() return picker and picker.is_open end)
+    is_open = method_called and type(is_open) == "function" and is_open or nil
+    if is_open then
+        local called, opened = pcall(is_open, picker)
+        if not called then
+            return gamma_arena_result.err("GA_CUSTOM_FACTION_PICKER_FAILED", "Faction picker state is unavailable")
+        end
+        if opened then
+            local close_called, close = pcall(function() return picker and picker.close end)
+            close = close_called and type(close) == "function" and close or nil
+            if not close then
+                return gamma_arena_result.err("GA_CUSTOM_FACTION_PICKER_FAILED", "Faction picker cannot be closed")
+            end
+            return protected_result("GA_CUSTOM_FACTION_PICKER_FAILED", "Faction picker close failed safely",
+                function() return close(picker) end)
+        end
+    end
+    if type(on_back) ~= "function" then
+        return gamma_arena_result.err("GA_CUSTOM_NAVIGATION_UNAVAILABLE", "Custom Setup back action is unavailable")
+    end
+    local called, result = pcall(on_back)
+    if not called then
+        return gamma_arena_result.err("GA_CUSTOM_NAVIGATION_UNAVAILABLE", "Custom Setup back action failed safely", {
+            reason = tostring(result)
+        })
+    end
+    return valid_result(result) and result or gamma_arena_result.ok(true)
+end
+
+function readiness_presentation(view)
+    view = type(view) == "table" and view or {}
+    local checks = {}
+    for index, check in ipairs(view.readiness or {}) do
+        local complete = check.complete == true
+        checks[index] = {
+            id = check.id,
+            string_id = check.string_id,
+            complete = complete,
+            marker = complete and "[x] " or "[ ] ",
+            state = complete and "complete" or "incomplete"
+        }
+    end
+    return {
+        caption_id = view.launch_enabled == true and "st_gamma_arena_custom_ready_to_start"
+            or "st_gamma_arena_custom_required_to_start",
+        state = view.launch_enabled == true and "ready" or "incomplete",
+        checks = checks
+    }
 end
 
 local function custom_trace(code, message, context)
@@ -473,14 +534,27 @@ function UICustom:InitControls()
     self.root = self.xml:InitStatic("gamma_arena_custom", self)
     self.title = self.xml:InitStatic("gamma_arena_custom:title", self.root)
     self.enemy_setup = self.xml:InitStatic("gamma_arena_custom:enemy_setup", self.root)
+    self.opponents_panel = self.xml:InitStatic("gamma_arena_custom:enemy_setup:opponents_panel", self.enemy_setup)
+    self.conditions_panel = self.xml:InitStatic("gamma_arena_custom:enemy_setup:conditions_panel", self.enemy_setup)
+    self.opponents_caption = self.xml:InitStatic("gamma_arena_custom:enemy_setup:opponents_caption", self.enemy_setup)
+    self.conditions_caption = self.xml:InitStatic("gamma_arena_custom:enemy_setup:conditions_caption", self.enemy_setup)
+    self.faction_label = self.xml:InitStatic("gamma_arena_custom:enemy_setup:faction_label", self.enemy_setup)
+    self.count_label = self.xml:InitStatic("gamma_arena_custom:enemy_setup:count_label", self.enemy_setup)
+    self.seed_label = self.xml:InitStatic("gamma_arena_custom:enemy_setup:seed_label", self.enemy_setup)
+    self.device_label = self.xml:InitStatic("gamma_arena_custom:enemy_setup:device_label", self.enemy_setup)
+    self.seed_helper = self.xml:InitStatic("gamma_arena_custom:enemy_setup:seed_helper", self.enemy_setup)
+    self.device_helper = self.xml:InitStatic("gamma_arena_custom:enemy_setup:device_helper", self.enemy_setup)
     self.roster_panel = self.xml:InitStatic("gamma_arena_custom:roster", self.root)
+    self.roster_caption = self.xml:InitStatic("gamma_arena_custom:roster:roster_caption", self.roster_panel)
     self.catalog_controls = self.xml:InitStatic("gamma_arena_custom:catalog_controls", self.root)
+    self.catalog_search_label = self.xml:InitStatic("gamma_arena_custom:catalog_controls:catalog_search_label", self.catalog_controls)
     self.inventory_panel = self.xml:InitStatic("gamma_arena_custom:inventory_panel", self.root)
     self.loadout_panel = self.xml:InitStatic("gamma_arena_custom:loadout_panel", self.root)
     self.inventory_caption = self.xml:InitStatic("gamma_arena_custom:inventory_caption", self.root)
     self.loadout_caption = self.xml:InitStatic("gamma_arena_custom:loadout_caption", self.root)
     self.footer_panel = self.xml:InitStatic("gamma_arena_custom:footer", self.root)
-    self.faction_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:faction", self.enemy_setup)
+    self.faction_button = self.xml:Init3tButton("gamma_arena_custom:enemy_setup:faction_button", self.enemy_setup)
+    self.faction_icon = self.xml:InitStatic("gamma_arena_custom:enemy_setup:faction_icon", self.enemy_setup)
     self.count_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:count", self.enemy_setup)
     self.device_combo = self.xml:InitComboBox("gamma_arena_custom:enemy_setup:device", self.enemy_setup)
     self.seed_edit = self.xml:InitEditBox("gamma_arena_custom:enemy_setup:seed", self.enemy_setup)
@@ -494,6 +568,7 @@ function UICustom:InitControls()
     self.points_used = self.xml:InitTextWnd("gamma_arena_custom:points_used", self.root)
     self.weight_text = self.xml:InitTextWnd("gamma_arena_custom:footer:weight", self.footer_panel)
     self.weight_limit_text = self.xml:InitTextWnd("gamma_arena_custom:footer:weight_limit", self.footer_panel)
+    self.readiness_caption = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_caption", self.footer_panel)
     self.readiness_windows = {
         outfit = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_outfit", self.footer_panel),
         knife = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_knife", self.footer_panel),
@@ -505,7 +580,7 @@ function UICustom:InitControls()
     self.start_button = self.xml:Init3tButton("gamma_arena_custom:start", self.root)
     self.random_button = self.xml:Init3tButton("gamma_arena_custom:random", self.root)
     self.back_button = self.xml:Init3tButton("gamma_arena_custom:back", self.root)
-    self:Register(self.faction_combo, "faction")
+    self:Register(self.faction_button, "faction")
     self:Register(self.count_combo, "count")
     self:Register(self.device_combo, "device")
     self:Register(self.seed_edit, "seed")
@@ -523,7 +598,6 @@ function UICustom:InitControls()
     for index, option in ipairs(initial_view.device_options or {}) do
         self.device_combo:AddItem(option.display_text, index)
     end
-    for index, faction_id in ipairs(snapshot.faction_ids or {}) do self.faction_combo:AddItem(faction_text(faction_id), index) end
     for count = 1, snapshot.capacity do self.count_combo:AddItem(tostring(count), count) end
     for index, filter_id in ipairs(FILTER_IDS) do self.catalog_filter:AddItem(filter_text(filter_id), index) end
     for index, sort_id in ipairs(SORT_IDS) do self.catalog_sort:AddItem(sort_text(sort_id), index) end
@@ -553,10 +627,17 @@ function UICustom:InitControls()
         container:SetGridSpecs(41, 2)
     end
     self.item_info = utils_ui.UIInfoItem(self)
+    self.faction_picker = gamma_arena_ui_faction_picker.new({
+        owner = self,
+        xml = self.xml,
+        root = self.root,
+        translate = translated,
+        on_select = function(faction_id) return self:ApplyFaction(faction_id) end
+    })
 end
 
 function UICustom:InitCallbacks()
-    self:AddCallback("faction", ui_events.LIST_ITEM_SELECT, self.OnFaction, self)
+    self:AddCallback("faction", ui_events.BUTTON_CLICKED, self.OpenFactionPicker, self)
     self:AddCallback("count", ui_events.LIST_ITEM_SELECT, self.OnCount, self)
     self:AddCallback("device", ui_events.LIST_ITEM_SELECT, self.OnDevice, self)
     self:AddCallback("catalog_search", ui_events.EDIT_TEXT_COMMIT, self.OnCatalogSearch, self)
@@ -641,7 +722,14 @@ function UICustom:Rebuild()
     self.catalog_state.search = view.search or self.catalog_state.search
     self.catalog_state.sort = view.sort or self.catalog_state.sort
     self.catalog_state.page = view.catalog_page or 1
-    set_combo(self.faction_combo, view.faction_ids, view.faction, faction_text, translated("st_gamma_arena_custom_choose_faction"))
+    if view.faction then
+        self.faction_button:SetText(faction_text(view.faction))
+    else
+        self.faction_button:SetText(translated("st_gamma_arena_custom_choose_faction"))
+    end
+    local faction_texture = gamma_arena_ui_faction_picker.texture_id(view.faction)
+    if faction_texture then pcall(self.faction_icon.InitTexture, self.faction_icon, faction_texture) end
+    self.faction_icon:Show(faction_texture ~= nil)
     set_combo(self.count_combo, {}, nil, tostring, tostring(view.count))
     self.count_combo:SetText(tostring(view.count))
     local device_text = view.device_options[1] and view.device_options[1].display_text
@@ -665,19 +753,24 @@ function UICustom:Rebuild()
     self.weight_text:SetText(translated("st_gamma_arena_custom_weight") .. ": " .. format_weight(view.weight_mg))
     self.weight_limit_text:SetText(translated("st_gamma_arena_custom_weight_limit") .. ": "
         .. format_weight(view.weight_limit_mg))
-    for _, check in ipairs(view.readiness or {}) do
+    local readiness = readiness_presentation(view)
+    self.readiness_caption:SetText(translated(readiness.caption_id))
+    self.readiness_caption:SetTextColor(readiness.state == "ready"
+        and GetARGB(255, 170, 210, 160) or GetARGB(255, 220, 210, 185))
+    for _, check in ipairs(readiness.checks) do
         local window = self.readiness_windows[check.id]
         if window then
-            window:SetText((check.complete and "[+] " or "[ ] ") .. translated(check.string_id))
+            window:SetText(check.marker .. translated(check.string_id))
             window:SetTextColor(check.complete and GetARGB(255, 170, 210, 160)
-                or GetARGB(255, 185, 185, 185))
+                or GetARGB(255, 205, 170, 135))
         end
     end
     local status = status_presentation(view)
     local color = STATUS_COLORS[status.state] or STATUS_COLORS.error
-    self.validation_text:SetText(gamma_arena_custom_setup_presenter.format_status(status, translated))
+    self.validation_text:SetText(status.state == "ready" and ""
+        or gamma_arena_custom_setup_presenter.format_status(status, translated))
     self.validation_text:SetTextColor(GetARGB(255, color[1], color[2], color[3]))
-    self.validation_text:Show(true)
+    self.validation_text:Show(status.state ~= "ready")
     if status.state == "error" and status.code then
         if self.last_reported_status_code ~= status.code then
             pcall(gamma_arena_log.error, status.code, "Custom Setup interaction failed", {
@@ -701,12 +794,23 @@ function UICustom:Rebuild()
     })
 end
 
-function UICustom:OnFaction()
+function UICustom:OpenFactionPicker()
     self.submission_error = nil
     local view = self.projection or project(self.model, self.selected_category)
-    local faction = combo_value(self.faction_combo, view.faction_ids, faction_text)
-    if faction then self.model:set_faction(faction) end
+    local opened = self.faction_picker:open(view.faction_ids, view.faction)
+    if not opened.ok then
+        self.submission_error = opened
+        self:Rebuild()
+    end
+    return opened
+end
+
+function UICustom:ApplyFaction(faction_id)
+    self.submission_error = nil
+    local applied = apply_faction_selection(self.model, faction_id)
+    if not applied.ok then self.submission_error = applied end
     self:Rebuild()
+    return applied
 end
 
 function UICustom:OnCount()
@@ -870,15 +974,25 @@ end
 
 function UICustom:Update()
     CUIScriptWnd.Update(self)
-    update_item_hover(self.inventory_container, self.loadout_container, self.item_info)
+    if not self.faction_picker:is_open() then
+        update_item_hover(self.inventory_container, self.loadout_container, self.item_info)
+    end
 end
 
 function UICustom:OnKeyboard(dik, keyboard_action)
+    if self.faction_picker:is_open() then
+        if keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then
+            return handle_escape(self.faction_picker, function() return self:OnBack() end)
+        end
+        return true
+    end
     local result = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
     if result == false then
         self.inventory_container:OnKeyboard(dik, keyboard_action)
         self.loadout_container:OnKeyboard(dik, keyboard_action)
-        if keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then self:OnBack() end
+        if keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then
+            return handle_escape(self.faction_picker, function() return self:OnBack() end)
+        end
     end
     return result
 end

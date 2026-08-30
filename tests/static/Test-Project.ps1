@@ -518,7 +518,7 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) "Task 9 custom UI XML is missing control $Id"
     }
     foreach ($Id in @('opponents_caption','conditions_caption','faction_button','faction_icon','faction_label','count_label',
-        'seed_label','seed_helper','device_label','device_helper','roster_caption','readiness_caption',
+        'seed_label','seed_helper','device_label','device_helper','roster_caption','catalog_search_label','readiness_caption',
         'faction_popup','faction_popup_blocker','faction_popup_frame','faction_cancel')) {
         Assert-True ($null -ne $Task9CustomXml.SelectSingleNode("//*[local-name()='$Id']")) `
             "Custom UX XML is missing explicit setup control $Id"
@@ -601,7 +601,10 @@ $ReadableCustomCases = @(
     'runtime_custom_ui_initializes_one_authoritative_faction',
     'runtime_custom_ui_distinguishes_incomplete_and_failed_status',
     'runtime_custom_faction_picker_layout_and_textures_are_bounded',
-    'runtime_custom_faction_picker_select_and_cancel_are_atomic'
+    'runtime_custom_faction_picker_select_and_cancel_are_atomic',
+    'runtime_custom_ui_applies_confirmed_faction_atomically',
+    'runtime_custom_ui_escape_cancels_picker_before_navigation',
+    'runtime_custom_ui_readiness_guidance_tracks_launch_state'
 )
 foreach ($Name in $ReadableCustomCases) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
@@ -631,7 +634,15 @@ $GroupedControlMarkers = @(
     'self.roster_panel = self.xml:InitStatic("gamma_arena_custom:roster", self.root)',
     'self.catalog_controls = self.xml:InitStatic("gamma_arena_custom:catalog_controls", self.root)',
     'self.footer_panel = self.xml:InitStatic("gamma_arena_custom:footer", self.root)',
-    '"gamma_arena_custom:enemy_setup:faction", self.enemy_setup',
+    'self.opponents_caption = self.xml:InitStatic("gamma_arena_custom:enemy_setup:opponents_caption", self.enemy_setup)',
+    'self.conditions_caption = self.xml:InitStatic("gamma_arena_custom:enemy_setup:conditions_caption", self.enemy_setup)',
+    'self.faction_button = self.xml:Init3tButton("gamma_arena_custom:enemy_setup:faction_button", self.enemy_setup)',
+    'self.faction_icon = self.xml:InitStatic("gamma_arena_custom:enemy_setup:faction_icon", self.enemy_setup)',
+    'self.seed_helper = self.xml:InitStatic("gamma_arena_custom:enemy_setup:seed_helper", self.enemy_setup)',
+    'self.device_helper = self.xml:InitStatic("gamma_arena_custom:enemy_setup:device_helper", self.enemy_setup)',
+    'self.roster_caption = self.xml:InitStatic("gamma_arena_custom:roster:roster_caption", self.roster_panel)',
+    'self.catalog_search_label = self.xml:InitStatic("gamma_arena_custom:catalog_controls:catalog_search_label", self.catalog_controls)',
+    'self.readiness_caption = self.xml:InitTextWnd("gamma_arena_custom:footer:readiness_caption", self.footer_panel)',
     '"gamma_arena_custom:catalog_controls:catalog_search", self.catalog_controls',
     'self.xml:InitStatic(row_path, self.roster_panel)',
     '"gamma_arena_custom:footer:weight", self.footer_panel'
@@ -683,6 +694,14 @@ foreach ($Marker in @('function initialize_faction','function status_presentatio
     'self.ports.initial_faction_index','infrastructure_error_code','last_reported_status_code')) {
     Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Readable Custom UI is missing $Marker"
 }
+foreach ($Marker in @('function apply_faction_selection','function handle_escape','function readiness_presentation',
+    'gamma_arena_ui_faction_picker.new','function UICustom:OpenFactionPicker','function UICustom:ApplyFaction',
+    'self.faction_picker:open(view.faction_ids, view.faction)','self.faction_button:SetText(faction_text(view.faction))',
+    'texture_id(view.faction)','handle_escape(self.faction_picker')) {
+    Assert-True ($ReadableCustomUi -match [regex]::Escape($Marker)) "Custom UX integration is missing $Marker"
+}
+Assert-True ($ReadableCustomUi -notmatch 'faction_combo') `
+    'Custom UX must replace the anonymous faction combo with the emblem picker trigger.'
 foreach ($Marker in @('function format_price_text','function arena_price_text','function update_item_hover',
     'utils_ui.UIInfoItem(self)','function UICustom:Update()','pcall(catalog_update, catalog_container, item_info)',
     'pcall(selected_update, selected_container, item_info)')) {
@@ -713,6 +732,7 @@ foreach ($Locale in @('eng','rus')) {
         'st_gamma_arena_custom_readiness_healing','st_gamma_arena_custom_error_points_deficit',
         'st_gamma_arena_custom_opponents_group','st_gamma_arena_custom_conditions_group',
         'st_gamma_arena_custom_fight_seed','st_gamma_arena_custom_player_device',
+        'st_gamma_arena_custom_search_label',
         'st_gamma_arena_custom_seed_helper','st_gamma_arena_custom_device_helper',
         'st_gamma_arena_custom_roster_helper','st_gamma_arena_custom_required_to_start',
         'st_gamma_arena_custom_ready_to_start','st_gamma_arena_custom_faction_picker_title',

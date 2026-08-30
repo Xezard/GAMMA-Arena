@@ -10417,6 +10417,73 @@ local function runtime_custom_faction_picker_select_and_cancel_are_atomic()
     gamma_arena_test_assert.equals(#emitted, 1, "cancel emits no selection")
 end
 
+local function runtime_custom_ui_applies_confirmed_faction_atomically()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.faction_ids = { "stalker", "bandit" }
+    catalog.factions.bandit = clone(catalog.factions.stalker)
+    catalog.factions.bandit.id = "bandit"
+    local model = gamma_arena_custom_setup_model.new(
+        catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "fixture selects an initial faction")
+
+    local applied = gamma_arena_ui_custom.apply_faction_selection(model, "bandit")
+    gamma_arena_test_assert.is_true(applied.ok, "confirmed faction applies through the model")
+    gamma_arena_test_assert.equals(model:snapshot().faction, "bandit", "confirmed faction becomes authoritative")
+
+    local rejected = gamma_arena_ui_custom.apply_faction_selection(model, "dolg")
+    gamma_arena_test_assert.is_false(rejected.ok, "unavailable confirmed faction is rejected")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_FACTION_UNKNOWN",
+        "unavailable confirmed faction preserves the domain error")
+    gamma_arena_test_assert.equals(model:snapshot().faction, "bandit",
+        "failed faction selection preserves the prior model snapshot")
+end
+
+local function runtime_custom_ui_escape_cancels_picker_before_navigation()
+    local picker = { opened = true, closes = 0 }
+    function picker:is_open() return self.opened end
+    function picker:close() self.opened = false; self.closes = self.closes + 1; return gamma_arena_result.ok(true) end
+    local backs = 0
+    local function back() backs = backs + 1; return gamma_arena_result.ok(true) end
+
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.handle_escape(picker, back).ok,
+        "Escape closes an open picker")
+    gamma_arena_test_assert.equals(picker.closes, 1, "open picker closes exactly once")
+    gamma_arena_test_assert.equals(backs, 0, "picker cancellation does not navigate away")
+
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.handle_escape(picker, back).ok,
+        "Escape navigates when the picker is already closed")
+    gamma_arena_test_assert.equals(backs, 1, "closed picker delegates one back navigation")
+end
+
+local function runtime_custom_ui_readiness_guidance_tracks_launch_state()
+    local incomplete = gamma_arena_ui_custom.readiness_presentation({
+        launch_enabled = false,
+        readiness = {
+            { id = "outfit", complete = true },
+            { id = "weapon", complete = false }
+        }
+    })
+    gamma_arena_test_assert.equals(incomplete.caption_id, "st_gamma_arena_custom_required_to_start",
+        "blocked launch keeps the explicit requirement heading")
+    gamma_arena_test_assert.equals(incomplete.checks[1].marker, "[x] ",
+        "complete requirement uses a font-safe checked marker")
+    gamma_arena_test_assert.equals(incomplete.checks[1].state, "complete",
+        "complete requirement exposes semantic state")
+    gamma_arena_test_assert.equals(incomplete.checks[2].marker, "[ ] ",
+        "incomplete requirement uses an open marker")
+    gamma_arena_test_assert.equals(incomplete.checks[2].state, "incomplete",
+        "incomplete requirement exposes semantic state")
+
+    local ready = gamma_arena_ui_custom.readiness_presentation({
+        launch_enabled = true,
+        readiness = { { id = "outfit", complete = true } }
+    })
+    gamma_arena_test_assert.equals(ready.caption_id, "st_gamma_arena_custom_ready_to_start",
+        "launchable setup reports readiness beside the primary action")
+    gamma_arena_test_assert.equals(ready.checks[1].marker, "[x] ",
+        "ready setup preserves checked requirement markers")
+end
+
 local function runtime_custom_ui_distinguishes_incomplete_and_failed_status()
     local incomplete = gamma_arena_ui_custom.status_presentation({
         validation_code = "GA_CUSTOM_OUTFIT_REQUIRED"
@@ -12207,6 +12274,9 @@ local cases = {
     { name = "runtime_custom_ui_initializes_one_authoritative_faction", fn = runtime_custom_ui_initializes_one_authoritative_faction },
     { name = "runtime_custom_faction_picker_layout_and_textures_are_bounded", fn = runtime_custom_faction_picker_layout_and_textures_are_bounded },
     { name = "runtime_custom_faction_picker_select_and_cancel_are_atomic", fn = runtime_custom_faction_picker_select_and_cancel_are_atomic },
+    { name = "runtime_custom_ui_applies_confirmed_faction_atomically", fn = runtime_custom_ui_applies_confirmed_faction_atomically },
+    { name = "runtime_custom_ui_escape_cancels_picker_before_navigation", fn = runtime_custom_ui_escape_cancels_picker_before_navigation },
+    { name = "runtime_custom_ui_readiness_guidance_tracks_launch_state", fn = runtime_custom_ui_readiness_guidance_tracks_launch_state },
     { name = "runtime_custom_ui_distinguishes_incomplete_and_failed_status", fn = runtime_custom_ui_distinguishes_incomplete_and_failed_status },
     { name = "runtime_custom_ui_formats_ap_and_routes_native_hover", fn = runtime_custom_ui_formats_ap_and_routes_native_hover },
     { name = "runtime_custom_ui_click_and_drag_dispatch_identical_commands", fn = runtime_custom_ui_click_and_drag_dispatch_identical_commands },
