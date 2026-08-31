@@ -2,6 +2,10 @@
 
 [![Nexus Mods](https://img.shields.io/badge/Nexus%20Mods-Download-D98F2B?style=flat-square)](https://www.nexusmods.com/stalkeranomaly/mods/135)
 [![ModDB](https://img.shields.io/badge/ModDB-Download-8B1E1E?style=flat-square)](https://www.moddb.com/mods/stalker-anomaly/addons/gamma-arena)
+[![Latest release](https://img.shields.io/github/v/release/Xezard/GAMMA-Arena?display_name=tag&sort=semver&style=flat-square)](https://github.com/Xezard/GAMMA-Arena/releases/latest)
+[![Release build](https://img.shields.io/github/actions/workflow/status/Xezard/GAMMA-Arena/release.yml?style=flat-square&label=release%20build)](https://github.com/Xezard/GAMMA-Arena/actions/workflows/release.yml)
+[![GitHub downloads](https://img.shields.io/github/downloads/Xezard/GAMMA-Arena/total?style=flat-square&label=GitHub%20downloads)](https://github.com/Xezard/GAMMA-Arena/releases)
+[![Code size](https://img.shields.io/github/languages/code-size/Xezard/GAMMA-Arena?style=flat-square)](https://github.com/Xezard/GAMMA-Arena)
 
 > A deterministic, replayable combat arena for S.T.A.L.K.E.R. Anomaly G.A.M.M.A., distributed as an independent Mod Organizer 2 add-on.
 
