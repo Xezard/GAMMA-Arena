@@ -1,6 +1,7 @@
 # Gamma Arena
 
 [![Nexus Mods](https://img.shields.io/badge/Nexus%20Mods-Download-D98F2B?style=flat-square)](https://www.nexusmods.com/stalkeranomaly/mods/135)
+[![ModDB](https://img.shields.io/badge/ModDB-Download-8B1E1E?style=flat-square)](https://www.moddb.com/mods/stalker-anomaly/addons/gamma-arena)
 
 > A deterministic, replayable combat arena for S.T.A.L.K.E.R. Anomaly G.A.M.M.A., distributed as an independent Mod Organizer 2 add-on.
 
