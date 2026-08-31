@@ -10348,6 +10348,17 @@ local function runtime_custom_ui_initializes_one_authoritative_faction()
     catalog.factions.bandit.id = "bandit"
     local model = gamma_arena_custom_setup_model.new(
         catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    local full_snapshot = model.snapshot
+    local bounded_status_snapshot = model.status_snapshot
+    local full_snapshot_calls, status_snapshot_calls = 0, 0
+    model.snapshot = function(self)
+        full_snapshot_calls = full_snapshot_calls + 1
+        return full_snapshot(self)
+    end
+    model.status_snapshot = function(self)
+        status_snapshot_calls = status_snapshot_calls + 1
+        return bounded_status_snapshot(self)
+    end
     local calls = 0
     local initialized = gamma_arena_ui_custom.initialize_faction(model, function(count)
         calls = calls + 1
@@ -10355,14 +10366,22 @@ local function runtime_custom_ui_initializes_one_authoritative_faction()
         return 2
     end)
     gamma_arena_test_assert.is_true(initialized.ok, "initial faction selection succeeds")
-    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "picker chooses exact faction")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "picker chooses exact faction")
     gamma_arena_test_assert.equals(calls, 1, "uninitialized model is picked once")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "faction initialization never builds a full catalog snapshot")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 1,
+        "faction initialization reads one bounded status snapshot")
 
     local preserved = gamma_arena_ui_custom.initialize_faction(model, function()
         error("preselected model must not consume another random choice")
     end)
     gamma_arena_test_assert.is_true(preserved.ok, "preselected faction is preserved")
-    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "second initialization is inert")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "second initialization is inert")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "preselected faction initialization remains full-snapshot free")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 2,
+        "preselected faction initialization reads only bounded status")
 end
 
 local function runtime_custom_faction_picker_layout_and_textures_are_bounded()
@@ -10879,6 +10898,26 @@ local function runtime_custom_presenter_preview_and_readiness_are_authoritative(
         "checklist completion never bypasses missing faction validation")
 end
 
+local function runtime_catalog_default_success_is_reused_only_for_default_source()
+    local first = gamma_arena_catalog.load()
+    local second = gamma_arena_catalog.load()
+    gamma_arena_test_assert.is_true(first.ok and second.ok,
+        "default runtime catalog loads successfully")
+    gamma_arena_test_assert.equals(second, first,
+        "default runtime catalog reuses one successful Result")
+    gamma_arena_test_assert.equals(second.value, first.value,
+        "default runtime catalog reuses one immutable snapshot")
+
+    local injected_first = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
+    local injected_second = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
+    gamma_arena_test_assert.is_true(injected_first.ok and injected_second.ok,
+        "injected catalogs still load successfully")
+    gamma_arena_test_assert.is_true(injected_first ~= injected_second,
+        "injected catalog Results are not shared")
+    gamma_arena_test_assert.is_true(injected_first.value ~= injected_second.value,
+        "injected catalog snapshots are not cached")
+end
+
 local function runtime_custom_presenter_refreshes_status_without_catalog_snapshot()
     local presenter = gamma_arena_custom_setup_presenter.new({
         translate = function(key) return key end
@@ -10940,6 +10979,156 @@ local function runtime_custom_presenter_refreshes_status_without_catalog_snapsho
         "status refresh updates device options")
     gamma_arena_test_assert.equals(refreshed.remaining, 660, "status refresh updates remaining budget")
     gamma_arena_test_assert.equals(refreshed.weight_mg, 13000, "status refresh updates weight totals")
+end
+
+local function runtime_custom_presenter_refreshes_affordability_without_model_preview()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local hard_context = { section = "hard_error" }
+    local view = {
+        remaining = 600,
+        catalog_cells = {
+            { section = "affordable", effective_price = 500, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
+            { section = "budget_only", effective_price = 700, disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } },
+            { section = "hard_error", effective_price = 100, disabled = true,
+                disabled_reason = "GA_CUSTOM_AMMO_ORPHAN", disabled_context = hard_context }
+        }
+    }
+    local same = presenter:refresh_affordability(view)
+    gamma_arena_test_assert.equals(same, view, "affordability refresh mutates the existing view")
+    gamma_arena_test_assert.is_false(view.catalog_cells[1].disabled, "fitting cell remains enabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "fitting cell clears stale disabled context")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "non-fitting cell remains budget-disabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_context, nil,
+        "retained overspend clears stale disabled context")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_reason, "GA_CUSTOM_AMMO_ORPHAN",
+        "hard rejection survives budget refresh")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_context, hard_context,
+        "hard rejection preserves its disabled context identity")
+
+    view.remaining = 800
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_false(view.catalog_cells[2].disabled,
+        "budget increase enables a formerly overspent cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, nil,
+        "budget increase clears only overspend reason")
+    gamma_arena_test_assert.is_true(view.catalog_cells[3].disabled,
+        "budget increase never clears a hard rejection")
+
+    view.remaining = 400
+    view.catalog_cells[1].disabled_context = { stale = true }
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
+        "budget decrease disables a newly unaffordable cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "budget decrease assigns exact overspend reason")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "new overspend clears stale disabled context")
+
+    local malformed = {
+        remaining = 800,
+        catalog_cells = {
+            { section = "negative_price", effective_price = -1, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
+            { section = "invalid_price", effective_price = "invalid", disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } }
+        }
+    }
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "negative projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "malformed projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_context, nil,
+        "negative projected price clears stale disabled context")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_context, nil,
+        "malformed projected price clears stale disabled context")
+
+    malformed.catalog_cells[1].effective_price = 1
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.is_true(malformed.catalog_cells[1].disabled,
+        "hard action failure remains disabled after a later fitting price")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "hard action failure is outside the mutable affordability reasons")
+
+    local carry_bonus = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    outfit = {
+                        { section = "bonus_outfit", category = "outfit", name_key = "bonus_outfit",
+                            base_price = 700, weight_mg = 5000, carry_bonus_mg = 10000,
+                            preview_multiplier = 1, preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600,
+                weight_mg = 49000, weight_limit_mg = 50000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "outfit", search = "", sort = "price_asc", page = 1 })
+    local carry_bonus_cell = carry_bonus.catalog_cells[1]
+    gamma_arena_test_assert.equals(carry_bonus_cell.hard_disabled_reason, nil,
+        "first outfit projects 54000 weight against its effective 60000 carry limit")
+    carry_bonus.remaining = 800
+    presenter:refresh_affordability(carry_bonus)
+    gamma_arena_test_assert.is_false(carry_bonus_cell.disabled,
+        "carry-bonus outfit becomes enabled when its independent budget block clears")
+    gamma_arena_test_assert.equals(carry_bonus_cell.disabled_reason, nil,
+        "valid 54000/60000 outfit projection has no stale overweight reason")
+
+    local dual = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    weapon = {
+                        { section = "heavy_overbudget", category = "weapon", name_key = "heavy_overbudget",
+                            base_price = 700, weight_mg = 300, preview_multiplier = 1,
+                            preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600, weight_mg = 800, weight_limit_mg = 1000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "weapon", search = "", sort = "price_asc", page = 1 })
+    local dual_cell = dual.catalog_cells[1]
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "full projection preserves the validation order's overspend result")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "full projection preserves simultaneous overweight as an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_context.weight_mg, 1100,
+        "independent hard block records the candidate weight")
+    local dual_hard_context = dual_cell.hard_disabled_context
+    dual.remaining = 800
+    presenter:refresh_affordability(dual)
+    gamma_arena_test_assert.is_true(dual_cell.disabled,
+        "budget increase does not enable a cell with an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "budget increase reveals the preserved overweight reason")
+    gamma_arena_test_assert.equals(dual_cell.disabled_context, dual_hard_context,
+        "budget increase preserves the independent hard context identity")
 end
 
 local function runtime_custom_presenter_status_failures_preserve_catalog_view()
@@ -11070,8 +11259,37 @@ local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomi
     end
     local scenarios = {
         { name = "partial table", mutate = function(status) for key in pairs(status) do status[key] = nil end end },
+        { name = "validation missing ok", mutate = function(status) status.validation = {} end },
+        { name = "validation ok wrong type", mutate = function(status) status.validation.ok = "false" end },
+        { name = "failed validation missing error", mutate = function(status)
+            status.validation = { ok = false }
+        end },
+        { name = "failed validation missing error code", mutate = function(status)
+            status.validation = { ok = false, error = { message = "invalid", context = {} } }
+        end },
+        { name = "failed validation missing error message", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", context = {} } }
+        end },
+        { name = "failed validation missing error context", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", message = "invalid" } }
+        end },
+        { name = "failed validation claims start", mutate = function(status) status.can_start = true end },
+        { name = "successful validation denies start", mutate = function(status)
+            status.validation = gamma_arena_result.ok({})
+            status.can_start = false
+        end },
         { name = "roster row missing rank", mutate = function(status) status.roster = { {} } end },
         { name = "roster row wrong type", mutate = function(status) status.roster = { false } end },
+        { name = "count exceeds capacity", mutate = function(status)
+            status.roster[2] = { rank = "novice" }
+            status.count = 2
+            status.capacity = 1
+        end },
+        { name = "count exceeds fixed roster controls", mutate = function(status)
+            for index = 2, 11 do status.roster[index] = { rank = "novice" } end
+            status.count = 11
+            status.capacity = 11
+        end },
         { name = "device options wrong type", mutate = function(status) status.device_options = false end },
         { name = "device option wrong element", mutate = function(status) status.device_options = { false } end }
     }
@@ -11119,22 +11337,11 @@ local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomi
 end
 
 local function runtime_custom_ui_refresh_helpers_preserve_native_cells()
-    local preview_calls = 0
-    local model = {
-        preview_add_one = function(_, section)
-            preview_calls = preview_calls + 1
-            if section == "wpn_alpha" then return gamma_arena_result.ok({}) end
-            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Too expensive")
-        end
+    local cells = {
+        { section = "wpn_alpha", effective_price = 500, disabled = false, disabled_reason = nil },
+        { section = "wpn_beta", effective_price = 700, disabled = true,
+            disabled_reason = "GA_CUSTOM_OVERSPEND" }
     }
-    local cells = { { section = "wpn_alpha" }, { section = "wpn_beta" } }
-    gamma_arena_ui_custom.refresh_catalog_cells(model, cells)
-    gamma_arena_test_assert.equals(preview_calls, 2, "status refresh previews each projected cell once")
-    gamma_arena_test_assert.is_false(cells[1].disabled, "affordable projected cell remains enabled")
-    gamma_arena_test_assert.equals(cells[1].disabled_reason, nil, "enabled projected cell clears reason")
-    gamma_arena_test_assert.is_true(cells[2].disabled, "unaffordable projected cell becomes disabled")
-    gamma_arena_test_assert.equals(cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
-        "disabled projected cell keeps exact reason")
 
     local colors = {}
     local alpha = {
@@ -11160,18 +11367,154 @@ local function runtime_custom_ui_refresh_helpers_preserve_native_cells()
     gamma_arena_test_assert.equals(colors.wpn_beta, "hide", "disabled native cell receives muted color")
 end
 
+local function runtime_custom_ui_renders_only_targeted_roster_delta()
+    local count_text = "invalid"
+    local count_sets = 0
+    local rows, combos = {}, {}
+    for index = 1, 10 do
+        rows[index] = {
+            calls = 0,
+            Show = function(self, visible)
+                self.calls = self.calls + 1
+                self.visible = visible
+            end
+        }
+        combos[index] = {
+            calls = 0,
+            enable_id = function(self, selected)
+                self.calls = self.calls + 1
+                self.selected = selected
+            end,
+            SetText = function(self, text) self.text = text end
+        }
+    end
+    local ui = {
+        count_combo = {
+            SetText = function(_, text)
+                count_sets = count_sets + 1
+                count_text = text
+            end
+        },
+        roster_rows = rows,
+        rank_combos = combos
+    }
+    local view = {
+        count = 4,
+        rank_ids = { "novice", "veteran", "master" },
+        roster = {
+            { rank = "novice" }, { rank = "veteran" },
+            { rank = "master" }, { rank = "novice" }
+        }
+    }
+
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 2 })
+    gamma_arena_test_assert.equals(count_text, "4", "accepted count renders the authoritative count")
+    gamma_arena_test_assert.equals(count_sets, 1, "count delta writes the targeted count once")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "count increase leaves prior first row untouched")
+    gamma_arena_test_assert.equals(rows[2].calls, 0, "count increase leaves prior last row untouched")
+    gamma_arena_test_assert.equals(rows[3].calls, 1, "count increase shows first added row once")
+    gamma_arena_test_assert.is_true(rows[3].visible, "count increase shows first added row")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "count increase shows second added row once")
+    gamma_arena_test_assert.is_true(rows[4].visible, "count increase shows second added row")
+    gamma_arena_test_assert.equals(rows[5].calls, 0, "count increase leaves following row untouched")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "count increase leaves prior rank combo untouched")
+    gamma_arena_test_assert.equals(combos[2].calls, 0, "count increase leaves prior last rank combo untouched")
+    gamma_arena_test_assert.equals(combos[3].selected, 3, "count increase restores first added authoritative rank")
+    gamma_arena_test_assert.equals(combos[4].selected, 1, "count increase restores second added authoritative rank")
+
+    view.roster[2].rank = "master"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].calls, 1, "rank delta writes only the targeted combo")
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rank delta renders the authoritative rank")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "rank delta leaves previous combo untouched")
+    gamma_arena_test_assert.equals(combos[3].calls, 1, "rank delta leaves following combo unchanged")
+    for index = 1, 10 do
+        local expected = (index == 3 or index == 4) and 1 or 0
+        gamma_arena_test_assert.equals(rows[index].calls, expected,
+            "rank delta leaves roster row visibility unchanged at " .. tostring(index))
+    end
+
+    count_text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 4 })
+    gamma_arena_test_assert.equals(count_text, "4", "rejected count restores the authoritative cached value")
+    gamma_arena_test_assert.equals(count_sets, 2, "rejected count restores only the targeted count control")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "rejected count leaves roster rows untouched")
+
+    combos[2].text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rejected rank restores the authoritative cached value")
+    gamma_arena_test_assert.equals(combos[2].calls, 2, "rejected rank restores only the targeted combo")
+
+    for index = 1, 10 do
+        rows[index].calls = 0
+        rows[index].visible = true
+        combos[index].calls = 0
+    end
+    view.count = 1
+    view.roster = { { rank = "novice" } }
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 10 })
+    gamma_arena_test_assert.equals(count_text, "1", "maximum decrease renders authoritative count")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "maximum decrease leaves retained row untouched")
+    for index = 2, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 1,
+            "maximum decrease hides affected row once at " .. tostring(index))
+        gamma_arena_test_assert.is_false(rows[index].visible,
+            "maximum decrease hides affected row at " .. tostring(index))
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "maximum decrease does not rewrite hidden combo at " .. tostring(index))
+    end
+
+    for index = 1, 10 do rows[index].calls = 0; combos[index].calls = 0 end
+    local count_sets_before_malformed = count_sets
+    view.count = 11
+    for index = 2, 11 do view.roster[index] = { rank = "novice" } end
+    local count_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { previous_count = 0 })
+    gamma_arena_test_assert.is_true(count_called, "malformed count cannot index beyond fixed controls")
+    gamma_arena_test_assert.equals(count_sets, count_sets_before_malformed,
+        "malformed count is rejected before mutating the count control")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 0,
+            "malformed count leaves bounded row untouched at " .. tostring(index))
+    end
+    local rank_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { rank_index = 11 })
+    gamma_arena_test_assert.is_true(rank_called, "malformed rank index cannot exceed fixed controls")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "malformed rank leaves bounded combo untouched at " .. tostring(index))
+    end
+end
+
 local function runtime_custom_model_status_snapshot_matches_full_status()
     local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.medkit.price = 200
     local model = gamma_arena_custom_setup_model.new(catalog,
         gamma_arena_test_custom_config.make_context(catalog).layout)
     gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "status parity fixture selects faction")
     gamma_arena_test_assert.is_true(model:set_count(2).ok, "status parity fixture selects opponent count")
-    gamma_arena_test_assert.is_true(model:set_rank(2, "veteran").ok, "status parity fixture selects opponent rank")
+    gamma_arena_test_assert.is_true(model:set_rank(2, "legend").ok, "status parity fixture selects high opponent rank")
     gamma_arena_test_assert.is_true(model:set_device("device_torch_nv_2").ok, "status parity fixture selects device")
+    gamma_arena_test_assert.is_true(model:add_one("outfit_field").ok, "status parity fixture selects outfit")
+    gamma_arena_test_assert.is_true(model:add_one("wpn_alpha").ok, "status parity fixture selects weapon")
+    gamma_arena_test_assert.is_true(model:add_one("ammo_alpha").ok, "status parity fixture selects ammo")
+    gamma_arena_test_assert.is_true(model:add_one("wpn_knife").ok, "status parity fixture selects knife")
+    for _ = 1, 3 do
+        gamma_arena_test_assert.is_true(model:add_one("medkit").ok, "status parity fixture grows medicine stack")
+    end
+    local selected_count = #model:snapshot().actor_items
+    gamma_arena_test_assert.is_true(model:set_rank(2, "novice").ok,
+        "lower rank budget preserves selected gear for repair")
     model:set_device("missing_device")
 
     local full = model:snapshot()
     local status = model:status_snapshot()
+    gamma_arena_test_assert.equals(#full.actor_items, selected_count,
+        "lower rank budget preserves selected gear")
+    gamma_arena_test_assert.equals(full.validation.error.code, "GA_CUSTOM_OVERSPEND",
+        "full snapshot reports preserved overbudget loadout")
+    gamma_arena_test_assert.equals(status.validation.error.code, "GA_CUSTOM_OVERSPEND",
+        "status snapshot reports preserved overbudget loadout")
     for _, field in ipairs({
         "faction", "count", "capacity", "actor_device", "budget", "spent", "remaining",
         "weight_mg", "weight_limit_mg", "can_start"
@@ -12607,13 +12950,16 @@ local cases = {
     { name = "runtime_custom_ui_projects_rejected_operation_until_success", fn = runtime_custom_ui_projects_rejected_operation_until_success },
     { name = 'runtime_custom_ui_catalog_failure_owns_summary', fn = runtime_custom_ui_catalog_failure_owns_summary },
     { name = "runtime_custom_ui_catalog_projection_is_bounded_and_complete", fn = runtime_custom_ui_catalog_projection_is_bounded_and_complete },
+    { name = "runtime_catalog_default_success_is_reused_only_for_default_source", fn = runtime_catalog_default_success_is_reused_only_for_default_source },
     { name = "runtime_custom_presenter_filters_sorts_and_pages_deterministically", fn = runtime_custom_presenter_filters_sorts_and_pages_deterministically },
     { name = "runtime_custom_presenter_preview_and_readiness_are_authoritative", fn = runtime_custom_presenter_preview_and_readiness_are_authoritative },
     { name = "runtime_custom_presenter_refreshes_status_without_catalog_snapshot", fn = runtime_custom_presenter_refreshes_status_without_catalog_snapshot },
+    { name = "runtime_custom_presenter_refreshes_affordability_without_model_preview", fn = runtime_custom_presenter_refreshes_affordability_without_model_preview },
     { name = "runtime_custom_presenter_status_failures_preserve_catalog_view", fn = runtime_custom_presenter_status_failures_preserve_catalog_view },
     { name = "runtime_custom_presenter_success_clears_transient_infrastructure_status", fn = runtime_custom_presenter_success_clears_transient_infrastructure_status },
     { name = "runtime_custom_presenter_rejects_malformed_status_snapshots_atomically", fn = runtime_custom_presenter_rejects_malformed_status_snapshots_atomically },
     { name = "runtime_custom_ui_refresh_helpers_preserve_native_cells", fn = runtime_custom_ui_refresh_helpers_preserve_native_cells },
+    { name = "runtime_custom_ui_renders_only_targeted_roster_delta", fn = runtime_custom_ui_renders_only_targeted_roster_delta },
     { name = "runtime_custom_model_status_snapshot_matches_full_status", fn = runtime_custom_model_status_snapshot_matches_full_status },
     { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },

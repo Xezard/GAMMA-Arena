@@ -1,5 +1,6 @@
 local FILTER_IDS = { "all", "weapon", "ammo", "armor", "medicine", "other" }
 local SORT_IDS = { "price_asc", "price_desc", "name_asc", "name_desc" }
+local MAX_ROSTER_ROWS = 10
 local FILTER_CATEGORIES = {
     weapon = { weapon = true },
     ammo = { ammo = true },
@@ -127,6 +128,7 @@ local function collect_rows(snapshot, translate)
                     name = localized_name(translate, cell.name_key, cell.section),
                     base_price = tonumber(cell.base_price) or 0,
                     weight_mg = tonumber(cell.weight_mg) or 0,
+                    carry_bonus_mg = tonumber(cell.carry_bonus_mg) or 0,
                     selected = cell.selected == true,
                     selected_quantity = tonumber(cell.selected_quantity) or 0,
                     preview_multiplier = multiplier,
@@ -171,6 +173,36 @@ local function finite_number(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
+local function snapshot_has_outfit(snapshot)
+    for _, entry in ipairs(type(snapshot) == "table" and snapshot.actor_items or {}) do
+        if type(entry) == "table" and entry.category == "outfit" then return true end
+    end
+    return false
+end
+
+local function projected_weight_hard_block(snapshot, cell, has_outfit)
+    local weight_mg = tonumber(snapshot and snapshot.weight_mg)
+    local weight_limit_mg = tonumber(snapshot and snapshot.weight_limit_mg)
+    local delta = tonumber(cell and cell.weight_mg)
+    if not finite_number(weight_mg) or not finite_number(weight_limit_mg)
+        or not finite_number(delta) or delta < 0 then
+        return nil, nil
+    end
+    local projected_weight_mg = weight_mg + delta
+    local projected_weight_limit_mg = weight_limit_mg
+    if cell.category == "outfit" and not has_outfit then
+        local carry_bonus_mg = tonumber(cell.carry_bonus_mg)
+        if not finite_number(carry_bonus_mg) or carry_bonus_mg < 0 then return nil, nil end
+        projected_weight_limit_mg = projected_weight_limit_mg + carry_bonus_mg
+    end
+    if not finite_number(projected_weight_limit_mg)
+        or projected_weight_mg <= projected_weight_limit_mg then return nil, nil end
+    return "GA_CUSTOM_OVERWEIGHT", {
+        weight_mg = projected_weight_mg,
+        weight_limit_mg = projected_weight_limit_mg
+    }
+end
+
 local function dense_array(value)
     if type(value) ~= "table" then return false end
     local count = 0
@@ -181,13 +213,24 @@ local function dense_array(value)
     return true
 end
 
+local function valid_result_shape(result)
+    if type(result) ~= "table" or type(result.ok) ~= "boolean" then return false end
+    if result.ok then return result.error == nil end
+    local detail = result.error
+    return type(detail) == "table" and type(detail.code) == "string" and detail.code ~= ""
+        and type(detail.message) == "string" and detail.message ~= ""
+        and type(detail.context) == "table"
+end
+
 local function valid_status_snapshot(snapshot)
     if type(snapshot) ~= "table" or not dense_array(snapshot.roster)
-        or not finite_integer(snapshot.count, 0) or snapshot.count ~= #snapshot.roster
-        or not finite_integer(snapshot.capacity, 0) or type(snapshot.can_start) ~= "boolean"
+        or not finite_integer(snapshot.count, 1) or snapshot.count ~= #snapshot.roster
+        or not finite_integer(snapshot.capacity, 1) or snapshot.count > snapshot.capacity
+        or snapshot.capacity > MAX_ROSTER_ROWS or type(snapshot.can_start) ~= "boolean"
         or (snapshot.faction ~= nil and (type(snapshot.faction) ~= "string" or snapshot.faction == ""))
         or (snapshot.actor_device ~= nil and type(snapshot.actor_device) ~= "string")
-        or type(snapshot.validation) ~= "table"
+        or not valid_result_shape(snapshot.validation)
+        or snapshot.can_start ~= snapshot.validation.ok
         or (snapshot.last_operation ~= nil and type(snapshot.last_operation) ~= "table") then
         return false
     end
@@ -313,6 +356,7 @@ function Presenter:project(model, state)
 
     local normalized = normalize_state(state)
     local rows = collect_rows(snapshot, self.translate)
+    local has_outfit = snapshot_has_outfit(snapshot)
     local filtered = {}
     for _, row in ipairs(rows) do if matches(row, normalized) then filtered[#filtered + 1] = row end end
     table.sort(filtered, function(left, right) return less(left, right, normalized.sort) end)
@@ -330,6 +374,16 @@ function Presenter:project(model, state)
         cell.disabled = not preview_called or type(preview) ~= "table" or preview.ok ~= true
         cell.disabled_reason = cell.disabled and (detail and detail.code or "GA_CUSTOM_ACTION_FAILED") or nil
         cell.disabled_context = cell.disabled and detail and detail.context or nil
+        local hard_reason, hard_context = projected_weight_hard_block(snapshot, cell, has_outfit)
+        if hard_reason then
+            cell.hard_disabled_reason = hard_reason
+            cell.hard_disabled_context = hard_context
+            if cell.disabled_reason == nil then
+                cell.disabled = true
+                cell.disabled_reason = hard_reason
+                cell.disabled_context = hard_context
+            end
+        end
         cells[#cells + 1] = cell
     end
 
@@ -415,6 +469,34 @@ function Presenter:refresh_status(model, view)
     view.weight_mg = snapshot.weight_mg or 0
     view.weight_limit_mg = snapshot.weight_limit_mg or 0
     view.last_operation = snapshot.last_operation
+    return view
+end
+
+function Presenter:refresh_affordability(view)
+    if type(view) ~= "table" or not finite_number(view.remaining) then return view end
+    for _, cell in ipairs(view.catalog_cells or {}) do
+        local reason = cell.disabled_reason
+        if reason == nil or reason == "GA_CUSTOM_OVERSPEND" then
+            local delta = tonumber(cell.effective_price)
+            if not finite_number(delta) or delta < 0 then
+                cell.disabled = true
+                cell.disabled_reason = "GA_CUSTOM_ACTION_FAILED"
+                cell.disabled_context = nil
+            elseif delta > view.remaining then
+                cell.disabled = true
+                cell.disabled_reason = "GA_CUSTOM_OVERSPEND"
+                cell.disabled_context = nil
+            elseif type(cell.hard_disabled_reason) == "string" and cell.hard_disabled_reason ~= "" then
+                cell.disabled = true
+                cell.disabled_reason = cell.hard_disabled_reason
+                cell.disabled_context = cell.hard_disabled_context
+            else
+                cell.disabled = false
+                cell.disabled_reason = nil
+                cell.disabled_context = nil
+            end
+        end
+    end
     return view
 end
 

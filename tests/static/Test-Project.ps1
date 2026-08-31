@@ -431,9 +431,9 @@ $Task7CurrentArtifacts = @(
 )
 
 $Task8CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+prewarm_catalog_rank_pools\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'valid_pool_prerequisites', 'cached_pool_validation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'exact_fields', 'canonical_integer', 'CONFIG_FIELDS', 'ROSTER_FIELDS', 'ITEM_FIELDS', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context', 'custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context', 'custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles', 'custom_setup_model_snapshots_reuse_committed_derived_state') }
 )
 
 foreach ($Contract in $Task8CustomContracts) {
@@ -449,6 +449,67 @@ foreach ($Contract in $Task8CustomContracts) {
     }
 }
 
+$Task8CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
+foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validation','custom_config_does_not_cache_rank_pool_failures_or_context','custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context','custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles')) {
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    Assert-True (([regex]::Matches($Task8CustomTests, $Registration)).Count -eq 1) "Task 8 cache case must be registered exactly once: $Name"
+}
+
+$Task8CustomSource = Get-Content -LiteralPath (Join-Path $RepoRoot $Task8CustomContracts[0].Path) -Raw
+$Task8PoolPrerequisiteBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+valid_pool_prerequisites\s*\(\s*profile\s*,\s*catalog\s*\).*?^end\s*$').Value
+$Task8SharedPrerequisites = $Task8PoolPrerequisiteBlock -match `
+    '(?s)return\s+type\(profile\)\s*==\s*"table"\s+and\s+type\(catalog\)\s*==\s*"table"\s+and\s+type\(catalog\.items\)\s*==\s*"table"\s+and\s+type\(catalog\.ammo\)\s*==\s*"table"\s+and\s+type\(catalog\.weapon_list\)\s*==\s*"table"'
+Assert-True $Task8SharedPrerequisites `
+    'Task 8 pool caches must share the complete profile and catalog prerequisite predicate.'
+
+$Task8PoolCacheBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+cached_pool_validation\s*\(.*?^end\s*$').Value
+$Task8PoolTypeGate = $Task8PoolCacheBlock.IndexOf('if not valid_pool_prerequisites(profile, catalog) then')
+$Task8PoolBypass = $Task8PoolCacheBlock -match `
+    'if\s+not\s+valid_pool_prerequisites\(profile,\s*catalog\)\s+then\s*return\s+validate_weapon_pool_internal\(profile,\s*catalog,\s*context\)\s*end'
+$Task8PoolCacheAccess = $Task8PoolCacheBlock.IndexOf('successful_pool_by_catalog[catalog]')
+Assert-True ($Task8PoolBypass -and $Task8PoolTypeGate -ge 0 -and $Task8PoolCacheAccess -gt $Task8PoolTypeGate) `
+    'Task 8 pool cache must apply shared prerequisites before cache access.'
+
+$Task8PoolInternalBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+validate_weapon_pool_internal\s*\(.*?^end\s*$').Value
+$Task8PoolPrerequisiteGate = $Task8PoolInternalBlock.IndexOf('if not valid_pool_prerequisites(profile, catalog) then')
+$Task8WeaponRecordsAccess = $Task8PoolInternalBlock.IndexOf('weapon_records(catalog)')
+Assert-True ($Task8PoolPrerequisiteGate -ge 0 -and $Task8WeaponRecordsAccess -gt $Task8PoolPrerequisiteGate) `
+    'Task 8 pool validation must apply shared prerequisites before reading cached weapon records.'
+
+$Task8RankCallbackCase = [regex]::Match($Task8CustomTests,
+    '(?ms)^local\s+function\s+custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles\(\).*?^end\s*$').Value
+foreach ($Marker in @('for\s+index\s*=\s*1\s*,\s*512', 'gamma_arena_custom_setup_model\.new',
+    'model:set_count\s*\(\s*10\s*\)', 'model:set_rank\s*\(\s*1\s*,\s*rank_id\s*\)',
+    'model:status_snapshot\s*\(\s*\)', 'operations\.profile_reads\s*,\s*0', 'operations\.weapon_reads\s*,\s*0')) {
+    Assert-True ($Task8RankCallbackCase -match $Marker) "Rank callback operation-count regression is missing: $Marker"
+}
+Assert-True ($Task8RankCallbackCase -match 'operations\.profile_reads\s*,\s*operations\.weapon_reads\s*=\s*0\s*,\s*0') `
+    'Rank callback regression must reset operation counters immediately before the real model call graph.'
+
+$Task8ItemCatalogSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
+$Task8CatalogSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
+$Task8ModelSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_model.script') -Raw
+Assert-True ($Task8ItemCatalogSource -match 'reconciled_pool_records_by_catalog\s*=\s*setmetatable\(\{\},\s*\{\s*__mode\s*=\s*"k"') `
+    'Reconciled rank-pool proofs must be weakly keyed by final catalog identity.'
+Assert-True ($Task8ItemCatalogSource -match 'function\s+reconciled_weapon_pool\s*\(\s*catalog\s*,\s*profile\s*\)') `
+    'Item-catalog reconciliation must expose exact catalog/profile identity proofs.'
+$Task8PrimerBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^function\s+prewarm_catalog_rank_pools\(.*?^end\s*$').Value
+foreach ($Marker in @('catalog\.faction_ids', 'catalog\.rank_ids', 'reconciled_weapon_pool\s*\(\s*catalog\s*,\s*profile\s*\)',
+    'cached_pool_validation\s*\(\s*profile\s*,\s*catalog', 'successful_pool_by_catalog\[catalog\]', 'summary\.complete')) {
+    Assert-True ($Task8PrimerBlock -match $Marker) "Catalog rank-pool primer is missing: $Marker"
+}
+$Task8CatalogLoadBlock = [regex]::Match($Task8CatalogSource, '(?ms)^local\s+function\s+load_impl\(.*?^end\s*$').Value
+Assert-True ($Task8CatalogLoadBlock.IndexOf('gamma_arena_custom_config.prewarm_catalog_rank_pools') -gt
+    $Task8CatalogLoadBlock.IndexOf('gamma_arena_item_catalog.load')) `
+    'Runtime catalog load must prewarm rank profiles after item reconciliation.'
+$Task8ModelNewBlock = [regex]::Match($Task8ModelSource, '(?ms)^function\s+new\(.*?^end\s*$').Value
+Assert-True ($Task8ModelNewBlock -match 'gamma_arena_custom_config\.prewarm_catalog_rank_pools\s*\(\s*catalog\s*\)') `
+    'Direct model construction must prevalidate rank pools outside count/rank callbacks.'
+
 $Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
     Assert-True ($Task8SessionContent -match [regex]::Escape($Marker)) "Task 8 session persistence is missing: $Marker"
@@ -463,8 +524,8 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 }
 
 $Task9CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', '(?m)^local\s+function\s+commit_allowing_incomplete_budget\s*\(', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', '(?m)^local\s+function\s+commit_allowing_incomplete_budget\s*\(', '(?m)^local\s+function\s+refresh_derived\s*\(', '(?m)^local\s+function\s+accept_candidate\s*\(', '(?m)^local\s+function\s+derived_values\s*\(', 'current_validation', 'current_budget', 'current_totals', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:refresh_affordability', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_faction_picker.script'; Namespace = 'gamma_arena_ui_faction_picker'; Required = @('(?m)^function\s+new\s*\(', '(?m)^function\s+layout\s*\(', '(?m)^function\s+texture_id\s*\(', 'function\s+Picker:open', 'function\s+Picker:close', 'function\s+Picker:is_open', 'function\s+Picker:select', 'MAX_FACTIONS\s*=\s*13', 'COLUMN_COUNT\s*=\s*4', 'GA_CUSTOM_FACTION_UNKNOWN', 'ui_mm_faction_', 'ui_new_game_flair_zombied') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'gamma_arena_custom_setup_presenter\.new', 'utils_ui\.UICellContainer', 'inventory_container', 'loadout_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'EDIT_TEXT_COMMIT', 'LIST_ITEM_SELECT', 'OnCatalogSearch', 'OnCatalogFilter', 'OnCatalogSort', 'On_CC_Mouse1', 'On_CC_DragDrop', 'dispatch_transfer', 'dispatch_drop', 'equip_replacing', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
@@ -577,9 +638,13 @@ foreach ($Locale in @('eng','rus')) {
     }
 }
 $Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
-foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_one_unit_commands_are_atomic','custom_setup_model_auto_equips_and_replaces_weapon_atomically','custom_setup_model_preserves_overbudget_inventory_for_repair','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
+foreach ($Name in @('custom_setup_model_preserves_order_and_recalculates_budget','custom_setup_model_progressively_assembles_valid_equipment_and_categories','custom_setup_model_rejects_masked_semantic_candidates_atomically','custom_setup_model_edits_stack_quantities_without_duplicates','custom_setup_model_one_unit_commands_are_atomic','custom_setup_model_auto_equips_and_replaces_weapon_atomically','custom_setup_model_preserves_overbudget_inventory_for_repair','custom_setup_model_snapshots_reuse_committed_derived_state','custom_setup_model_grenade_selection_removal_and_reorder_are_semantic')) {
     Assert-True ($Task9CustomTests -match [regex]::Escape($Name)) "Task 9 model tests must cover $Name"
 }
+$DerivedStateCase = 'custom_setup_model_snapshots_reuse_committed_derived_state'
+$DerivedStateRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($DerivedStateCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($DerivedStateCase) + '\s*\}'
+Assert-True (([regex]::Matches($Task9CustomTests, $DerivedStateRegistration)).Count -eq 1) `
+    'Custom derived-state cache regression must be registered exactly once.'
 $Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_custom_ui_projects_rejected_operation_until_success','runtime_custom_ui_rebuilds_catalog_left_and_selected_right','runtime_custom_presenter_filters_sorts_and_pages_deterministically','runtime_custom_presenter_preview_and_readiness_are_authoritative','runtime_composed_catalog_supports_first_custom_item_edit')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
@@ -3404,9 +3469,41 @@ $RosterRefreshPresenter = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gam
 $RosterRefreshUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
 $RosterRefreshRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
 Assert-True ($RosterRefreshModel -match 'function\s+Model:status_snapshot') 'Custom roster refresh model must expose status_snapshot.'
+$DerivedStatusBlock = [regex]::Match($RosterRefreshModel, '(?ms)^function\s+Model:status_snapshot\(\).*?^end\s*$').Value
+$DerivedSnapshotBlock = [regex]::Match($RosterRefreshModel, '(?ms)^function\s+Model:snapshot\(\).*?^end\s*$').Value
+foreach ($Block in @($DerivedStatusBlock, $DerivedSnapshotBlock)) {
+    Assert-True ($Block -match 'deep_copy\(self\.current_validation\)') `
+        'Custom snapshots must read the committed validation Result.'
+    Assert-True ($Block -match 'derived_values\(self\)') `
+        'Custom snapshots must read committed budget and totals Results.'
+    Assert-True ($Block -notmatch 'gamma_arena_custom_config\.(?:validate|budget|totals)\s*\(') `
+        'Custom snapshots must not repeat public validation, budget, or totals work.'
+}
+$DerivedRuntimeCase = [regex]::Match($RosterRefreshRuntime,
+    '(?ms)^local\s+function\s+runtime_custom_model_status_snapshot_matches_full_status\(\).*?^end\s*$').Value
+Assert-True ($DerivedRuntimeCase -match 'set_rank\s*\(\s*2\s*,\s*"novice"\s*\)' -and
+    ([regex]::Matches($DerivedRuntimeCase, 'GA_CUSTOM_OVERSPEND')).Count -ge 2) `
+    'Custom runtime parity must preserve an overbudget loadout after lowering rank.'
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
+Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_affordability') 'Custom roster refresh presenter must expose arithmetic affordability refresh.'
 Assert-True ($RosterRefreshPresenter -match 'local\s+function\s+valid_status_snapshot') 'Custom status refresh must validate snapshot shape before mutation.'
-Assert-True ($RosterRefreshUi -match 'function\s+refresh_catalog_cells') 'Custom status refresh must expose current-page preview helper.'
+$StatusShapeBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+valid_status_snapshot\(.*?^end\s*$').Value
+Assert-True ($StatusShapeBlock -match 'snapshot\.count\s*>\s*snapshot\.capacity') `
+    'Custom status refresh must reject a count above authoritative capacity.'
+Assert-True ($StatusShapeBlock -match 'snapshot\.capacity\s*>\s*MAX_ROSTER_ROWS') `
+    'Custom status refresh must reject capacity above the fixed roster controls.'
+$StatusResultBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+valid_result_shape\(.*?^end\s*$').Value
+Assert-True ($StatusResultBlock -match 'type\(result\.ok\)\s*~=\s*"boolean"') `
+    'Custom status validation must require a boolean Result ok field.'
+foreach ($Field in @('code','message','context')) {
+    Assert-True ($StatusResultBlock -match ('detail\.' + $Field)) `
+        "Failed Custom status validation must require structured error $Field."
+}
+Assert-True ($StatusShapeBlock -match 'valid_result_shape\s*\(\s*snapshot\.validation\s*\)') `
+    'Custom status refresh must validate the full validation Result shape.'
+Assert-True ($StatusShapeBlock -match 'snapshot\.can_start\s*~=\s*snapshot\.validation\.ok') `
+    'Custom status refresh must require can_start to equal validation.ok exactly.'
+Assert-True ($RosterRefreshUi -notmatch 'function\s+refresh_catalog_cells') 'Custom status refresh must not expose a current-page preview helper.'
 Assert-True ($RosterRefreshUi -match 'function\s+refresh_inventory_cells') 'Custom status refresh must expose in-place inventory helper.'
 $RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
 $RefreshPresenterEnd = if ($RefreshPresenterStart -ge 0) { $RosterRefreshPresenter.IndexOf('function status_presentation', $RefreshPresenterStart) } else { -1 }
@@ -3416,14 +3513,101 @@ if ($RefreshPresenterStart -ge 0 -and $RefreshPresenterEnd -gt $RefreshPresenter
     Assert-True ($RefreshPresenterBlock -match 'view\.infrastructure_error_code\s*=\s*nil') `
         'Successful Custom status refresh must clear transient infrastructure status.'
 }
+$CatalogProjectionStart = $RosterRefreshPresenter.IndexOf('function Presenter:project(model, state)')
+$CatalogProjectionEnd = if ($CatalogProjectionStart -ge 0) { $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status', $CatalogProjectionStart) } else { -1 }
+Assert-True ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProjectionStart) 'Custom catalog projection must remain structurally testable.'
+if ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProjectionStart) {
+    $CatalogProjectionBlock = $RosterRefreshPresenter.Substring($CatalogProjectionStart, $CatalogProjectionEnd - $CatalogProjectionStart)
+    Assert-True ($CatalogProjectionBlock -match 'hard_disabled_reason') `
+        'Custom catalog projection must preserve an independent hard affordability block.'
+    Assert-True ($CatalogProjectionBlock -match 'hard_disabled_context') `
+        'Custom catalog projection must preserve hard-block context for later arithmetic refresh.'
+}
+$CatalogRowsBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+collect_rows\(.*?^end\s*$').Value
+Assert-True ($DerivedSnapshotBlock -match 'carry_bonus_mg\s*=\s*definition\.carry_bonus_mg') `
+    'Full model snapshot must carry authoritative outfit carry bonus metadata.'
+Assert-True ($CatalogRowsBlock -match 'carry_bonus_mg\s*=\s*tonumber\(cell\.carry_bonus_mg\)') `
+    'Full presenter projection must retain candidate outfit carry bonus metadata.'
+$ProjectedWeightBlock = [regex]::Match($RosterRefreshPresenter,
+    '(?ms)^local\s+function\s+projected_weight_hard_block\(.*?^end\s*$').Value
+foreach ($Marker in @('cell\.category\s*==\s*"outfit"', 'cell\.carry_bonus_mg', 'projected_weight_limit_mg')) {
+    Assert-True ($ProjectedWeightBlock -match $Marker) "Projected weight hard block is missing: $Marker"
+}
+Assert-True ($CatalogProjectionBlock -match 'snapshot_has_outfit\s*\(\s*snapshot\s*\)' -and
+    $CatalogProjectionBlock -match 'projected_weight_hard_block\s*\(\s*snapshot\s*,\s*cell\s*,\s*has_outfit\s*\)') `
+    'Full projection must apply candidate effective carry limits from one outfit-state scan.'
+$AffordabilityRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
+    '(?ms)^local\s+function\s+runtime_custom_presenter_refreshes_affordability_without_model_preview\(\).*?^end\s*$').Value
+foreach ($Marker in @('weight_mg\s*=\s*49000', 'weight_limit_mg\s*=\s*50000', 'weight_mg\s*=\s*5000',
+    'carry_bonus_mg\s*=\s*10000', '54000/60000')) {
+    Assert-True ($AffordabilityRuntimeBlock -match $Marker) "Carry-bonus projection regression is missing: $Marker"
+}
+$MalformedStatusRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
+    '(?ms)^local\s+function\s+runtime_custom_presenter_rejects_malformed_status_snapshots_atomically\(\).*?^end\s*$').Value
+foreach ($Marker in @('validation missing ok', 'failed validation missing error', 'failed validation missing error code',
+    'failed validation missing error message', 'failed validation missing error context', 'failed validation claims start',
+    'successful validation denies start')) {
+    Assert-True ($MalformedStatusRuntimeBlock -match [regex]::Escape($Marker)) `
+        "Malformed status runtime regression is missing: $Marker"
+}
 foreach ($HandlerName in @('OnCount', 'OnRank')) {
     $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value
-    Assert-True ($HandlerBlock -match 'self:RefreshStatus\(\)') "Custom $HandlerName must use the lightweight status refresh."
-    Assert-True ($HandlerBlock -notmatch 'self:Rebuild\(\)') "Custom $HandlerName must not rebuild the catalog."
+    Assert-True ($HandlerBlock -match 'self:RefreshRosterStatus\(') "Custom $HandlerName must use incremental roster refresh."
+    Assert-True ($HandlerBlock -match 'local\s+result\s*=') "Custom $HandlerName must consume its model command Result."
+    Assert-True ($HandlerBlock -match 'not\s+result\.ok') "Custom $HandlerName must preserve a rejected command Result."
+    foreach ($Forbidden in @('self:Rebuild\(', 'presenter:project', 'model:snapshot', 'preview_add_one', 'rebuild_panels')) {
+        Assert-True ($HandlerBlock -notmatch $Forbidden) "Custom $HandlerName hot path must exclude $Forbidden."
+    }
 }
-$RefreshStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshStatus\(.*?^end\s*$').Value
-Assert-True ($RefreshStatusBlock -notmatch 'rebuild_panels') 'Custom lightweight refresh must not rebuild item panels.'
-Assert-True ($RefreshStatusBlock -notmatch 'model:snapshot') 'Custom lightweight refresh must not request a full model snapshot.'
+$RosterStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshRosterStatus\(.*?^end\s*$').Value
+foreach ($Required in @('presenter:refresh_status', 'presenter:refresh_affordability', 'refresh_inventory_cells')) {
+    Assert-True ($RosterStatusBlock -match $Required) "Incremental roster refresh must include $Required."
+}
+foreach ($Forbidden in @('presenter:project', 'model:snapshot', 'preview_add_one', 'rebuild_panels', 'container:Reset', 'AddItem')) {
+    Assert-True ($RosterStatusBlock -notmatch $Forbidden) "Incremental roster refresh must exclude $Forbidden."
+}
+$AffordabilityRefreshIndex = $RosterStatusBlock.IndexOf('self.presenter:refresh_affordability(view)')
+$InventoryRefreshIndex = $RosterStatusBlock.IndexOf('refresh_inventory_cells(self.inventory_container, view.catalog_cells)')
+Assert-True ($AffordabilityRefreshIndex -ge 0 -and $InventoryRefreshIndex -gt $AffordabilityRefreshIndex) `
+    'Custom incremental roster refresh must update arithmetic affordability before native cells.'
+$InitControlsBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:InitControls\(.*?^end\s*$').Value
+$InitializeFactionBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+initialize_faction\(.*?^end\s*$').Value
+$CustomConstructorBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:__init\(.*?^end\s*$').Value
+Assert-True ($CustomConstructorBlock -match 'initialize_faction\(self\.model' -and
+    $CustomConstructorBlock -match 'self:InitControls\(\)' -and $CustomConstructorBlock -match 'self:Rebuild\(\)') `
+    'Custom constructor initialization call graph must remain structurally visible.'
+foreach ($InitializationBlock in @($CustomConstructorBlock, $InitializeFactionBlock, $InitControlsBlock)) {
+    Assert-True ($InitializationBlock -notmatch 'model[\.:]snapshot') `
+        'Custom constructor and initialization helpers must not build a full model snapshot.'
+    Assert-True ($InitializationBlock -notmatch '(?<!presenter:)project\(') `
+        'Custom constructor and initialization helpers must not build the legacy full projection.'
+}
+Assert-True ($InitializeFactionBlock -match 'model\.status_snapshot') `
+    'Custom faction initialization must use bounded status.'
+Assert-True ($InitializeFactionBlock -match 'model\.catalog' -and $InitializeFactionBlock -match 'faction_ids') `
+    'Custom faction initialization must use immutable catalog faction metadata.'
+$InitialRebuildBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:Rebuild\(.*?^end\s*$').Value
+Assert-True (([regex]::Matches($InitialRebuildBlock, 'presenter:project\(')).Count -eq 1) `
+    'Custom Rebuild must own exactly one authoritative full presenter projection.'
+$RosterDeltaBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+render_roster_delta\(.*?^end\s*$').Value
+Assert-True ($RosterDeltaBlock -match 'change\.previous_count') 'Incremental count rendering must be targeted by previous_count.'
+Assert-True ($RosterDeltaBlock -match 'change\.rank_index') 'Incremental rank rendering must be targeted by rank_index.'
+Assert-True ($RosterDeltaBlock -match 'self\.count_combo:SetText\(tostring\(view\.count\)\)') `
+    'Rejected count changes must restore only the authoritative count control.'
+Assert-True ($RosterDeltaBlock -match 'roster_count\(view\.count\)' -and
+    $RosterDeltaBlock -match 'roster_count\(change\.previous_count\)') `
+    'Incremental count rendering must validate current and previous bounds before indexing controls.'
+Assert-True ($RosterDeltaBlock -match 'roster_index\(change\.rank_index\)') `
+    'Incremental rank rendering must validate its fixed-control index.'
+Assert-True ($RosterDeltaBlock -match 'local\s+row\s*=\s*rows\[index\]' -and
+    $RosterDeltaBlock -match 'local\s+combo\s*=\s*combos\[index\]') `
+    'Incremental roster rendering must defensively guard bounded native controls.'
+$SharedStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^local\s+function\s+render_roster_status\(.*?^end\s*$').Value
+Assert-True ($SharedStatusBlock -match 'render_status_message\(self,\s*view\)') `
+    'Incremental roster rendering must reuse the shared status and logging policy.'
+$FullStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^local\s+function\s+render_status_controls\(.*?^end\s*$').Value
+Assert-True ($FullStatusBlock -match 'render_roster_status\(self,\s*view\)') `
+    'Full rendering must reuse the shared roster/status policy.'
 $PrepareViewStart = $RosterRefreshUi.IndexOf('local function prepare_view(self, view)')
 $PrepareViewEnd = if ($PrepareViewStart -ge 0) { $RosterRefreshUi.IndexOf('local function render_status_controls', $PrepareViewStart) } else { -1 }
 Assert-True ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) 'Custom view preparation must remain structurally testable.'
@@ -3436,6 +3620,22 @@ $RosterRefreshCase = 'runtime_custom_presenter_refreshes_status_without_catalog_
 $RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
 Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterRefreshRegistration)).Count -eq 1) 'Custom roster refresh runtime regression must be registered exactly once.'
+$AffordabilityCase = 'runtime_custom_presenter_refreshes_affordability_without_model_preview'
+$AffordabilityRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($AffordabilityCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($AffordabilityCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($AffordabilityCase))) 'Custom arithmetic affordability runtime regression is missing.'
+Assert-True (([regex]::Matches($RosterRefreshRuntime, $AffordabilityRegistration)).Count -eq 1) 'Custom arithmetic affordability runtime regression must be registered exactly once.'
+$RosterDeltaCase = 'runtime_custom_ui_renders_only_targeted_roster_delta'
+$RosterDeltaRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterDeltaCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterDeltaCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterDeltaCase))) 'Custom targeted roster runtime regression is missing.'
+Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterDeltaRegistration)).Count -eq 1) 'Custom targeted roster runtime regression must be registered exactly once.'
+
+$CatalogCacheSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
+Assert-True ($CatalogCacheSource -match 'local\s+runtime_catalog_result\s*=\s*nil') 'Runtime catalog cache must be explicit.'
+Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+runtime_catalog_result\s*~=\s*nil') 'Only the default runtime source may read the cache.'
+Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+result\.ok') 'Only a successful default runtime Result may populate the cache.'
+$CatalogCacheCase = 'runtime_catalog_default_success_is_reused_only_for_default_source'
+$CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*' + $CatalogCacheCase + '\s*\}'
+Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $CatalogCacheRegistration)).Count -eq 1) 'Runtime catalog cache case must be registered exactly once.'
 
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
 if (Test-Path -LiteralPath $SmokeHarnessPath) {

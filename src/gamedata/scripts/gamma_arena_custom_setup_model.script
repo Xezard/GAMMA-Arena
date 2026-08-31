@@ -87,15 +87,25 @@ local function reject(self, result)
     return result
 end
 
+local function refresh_derived(self)
+    self.current_budget = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
+    self.current_totals = gamma_arena_custom_config.totals(self.draft, self.catalog)
+end
+
+local function accept_candidate(self, candidate, validated)
+    self.draft = candidate
+    self.current_validation = validated
+    refresh_derived(self)
+    local result = gamma_arena_result.ok({ validation = deep_copy(validated) })
+    self.last_operation = deep_copy(result)
+    return result
+end
+
 local function commit(self, candidate)
     local validated = gamma_arena_custom_config.validate(candidate, { catalog = self.catalog, layout = self.layout })
     local accepted = gamma_arena_custom_config.validate_draft(candidate, { catalog = self.catalog, layout = self.layout })
     if not accepted.ok then return reject(self, accepted) end
-    self.draft = candidate
-    self.current_validation = validated
-    local result = gamma_arena_result.ok({ validation = deep_copy(validated) })
-    self.last_operation = deep_copy(result)
-    return result
+    return accept_candidate(self, candidate, validated)
 end
 
 local function commit_allowing_incomplete_budget(self, candidate, allow_overweight)
@@ -110,11 +120,7 @@ local function commit_allowing_incomplete_budget(self, candidate, allow_overweig
         and not (allow_overweight and code == "GA_CUSTOM_OVERWEIGHT") then
         return reject(self, accepted)
     end
-    self.draft = candidate
-    self.current_validation = validated
-    local result = gamma_arena_result.ok({ validation = deep_copy(validated) })
-    self.last_operation = deep_copy(result)
-    return result
+    return accept_candidate(self, candidate, validated)
 end
 
 local function item_definition(self, section)
@@ -508,12 +514,18 @@ local function projected_device_options(self)
     return device_options
 end
 
+local function derived_values(self)
+    local totals = self.current_totals
+    local budget = self.current_budget
+    return budget and budget.ok and budget.value or 0,
+        totals and totals.ok and totals.value or {
+            points = 0, weight_mg = 0, weight_limit_mg = self.catalog.base_carry_weight or 0
+        }
+end
+
 function Model:status_snapshot()
-    local validated = self:validation()
-    local budget_result = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
-    local totals_result = gamma_arena_custom_config.totals(self.draft, self.catalog)
-    local spent = totals_result.ok and totals_result.value.points or 0
-    local budget = budget_result.ok and budget_result.value or 0
+    local budget, totals = derived_values(self)
+    local validated = deep_copy(self.current_validation)
     return {
         faction = self.draft.faction,
         roster = deep_copy(self.draft.roster),
@@ -522,11 +534,10 @@ function Model:status_snapshot()
         actor_device = self.draft.actor_device,
         device_options = projected_device_options(self),
         budget = budget,
-        spent = spent,
-        remaining = budget - spent,
-        weight_mg = totals_result.ok and totals_result.value.weight_mg or 0,
-        weight_limit_mg = totals_result.ok and totals_result.value.weight_limit_mg
-            or (self.catalog.base_carry_weight or 0),
+        spent = totals.points,
+        remaining = budget - totals.points,
+        weight_mg = totals.weight_mg,
+        weight_limit_mg = totals.weight_limit_mg,
         validation = validated,
         can_start = validated.ok == true,
         last_operation = deep_copy(self.last_operation)
@@ -534,9 +545,8 @@ function Model:status_snapshot()
 end
 
 function Model:snapshot()
-    local validated = self:validation()
-    local budget_result = gamma_arena_custom_config.budget(self.draft.roster, self.catalog)
-    local totals_result = gamma_arena_custom_config.totals(self.draft, self.catalog)
+    local validated = deep_copy(self.current_validation)
+    local budget, totals = derived_values(self)
     local selected, selected_map, selected_grenades = {}, {}, {}
     local grenade_index = 0
     for index, entry in ipairs(self.draft.actor_items) do
@@ -577,6 +587,7 @@ function Model:snapshot()
                 name_key = definition.name_key,
                 base_price = definition.price,
                 weight_mg = definition.weight_mg,
+                carry_bonus_mg = definition.carry_bonus_mg,
                 selected = is_selected,
                 selected_quantity = is_selected and selected_map[section].quantity or 0,
                 disabled = disabled,
@@ -586,8 +597,6 @@ function Model:snapshot()
         end
     end
     local device_options = projected_device_options(self)
-    local spent = totals_result.ok and totals_result.value.points or 0
-    local budget = budget_result.ok and budget_result.value or 0
     return {
         config = copy_config(self.draft),
         faction = self.draft.faction,
@@ -607,10 +616,10 @@ function Model:snapshot()
         physical_count = physical_count(self.draft),
         max_physical_items_per_participant = self.catalog.max_physical_items_per_participant,
         budget = budget,
-        spent = spent,
-        remaining = budget - spent,
-        weight_mg = totals_result.ok and totals_result.value.weight_mg or 0,
-        weight_limit_mg = totals_result.ok and totals_result.value.weight_limit_mg or (self.catalog.base_carry_weight or 0),
+        spent = totals.points,
+        remaining = budget - totals.points,
+        weight_mg = totals.weight_mg,
+        weight_limit_mg = totals.weight_limit_mg,
         validation = validated,
         can_start = validated.ok == true,
         last_operation = deep_copy(self.last_operation)
@@ -620,6 +629,7 @@ end
 function new(catalog, layout)
     catalog = type(catalog) == "table" and catalog or {}
     layout = type(layout) == "table" and layout or {}
+    gamma_arena_custom_config.prewarm_catalog_rank_pools(catalog)
     local self = setmetatable({
         catalog = catalog,
         layout = layout,
@@ -634,5 +644,6 @@ function new(catalog, layout)
         last_operation = nil
     }, Model)
     self.current_validation = gamma_arena_custom_config.validate(self.draft, { catalog = catalog, layout = layout })
+    refresh_derived(self)
     return self
 end
