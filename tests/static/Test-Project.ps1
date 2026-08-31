@@ -465,6 +465,14 @@ $Task8PoolCacheAccess = $Task8PoolCacheBlock.IndexOf('successful_pool_by_catalog
 Assert-True ($Task8PoolBypass -and $Task8PoolTypeGate -ge 0 -and $Task8PoolCacheAccess -gt $Task8PoolTypeGate) `
     'Task 8 pool cache must type-gate profile and catalog before cache access.'
 
+$Task8PoolInternalBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+validate_weapon_pool_internal\s*\(.*?^end\s*$').Value
+$Task8PoolPrerequisiteGate = [regex]::Match($Task8PoolInternalBlock,
+    '(?s)if\s+type\(profile\)\s*~=\s*"table"\s+or\s+type\(catalog\)\s*~=\s*"table"\s+or\s+type\(catalog\.items\)\s*~=\s*"table"\s+or\s+type\(catalog\.ammo\)\s*~=\s*"table"\s+or\s+type\(catalog\.weapon_list\)\s*~=\s*"table"\s+then\s*return\s+failure\("GA_CUSTOM_WEAPON_POOL_INVALID".*?end')
+$Task8WeaponRecordsAccess = $Task8PoolInternalBlock.IndexOf('weapon_records(catalog)')
+Assert-True ($Task8PoolPrerequisiteGate.Success -and $Task8WeaponRecordsAccess -gt $Task8PoolPrerequisiteGate.Index) `
+    'Task 8 pool validation must reject malformed prerequisites before reading cached weapon records.'
+
 $Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
     Assert-True ($Task8SessionContent -match [regex]::Escape($Marker)) "Task 8 session persistence is missing: $Marker"
