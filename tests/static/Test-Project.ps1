@@ -431,7 +431,7 @@ $Task7CurrentArtifacts = @(
 )
 
 $Task8CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'cached_pool_validation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'valid_pool_prerequisites', 'cached_pool_validation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'exact_fields', 'canonical_integer', 'CONFIG_FIELDS', 'ROSTER_FIELDS', 'ITEM_FIELDS', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context', 'custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context') }
 )
@@ -456,22 +456,28 @@ foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validat
 }
 
 $Task8CustomSource = Get-Content -LiteralPath (Join-Path $RepoRoot $Task8CustomContracts[0].Path) -Raw
+$Task8PoolPrerequisiteBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+valid_pool_prerequisites\s*\(\s*profile\s*,\s*catalog\s*\).*?^end\s*$').Value
+$Task8SharedPrerequisites = $Task8PoolPrerequisiteBlock -match `
+    '(?s)return\s+type\(profile\)\s*==\s*"table"\s+and\s+type\(catalog\)\s*==\s*"table"\s+and\s+type\(catalog\.items\)\s*==\s*"table"\s+and\s+type\(catalog\.ammo\)\s*==\s*"table"\s+and\s+type\(catalog\.weapon_list\)\s*==\s*"table"'
+Assert-True $Task8SharedPrerequisites `
+    'Task 8 pool caches must share the complete profile and catalog prerequisite predicate.'
+
 $Task8PoolCacheBlock = [regex]::Match($Task8CustomSource,
     '(?ms)^local\s+function\s+cached_pool_validation\s*\(.*?^end\s*$').Value
-$Task8PoolTypeGate = $Task8PoolCacheBlock.IndexOf('if type(profile) ~= "table" or type(catalog) ~= "table" then')
+$Task8PoolTypeGate = $Task8PoolCacheBlock.IndexOf('if not valid_pool_prerequisites(profile, catalog) then')
 $Task8PoolBypass = $Task8PoolCacheBlock -match `
-    'if\s+type\(profile\)\s*~=\s*"table"\s+or\s+type\(catalog\)\s*~=\s*"table"\s+then\s*return\s+validate_weapon_pool_internal\(profile,\s*catalog,\s*context\)\s*end'
+    'if\s+not\s+valid_pool_prerequisites\(profile,\s*catalog\)\s+then\s*return\s+validate_weapon_pool_internal\(profile,\s*catalog,\s*context\)\s*end'
 $Task8PoolCacheAccess = $Task8PoolCacheBlock.IndexOf('successful_pool_by_catalog[catalog]')
 Assert-True ($Task8PoolBypass -and $Task8PoolTypeGate -ge 0 -and $Task8PoolCacheAccess -gt $Task8PoolTypeGate) `
-    'Task 8 pool cache must type-gate profile and catalog before cache access.'
+    'Task 8 pool cache must apply shared prerequisites before cache access.'
 
 $Task8PoolInternalBlock = [regex]::Match($Task8CustomSource,
     '(?ms)^local\s+function\s+validate_weapon_pool_internal\s*\(.*?^end\s*$').Value
-$Task8PoolPrerequisiteGate = [regex]::Match($Task8PoolInternalBlock,
-    '(?s)if\s+type\(profile\)\s*~=\s*"table"\s+or\s+type\(catalog\)\s*~=\s*"table"\s+or\s+type\(catalog\.items\)\s*~=\s*"table"\s+or\s+type\(catalog\.ammo\)\s*~=\s*"table"\s+or\s+type\(catalog\.weapon_list\)\s*~=\s*"table"\s+then\s*return\s+failure\("GA_CUSTOM_WEAPON_POOL_INVALID".*?end')
+$Task8PoolPrerequisiteGate = $Task8PoolInternalBlock.IndexOf('if not valid_pool_prerequisites(profile, catalog) then')
 $Task8WeaponRecordsAccess = $Task8PoolInternalBlock.IndexOf('weapon_records(catalog)')
-Assert-True ($Task8PoolPrerequisiteGate.Success -and $Task8WeaponRecordsAccess -gt $Task8PoolPrerequisiteGate.Index) `
-    'Task 8 pool validation must reject malformed prerequisites before reading cached weapon records.'
+Assert-True ($Task8PoolPrerequisiteGate -ge 0 -and $Task8WeaponRecordsAccess -gt $Task8PoolPrerequisiteGate) `
+    'Task 8 pool validation must apply shared prerequisites before reading cached weapon records.'
 
 $Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
