@@ -100,7 +100,12 @@ local function contains(values, expected)
     return false
 end
 
+local weapon_records_by_catalog = setmetatable({}, { __mode = "k" })
+local successful_pool_by_catalog = setmetatable({}, { __mode = "k" })
+
 local function weapon_records(catalog)
+    local cached = weapon_records_by_catalog[catalog]
+    if cached ~= nil then return cached end
     local source = type(catalog) == "table" and catalog.weapon_list or nil
     local count = dense_length(source, "GA_CUSTOM_WEAPON_POOL_INVALID", "weapon_list")
     if count == nil then return nil end
@@ -112,6 +117,7 @@ local function weapon_records(catalog)
             if records[section] == nil then records[section] = weapon else records[section] = false end
         end
     end
+    weapon_records_by_catalog[catalog] = records
     return records
 end
 
@@ -162,6 +168,19 @@ local function validate_weapon_pool_internal(profile, catalog, context)
     end
     table.sort(result, function(left, right) return left.section < right.section end)
     return gamma_arena_result.ok(result)
+end
+
+local function cached_pool_validation(profile, catalog, context)
+    local profiles = successful_pool_by_catalog[catalog]
+    if profiles == nil then
+        profiles = setmetatable({}, { __mode = "k" })
+        successful_pool_by_catalog[catalog] = profiles
+    end
+    local cached = profiles[profile]
+    if cached ~= nil then return cached end
+    local result = validate_weapon_pool_internal(profile, catalog, context)
+    if result.ok then profiles[profile] = result end
+    return result
 end
 
 local function totals_internal(config, catalog)
@@ -415,7 +434,7 @@ function totals(config, catalog)
 end
 
 function validate_weapon_pool(profile, catalog, context)
-    local succeeded, result = pcall(validate_weapon_pool_internal, profile, catalog, context)
+    local succeeded, result = pcall(cached_pool_validation, profile, catalog, context)
     if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
     return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Selected faction rank weapon validation failed safely", {
         reason = tostring(result)

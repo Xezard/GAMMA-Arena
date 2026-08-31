@@ -86,6 +86,21 @@ function make_valid_config(catalog)
     }
 end
 
+local function counted_weapon_catalog()
+    local catalog = make_catalog()
+    local reads = 0
+    for index, record in ipairs(catalog.weapon_list) do
+        local source = record
+        catalog.weapon_list[index] = setmetatable({}, {
+            __index = function(_, key)
+                reads = reads + 1
+                return source[key]
+            end
+        })
+    end
+    return catalog, function() return reads end
+end
+
 local function assert_code(result, code, message)
     gamma_arena_test_assert.is_false(result.ok, message)
     gamma_arena_test_assert.equals(result.error.code, code, message .. " code")
@@ -108,6 +123,37 @@ local function custom_config_accepts_and_copies_valid_ordered_input()
     gamma_arena_test_assert.equals(totals.value.points, 500, "second grenade receives multiplier")
     gamma_arena_test_assert.equals(totals.value.weight_mg, 9700, "physical weight is authoritative")
     gamma_arena_test_assert.equals(totals.value.weight_limit_mg, 60000, "outfit increases carry limit")
+end
+
+local function custom_config_reuses_successful_immutable_rank_pool_validation()
+    local catalog, read_count = counted_weapon_catalog()
+    local context = make_context(catalog)
+    local config = make_valid_config(catalog)
+    config.roster = { { rank = "novice" }, { rank = "novice" }, { rank = "novice" } }
+    local first = gamma_arena_custom_config.validate(config, context)
+    gamma_arena_test_assert.is_true(first.ok, "first repeated-rank validation succeeds")
+    local after_first = read_count()
+    gamma_arena_test_assert.is_true(after_first > 0, "first validation reads weapon records")
+    local second = gamma_arena_custom_config.validate(config, context)
+    gamma_arena_test_assert.is_true(second.ok, "second repeated-rank validation succeeds")
+    gamma_arena_test_assert.equals(read_count(), after_first,
+        "successful immutable rank pool validation is reused")
+end
+
+local function custom_config_does_not_cache_rank_pool_failures_or_context()
+    local catalog = make_catalog()
+    local profile = catalog.factions.stalker.ranks.novice
+    profile.primary_weapons[1] = "missing_weapon"
+    local first = gamma_arena_custom_config.validate_weapon_pool(profile, catalog,
+        { index = 1, faction = "stalker", rank = "novice" })
+    local second = gamma_arena_custom_config.validate_weapon_pool(profile, catalog,
+        { index = 9, faction = "stalker", rank = "novice" })
+    assert_code(first, "GA_CUSTOM_WEAPON_POOL_INVALID", "first invalid pool")
+    assert_code(second, "GA_CUSTOM_WEAPON_POOL_INVALID", "second invalid pool")
+    gamma_arena_test_assert.equals(first.error.context.index, 1,
+        "first failure retains first row context")
+    gamma_arena_test_assert.equals(second.error.context.index, 9,
+        "failed validation is recalculated for new row context")
 end
 
 local function custom_config_rejects_roster_catalog_and_shape_matrix()
@@ -801,6 +847,8 @@ end
 
 local cases = {
     { name = "custom_config_accepts_and_copies_valid_ordered_input", fn = custom_config_accepts_and_copies_valid_ordered_input },
+    { name = "custom_config_reuses_successful_immutable_rank_pool_validation", fn = custom_config_reuses_successful_immutable_rank_pool_validation },
+    { name = "custom_config_does_not_cache_rank_pool_failures_or_context", fn = custom_config_does_not_cache_rank_pool_failures_or_context },
     { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
     { name = "custom_config_distinguishes_empty_inventory_from_entry_overflow", fn = custom_config_distinguishes_empty_inventory_from_entry_overflow },
     { name = "custom_config_rejects_selected_empty_rank_weapon_pool", fn = custom_config_rejects_selected_empty_rank_weapon_pool },
