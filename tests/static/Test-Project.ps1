@@ -3437,6 +3437,14 @@ $RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefres
 Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterRefreshRegistration)).Count -eq 1) 'Custom roster refresh runtime regression must be registered exactly once.'
 
+$CatalogCacheSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
+Assert-True ($CatalogCacheSource -match 'local\s+runtime_catalog_result\s*=\s*nil') 'Runtime catalog cache must be explicit.'
+Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+runtime_catalog_result\s*~=\s*nil') 'Only the default runtime source may read the cache.'
+Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+result\.ok') 'Only a successful default runtime Result may populate the cache.'
+$CatalogCacheCase = 'runtime_catalog_default_success_is_reused_only_for_default_source'
+$CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*' + $CatalogCacheCase + '\s*\}'
+Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $CatalogCacheRegistration)).Count -eq 1) 'Runtime catalog cache case must be registered exactly once.'
+
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
 if (Test-Path -LiteralPath $SmokeHarnessPath) {
     $SmokeHarnessContent = Get-Content -LiteralPath $SmokeHarnessPath -Raw
