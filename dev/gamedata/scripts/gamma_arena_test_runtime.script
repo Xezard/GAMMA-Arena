@@ -10962,6 +10962,66 @@ local function runtime_custom_presenter_refreshes_status_without_catalog_snapsho
     gamma_arena_test_assert.equals(refreshed.weight_mg, 13000, "status refresh updates weight totals")
 end
 
+local function runtime_custom_presenter_refreshes_affordability_without_model_preview()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local view = {
+        remaining = 600,
+        catalog_cells = {
+            { section = "affordable", effective_price = 500, disabled = false, disabled_reason = nil },
+            { section = "budget_only", effective_price = 700, disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND" },
+            { section = "hard_error", effective_price = 100, disabled = true,
+                disabled_reason = "GA_CUSTOM_AMMO_ORPHAN" }
+        }
+    }
+    local same = presenter:refresh_affordability(view)
+    gamma_arena_test_assert.equals(same, view, "affordability refresh mutates the existing view")
+    gamma_arena_test_assert.is_false(view.catalog_cells[1].disabled, "fitting cell remains enabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "non-fitting cell remains budget-disabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_reason, "GA_CUSTOM_AMMO_ORPHAN",
+        "hard rejection survives budget refresh")
+
+    view.remaining = 800
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_false(view.catalog_cells[2].disabled,
+        "budget increase enables a formerly overspent cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, nil,
+        "budget increase clears only overspend reason")
+    gamma_arena_test_assert.is_true(view.catalog_cells[3].disabled,
+        "budget increase never clears a hard rejection")
+
+    view.remaining = 400
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
+        "budget decrease disables a newly unaffordable cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "budget decrease assigns exact overspend reason")
+
+    local malformed = {
+        remaining = 800,
+        catalog_cells = {
+            { section = "negative_price", effective_price = -1, disabled = false, disabled_reason = nil },
+            { section = "invalid_price", effective_price = "invalid", disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND" }
+        }
+    }
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "negative projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "malformed projected price becomes a hard action failure")
+
+    malformed.catalog_cells[1].effective_price = 1
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.is_true(malformed.catalog_cells[1].disabled,
+        "hard action failure remains disabled after a later fitting price")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "hard action failure is outside the mutable affordability reasons")
+end
+
 local function runtime_custom_presenter_status_failures_preserve_catalog_view()
     local presenter = gamma_arena_custom_setup_presenter.new({
         translate = function(key) return key end
@@ -11139,22 +11199,11 @@ local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomi
 end
 
 local function runtime_custom_ui_refresh_helpers_preserve_native_cells()
-    local preview_calls = 0
-    local model = {
-        preview_add_one = function(_, section)
-            preview_calls = preview_calls + 1
-            if section == "wpn_alpha" then return gamma_arena_result.ok({}) end
-            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Too expensive")
-        end
+    local cells = {
+        { section = "wpn_alpha", effective_price = 500, disabled = false, disabled_reason = nil },
+        { section = "wpn_beta", effective_price = 700, disabled = true,
+            disabled_reason = "GA_CUSTOM_OVERSPEND" }
     }
-    local cells = { { section = "wpn_alpha" }, { section = "wpn_beta" } }
-    gamma_arena_ui_custom.refresh_catalog_cells(model, cells)
-    gamma_arena_test_assert.equals(preview_calls, 2, "status refresh previews each projected cell once")
-    gamma_arena_test_assert.is_false(cells[1].disabled, "affordable projected cell remains enabled")
-    gamma_arena_test_assert.equals(cells[1].disabled_reason, nil, "enabled projected cell clears reason")
-    gamma_arena_test_assert.is_true(cells[2].disabled, "unaffordable projected cell becomes disabled")
-    gamma_arena_test_assert.equals(cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
-        "disabled projected cell keeps exact reason")
 
     local colors = {}
     local alpha = {
@@ -12648,6 +12697,7 @@ local cases = {
     { name = "runtime_custom_presenter_filters_sorts_and_pages_deterministically", fn = runtime_custom_presenter_filters_sorts_and_pages_deterministically },
     { name = "runtime_custom_presenter_preview_and_readiness_are_authoritative", fn = runtime_custom_presenter_preview_and_readiness_are_authoritative },
     { name = "runtime_custom_presenter_refreshes_status_without_catalog_snapshot", fn = runtime_custom_presenter_refreshes_status_without_catalog_snapshot },
+    { name = "runtime_custom_presenter_refreshes_affordability_without_model_preview", fn = runtime_custom_presenter_refreshes_affordability_without_model_preview },
     { name = "runtime_custom_presenter_status_failures_preserve_catalog_view", fn = runtime_custom_presenter_status_failures_preserve_catalog_view },
     { name = "runtime_custom_presenter_success_clears_transient_infrastructure_status", fn = runtime_custom_presenter_success_clears_transient_infrastructure_status },
     { name = "runtime_custom_presenter_rejects_malformed_status_snapshots_atomically", fn = runtime_custom_presenter_rejects_malformed_status_snapshots_atomically },

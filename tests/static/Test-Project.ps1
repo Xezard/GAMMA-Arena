@@ -494,7 +494,7 @@ foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_b
 
 $Task9CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_model.script'; Namespace = 'gamma_arena_custom_setup_model'; Required = @('(?m)^function\s+new\s*\(', '(?m)^local\s+function\s+commit_allowing_incomplete_budget\s*\(', '(?m)^local\s+function\s+refresh_derived\s*\(', '(?m)^local\s+function\s+accept_candidate\s*\(', '(?m)^local\s+function\s+derived_values\s*\(', 'current_validation', 'current_budget', 'current_totals', 'function\s+Model:set_faction', 'function\s+Model:set_count', 'function\s+Model:set_rank', 'function\s+Model:add_item', 'function\s+Model:increment_item', 'function\s+Model:decrement_item', 'function\s+Model:remove_item', 'function\s+Model:equip', 'function\s+Model:unequip', 'function\s+Model:preview_add_one', 'function\s+Model:add_one', 'function\s+Model:remove_one', 'function\s+Model:equip_replacing', 'function\s+Model:snapshot', 'function\s+Model:validation', 'gamma_arena_custom_config\.validate', 'gamma_arena_custom_config\.validate_draft', 'max_entries', 'max_physical_items_per_participant', 'selected_grenades', 'effective_price', 'last_operation') },
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'; Namespace = 'gamma_arena_custom_setup_presenter'; Required = @('(?m)^function\s+new\s*\(', 'function\s+Presenter:project', 'function\s+Presenter:refresh_affordability', 'function\s+Presenter:readiness', '(?m)^local\s+function\s+projection_failure\s*\(', '(?m)^function\s+status_presentation\s*\(', '(?m)^function\s+format_status\s*\(', 'preview_add_one', 'price_asc', 'name_asc', 'catalog_page_count', 'disabled_reason', 'st_gamma_arena_custom_readiness_healing') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_faction_picker.script'; Namespace = 'gamma_arena_ui_faction_picker'; Required = @('(?m)^function\s+new\s*\(', '(?m)^function\s+layout\s*\(', '(?m)^function\s+texture_id\s*\(', 'function\s+Picker:open', 'function\s+Picker:close', 'function\s+Picker:is_open', 'function\s+Picker:select', 'MAX_FACTIONS\s*=\s*13', 'COLUMN_COUNT\s*=\s*4', 'GA_CUSTOM_FACTION_UNKNOWN', 'ui_mm_faction_', 'ui_new_game_flair_zombied') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_ui_custom.script'; Namespace = 'gamma_arena_ui_custom'; Required = @('class\s+"UICustom"\s+\(CUIScriptWnd\)', '(?m)^function\s+create\s*\(', '(?m)^function\s+project\s*\(', '(?m)^function\s+submit\s*\(', '(?m)^function\s+dispatch_transfer\s*\(', '(?m)^function\s+dispatch_drop\s*\(', '(?m)^function\s+dispatch_equip\s*\(', 'gamma_arena_custom_setup_presenter\.new', 'utils_ui\.UICellContainer', 'inventory_container', 'loadout_container', 'gamma_arena_custom_config\.validate', 'schema_version\s*=\s*2', 'generation_recipe\s*=\s*"custom"', 'EDIT_TEXT_COMMIT', 'LIST_ITEM_SELECT', 'OnCatalogSearch', 'OnCatalogFilter', 'OnCatalogSort', 'On_CC_Mouse1', 'On_CC_DragDrop', 'dispatch_transfer', 'dispatch_drop', 'equip_replacing', 'operation_error_code', 'summary_code', 'x2', 'start_button:Enable', 'GA_DEBUG_CUSTOM_CATALOG_BEGIN', 'GA_DEBUG_CUSTOM_CATALOG_RESULT', 'GA_DEBUG_CUSTOM_REBUILD_BEGIN', 'GA_DEBUG_CUSTOM_REBUILD_RESULT') }
 )
@@ -3454,8 +3454,9 @@ Assert-True ($DerivedRuntimeCase -match 'set_rank\s*\(\s*2\s*,\s*"novice"\s*\)' 
     ([regex]::Matches($DerivedRuntimeCase, 'GA_CUSTOM_OVERSPEND')).Count -ge 2) `
     'Custom runtime parity must preserve an overbudget loadout after lowering rank.'
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
+Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_affordability') 'Custom roster refresh presenter must expose arithmetic affordability refresh.'
 Assert-True ($RosterRefreshPresenter -match 'local\s+function\s+valid_status_snapshot') 'Custom status refresh must validate snapshot shape before mutation.'
-Assert-True ($RosterRefreshUi -match 'function\s+refresh_catalog_cells') 'Custom status refresh must expose current-page preview helper.'
+Assert-True ($RosterRefreshUi -notmatch 'function\s+refresh_catalog_cells') 'Custom status refresh must not expose a current-page preview helper.'
 Assert-True ($RosterRefreshUi -match 'function\s+refresh_inventory_cells') 'Custom status refresh must expose in-place inventory helper.'
 $RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
 $RefreshPresenterEnd = if ($RefreshPresenterStart -ge 0) { $RosterRefreshPresenter.IndexOf('function status_presentation', $RefreshPresenterStart) } else { -1 }
@@ -3473,6 +3474,11 @@ foreach ($HandlerName in @('OnCount', 'OnRank')) {
 $RefreshStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshStatus\(.*?^end\s*$').Value
 Assert-True ($RefreshStatusBlock -notmatch 'rebuild_panels') 'Custom lightweight refresh must not rebuild item panels.'
 Assert-True ($RefreshStatusBlock -notmatch 'model:snapshot') 'Custom lightweight refresh must not request a full model snapshot.'
+Assert-True ($RefreshStatusBlock -notmatch 'preview_add_one') 'Custom lightweight refresh must not preview visible catalog cells.'
+$AffordabilityRefreshIndex = $RefreshStatusBlock.IndexOf('self.presenter:refresh_affordability(view)')
+$InventoryRefreshIndex = $RefreshStatusBlock.IndexOf('refresh_inventory_cells(self.inventory_container, view.catalog_cells)')
+Assert-True ($AffordabilityRefreshIndex -ge 0 -and $InventoryRefreshIndex -gt $AffordabilityRefreshIndex) `
+    'Custom lightweight refresh must update arithmetic affordability before native cells.'
 $PrepareViewStart = $RosterRefreshUi.IndexOf('local function prepare_view(self, view)')
 $PrepareViewEnd = if ($PrepareViewStart -ge 0) { $RosterRefreshUi.IndexOf('local function render_status_controls', $PrepareViewStart) } else { -1 }
 Assert-True ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) 'Custom view preparation must remain structurally testable.'
@@ -3485,6 +3491,10 @@ $RosterRefreshCase = 'runtime_custom_presenter_refreshes_status_without_catalog_
 $RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
 Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterRefreshRegistration)).Count -eq 1) 'Custom roster refresh runtime regression must be registered exactly once.'
+$AffordabilityCase = 'runtime_custom_presenter_refreshes_affordability_without_model_preview'
+$AffordabilityRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($AffordabilityCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($AffordabilityCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($AffordabilityCase))) 'Custom arithmetic affordability runtime regression is missing.'
+Assert-True (([regex]::Matches($RosterRefreshRuntime, $AffordabilityRegistration)).Count -eq 1) 'Custom arithmetic affordability runtime regression must be registered exactly once.'
 
 $CatalogCacheSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
 Assert-True ($CatalogCacheSource -match 'local\s+runtime_catalog_result\s*=\s*nil') 'Runtime catalog cache must be explicit.'
