@@ -4,7 +4,7 @@
 
 > A deterministic, replayable combat arena for S.T.A.L.K.E.R. Anomaly G.A.M.M.A., distributed as an independent Mod Organizer 2 add-on.
 
-Gamma Arena turns the classic Rostok Arena into a self-contained combat mode with seeded fights, generated equipment, four difficulty levels, and explicit round cleanup.
+Gamma Arena turns the classic Rostok Arena into a self-contained combat mode with Random mode and Custom Setup, seeded fights, generated equipment, four difficulty levels, and explicit round cleanup.
 
 ## Screenshots
 ![Gamma Arena battle in Rostok](assets/battle_1.png)
@@ -12,9 +12,9 @@ Gamma Arena turns the classic Rostok Arena into a self-contained combat mode wit
 
 ## Features
 
-- Seeded, deterministic fight generation.
+- Random mode for seeded, deterministic fight generation, plus Custom Setup for tailored fights.
 - Four difficulty levels: Rookie, Stalker, Veteran, and Master.
-- Profile-aware catalogs and generated weapons, armor, ammunition, medical supplies, grenades, and lighting devices.
+- Profile-aware catalogs and generated weapons, armor, ammunition, medical supplies, grenades, and lighting devices for Random mode and Custom Setup.
 - Arena-specific opponent setup, tactical behavior, medical use.
 - Optional original Rostok Arena commentator and crowd reactions through MCM.
 - English and Russian localization.
@@ -44,9 +44,15 @@ Install updates through MO2 and replace only the **Gamma Arena** entry. Keep the
 
 1. Launch G.A.M.M.A. through MO2.
 2. Select **Arena** in the main menu, directly after **New Game**.
-3. Choose a difficulty and start the session.
+3. Choose **Random mode** to select a difficulty and start a generated session, or choose **Custom Setup** to configure the fight yourself.
 4. Complete the fight and use the result screen to continue. The battle HUD shows the active seed and fight number.
 5. Use **Restart Arena** in the pause menu to discard the current fight and generate the next one without reloading the level.
+
+### Custom Setup
+
+Use the emblem picker to select the enemy faction. Choose one to ten opponents and set each opponent's exact rank, then use either a random seed or a manual seed for the fight.
+
+Choose no device, a headlamp, or Gen 1, Gen 2, or Gen 3 NVG. Build the loadout from the active installed GAMMA catalog; equipment points, weight, and the launch checklist show whether it is ready: an outfit, a knife, an equipped firearm with compatible ammunition, and healing. Victories retain the roster and actor template while regenerating enemy equipment. Defeat returns to a fresh default Custom Setup.
 
 The **Gamma Arena** MCM page controls the original Rostok commentator and crowd reactions. Both options are enabled by default and can be changed while the game is running.
 
