@@ -598,24 +598,24 @@ function UICustom:InitControls()
     self:Register(self.catalog_previous, "catalog_previous")
     self:Register(self.catalog_next, "catalog_next")
 
-    local snapshot = self.model:snapshot()
-    local initial_view = project(self.model, self.selected_category)
-    for index, option in ipairs(initial_view.device_options or {}) do
+    local initial_status = self.model:status_snapshot()
+    for index, option in ipairs(normalize_device_options(initial_status.device_options)) do
         self.device_combo:AddItem(option.display_text, index)
     end
-    for count = 1, snapshot.capacity do self.count_combo:AddItem(tostring(count), count) end
+    for count = 1, initial_status.capacity do self.count_combo:AddItem(tostring(count), count) end
     for index, filter_id in ipairs(FILTER_IDS) do self.catalog_filter:AddItem(filter_text(filter_id), index) end
     for index, sort_id in ipairs(SORT_IDS) do self.catalog_sort:AddItem(sort_text(sort_id), index) end
     self.catalog_search:SetText("")
     self.catalog_filter:SetText(filter_text(self.catalog_state.filter))
     self.catalog_sort:SetText(sort_text(self.catalog_state.sort))
     self.roster_rows, self.rank_combos = {}, {}
+    local rank_ids = type(self.model.catalog) == "table" and self.model.catalog.rank_ids or {}
     for index = 1, 10 do
         local row_path = "gamma_arena_custom:roster:roster_row_" .. tostring(index)
         self.roster_rows[index] = self.xml:InitStatic(row_path, self.roster_panel)
         self.rank_combos[index] = self.xml:InitComboBox(row_path .. ":rank_" .. tostring(index), self.roster_rows[index])
         self:Register(self.rank_combos[index], "rank_" .. tostring(index))
-        for rank_index, rank_id in ipairs(snapshot.rank_ids or {}) do
+        for rank_index, rank_id in ipairs(rank_ids) do
             self.rank_combos[index]:AddItem(rank_text(rank_id), rank_index)
         end
     end
@@ -734,6 +734,62 @@ local function prepare_view(self, view)
     return view
 end
 
+function render_roster_delta(self, view, change)
+    view = type(view) == "table" and view or {}
+    change = type(change) == "table" and change or {}
+    if change.previous_count ~= nil then
+        self.count_combo:SetText(tostring(view.count))
+        local previous_count = tonumber(change.previous_count) or 0
+        local count = tonumber(view.count) or 0
+        local first = math.min(previous_count, count) + 1
+        local last = math.max(previous_count, count)
+        for index = first, last do
+            local visible = index <= count
+            self.roster_rows[index]:Show(visible)
+            if visible and view.roster[index] then
+                set_combo(self.rank_combos[index], view.rank_ids, view.roster[index].rank, rank_text)
+            end
+        end
+    end
+    if change.rank_index ~= nil and view.roster[change.rank_index] then
+        set_combo(self.rank_combos[change.rank_index], view.rank_ids,
+            view.roster[change.rank_index].rank, rank_text)
+    end
+end
+
+local function render_status_message(self, view)
+    local status = status_presentation(view)
+    local color = STATUS_COLORS[status.state] or STATUS_COLORS.error
+    self.validation_text:SetText(status.state == "ready" and ""
+        or gamma_arena_custom_setup_presenter.format_status(status, translated))
+    self.validation_text:SetTextColor(GetARGB(255, color[1], color[2], color[3]))
+    self.validation_text:Show(status.state ~= "ready")
+    if status.state == "error" and status.code then
+        if self.last_reported_status_code ~= status.code then
+            pcall(gamma_arena_log.error, status.code, "Custom Setup interaction failed", {
+                source = status.source
+            })
+            self.last_reported_status_code = status.code
+        end
+    else
+        self.last_reported_status_code = nil
+    end
+end
+
+local function render_roster_status(self, view)
+    self.points_available:SetText(translated("st_gamma_arena_custom_points_available") .. ": "
+        .. tostring(view.remaining) .. " AP")
+    self.points_used:SetText(translated("st_gamma_arena_custom_points_used") .. ": "
+        .. tostring(view.spent) .. " AP")
+    local readiness = readiness_presentation(view)
+    self.readiness_caption:SetText(translated(readiness.caption_id))
+    self.readiness_caption:SetTextColor(readiness.state == "ready"
+        and GetARGB(255, 170, 210, 160) or GetARGB(255, 220, 210, 185))
+    render_status_message(self, view)
+    self.start_button:Enable(view.launch_enabled)
+    return readiness
+end
+
 local function render_status_controls(self, view)
     if view.faction then
         self.faction_button:TextControl():SetText(faction_text(view.faction))
@@ -759,17 +815,10 @@ local function render_status_controls(self, view)
     self.catalog_search:SetText(self.catalog_state.search)
     set_combo(self.catalog_filter, FILTER_IDS, self.catalog_state.filter, filter_text)
     set_combo(self.catalog_sort, SORT_IDS, self.catalog_state.sort, sort_text)
-    self.points_available:SetText(translated("st_gamma_arena_custom_points_available") .. ": "
-        .. tostring(view.remaining) .. " AP")
-    self.points_used:SetText(translated("st_gamma_arena_custom_points_used") .. ": "
-        .. tostring(view.spent) .. " AP")
     self.weight_text:SetText(translated("st_gamma_arena_custom_weight") .. ": " .. format_weight(view.weight_mg))
     self.weight_limit_text:SetText(translated("st_gamma_arena_custom_weight_limit") .. ": "
         .. format_weight(view.weight_limit_mg))
-    local readiness = readiness_presentation(view)
-    self.readiness_caption:SetText(translated(readiness.caption_id))
-    self.readiness_caption:SetTextColor(readiness.state == "ready"
-        and GetARGB(255, 170, 210, 160) or GetARGB(255, 220, 210, 185))
+    local readiness = render_roster_status(self, view)
     for _, check in ipairs(readiness.checks) do
         local window = self.readiness_windows[check.id]
         if window then
@@ -778,23 +827,6 @@ local function render_status_controls(self, view)
                 or GetARGB(255, 205, 170, 135))
         end
     end
-    local status = status_presentation(view)
-    local color = STATUS_COLORS[status.state] or STATUS_COLORS.error
-    self.validation_text:SetText(status.state == "ready" and ""
-        or gamma_arena_custom_setup_presenter.format_status(status, translated))
-    self.validation_text:SetTextColor(GetARGB(255, color[1], color[2], color[3]))
-    self.validation_text:Show(status.state ~= "ready")
-    if status.state == "error" and status.code then
-        if self.last_reported_status_code ~= status.code then
-            pcall(gamma_arena_log.error, status.code, "Custom Setup interaction failed", {
-                source = status.source
-            })
-            self.last_reported_status_code = status.code
-        end
-    else
-        self.last_reported_status_code = nil
-    end
-    self.start_button:Enable(view.launch_enabled)
     self.catalog_page_text:SetText(tostring(view.catalog_page) .. " / " .. tostring(view.catalog_page_count))
     self.catalog_previous:Enable(view.catalog_has_previous)
     self.catalog_next:Enable(view.catalog_has_next)
@@ -823,11 +855,12 @@ function UICustom:Rebuild()
     })
 end
 
-function UICustom:RefreshStatus()
+function UICustom:RefreshRosterStatus(change)
     local view = prepare_view(self, self.presenter:refresh_status(self.model, self.projection))
     self.presenter:refresh_affordability(view)
     self.projection = view
-    render_status_controls(self, view)
+    render_roster_delta(self, view, change)
+    render_roster_status(self, view)
     refresh_inventory_cells(self.inventory_container, view.catalog_cells)
 end
 
@@ -852,9 +885,10 @@ end
 
 function UICustom:OnCount()
     self.submission_error = nil
-    local count = tonumber(self.count_combo:GetText())
-    self.model:set_count(count)
-    self:RefreshStatus()
+    local previous_count = self.projection and self.projection.count or 0
+    local result = self.model:set_count(tonumber(self.count_combo:GetText()))
+    if not result.ok then self.submission_error = result end
+    self:RefreshRosterStatus({ previous_count = previous_count })
 end
 
 function UICustom:OnDevice()
@@ -869,8 +903,10 @@ function UICustom:OnRank(index)
     self.submission_error = nil
     local view = self.projection or {}
     local rank = combo_value(self.rank_combos[index], view.rank_ids, rank_text)
-    if rank then self.model:set_rank(index, rank) end
-    self:RefreshStatus()
+    local result = rank and self.model:set_rank(index, rank)
+        or gamma_arena_result.err("GA_CUSTOM_RANK_UNKNOWN", "Custom roster rank is unavailable")
+    if not result.ok then self.submission_error = result end
+    self:RefreshRosterStatus({ rank_index = index })
 end
 
 function UICustom:OnCategory(category)

@@ -11285,6 +11285,85 @@ local function runtime_custom_ui_refresh_helpers_preserve_native_cells()
     gamma_arena_test_assert.equals(colors.wpn_beta, "hide", "disabled native cell receives muted color")
 end
 
+local function runtime_custom_ui_renders_only_targeted_roster_delta()
+    local count_text = "invalid"
+    local count_sets = 0
+    local rows, combos = {}, {}
+    for index = 1, 10 do
+        rows[index] = {
+            calls = 0,
+            Show = function(self, visible)
+                self.calls = self.calls + 1
+                self.visible = visible
+            end
+        }
+        combos[index] = {
+            calls = 0,
+            enable_id = function(self, selected)
+                self.calls = self.calls + 1
+                self.selected = selected
+            end,
+            SetText = function(self, text) self.text = text end
+        }
+    end
+    local ui = {
+        count_combo = {
+            SetText = function(_, text)
+                count_sets = count_sets + 1
+                count_text = text
+            end
+        },
+        roster_rows = rows,
+        rank_combos = combos
+    }
+    local view = {
+        count = 4,
+        rank_ids = { "novice", "veteran", "master" },
+        roster = {
+            { rank = "novice" }, { rank = "veteran" },
+            { rank = "master" }, { rank = "novice" }
+        }
+    }
+
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 2 })
+    gamma_arena_test_assert.equals(count_text, "4", "accepted count renders the authoritative count")
+    gamma_arena_test_assert.equals(count_sets, 1, "count delta writes the targeted count once")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "count increase leaves prior first row untouched")
+    gamma_arena_test_assert.equals(rows[2].calls, 0, "count increase leaves prior last row untouched")
+    gamma_arena_test_assert.equals(rows[3].calls, 1, "count increase shows first added row once")
+    gamma_arena_test_assert.is_true(rows[3].visible, "count increase shows first added row")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "count increase shows second added row once")
+    gamma_arena_test_assert.is_true(rows[4].visible, "count increase shows second added row")
+    gamma_arena_test_assert.equals(rows[5].calls, 0, "count increase leaves following row untouched")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "count increase leaves prior rank combo untouched")
+    gamma_arena_test_assert.equals(combos[2].calls, 0, "count increase leaves prior last rank combo untouched")
+    gamma_arena_test_assert.equals(combos[3].selected, 3, "count increase restores first added authoritative rank")
+    gamma_arena_test_assert.equals(combos[4].selected, 1, "count increase restores second added authoritative rank")
+
+    view.roster[2].rank = "master"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].calls, 1, "rank delta writes only the targeted combo")
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rank delta renders the authoritative rank")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "rank delta leaves previous combo untouched")
+    gamma_arena_test_assert.equals(combos[3].calls, 1, "rank delta leaves following combo unchanged")
+    for index = 1, 10 do
+        local expected = (index == 3 or index == 4) and 1 or 0
+        gamma_arena_test_assert.equals(rows[index].calls, expected,
+            "rank delta leaves roster row visibility unchanged at " .. tostring(index))
+    end
+
+    count_text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 4 })
+    gamma_arena_test_assert.equals(count_text, "4", "rejected count restores the authoritative cached value")
+    gamma_arena_test_assert.equals(count_sets, 2, "rejected count restores only the targeted count control")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "rejected count leaves roster rows untouched")
+
+    combos[2].text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rejected rank restores the authoritative cached value")
+    gamma_arena_test_assert.equals(combos[2].calls, 2, "rejected rank restores only the targeted combo")
+end
+
 local function runtime_custom_model_status_snapshot_matches_full_status()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     catalog.items.medkit.price = 200
@@ -12758,6 +12837,7 @@ local cases = {
     { name = "runtime_custom_presenter_success_clears_transient_infrastructure_status", fn = runtime_custom_presenter_success_clears_transient_infrastructure_status },
     { name = "runtime_custom_presenter_rejects_malformed_status_snapshots_atomically", fn = runtime_custom_presenter_rejects_malformed_status_snapshots_atomically },
     { name = "runtime_custom_ui_refresh_helpers_preserve_native_cells", fn = runtime_custom_ui_refresh_helpers_preserve_native_cells },
+    { name = "runtime_custom_ui_renders_only_targeted_roster_delta", fn = runtime_custom_ui_renders_only_targeted_roster_delta },
     { name = "runtime_custom_model_status_snapshot_matches_full_status", fn = runtime_custom_model_status_snapshot_matches_full_status },
     { name = "runtime_composed_catalog_supports_first_custom_item_edit", fn = runtime_composed_catalog_supports_first_custom_item_edit },
     { name = "runtime_universal_items_materialize_exact_entities_and_slot_order", fn = runtime_universal_items_materialize_exact_entities_and_slot_order },

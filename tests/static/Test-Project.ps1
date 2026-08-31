@@ -3478,17 +3478,38 @@ if ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProject
 }
 foreach ($HandlerName in @('OnCount', 'OnRank')) {
     $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value
-    Assert-True ($HandlerBlock -match 'self:RefreshStatus\(\)') "Custom $HandlerName must use the lightweight status refresh."
-    Assert-True ($HandlerBlock -notmatch 'self:Rebuild\(\)') "Custom $HandlerName must not rebuild the catalog."
+    Assert-True ($HandlerBlock -match 'self:RefreshRosterStatus\(') "Custom $HandlerName must use incremental roster refresh."
+    Assert-True ($HandlerBlock -match 'local\s+result\s*=') "Custom $HandlerName must consume its model command Result."
+    Assert-True ($HandlerBlock -match 'not\s+result\.ok') "Custom $HandlerName must preserve a rejected command Result."
+    foreach ($Forbidden in @('self:Rebuild\(', 'presenter:project', 'model:snapshot', 'preview_add_one', 'rebuild_panels')) {
+        Assert-True ($HandlerBlock -notmatch $Forbidden) "Custom $HandlerName hot path must exclude $Forbidden."
+    }
 }
-$RefreshStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshStatus\(.*?^end\s*$').Value
-Assert-True ($RefreshStatusBlock -notmatch 'rebuild_panels') 'Custom lightweight refresh must not rebuild item panels.'
-Assert-True ($RefreshStatusBlock -notmatch 'model:snapshot') 'Custom lightweight refresh must not request a full model snapshot.'
-Assert-True ($RefreshStatusBlock -notmatch 'preview_add_one') 'Custom lightweight refresh must not preview visible catalog cells.'
-$AffordabilityRefreshIndex = $RefreshStatusBlock.IndexOf('self.presenter:refresh_affordability(view)')
-$InventoryRefreshIndex = $RefreshStatusBlock.IndexOf('refresh_inventory_cells(self.inventory_container, view.catalog_cells)')
+$RosterStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:RefreshRosterStatus\(.*?^end\s*$').Value
+foreach ($Required in @('presenter:refresh_status', 'presenter:refresh_affordability', 'refresh_inventory_cells')) {
+    Assert-True ($RosterStatusBlock -match $Required) "Incremental roster refresh must include $Required."
+}
+foreach ($Forbidden in @('presenter:project', 'model:snapshot', 'preview_add_one', 'rebuild_panels', 'container:Reset', 'AddItem')) {
+    Assert-True ($RosterStatusBlock -notmatch $Forbidden) "Incremental roster refresh must exclude $Forbidden."
+}
+$AffordabilityRefreshIndex = $RosterStatusBlock.IndexOf('self.presenter:refresh_affordability(view)')
+$InventoryRefreshIndex = $RosterStatusBlock.IndexOf('refresh_inventory_cells(self.inventory_container, view.catalog_cells)')
 Assert-True ($AffordabilityRefreshIndex -ge 0 -and $InventoryRefreshIndex -gt $AffordabilityRefreshIndex) `
-    'Custom lightweight refresh must update arithmetic affordability before native cells.'
+    'Custom incremental roster refresh must update arithmetic affordability before native cells.'
+$InitControlsBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:InitControls\(.*?^end\s*$').Value
+Assert-True ($InitControlsBlock -notmatch 'model:snapshot\(') 'Custom control initialization must not build a full model snapshot.'
+Assert-True ($InitControlsBlock -notmatch '(?<!presenter:)project\(') 'Custom control initialization must not build the legacy full projection.'
+$RosterDeltaBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+render_roster_delta\(.*?^end\s*$').Value
+Assert-True ($RosterDeltaBlock -match 'change\.previous_count') 'Incremental count rendering must be targeted by previous_count.'
+Assert-True ($RosterDeltaBlock -match 'change\.rank_index') 'Incremental rank rendering must be targeted by rank_index.'
+Assert-True ($RosterDeltaBlock -match 'self\.count_combo:SetText\(tostring\(view\.count\)\)') `
+    'Rejected count changes must restore only the authoritative count control.'
+$SharedStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^local\s+function\s+render_roster_status\(.*?^end\s*$').Value
+Assert-True ($SharedStatusBlock -match 'render_status_message\(self,\s*view\)') `
+    'Incremental roster rendering must reuse the shared status and logging policy.'
+$FullStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^local\s+function\s+render_status_controls\(.*?^end\s*$').Value
+Assert-True ($FullStatusBlock -match 'render_roster_status\(self,\s*view\)') `
+    'Full rendering must reuse the shared roster/status policy.'
 $PrepareViewStart = $RosterRefreshUi.IndexOf('local function prepare_view(self, view)')
 $PrepareViewEnd = if ($PrepareViewStart -ge 0) { $RosterRefreshUi.IndexOf('local function render_status_controls', $PrepareViewStart) } else { -1 }
 Assert-True ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) 'Custom view preparation must remain structurally testable.'
@@ -3505,6 +3526,10 @@ $AffordabilityCase = 'runtime_custom_presenter_refreshes_affordability_without_m
 $AffordabilityRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($AffordabilityCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($AffordabilityCase) + '\s*\}'
 Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($AffordabilityCase))) 'Custom arithmetic affordability runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $AffordabilityRegistration)).Count -eq 1) 'Custom arithmetic affordability runtime regression must be registered exactly once.'
+$RosterDeltaCase = 'runtime_custom_ui_renders_only_targeted_roster_delta'
+$RosterDeltaRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterDeltaCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterDeltaCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterDeltaCase))) 'Custom targeted roster runtime regression is missing.'
+Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterDeltaRegistration)).Count -eq 1) 'Custom targeted roster runtime regression must be registered exactly once.'
 
 $CatalogCacheSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
 Assert-True ($CatalogCacheSource -match 'local\s+runtime_catalog_result\s*=\s*nil') 'Runtime catalog cache must be explicit.'
