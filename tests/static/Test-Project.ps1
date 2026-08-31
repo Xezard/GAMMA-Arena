@@ -3466,6 +3466,16 @@ if ($RefreshPresenterStart -ge 0 -and $RefreshPresenterEnd -gt $RefreshPresenter
     Assert-True ($RefreshPresenterBlock -match 'view\.infrastructure_error_code\s*=\s*nil') `
         'Successful Custom status refresh must clear transient infrastructure status.'
 }
+$CatalogProjectionStart = $RosterRefreshPresenter.IndexOf('function Presenter:project(model, state)')
+$CatalogProjectionEnd = if ($CatalogProjectionStart -ge 0) { $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status', $CatalogProjectionStart) } else { -1 }
+Assert-True ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProjectionStart) 'Custom catalog projection must remain structurally testable.'
+if ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProjectionStart) {
+    $CatalogProjectionBlock = $RosterRefreshPresenter.Substring($CatalogProjectionStart, $CatalogProjectionEnd - $CatalogProjectionStart)
+    Assert-True ($CatalogProjectionBlock -match 'hard_disabled_reason') `
+        'Custom catalog projection must preserve an independent hard affordability block.'
+    Assert-True ($CatalogProjectionBlock -match 'hard_disabled_context') `
+        'Custom catalog projection must preserve hard-block context for later arithmetic refresh.'
+}
 foreach ($HandlerName in @('OnCount', 'OnRank')) {
     $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value
     Assert-True ($HandlerBlock -match 'self:RefreshStatus\(\)') "Custom $HandlerName must use the lightweight status refresh."

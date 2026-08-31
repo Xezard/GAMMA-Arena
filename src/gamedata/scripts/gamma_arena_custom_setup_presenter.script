@@ -171,6 +171,22 @@ local function finite_number(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
+local function projected_weight_hard_block(snapshot, cell)
+    local weight_mg = tonumber(snapshot and snapshot.weight_mg)
+    local weight_limit_mg = tonumber(snapshot and snapshot.weight_limit_mg)
+    local delta = tonumber(cell and cell.weight_mg)
+    if not finite_number(weight_mg) or not finite_number(weight_limit_mg)
+        or not finite_number(delta) or delta < 0 then
+        return nil, nil
+    end
+    local projected_weight_mg = weight_mg + delta
+    if projected_weight_mg <= weight_limit_mg then return nil, nil end
+    return "GA_CUSTOM_OVERWEIGHT", {
+        weight_mg = projected_weight_mg,
+        weight_limit_mg = weight_limit_mg
+    }
+end
+
 local function dense_array(value)
     if type(value) ~= "table" then return false end
     local count = 0
@@ -330,6 +346,16 @@ function Presenter:project(model, state)
         cell.disabled = not preview_called or type(preview) ~= "table" or preview.ok ~= true
         cell.disabled_reason = cell.disabled and (detail and detail.code or "GA_CUSTOM_ACTION_FAILED") or nil
         cell.disabled_context = cell.disabled and detail and detail.context or nil
+        local hard_reason, hard_context = projected_weight_hard_block(snapshot, cell)
+        if hard_reason then
+            cell.hard_disabled_reason = hard_reason
+            cell.hard_disabled_context = hard_context
+            if cell.disabled_reason == nil then
+                cell.disabled = true
+                cell.disabled_reason = hard_reason
+                cell.disabled_context = hard_context
+            end
+        end
         cells[#cells + 1] = cell
     end
 
@@ -427,9 +453,15 @@ function Presenter:refresh_affordability(view)
             if not finite_number(delta) or delta < 0 then
                 cell.disabled = true
                 cell.disabled_reason = "GA_CUSTOM_ACTION_FAILED"
+                cell.disabled_context = nil
             elseif delta > view.remaining then
                 cell.disabled = true
                 cell.disabled_reason = "GA_CUSTOM_OVERSPEND"
+                cell.disabled_context = nil
+            elseif type(cell.hard_disabled_reason) == "string" and cell.hard_disabled_reason ~= "" then
+                cell.disabled = true
+                cell.disabled_reason = cell.hard_disabled_reason
+                cell.disabled_context = cell.hard_disabled_context
             else
                 cell.disabled = false
                 cell.disabled_reason = nil

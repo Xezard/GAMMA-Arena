@@ -10966,23 +10966,31 @@ local function runtime_custom_presenter_refreshes_affordability_without_model_pr
     local presenter = gamma_arena_custom_setup_presenter.new({
         translate = function(key) return key end
     })
+    local hard_context = { section = "hard_error" }
     local view = {
         remaining = 600,
         catalog_cells = {
-            { section = "affordable", effective_price = 500, disabled = false, disabled_reason = nil },
+            { section = "affordable", effective_price = 500, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
             { section = "budget_only", effective_price = 700, disabled = true,
-                disabled_reason = "GA_CUSTOM_OVERSPEND" },
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } },
             { section = "hard_error", effective_price = 100, disabled = true,
-                disabled_reason = "GA_CUSTOM_AMMO_ORPHAN" }
+                disabled_reason = "GA_CUSTOM_AMMO_ORPHAN", disabled_context = hard_context }
         }
     }
     local same = presenter:refresh_affordability(view)
     gamma_arena_test_assert.equals(same, view, "affordability refresh mutates the existing view")
     gamma_arena_test_assert.is_false(view.catalog_cells[1].disabled, "fitting cell remains enabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "fitting cell clears stale disabled context")
     gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
         "non-fitting cell remains budget-disabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_context, nil,
+        "retained overspend clears stale disabled context")
     gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_reason, "GA_CUSTOM_AMMO_ORPHAN",
         "hard rejection survives budget refresh")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_context, hard_context,
+        "hard rejection preserves its disabled context identity")
 
     view.remaining = 800
     presenter:refresh_affordability(view)
@@ -10994,18 +11002,22 @@ local function runtime_custom_presenter_refreshes_affordability_without_model_pr
         "budget increase never clears a hard rejection")
 
     view.remaining = 400
+    view.catalog_cells[1].disabled_context = { stale = true }
     presenter:refresh_affordability(view)
     gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
         "budget decrease disables a newly unaffordable cell")
     gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason, "GA_CUSTOM_OVERSPEND",
         "budget decrease assigns exact overspend reason")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "new overspend clears stale disabled context")
 
     local malformed = {
         remaining = 800,
         catalog_cells = {
-            { section = "negative_price", effective_price = -1, disabled = false, disabled_reason = nil },
+            { section = "negative_price", effective_price = -1, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
             { section = "invalid_price", effective_price = "invalid", disabled = true,
-                disabled_reason = "GA_CUSTOM_OVERSPEND" }
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } }
         }
     }
     presenter:refresh_affordability(malformed)
@@ -11013,6 +11025,10 @@ local function runtime_custom_presenter_refreshes_affordability_without_model_pr
         "negative projected price becomes a hard action failure")
     gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
         "malformed projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_context, nil,
+        "negative projected price clears stale disabled context")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_context, nil,
+        "malformed projected price clears stale disabled context")
 
     malformed.catalog_cells[1].effective_price = 1
     presenter:refresh_affordability(malformed)
@@ -11020,6 +11036,46 @@ local function runtime_custom_presenter_refreshes_affordability_without_model_pr
         "hard action failure remains disabled after a later fitting price")
     gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
         "hard action failure is outside the mutable affordability reasons")
+
+    local dual = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    weapon = {
+                        { section = "heavy_overbudget", category = "weapon", name_key = "heavy_overbudget",
+                            base_price = 700, weight_mg = 300, preview_multiplier = 1,
+                            preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600, weight_mg = 800, weight_limit_mg = 1000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "weapon", search = "", sort = "price_asc", page = 1 })
+    local dual_cell = dual.catalog_cells[1]
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "full projection preserves the validation order's overspend result")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "full projection preserves simultaneous overweight as an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_context.weight_mg, 1100,
+        "independent hard block records the candidate weight")
+    local dual_hard_context = dual_cell.hard_disabled_context
+    dual.remaining = 800
+    presenter:refresh_affordability(dual)
+    gamma_arena_test_assert.is_true(dual_cell.disabled,
+        "budget increase does not enable a cell with an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "budget increase reveals the preserved overweight reason")
+    gamma_arena_test_assert.equals(dual_cell.disabled_context, dual_hard_context,
+        "budget increase preserves the independent hard context identity")
 end
 
 local function runtime_custom_presenter_status_failures_preserve_catalog_view()
