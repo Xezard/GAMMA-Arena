@@ -25,6 +25,9 @@ local PLAYABLE_LOADOUT_SECTIONS = {
     "isg_loadout", "zombied_loadout"
 }
 
+local reconciled_pool_records_by_catalog = setmetatable({}, { __mode = "k" })
+local reconciled_pool_records_by_rank_catalog = setmetatable({}, { __mode = "k" })
+
 local function failure(code, message, context)
     return gamma_arena_result.err(code, message, context or {})
 end
@@ -609,6 +612,7 @@ local function reconcile_rank_catalog(rank_catalog, legacy_catalog, items)
     end
 
     local reconciled = copy_record(rank_catalog)
+    local pool_records_by_profile = {}
     local rank_ids_seen = {}
     reconciled.rank_ids, reconciled.ranks = {}, {}
     for index = 1, rank_count do
@@ -657,8 +661,14 @@ local function reconcile_rank_catalog(rank_catalog, legacy_catalog, items)
             copied_rank.primary_weapons = primary.value
             copied_rank.secondary_weapons = secondary.value
             copied_faction.ranks[rank_id] = copied_rank
+            local records = {}
+            for _, section in ipairs(primary.value) do records[#records + 1] = weapon_records[section] end
+            for _, section in ipairs(secondary.value) do records[#records + 1] = weapon_records[section] end
+            table.sort(records, function(left, right) return left.section < right.section end)
+            pool_records_by_profile[copied_rank] = records
         end
     end
+    reconciled_pool_records_by_rank_catalog[reconciled] = pool_records_by_profile
     return gamma_arena_result.ok(reconciled)
 end
 
@@ -851,7 +861,14 @@ local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sec
     catalog.generator_version = 11
     catalog.base_carry_weight = base_carry_weight
     catalog.fingerprint = fingerprint(item_ids, items, reconciled_ranks.value, base_carry_weight)
+    reconciled_pool_records_by_catalog[catalog] = reconciled_pool_records_by_rank_catalog[reconciled_ranks.value]
     return gamma_arena_result.ok(catalog)
+end
+
+function reconciled_weapon_pool(catalog, profile)
+    if type(catalog) ~= "table" or type(profile) ~= "table" then return nil end
+    local profiles = reconciled_pool_records_by_catalog[catalog]
+    return type(profiles) == "table" and profiles[profile] or nil
 end
 
 function load(source, legacy_catalog, rank_catalog, shared_system_sections)

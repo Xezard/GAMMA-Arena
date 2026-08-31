@@ -431,9 +431,9 @@ $Task7CurrentArtifacts = @(
 )
 
 $Task8CustomContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'valid_pool_prerequisites', 'cached_pool_validation') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+prewarm_catalog_rank_pools\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'valid_pool_prerequisites', 'cached_pool_validation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'exact_fields', 'canonical_integer', 'CONFIG_FIELDS', 'ROSTER_FIELDS', 'ITEM_FIELDS', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context', 'custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context', 'custom_setup_model_snapshots_reuse_committed_derived_state') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context', 'custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context', 'custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles', 'custom_setup_model_snapshots_reuse_committed_derived_state') }
 )
 
 foreach ($Contract in $Task8CustomContracts) {
@@ -450,7 +450,7 @@ foreach ($Contract in $Task8CustomContracts) {
 }
 
 $Task8CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
-foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validation','custom_config_does_not_cache_rank_pool_failures_or_context','custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context')) {
+foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validation','custom_config_does_not_cache_rank_pool_failures_or_context','custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context','custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task8CustomTests, $Registration)).Count -eq 1) "Task 8 cache case must be registered exactly once: $Name"
 }
@@ -478,6 +478,37 @@ $Task8PoolPrerequisiteGate = $Task8PoolInternalBlock.IndexOf('if not valid_pool_
 $Task8WeaponRecordsAccess = $Task8PoolInternalBlock.IndexOf('weapon_records(catalog)')
 Assert-True ($Task8PoolPrerequisiteGate -ge 0 -and $Task8WeaponRecordsAccess -gt $Task8PoolPrerequisiteGate) `
     'Task 8 pool validation must apply shared prerequisites before reading cached weapon records.'
+
+$Task8RankCallbackCase = [regex]::Match($Task8CustomTests,
+    '(?ms)^local\s+function\s+custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles\(\).*?^end\s*$').Value
+foreach ($Marker in @('for\s+index\s*=\s*1\s*,\s*512', 'gamma_arena_custom_setup_model\.new',
+    'model:set_count\s*\(\s*10\s*\)', 'model:set_rank\s*\(\s*1\s*,\s*rank_id\s*\)',
+    'model:status_snapshot\s*\(\s*\)', 'operations\.profile_reads\s*,\s*0', 'operations\.weapon_reads\s*,\s*0')) {
+    Assert-True ($Task8RankCallbackCase -match $Marker) "Rank callback operation-count regression is missing: $Marker"
+}
+Assert-True ($Task8RankCallbackCase -match 'operations\.profile_reads\s*,\s*operations\.weapon_reads\s*=\s*0\s*,\s*0') `
+    'Rank callback regression must reset operation counters immediately before the real model call graph.'
+
+$Task8ItemCatalogSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
+$Task8CatalogSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
+$Task8ModelSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_model.script') -Raw
+Assert-True ($Task8ItemCatalogSource -match 'reconciled_pool_records_by_catalog\s*=\s*setmetatable\(\{\},\s*\{\s*__mode\s*=\s*"k"') `
+    'Reconciled rank-pool proofs must be weakly keyed by final catalog identity.'
+Assert-True ($Task8ItemCatalogSource -match 'function\s+reconciled_weapon_pool\s*\(\s*catalog\s*,\s*profile\s*\)') `
+    'Item-catalog reconciliation must expose exact catalog/profile identity proofs.'
+$Task8PrimerBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^function\s+prewarm_catalog_rank_pools\(.*?^end\s*$').Value
+foreach ($Marker in @('catalog\.faction_ids', 'catalog\.rank_ids', 'reconciled_weapon_pool\s*\(\s*catalog\s*,\s*profile\s*\)',
+    'cached_pool_validation\s*\(\s*profile\s*,\s*catalog', 'successful_pool_by_catalog\[catalog\]', 'summary\.complete')) {
+    Assert-True ($Task8PrimerBlock -match $Marker) "Catalog rank-pool primer is missing: $Marker"
+}
+$Task8CatalogLoadBlock = [regex]::Match($Task8CatalogSource, '(?ms)^local\s+function\s+load_impl\(.*?^end\s*$').Value
+Assert-True ($Task8CatalogLoadBlock.IndexOf('gamma_arena_custom_config.prewarm_catalog_rank_pools') -gt
+    $Task8CatalogLoadBlock.IndexOf('gamma_arena_item_catalog.load')) `
+    'Runtime catalog load must prewarm rank profiles after item reconciliation.'
+$Task8ModelNewBlock = [regex]::Match($Task8ModelSource, '(?ms)^function\s+new\(.*?^end\s*$').Value
+Assert-True ($Task8ModelNewBlock -match 'gamma_arena_custom_config\.prewarm_catalog_rank_pools\s*\(\s*catalog\s*\)') `
+    'Direct model construction must prevalidate rank pools outside count/rank callbacks.'
 
 $Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
@@ -3461,6 +3492,17 @@ Assert-True ($StatusShapeBlock -match 'snapshot\.count\s*>\s*snapshot\.capacity'
     'Custom status refresh must reject a count above authoritative capacity.'
 Assert-True ($StatusShapeBlock -match 'snapshot\.capacity\s*>\s*MAX_ROSTER_ROWS') `
     'Custom status refresh must reject capacity above the fixed roster controls.'
+$StatusResultBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+valid_result_shape\(.*?^end\s*$').Value
+Assert-True ($StatusResultBlock -match 'type\(result\.ok\)\s*~=\s*"boolean"') `
+    'Custom status validation must require a boolean Result ok field.'
+foreach ($Field in @('code','message','context')) {
+    Assert-True ($StatusResultBlock -match ('detail\.' + $Field)) `
+        "Failed Custom status validation must require structured error $Field."
+}
+Assert-True ($StatusShapeBlock -match 'valid_result_shape\s*\(\s*snapshot\.validation\s*\)') `
+    'Custom status refresh must validate the full validation Result shape.'
+Assert-True ($StatusShapeBlock -match 'snapshot\.can_start\s*~=\s*snapshot\.validation\.ok') `
+    'Custom status refresh must require can_start to equal validation.ok exactly.'
 Assert-True ($RosterRefreshUi -notmatch 'function\s+refresh_catalog_cells') 'Custom status refresh must not expose a current-page preview helper.'
 Assert-True ($RosterRefreshUi -match 'function\s+refresh_inventory_cells') 'Custom status refresh must expose in-place inventory helper.'
 $RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
@@ -3480,6 +3522,33 @@ if ($CatalogProjectionStart -ge 0 -and $CatalogProjectionEnd -gt $CatalogProject
         'Custom catalog projection must preserve an independent hard affordability block.'
     Assert-True ($CatalogProjectionBlock -match 'hard_disabled_context') `
         'Custom catalog projection must preserve hard-block context for later arithmetic refresh.'
+}
+$CatalogRowsBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+collect_rows\(.*?^end\s*$').Value
+Assert-True ($DerivedSnapshotBlock -match 'carry_bonus_mg\s*=\s*definition\.carry_bonus_mg') `
+    'Full model snapshot must carry authoritative outfit carry bonus metadata.'
+Assert-True ($CatalogRowsBlock -match 'carry_bonus_mg\s*=\s*tonumber\(cell\.carry_bonus_mg\)') `
+    'Full presenter projection must retain candidate outfit carry bonus metadata.'
+$ProjectedWeightBlock = [regex]::Match($RosterRefreshPresenter,
+    '(?ms)^local\s+function\s+projected_weight_hard_block\(.*?^end\s*$').Value
+foreach ($Marker in @('cell\.category\s*==\s*"outfit"', 'cell\.carry_bonus_mg', 'projected_weight_limit_mg')) {
+    Assert-True ($ProjectedWeightBlock -match $Marker) "Projected weight hard block is missing: $Marker"
+}
+Assert-True ($CatalogProjectionBlock -match 'snapshot_has_outfit\s*\(\s*snapshot\s*\)' -and
+    $CatalogProjectionBlock -match 'projected_weight_hard_block\s*\(\s*snapshot\s*,\s*cell\s*,\s*has_outfit\s*\)') `
+    'Full projection must apply candidate effective carry limits from one outfit-state scan.'
+$AffordabilityRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
+    '(?ms)^local\s+function\s+runtime_custom_presenter_refreshes_affordability_without_model_preview\(\).*?^end\s*$').Value
+foreach ($Marker in @('weight_mg\s*=\s*49000', 'weight_limit_mg\s*=\s*50000', 'weight_mg\s*=\s*5000',
+    'carry_bonus_mg\s*=\s*10000', '54000/60000')) {
+    Assert-True ($AffordabilityRuntimeBlock -match $Marker) "Carry-bonus projection regression is missing: $Marker"
+}
+$MalformedStatusRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
+    '(?ms)^local\s+function\s+runtime_custom_presenter_rejects_malformed_status_snapshots_atomically\(\).*?^end\s*$').Value
+foreach ($Marker in @('validation missing ok', 'failed validation missing error', 'failed validation missing error code',
+    'failed validation missing error message', 'failed validation missing error context', 'failed validation claims start',
+    'successful validation denies start')) {
+    Assert-True ($MalformedStatusRuntimeBlock -match [regex]::Escape($Marker)) `
+        "Malformed status runtime regression is missing: $Marker"
 }
 foreach ($HandlerName in @('OnCount', 'OnRank')) {
     $HandlerBlock = [regex]::Match($RosterRefreshUi, ('(?ms)^function\s+UICustom:' + $HandlerName + '\(.*?^end\s*$')).Value

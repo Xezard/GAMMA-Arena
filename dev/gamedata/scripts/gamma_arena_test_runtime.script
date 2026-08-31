@@ -11056,6 +11056,40 @@ local function runtime_custom_presenter_refreshes_affordability_without_model_pr
     gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
         "hard action failure is outside the mutable affordability reasons")
 
+    local carry_bonus = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    outfit = {
+                        { section = "bonus_outfit", category = "outfit", name_key = "bonus_outfit",
+                            base_price = 700, weight_mg = 5000, carry_bonus_mg = 10000,
+                            preview_multiplier = 1, preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600,
+                weight_mg = 49000, weight_limit_mg = 50000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "outfit", search = "", sort = "price_asc", page = 1 })
+    local carry_bonus_cell = carry_bonus.catalog_cells[1]
+    gamma_arena_test_assert.equals(carry_bonus_cell.hard_disabled_reason, nil,
+        "first outfit projects 54000 weight against its effective 60000 carry limit")
+    carry_bonus.remaining = 800
+    presenter:refresh_affordability(carry_bonus)
+    gamma_arena_test_assert.is_false(carry_bonus_cell.disabled,
+        "carry-bonus outfit becomes enabled when its independent budget block clears")
+    gamma_arena_test_assert.equals(carry_bonus_cell.disabled_reason, nil,
+        "valid 54000/60000 outfit projection has no stale overweight reason")
+
     local dual = presenter:project({
         catalog = { items = {} },
         snapshot = function()
@@ -11225,6 +11259,25 @@ local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomi
     end
     local scenarios = {
         { name = "partial table", mutate = function(status) for key in pairs(status) do status[key] = nil end end },
+        { name = "validation missing ok", mutate = function(status) status.validation = {} end },
+        { name = "validation ok wrong type", mutate = function(status) status.validation.ok = "false" end },
+        { name = "failed validation missing error", mutate = function(status)
+            status.validation = { ok = false }
+        end },
+        { name = "failed validation missing error code", mutate = function(status)
+            status.validation = { ok = false, error = { message = "invalid", context = {} } }
+        end },
+        { name = "failed validation missing error message", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", context = {} } }
+        end },
+        { name = "failed validation missing error context", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", message = "invalid" } }
+        end },
+        { name = "failed validation claims start", mutate = function(status) status.can_start = true end },
+        { name = "successful validation denies start", mutate = function(status)
+            status.validation = gamma_arena_result.ok({})
+            status.can_start = false
+        end },
         { name = "roster row missing rank", mutate = function(status) status.roster = { {} } end },
         { name = "roster row wrong type", mutate = function(status) status.roster = { false } end },
         { name = "count exceeds capacity", mutate = function(status)

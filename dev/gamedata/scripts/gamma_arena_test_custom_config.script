@@ -201,6 +201,69 @@ local function custom_config_malformed_pool_inputs_bypass_cache_and_preserve_con
         "first valid profile reads weapon records after malformed profile")
 end
 
+local function custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles()
+    local catalog = make_catalog()
+    local operations = { profile_reads = 0, weapon_reads = 0 }
+    catalog.rank_ids = { "novice", "trainee", "experienced", "veteran", "master", "legend" }
+    catalog.ranks = {}
+    catalog.factions.stalker.ranks = {}
+    for index, rank_id in ipairs(catalog.rank_ids) do
+        catalog.ranks[rank_id] = { id = rank_id, threat = index * 100 }
+        local source = {
+            id = rank_id,
+            primary_weapons = { "wpn_alpha" },
+            secondary_weapons = {}
+        }
+        catalog.factions.stalker.ranks[rank_id] = setmetatable({}, {
+            __index = function(_, key)
+                if key == "primary_weapons" or key == "secondary_weapons" then
+                    operations.profile_reads = operations.profile_reads + 1
+                end
+                return source[key]
+            end
+        })
+    end
+    for index = 1, 512 do
+        local source = index == 1 and catalog.weapon_list[1] or {
+            section = "unused_weapon_" .. tostring(index),
+            ammo = "ammo_alpha", cost = 1, slot = 2,
+            ammo_box_min = 1, ammo_box_max = 1
+        }
+        catalog.weapon_list[index] = setmetatable({}, {
+            __index = function(_, key)
+                operations.weapon_reads = operations.weapon_reads + 1
+                return source[key]
+            end
+        })
+    end
+
+    local prewarmed = gamma_arena_custom_config.prewarm_catalog_rank_pools(catalog)
+    gamma_arena_test_assert.is_true(prewarmed.ok, "rank profiles prewarm outside model callbacks")
+    gamma_arena_test_assert.equals(prewarmed.value.profile_count, #catalog.rank_ids,
+        "prewarm covers every selected-faction rank profile")
+    gamma_arena_test_assert.is_true(operations.profile_reads > 0,
+        "prewarm performs profile work before callbacks")
+    gamma_arena_test_assert.is_true(operations.weapon_reads > 0,
+        "prewarm performs installed weapon-list work before callbacks")
+    operations.profile_reads, operations.weapon_reads = 0, 0
+
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok,
+        "prevalidated faction selection succeeds")
+    gamma_arena_test_assert.is_true(model:set_count(10).ok,
+        "prevalidated count growth succeeds")
+    model:status_snapshot()
+    for _, rank_id in ipairs(catalog.rank_ids) do
+        gamma_arena_test_assert.is_true(model:set_rank(1, rank_id).ok,
+            "first prevalidated rank click succeeds for " .. rank_id)
+        model:status_snapshot()
+    end
+    gamma_arena_test_assert.equals(operations.profile_reads, 0,
+        "count and first click for every rank perform zero profile-record scans")
+    gamma_arena_test_assert.equals(operations.weapon_reads, 0,
+        "count and first click for every rank perform zero installed weapon-list scans")
+end
+
 local function custom_config_rejects_roster_catalog_and_shape_matrix()
     local catalog = make_catalog()
     local context = make_context(catalog)
@@ -934,6 +997,7 @@ local cases = {
     { name = "custom_config_reuses_successful_immutable_rank_pool_validation", fn = custom_config_reuses_successful_immutable_rank_pool_validation },
     { name = "custom_config_does_not_cache_rank_pool_failures_or_context", fn = custom_config_does_not_cache_rank_pool_failures_or_context },
     { name = "custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context", fn = custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context },
+    { name = "custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles", fn = custom_setup_model_rank_callbacks_reuse_all_prevalidated_profiles },
     { name = "custom_config_rejects_roster_catalog_and_shape_matrix", fn = custom_config_rejects_roster_catalog_and_shape_matrix },
     { name = "custom_config_distinguishes_empty_inventory_from_entry_overflow", fn = custom_config_distinguishes_empty_inventory_from_entry_overflow },
     { name = "custom_config_rejects_selected_empty_rank_weapon_pool", fn = custom_config_rejects_selected_empty_rank_weapon_pool },

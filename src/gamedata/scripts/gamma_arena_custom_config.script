@@ -102,6 +102,7 @@ end
 
 local weapon_records_by_catalog = setmetatable({}, { __mode = "k" })
 local successful_pool_by_catalog = setmetatable({}, { __mode = "k" })
+local completed_pool_prewarms_by_catalog = setmetatable({}, { __mode = "k" })
 
 local function valid_pool_prerequisites(profile, catalog)
     return type(profile) == "table" and type(catalog) == "table"
@@ -189,9 +190,109 @@ local function cached_pool_validation(profile, catalog, context)
     end
     local cached = profiles[profile]
     if cached ~= nil then return cached end
+    local proof_lookup = type(gamma_arena_item_catalog) == "table"
+        and gamma_arena_item_catalog.reconciled_weapon_pool or nil
+    if type(proof_lookup) == "function" then
+        local reconciled = gamma_arena_item_catalog.reconciled_weapon_pool(catalog, profile)
+        if reconciled ~= nil then
+            if #reconciled == 0 then
+                return failure("GA_CUSTOM_WEAPON_POOL_INVALID",
+                    "Selected faction rank has no physical weapon", context)
+            end
+            local result = gamma_arena_result.ok(reconciled)
+            profiles[profile] = result
+            return result
+        end
+    end
     local result = validate_weapon_pool_internal(profile, catalog, context)
     if result.ok then profiles[profile] = result end
     return result
+end
+
+function prewarm_catalog_rank_pools(catalog)
+    local succeeded, result = pcall(function()
+        if type(catalog) ~= "table" or type(catalog.factions) ~= "table"
+            or type(catalog.ranks) ~= "table" or type(catalog.items) ~= "table"
+            or type(catalog.ammo) ~= "table" or type(catalog.weapon_list) ~= "table" then
+            return failure("GA_CUSTOM_CATALOG_INVALID", "Custom rank-pool prevalidation requires an active catalog")
+        end
+        local faction_count, faction_error = dense_length(catalog.faction_ids,
+            "GA_CUSTOM_CATALOG_INVALID", "faction_ids")
+        if faction_count == nil or faction_count == 0 then
+            return faction_error or failure("GA_CUSTOM_CATALOG_INVALID", "Custom faction catalog is empty")
+        end
+        local rank_count, rank_error = dense_length(catalog.rank_ids,
+            "GA_CUSTOM_CATALOG_INVALID", "rank_ids")
+        if rank_count == nil or rank_count == 0 then
+            return rank_error or failure("GA_CUSTOM_CATALOG_INVALID", "Custom rank catalog is empty")
+        end
+
+        local pending = {}
+        for faction_index = 1, faction_count do
+            local faction_id = catalog.faction_ids[faction_index]
+            local faction = text(faction_id) and catalog.factions[faction_id] or nil
+            if type(faction) ~= "table" or type(faction.ranks) ~= "table" then
+                return failure("GA_CUSTOM_CATALOG_INVALID", "Custom faction rank catalog is invalid", {
+                    faction = faction_id
+                })
+            end
+            for rank_index = 1, rank_count do
+                local rank_id = catalog.rank_ids[rank_index]
+                local profile = text(rank_id) and faction.ranks[rank_id] or nil
+                if type(catalog.ranks[rank_id]) ~= "table" or not valid_pool_prerequisites(profile, catalog) then
+                    return failure("GA_CUSTOM_CATALOG_INVALID", "Custom faction rank profile is invalid", {
+                        faction = faction_id, rank = rank_id
+                    })
+                end
+                pending[#pending + 1] = { faction = faction_id, rank = rank_id, profile = profile }
+            end
+        end
+
+        local completed = completed_pool_prewarms_by_catalog[catalog]
+        if completed ~= nil then return completed end
+        local profiles = successful_pool_by_catalog[catalog]
+        if profiles == nil then
+            profiles = setmetatable({}, { __mode = "k" })
+            successful_pool_by_catalog[catalog] = profiles
+        end
+        local summary = { profile_count = #pending, proof_count = 0, scan_count = 0, complete = true }
+        for _, entry in ipairs(pending) do
+            local profile = entry.profile
+            local validated = profiles[profile]
+            if validated == nil then
+                local reconciled = nil
+                if type(gamma_arena_item_catalog) == "table"
+                    and type(gamma_arena_item_catalog.reconciled_weapon_pool) == "function" then
+                    reconciled = gamma_arena_item_catalog.reconciled_weapon_pool(catalog, profile)
+                end
+                if reconciled ~= nil then
+                    summary.proof_count = summary.proof_count + 1
+                    if #reconciled > 0 then
+                        validated = gamma_arena_result.ok(reconciled)
+                        profiles[profile] = validated
+                    else
+                        validated = failure("GA_CUSTOM_WEAPON_POOL_INVALID",
+                            "Selected faction rank has no physical weapon", {
+                                faction = entry.faction, rank = entry.rank
+                            })
+                    end
+                else
+                    summary.scan_count = summary.scan_count + 1
+                    validated = cached_pool_validation(profile, catalog, {
+                        faction = entry.faction, rank = entry.rank
+                    })
+                end
+            end
+            if not validated.ok then summary.complete = false end
+        end
+        local warmed = gamma_arena_result.ok(summary)
+        if summary.complete then completed_pool_prewarms_by_catalog[catalog] = warmed end
+        return warmed
+    end)
+    if succeeded and type(result) == "table" and type(result.ok) == "boolean" then return result end
+    return failure("GA_CUSTOM_WEAPON_POOL_INVALID", "Custom rank-pool prevalidation failed safely", {
+        reason = tostring(result)
+    })
 end
 
 local function totals_internal(config, catalog)
