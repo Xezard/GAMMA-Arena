@@ -433,7 +433,7 @@ $Task7CurrentArtifacts = @(
 $Task8CustomContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_config.script'; Namespace = 'gamma_arena_custom_config'; Required = @('(?m)^function\s+validate\s*\(', '(?m)^function\s+validate_weapon_pool\s*\(', '(?m)^function\s+budget\s*\(', '(?m)^function\s+totals\s*\(', 'primary_weapons', 'secondary_weapons', 'GA_CUSTOM_ITEM_REQUIRED', 'GA_CUSTOM_GRENADE_LIMIT', 'GA_CUSTOM_EQUIPMENT_QUANTITY', 'GA_CUSTOM_WEAPON_POOL_INVALID', 'second_grenade_price_multiplier', 'max_physical_items_per_participant', 'weight_limit_mg', 'weapon_records_by_catalog', 'successful_pool_by_catalog', '__mode\s*=\s*"k"', 'cached_pool_validation') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_custom_codec.script'; Namespace = 'gamma_arena_custom_codec'; Required = @('(?m)^function\s+keys\s*\(', '(?m)^function\s+encode\s*\(', '(?m)^function\s+decode\s*\(', 'dense_length', 'exact_fields', 'canonical_integer', 'CONFIG_FIELDS', 'ROSTER_FIELDS', 'ITEM_FIELDS', 'GA_CUSTOM_CODEC_TRAILING_KEY', 'roster_count', 'actor_item_count', 'equipped_slot') },
-    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context') }
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_custom_config.script'; Namespace = 'gamma_arena_test_custom_config'; Required = @('(?m)^function\s+run\s*\(', 'custom_config_rejects_roster_catalog_and_shape_matrix', 'custom_config_distinguishes_empty_inventory_from_entry_overflow', 'custom_config_rejects_selected_empty_rank_weapon_pool', 'custom_config_rejects_equipment_compatibility_and_budget_matrix', 'custom_config_rejects_non_unit_physical_equipment', 'custom_config_preserves_legitimate_inventory_stacks', 'custom_config_grenade_order_is_semantic', 'custom_codec_round_trip_preserves_bounded_order', 'custom_codec_rejects_sparse_and_oversized_shapes', 'custom_codec_encode_rejects_unknown_fields_and_malformed_scalars', 'custom_codec_encode_uses_canonical_decimal_quantities', 'custom_config_reuses_successful_immutable_rank_pool_validation', 'custom_config_does_not_cache_rank_pool_failures_or_context', 'custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context') }
 )
 
 foreach ($Contract in $Task8CustomContracts) {
@@ -450,10 +450,20 @@ foreach ($Contract in $Task8CustomContracts) {
 }
 
 $Task8CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
-foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validation','custom_config_does_not_cache_rank_pool_failures_or_context')) {
+foreach ($Name in @('custom_config_reuses_successful_immutable_rank_pool_validation','custom_config_does_not_cache_rank_pool_failures_or_context','custom_config_malformed_pool_inputs_bypass_cache_and_preserve_context')) {
     $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task8CustomTests, $Registration)).Count -eq 1) "Task 8 cache case must be registered exactly once: $Name"
 }
+
+$Task8CustomSource = Get-Content -LiteralPath (Join-Path $RepoRoot $Task8CustomContracts[0].Path) -Raw
+$Task8PoolCacheBlock = [regex]::Match($Task8CustomSource,
+    '(?ms)^local\s+function\s+cached_pool_validation\s*\(.*?^end\s*$').Value
+$Task8PoolTypeGate = $Task8PoolCacheBlock.IndexOf('if type(profile) ~= "table" or type(catalog) ~= "table" then')
+$Task8PoolBypass = $Task8PoolCacheBlock -match `
+    'if\s+type\(profile\)\s*~=\s*"table"\s+or\s+type\(catalog\)\s*~=\s*"table"\s+then\s*return\s+validate_weapon_pool_internal\(profile,\s*catalog,\s*context\)\s*end'
+$Task8PoolCacheAccess = $Task8PoolCacheBlock.IndexOf('successful_pool_by_catalog[catalog]')
+Assert-True ($Task8PoolBypass -and $Task8PoolTypeGate -ge 0 -and $Task8PoolCacheAccess -gt $Task8PoolTypeGate) `
+    'Task 8 pool cache must type-gate profile and catalog before cache access.'
 
 $Task8SessionContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
 foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'launch_catalog_revision', 'launch_catalog_fingerprint', 'launch_custom_', 'gamma_arena_custom_codec.keys', 'gamma_arena_custom_codec.decode', 'persisted_keys_absent')) {
