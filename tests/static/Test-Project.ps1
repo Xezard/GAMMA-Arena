@@ -3456,6 +3456,11 @@ Assert-True ($DerivedRuntimeCase -match 'set_rank\s*\(\s*2\s*,\s*"novice"\s*\)' 
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_status') 'Custom roster refresh presenter must expose refresh_status.'
 Assert-True ($RosterRefreshPresenter -match 'function\s+Presenter:refresh_affordability') 'Custom roster refresh presenter must expose arithmetic affordability refresh.'
 Assert-True ($RosterRefreshPresenter -match 'local\s+function\s+valid_status_snapshot') 'Custom status refresh must validate snapshot shape before mutation.'
+$StatusShapeBlock = [regex]::Match($RosterRefreshPresenter, '(?ms)^local\s+function\s+valid_status_snapshot\(.*?^end\s*$').Value
+Assert-True ($StatusShapeBlock -match 'snapshot\.count\s*>\s*snapshot\.capacity') `
+    'Custom status refresh must reject a count above authoritative capacity.'
+Assert-True ($StatusShapeBlock -match 'snapshot\.capacity\s*>\s*MAX_ROSTER_ROWS') `
+    'Custom status refresh must reject capacity above the fixed roster controls.'
 Assert-True ($RosterRefreshUi -notmatch 'function\s+refresh_catalog_cells') 'Custom status refresh must not expose a current-page preview helper.'
 Assert-True ($RosterRefreshUi -match 'function\s+refresh_inventory_cells') 'Custom status refresh must expose in-place inventory helper.'
 $RefreshPresenterStart = $RosterRefreshPresenter.IndexOf('function Presenter:refresh_status(model, view)')
@@ -3497,13 +3502,37 @@ $InventoryRefreshIndex = $RosterStatusBlock.IndexOf('refresh_inventory_cells(sel
 Assert-True ($AffordabilityRefreshIndex -ge 0 -and $InventoryRefreshIndex -gt $AffordabilityRefreshIndex) `
     'Custom incremental roster refresh must update arithmetic affordability before native cells.'
 $InitControlsBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:InitControls\(.*?^end\s*$').Value
-Assert-True ($InitControlsBlock -notmatch 'model:snapshot\(') 'Custom control initialization must not build a full model snapshot.'
-Assert-True ($InitControlsBlock -notmatch '(?<!presenter:)project\(') 'Custom control initialization must not build the legacy full projection.'
+$InitializeFactionBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+initialize_faction\(.*?^end\s*$').Value
+$CustomConstructorBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:__init\(.*?^end\s*$').Value
+Assert-True ($CustomConstructorBlock -match 'initialize_faction\(self\.model' -and
+    $CustomConstructorBlock -match 'self:InitControls\(\)' -and $CustomConstructorBlock -match 'self:Rebuild\(\)') `
+    'Custom constructor initialization call graph must remain structurally visible.'
+foreach ($InitializationBlock in @($CustomConstructorBlock, $InitializeFactionBlock, $InitControlsBlock)) {
+    Assert-True ($InitializationBlock -notmatch 'model[\.:]snapshot') `
+        'Custom constructor and initialization helpers must not build a full model snapshot.'
+    Assert-True ($InitializationBlock -notmatch '(?<!presenter:)project\(') `
+        'Custom constructor and initialization helpers must not build the legacy full projection.'
+}
+Assert-True ($InitializeFactionBlock -match 'model\.status_snapshot') `
+    'Custom faction initialization must use bounded status.'
+Assert-True ($InitializeFactionBlock -match 'model\.catalog' -and $InitializeFactionBlock -match 'faction_ids') `
+    'Custom faction initialization must use immutable catalog faction metadata.'
+$InitialRebuildBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+UICustom:Rebuild\(.*?^end\s*$').Value
+Assert-True (([regex]::Matches($InitialRebuildBlock, 'presenter:project\(')).Count -eq 1) `
+    'Custom Rebuild must own exactly one authoritative full presenter projection.'
 $RosterDeltaBlock = [regex]::Match($RosterRefreshUi, '(?ms)^function\s+render_roster_delta\(.*?^end\s*$').Value
 Assert-True ($RosterDeltaBlock -match 'change\.previous_count') 'Incremental count rendering must be targeted by previous_count.'
 Assert-True ($RosterDeltaBlock -match 'change\.rank_index') 'Incremental rank rendering must be targeted by rank_index.'
 Assert-True ($RosterDeltaBlock -match 'self\.count_combo:SetText\(tostring\(view\.count\)\)') `
     'Rejected count changes must restore only the authoritative count control.'
+Assert-True ($RosterDeltaBlock -match 'roster_count\(view\.count\)' -and
+    $RosterDeltaBlock -match 'roster_count\(change\.previous_count\)') `
+    'Incremental count rendering must validate current and previous bounds before indexing controls.'
+Assert-True ($RosterDeltaBlock -match 'roster_index\(change\.rank_index\)') `
+    'Incremental rank rendering must validate its fixed-control index.'
+Assert-True ($RosterDeltaBlock -match 'local\s+row\s*=\s*rows\[index\]' -and
+    $RosterDeltaBlock -match 'local\s+combo\s*=\s*combos\[index\]') `
+    'Incremental roster rendering must defensively guard bounded native controls.'
 $SharedStatusBlock = [regex]::Match($RosterRefreshUi, '(?ms)^local\s+function\s+render_roster_status\(.*?^end\s*$').Value
 Assert-True ($SharedStatusBlock -match 'render_status_message\(self,\s*view\)') `
     'Incremental roster rendering must reuse the shared status and logging policy.'

@@ -1,5 +1,6 @@
 local CATEGORY_IDS = { "weapon", "ammo", "outfit", "helmet", "knife", "medicine", "grenade" }
 local CATALOG_PAGE_SIZE = 80
+local MAX_ROSTER_ROWS = 10
 local FILTER_IDS = { "all", "weapon", "ammo", "armor", "medicine", "other" }
 local SORT_IDS = { "price_asc", "price_desc", "name_asc", "name_desc" }
 local FILTER_LABEL_KEYS = {
@@ -69,17 +70,18 @@ local function protected_result(code, message, callback)
 end
 
 function initialize_faction(model, picker)
-    if type(model) ~= "table" or type(model.snapshot) ~= "function" or type(model.set_faction) ~= "function" then
+    if type(model) ~= "table" or type(model.status_snapshot) ~= "function"
+        or type(model.set_faction) ~= "function" then
         return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup model is unavailable")
     end
-    local called, snapshot = pcall(model.snapshot, model)
-    if not called or type(snapshot) ~= "table" then
-        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup snapshot is unavailable")
+    local called, status = pcall(model.status_snapshot, model)
+    if not called or type(status) ~= "table" then
+        return gamma_arena_result.err("GA_CUSTOM_MODEL_INVALID", "Custom setup status is unavailable")
     end
-    if type(snapshot.faction) == "string" and snapshot.faction ~= "" then
-        return gamma_arena_result.ok(snapshot.faction)
+    if type(status.faction) == "string" and status.faction ~= "" then
+        return gamma_arena_result.ok(status.faction)
     end
-    local faction_ids = snapshot.faction_ids
+    local faction_ids = type(model.catalog) == "table" and model.catalog.faction_ids or nil
     if type(faction_ids) ~= "table" or #faction_ids == 0 then
         return gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Custom setup has no available factions")
     end
@@ -734,26 +736,47 @@ local function prepare_view(self, view)
     return view
 end
 
+local function roster_count(value)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge
+        or value ~= math.floor(value) or value < 0 or value > MAX_ROSTER_ROWS then
+        return nil
+    end
+    return value
+end
+
+local function roster_index(value)
+    local index = roster_count(value)
+    return index and index >= 1 and index or nil
+end
+
 function render_roster_delta(self, view, change)
     view = type(view) == "table" and view or {}
     change = type(change) == "table" and change or {}
+    local roster = type(view.roster) == "table" and view.roster or {}
+    local rows = type(self.roster_rows) == "table" and self.roster_rows or {}
+    local combos = type(self.rank_combos) == "table" and self.rank_combos or {}
     if change.previous_count ~= nil then
-        self.count_combo:SetText(tostring(view.count))
-        local previous_count = tonumber(change.previous_count) or 0
-        local count = tonumber(view.count) or 0
-        local first = math.min(previous_count, count) + 1
-        local last = math.max(previous_count, count)
-        for index = first, last do
-            local visible = index <= count
-            self.roster_rows[index]:Show(visible)
-            if visible and view.roster[index] then
-                set_combo(self.rank_combos[index], view.rank_ids, view.roster[index].rank, rank_text)
+        local previous_count = roster_count(change.previous_count)
+        local count = roster_count(view.count)
+        if previous_count ~= nil and count ~= nil then
+            self.count_combo:SetText(tostring(view.count))
+            local first = math.min(previous_count, count) + 1
+            local last = math.max(previous_count, count)
+            for index = first, last do
+                local row = rows[index]
+                local combo = combos[index]
+                local visible = index <= count
+                if row then row:Show(visible) end
+                if visible and combo and roster[index] then
+                    set_combo(combo, view.rank_ids, roster[index].rank, rank_text)
+                end
             end
         end
     end
-    if change.rank_index ~= nil and view.roster[change.rank_index] then
-        set_combo(self.rank_combos[change.rank_index], view.rank_ids,
-            view.roster[change.rank_index].rank, rank_text)
+    local rank_index = roster_index(change.rank_index)
+    local rank_combo = rank_index and combos[rank_index] or nil
+    if rank_combo and roster[rank_index] then
+        set_combo(rank_combo, view.rank_ids, roster[rank_index].rank, rank_text)
     end
 end
 

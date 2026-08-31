@@ -10348,6 +10348,17 @@ local function runtime_custom_ui_initializes_one_authoritative_faction()
     catalog.factions.bandit.id = "bandit"
     local model = gamma_arena_custom_setup_model.new(
         catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    local full_snapshot = model.snapshot
+    local bounded_status_snapshot = model.status_snapshot
+    local full_snapshot_calls, status_snapshot_calls = 0, 0
+    model.snapshot = function(self)
+        full_snapshot_calls = full_snapshot_calls + 1
+        return full_snapshot(self)
+    end
+    model.status_snapshot = function(self)
+        status_snapshot_calls = status_snapshot_calls + 1
+        return bounded_status_snapshot(self)
+    end
     local calls = 0
     local initialized = gamma_arena_ui_custom.initialize_faction(model, function(count)
         calls = calls + 1
@@ -10355,14 +10366,22 @@ local function runtime_custom_ui_initializes_one_authoritative_faction()
         return 2
     end)
     gamma_arena_test_assert.is_true(initialized.ok, "initial faction selection succeeds")
-    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "picker chooses exact faction")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "picker chooses exact faction")
     gamma_arena_test_assert.equals(calls, 1, "uninitialized model is picked once")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "faction initialization never builds a full catalog snapshot")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 1,
+        "faction initialization reads one bounded status snapshot")
 
     local preserved = gamma_arena_ui_custom.initialize_faction(model, function()
         error("preselected model must not consume another random choice")
     end)
     gamma_arena_test_assert.is_true(preserved.ok, "preselected faction is preserved")
-    gamma_arena_test_assert.equals(model:snapshot().faction, catalog.faction_ids[2], "second initialization is inert")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "second initialization is inert")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "preselected faction initialization remains full-snapshot free")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 2,
+        "preselected faction initialization reads only bounded status")
 end
 
 local function runtime_custom_faction_picker_layout_and_textures_are_bounded()
@@ -11208,6 +11227,16 @@ local function runtime_custom_presenter_rejects_malformed_status_snapshots_atomi
         { name = "partial table", mutate = function(status) for key in pairs(status) do status[key] = nil end end },
         { name = "roster row missing rank", mutate = function(status) status.roster = { {} } end },
         { name = "roster row wrong type", mutate = function(status) status.roster = { false } end },
+        { name = "count exceeds capacity", mutate = function(status)
+            status.roster[2] = { rank = "novice" }
+            status.count = 2
+            status.capacity = 1
+        end },
+        { name = "count exceeds fixed roster controls", mutate = function(status)
+            for index = 2, 11 do status.roster[index] = { rank = "novice" } end
+            status.count = 11
+            status.capacity = 11
+        end },
         { name = "device options wrong type", mutate = function(status) status.device_options = false end },
         { name = "device option wrong element", mutate = function(status) status.device_options = { false } end }
     }
@@ -11362,6 +11391,46 @@ local function runtime_custom_ui_renders_only_targeted_roster_delta()
     gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
     gamma_arena_test_assert.equals(combos[2].selected, 3, "rejected rank restores the authoritative cached value")
     gamma_arena_test_assert.equals(combos[2].calls, 2, "rejected rank restores only the targeted combo")
+
+    for index = 1, 10 do
+        rows[index].calls = 0
+        rows[index].visible = true
+        combos[index].calls = 0
+    end
+    view.count = 1
+    view.roster = { { rank = "novice" } }
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 10 })
+    gamma_arena_test_assert.equals(count_text, "1", "maximum decrease renders authoritative count")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "maximum decrease leaves retained row untouched")
+    for index = 2, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 1,
+            "maximum decrease hides affected row once at " .. tostring(index))
+        gamma_arena_test_assert.is_false(rows[index].visible,
+            "maximum decrease hides affected row at " .. tostring(index))
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "maximum decrease does not rewrite hidden combo at " .. tostring(index))
+    end
+
+    for index = 1, 10 do rows[index].calls = 0; combos[index].calls = 0 end
+    local count_sets_before_malformed = count_sets
+    view.count = 11
+    for index = 2, 11 do view.roster[index] = { rank = "novice" } end
+    local count_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { previous_count = 0 })
+    gamma_arena_test_assert.is_true(count_called, "malformed count cannot index beyond fixed controls")
+    gamma_arena_test_assert.equals(count_sets, count_sets_before_malformed,
+        "malformed count is rejected before mutating the count control")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 0,
+            "malformed count leaves bounded row untouched at " .. tostring(index))
+    end
+    local rank_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { rank_index = 11 })
+    gamma_arena_test_assert.is_true(rank_called, "malformed rank index cannot exceed fixed controls")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "malformed rank leaves bounded combo untouched at " .. tostring(index))
+    end
 end
 
 local function runtime_custom_model_status_snapshot_matches_full_status()
