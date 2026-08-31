@@ -639,6 +639,45 @@ local function custom_setup_model_preserves_overbudget_inventory_for_repair()
     gamma_arena_test_assert.is_true(model:validation().ok, "repaired loadout becomes launchable")
 end
 
+local function custom_setup_model_snapshots_reuse_committed_derived_state()
+    local catalog = make_catalog()
+    local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "derived-state fixture faction")
+
+    local original_validate = gamma_arena_custom_config.validate
+    local original_budget = gamma_arena_custom_config.budget
+    local original_totals = gamma_arena_custom_config.totals
+    local calls = { validate = 0, budget = 0, totals = 0 }
+    gamma_arena_custom_config.validate = function(...)
+        calls.validate = calls.validate + 1
+        return original_validate(...)
+    end
+    gamma_arena_custom_config.budget = function(...)
+        calls.budget = calls.budget + 1
+        return original_budget(...)
+    end
+    gamma_arena_custom_config.totals = function(...)
+        calls.totals = calls.totals + 1
+        return original_totals(...)
+    end
+
+    local called, reason = pcall(function()
+        local status = model:status_snapshot()
+        local full = model:snapshot()
+        gamma_arena_test_assert.equals(status.budget, full.budget,
+            "cached status and full snapshot budgets agree")
+        gamma_arena_test_assert.equals(status.validation.ok, full.validation.ok,
+            "cached status and full snapshot validation agree")
+    end)
+    gamma_arena_custom_config.validate = original_validate
+    gamma_arena_custom_config.budget = original_budget
+    gamma_arena_custom_config.totals = original_totals
+    gamma_arena_test_assert.is_true(called, "cached snapshot probe is safe: " .. tostring(reason))
+    gamma_arena_test_assert.equals(calls.validate, 0, "snapshots do not repeat full validation")
+    gamma_arena_test_assert.equals(calls.budget, 0, "snapshots do not repeat public budget calculation")
+    gamma_arena_test_assert.equals(calls.totals, 0, "snapshots do not repeat public totals calculation")
+end
+
 local function custom_setup_model_grenade_selection_removal_and_reorder_are_semantic()
     local catalog = make_catalog()
     local model = gamma_arena_custom_setup_model.new(catalog, make_context(catalog).layout)
@@ -909,6 +948,7 @@ local cases = {
     { name = "custom_setup_model_one_unit_commands_are_atomic", fn = custom_setup_model_one_unit_commands_are_atomic },
     { name = "custom_setup_model_auto_equips_and_replaces_weapon_atomically", fn = custom_setup_model_auto_equips_and_replaces_weapon_atomically },
     { name = "custom_setup_model_preserves_overbudget_inventory_for_repair", fn = custom_setup_model_preserves_overbudget_inventory_for_repair },
+    { name = "custom_setup_model_snapshots_reuse_committed_derived_state", fn = custom_setup_model_snapshots_reuse_committed_derived_state },
     { name = "custom_setup_model_grenade_selection_removal_and_reorder_are_semantic", fn = custom_setup_model_grenade_selection_removal_and_reorder_are_semantic },
     { name = "custom_codec_round_trip_preserves_bounded_order", fn = custom_codec_round_trip_preserves_bounded_order }
     ,{ name = "custom_codec_rejects_sparse_and_oversized_shapes", fn = custom_codec_rejects_sparse_and_oversized_shapes }
