@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.1 - 2026-08-31
+
 - Made Custom Setup opening, opponent-count changes, and rank changes incremental, eliminating repeated installed-catalog loading, validation, and cell rebuilding from the input path.
 
 ## 0.5.0 - 2026-08-31

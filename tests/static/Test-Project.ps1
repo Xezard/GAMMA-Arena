@@ -119,7 +119,7 @@ foreach ($ProtectionLabel in @(
 $Task7RepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 $Task7VersionPath = Join-Path $RepoRoot 'VERSION'
 $AddonVersion = if (Test-Path -LiteralPath $Task7VersionPath -PathType Leaf) { (Get-Content -LiteralPath $Task7VersionPath -Raw).Trim() } else { '' }
-if ($Task7RepositoryCheckout) { Assert-True ($AddonVersion -ceq '0.5.0') 'Task 7 release version must be exactly 0.5.0.' }
+if ($Task7RepositoryCheckout) { Assert-True ($AddonVersion -ceq '0.5.1') 'Task 7 release version must be exactly 0.5.1.' }
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 if ($Task7RepositoryCheckout) {
 $Task7BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
@@ -1113,7 +1113,7 @@ foreach ($Marker in @('FightSpec v9','catalog schema `10`','generator_version = 
     Assert-True ($Task7SessionSchemaDoc.Contains($Marker)) "Task 7 session schema documentation is stale: $Marker"
 }
 $Task7CompatibilityManifestDoc = Get-Content -LiteralPath (Join-Path $RepoRoot 'schemas\compatibility-manifest-v1.md') -Raw
-foreach ($Marker in @('"0.5.0"','fight_spec_schema_version` | integer | `9`','catalog_schema_version` | integer | `10`','catalog_revision` | integer | `11`','generator_version` | integer | `11`')) {
+foreach ($Marker in @('"0.5.1"','fight_spec_schema_version` | integer | `9`','catalog_schema_version` | integer | `10`','catalog_revision` | integer | `11`','generator_version` | integer | `11`')) {
     Assert-True ($Task7CompatibilityManifestDoc.Contains($Marker)) "Task 7 compatibility manifest documentation is stale: $Marker"
 }
 $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
