@@ -12252,15 +12252,28 @@ local function runtime_composed_actor_binds_mags_redux_bonus_ports()
     local env, item_ports = task11_production_item_ports()
     local mag_data = {}
     local fill_calls = 0
+    local refresh_calls = 0
+    local pouch_refreshed = false
     item_ports.mags_redux_resolve_api = function()
         return {
             is_supported_weapon = function(section) return section == "rifle" end,
             default_magazine = function() return "mag_rifle" end,
             read_magazine = function(id) return mag_data[id] end,
-            is_carried = function() return false end,
+            is_carried = function() return env.slots.outfit ~= nil end,
+            refresh_loadout = function()
+                refresh_calls = refresh_calls + 1
+                local weapon = env.slots.weapon_2
+                pouch_refreshed = env.slots.outfit ~= nil and weapon ~= nil
+                    and env.magazines[weapon.runtime_id] == "ammo_a"
+                gamma_arena_test_assert.is_true(pouch_refreshed,
+                    "vendor pouch refresh follows outfit equip and weapon magazine verification")
+                return true
+            end,
             fill_magazine = function(id, section, capacity, ammo)
                 fill_calls = fill_calls + 1
                 gamma_arena_test_assert.is_true(env.tags[id] ~= nil, "reserve magazine is registered before vendor initialization")
+                gamma_arena_test_assert.is_true(pouch_refreshed, "each vendor fill follows a fresh outfit-dependent pouch refresh")
+                pouch_refreshed = false
                 local loaded = {}
                 for index = 1, capacity do loaded[index] = ammo end
                 mag_data[id] = { section = section, loaded = loaded }
@@ -12279,6 +12292,7 @@ local function runtime_composed_actor_binds_mags_redux_bonus_ports()
     orchestrator.session = { schema_version = 2, session_id = "ga_task_mags", session_nonce = "ga_task_mags_nonce" }
     local items = orchestrator.deps.actor.deps.items
     local applied = items:apply(owner, {
+        { section = "outfit", quantity = 1, equipped_slot = "outfit" },
         { section = "rifle", quantity = 1, equipped_slot = "weapon_2" },
         { section = "ammo_a", quantity = 30 }
     }, universal_catalog())
@@ -12296,6 +12310,7 @@ local function runtime_composed_actor_binds_mags_redux_bonus_ports()
     end
     gamma_arena_test_assert.equals(ammo_boxes, 30, "production integration preserves thirty selected boxes")
     gamma_arena_test_assert.equals(magazines, 2, "production integration creates two reserve magazines")
+    gamma_arena_test_assert.equals(refresh_calls, 2, "production integration refreshes the vendor pouch once per reserve")
     gamma_arena_test_assert.equals(fill_calls, 2, "production integration initializes each reserve magazine exactly once")
     local checkpoints = {}
     for _, checkpoint in ipairs(deps._diagnostics.checkpoints) do
@@ -12312,7 +12327,7 @@ local function runtime_composed_actor_binds_mags_redux_bonus_ports()
         gamma_arena_test_assert.equals(checkpoint.context.reserve_ordinal, ordinal, "reserve checkpoint retains ordinal")
         gamma_arena_test_assert.equals(checkpoint.context.capacity, 30, "reserve checkpoint retains capacity")
         gamma_arena_test_assert.equals(checkpoint.context.ammo_section, "ammo_a", "reserve checkpoint bounds ammo section")
-        gamma_arena_test_assert.is_false(checkpoint.context.carried, "reserve checkpoint retains best-effort carried state")
+        gamma_arena_test_assert.is_true(checkpoint.context.carried, "reserve checkpoint observes outfit-dependent carried state")
     end
 end
 

@@ -2312,6 +2312,52 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     }
     Assert-True ($Task5BootstrapContent -notmatch 'function\s+mags_patches\.|function\s+magazine_binder\.') 'Gamma Arena must not override Mags Redux vendor functions'
     Assert-True ($Task5BootstrapContent -match 'initialize_created\s*=\s*function\s*\([^,]+,\s*record,\s*descriptor\)[\s\S]{0,500}mags_redux:initialize\(record\.id') 'Mags Redux initialization must use the registered Arena ownership record id'
+    $FinalMagsAdapterContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_mags_redux.script') -Raw
+    $FinalMagsMaterializerContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script') -Raw
+    $FinalMagsAdapterTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_mags_redux.script') -Raw
+    $FinalMagsMaterializerTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_item_materializer.script') -Raw
+    Assert-True ($FinalMagsAdapterContent -match 'MAX_MAGAZINE_CAPACITY\s*=\s*512') 'Mags Redux reserves must have an explicit 512-round ceiling.'
+    Assert-True ($FinalMagsMaterializerContent -match 'MAX_MAGAZINE_CAPACITY\s*=\s*512') 'Bonus descriptor preflight must enforce the explicit 512-round ceiling.'
+    $FinalMagsDenseBlock = [regex]::Match($FinalMagsAdapterContent, 'local\s+function\s+dense_array_length[\s\S]*?(?=local\s+function|function\s+Adapter:)').Value
+    Assert-True ($FinalMagsDenseBlock.Length -gt 0) 'Mags Redux dense-array validation must expose its bounded length helper.'
+    Assert-True ($FinalMagsDenseBlock -match 'for\s+key\s+in\s+pairs\s*\(' -and $FinalMagsDenseBlock -match 'maximum\s*==\s*count') 'Mags Redux dense-array validation must compare key count with maximum index.'
+    Assert-True ($FinalMagsDenseBlock -notmatch 'for\s+\w+\s*=\s*1\s*,') 'Mags Redux dense-array validation must never iterate through a third-party maximum index.'
+    Assert-True ($FinalMagsAdapterContent -match 'MAX_CONTEXT_TEXT\s*=\s*96') 'Mags Redux descriptor diagnostics must use an explicit bounded text ceiling.'
+    foreach ($Field in @('weapon_section','magazine_section','ammo_section','reserve_ordinal','expected_capacity','observed_state')) {
+        Assert-True ($FinalMagsAdapterContent -match ('(?m)^\s*' + [regex]::Escape($Field) + '\s*=')) "Mags Redux descriptor diagnostics must include $Field."
+    }
+    $FinalMagsInitializeBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:initialize[\s\S]*?(?=\r?\nfunction\s+new)').Value
+    $FinalMagsRefreshIndex = $FinalMagsInitializeBlock.IndexOf('api.refresh_loadout')
+    $FinalMagsFillIndex = $FinalMagsInitializeBlock.IndexOf('api.fill_magazine')
+    Assert-True ($FinalMagsRefreshIndex -ge 0 -and $FinalMagsFillIndex -gt $FinalMagsRefreshIndex) 'Mags Redux must refresh vendor loadout slots before every reserve fill.'
+    Assert-True ($Task5BootstrapContent -match 'refresh_loadout\s*=\s*binder\s+and\s+binder\.validate_loadout') 'Bootstrap must bind magazine_binder.validate_loadout as the vendor loadout refresh.'
+    Assert-True ($FinalMagsAdapterContent -match '\{\s*"is_supported_weapon"[\s\S]{0,220}"refresh_loadout"[\s\S]{0,220}"fill_magazine"') 'A present Mags Redux API must require the refresh capability.'
+    $FinalMagsAdvanceBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:advance_pending[\s\S]*?(?=\r?\nfunction\s+Materializer:update)').Value
+    Assert-True ($FinalMagsAdvanceBlock -match 'if\s+entry\s*==\s*nil\s+then[\s\S]{0,600}initialize_bonus_items[\s\S]{0,600}active_equipped_entry') 'Pending materialization must initialize reserves after all equipment verification and before activation.'
+    Assert-True ($FinalMagsAdvanceBlock -match 'pending\.bonus_initialized\s*~=\s*true[\s\S]{0,400}pending\.bonus_initialized\s*=\s*true') 'Pending reserve initialization must have an exact-once completion guard.'
+    $FinalMagsApplyBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:apply[\s\S]*?(?=\r?\nfunction\s+new)').Value
+    $FinalMagsSyncEquipIndex = $FinalMagsApplyBlock.IndexOf('for _, entry in ipairs(equipped) do')
+    $FinalMagsSyncInitIndex = $FinalMagsApplyBlock.LastIndexOf('initialize_bonus_items')
+    $FinalMagsSyncActiveIndex = $FinalMagsApplyBlock.LastIndexOf('local active_entry')
+    Assert-True ($FinalMagsSyncEquipIndex -ge 0 -and $FinalMagsSyncInitIndex -gt $FinalMagsSyncEquipIndex -and $FinalMagsSyncActiveIndex -gt $FinalMagsSyncInitIndex) 'Synchronous materialization must initialize reserves only after equipment and weapon verification.'
+    Assert-True (([regex]::Matches($FinalMagsMaterializerContent, 'initialize_bonus_items\s*\(')).Count -eq 3) 'Reserve initialization must have one helper and exactly one sync and one pending call site.'
+    foreach ($Name in @(
+        'mags_redux_refreshes_vendor_loadout_before_each_fill',
+        'mags_redux_rejects_pathological_capacities_before_vendor_fill',
+        'mags_redux_rejects_huge_sparse_loaded_index_in_key_count_time'
+    )) {
+        Assert-True ($FinalMagsAdapterTests -match [regex]::Escape($Name)) "Final Mags Redux adapter regression must cover $Name."
+    }
+    foreach ($Name in @(
+        'item_materializer_bonus_initialization_waits_for_synchronous_equipment_verification',
+        'item_materializer_bonus_initialization_waits_for_pending_equipment_and_runs_once',
+        'item_materializer_equipment_failure_rolls_back_without_bonus_initialization',
+        'item_materializer_bonus_capacity_limit_rejects_before_creation'
+    )) {
+        Assert-True ($FinalMagsMaterializerTests -match [regex]::Escape($Name)) "Final Mags Redux materializer regression must cover $Name."
+    }
+    Assert-True ($Task5DevTestContent -match 'vendor pouch refresh follows outfit equip and weapon magazine verification') 'Composed Mags Redux regression must require outfit-dependent pouch refresh after weapon verification.'
+    Assert-True ($Task5DevTestContent -match 'refresh_calls,\s*2') 'Composed Mags Redux regression must prove exactly one refresh per reserve.'
     Assert-True ($Task5BootstrapContent -match 'function\s+engine_inventory_slot\(ltx_slot\)[\s\S]{0,700}ltx_slot\s*\+\s*1') 'Actor loadout must translate zero-based LTX slots to one-based Lua inventory API slots'
     foreach ($Marker in @('WAIT_SLOT_VERIFY','CHARGE_OUTFIT','WAIT_MAGAZINE_VERIFY','WAIT_ACTIVE_VERIFY','outfit_requires_power','exo_is_object','exo_get_data','exo_init_data','exo_set_data')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment must retain cross-frame phase $Marker"

@@ -77,6 +77,7 @@ local function activation_catalog()
     return {
         max_physical_items_per_participant = 256,
         items = {
+            outfit_test = { category = "outfit", ltx_slot = 6 },
             rifle_test = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_test" } },
             ammo_test = { category = "ammo", box_size = 20 }
         }
@@ -152,15 +153,21 @@ local function waits_for_deferred_actor_weapon_activation()
         "ready result retains the activated logical slot")
 end
 
-local function bonus_fixture(fail_ordinal)
+local function bonus_fixture(fail_ordinal, options)
+    options = options or {}
     local env = {
         next_id = 1000,
+        now = 0,
         counts = {},
         full_ammo_boxes = 0,
         initialized = {},
+        events = {},
+        registered_count = 0,
+        ownership_count = 0,
         rollback_attempts = {},
         slots = {},
-        magazine = {}
+        magazine = {},
+        activation_submissions = 0
     }
     local materializer = gamma_arena_item_materializer.new({
         bonus_descriptors = function()
@@ -171,7 +178,7 @@ local function bonus_fixture(fail_ordinal)
                     bonus_kind = "mags_redux",
                     weapon_section = "rifle_test",
                     selected_ammo = "ammo_test",
-                    magazine_capacity = 30,
+                    magazine_capacity = options.capacity or 30,
                     reserve_ordinal = 1
                 },
                 {
@@ -180,7 +187,7 @@ local function bonus_fixture(fail_ordinal)
                     bonus_kind = "mags_redux",
                     weapon_section = "rifle_test",
                     selected_ammo = "ammo_test",
-                    magazine_capacity = 30,
+                    magazine_capacity = options.capacity or 30,
                     reserve_ordinal = 2
                 }
             }
@@ -201,26 +208,62 @@ local function bonus_fixture(fail_ordinal)
         end,
         entity_id = function(entity) return entity.runtime_id end,
         register = function(entity, descriptor)
+            env.registered_count = env.registered_count + 1
+            env.events[#env.events + 1] = "register:" .. descriptor.section
             return { id = entity.runtime_id, section = descriptor.section }
         end,
-        verify_ownership = function() return true end,
+        verify_ownership = function(entity)
+            env.ownership_count = env.ownership_count + 1
+            env.events[#env.events + 1] = "ownership:" .. entity.section
+            return true
+        end,
         initialize_created = function(entity, record, descriptor)
+            env.events[#env.events + 1] = "initialize:" .. tostring(descriptor.reserve_ordinal)
             env.initialized[#env.initialized + 1] = {
                 id = record.id,
                 section = descriptor.section,
-                ordinal = descriptor.reserve_ordinal
+                ordinal = descriptor.reserve_ordinal,
+                outfit_equipped = env.slots.outfit ~= nil,
+                weapon_verified = env.weapon_verified == true,
+                registered_count = env.registered_count,
+                ownership_count = env.ownership_count
             }
             if descriptor.reserve_ordinal == fail_ordinal then
                 return gamma_arena_result.err("GA_TEST_BONUS_INIT_FAILED", "injected reserve initialization failure")
             end
             return true
         end,
+        clock = options.pending and function() return env.now end or nil,
+        timeout_ms = 100,
         resolve_item = function(entity) return entity end,
-        move_to_slot = function(owner, entity, slot) env.slots[slot] = entity; return true end,
-        item_in_slot = function(owner, slot) return env.slots[slot] end,
-        fill_magazine = function(entity, ammo) env.magazine[entity.runtime_id] = ammo; return true end,
-        magazine_ammo = function(entity) return env.magazine[entity.runtime_id] end,
-        activate_slot = function() return true end,
+        move_to_slot = function(owner, entity, slot)
+            env.events[#env.events + 1] = "equip:" .. slot
+            if options.fail_slot == slot then
+                return gamma_arena_result.err("GA_TEST_EQUIP_FAILED", "injected equipment failure")
+            end
+            env.slots[slot] = entity
+            return true
+        end,
+        item_in_slot = function(owner, slot)
+            env.events[#env.events + 1] = "slot_proof:" .. slot
+            return env.slots[slot]
+        end,
+        fill_magazine = function(entity, ammo)
+            env.events[#env.events + 1] = "weapon_fill"
+            env.magazine[entity.runtime_id] = ammo
+            return true
+        end,
+        magazine_ammo = function(entity)
+            env.events[#env.events + 1] = "weapon_proof"
+            env.weapon_verified = env.magazine[entity.runtime_id] == "ammo_test"
+            return env.magazine[entity.runtime_id]
+        end,
+        activate_slot = function(owner, slot)
+            env.activation_submissions = env.activation_submissions + 1
+            env.requested_active = env.slots[slot]
+            return true
+        end,
+        active_item = function() return env.active end,
         prepare_rollback = function() return true end,
         rollback = function(entity)
             env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
@@ -228,6 +271,79 @@ local function bonus_fixture(fail_ordinal)
         end
     })
     return env, materializer
+end
+
+local function bonus_items_with_outfit()
+    return {
+        { section = "outfit_test", quantity = 1, equipped_slot = "outfit" },
+        { section = "rifle_test", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_test", quantity = 30 }
+    }
+end
+
+local function assert_bonus_initialization_after_equipment(env, label)
+    gamma_arena_test_assert.equals(#env.initialized, 2, label .. " initializes exactly two reserves")
+    for ordinal, observed in ipairs(env.initialized) do
+        gamma_arena_test_assert.equals(observed.ordinal, ordinal, label .. " initializes each reserve once in order")
+        gamma_arena_test_assert.is_true(observed.outfit_equipped, label .. " equips outfit before reserve initialization")
+        gamma_arena_test_assert.is_true(observed.weapon_verified, label .. " verifies weapon magazine before reserve initialization")
+        gamma_arena_test_assert.equals(observed.registered_count, env.registered_count,
+            label .. " registers every created item before reserve initialization")
+        gamma_arena_test_assert.equals(observed.ownership_count, env.ownership_count,
+            label .. " proves ownership for every created item before reserve initialization")
+    end
+end
+
+local function drive_bonus_pending(env, materializer, result)
+    for _ = 1, 64 do
+        if not result.ok or type(result.value) ~= "table" or result.value.pending ~= true then return result end
+        if env.requested_active ~= nil then env.active = env.requested_active end
+        env.now = env.now + 1
+        result = materializer:update()
+    end
+    return gamma_arena_result.err("GA_TEST_BONUS_UPDATE_LIMIT", "bonus fixture exceeded bounded updates")
+end
+
+local function bonus_initialization_waits_for_synchronous_equipment_verification()
+    local env, materializer = bonus_fixture()
+    local result = materializer:apply({ runtime_id = 1 }, bonus_items_with_outfit(), activation_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "synchronous bonus loadout materializes")
+    assert_bonus_initialization_after_equipment(env, "synchronous path")
+end
+
+local function bonus_initialization_waits_for_pending_equipment_and_runs_once()
+    local env, materializer = bonus_fixture(nil, { pending = true })
+    local result = materializer:apply({ runtime_id = 1 }, bonus_items_with_outfit(), activation_catalog())
+    gamma_arena_test_assert.is_true(result.ok and result.value.pending == true,
+        "pending bonus loadout starts across engine frames")
+    gamma_arena_test_assert.equals(#env.initialized, 0, "pending path does not initialize reserves before equipment")
+    local ready = drive_bonus_pending(env, materializer, result)
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.pending ~= true,
+        "pending bonus loadout reaches readiness")
+    gamma_arena_test_assert.equals(env.activation_submissions, 1, "pending path submits weapon activation once")
+    assert_bonus_initialization_after_equipment(env, "pending path")
+end
+
+local function equipment_failure_rolls_back_without_bonus_initialization()
+    local env, materializer = bonus_fixture(nil, { fail_slot = "weapon_2" })
+    local result = materializer:apply({ runtime_id = 1 }, bonus_items_with_outfit(), activation_catalog())
+    gamma_arena_test_assert.is_false(result.ok, "equipment failure aborts the bonus transaction")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_EQUIP_FAILED", "equipment failure identity is preserved")
+    gamma_arena_test_assert.equals(#env.initialized, 0, "equipment failure never mutates vendor reserve state")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, 34, "equipment failure rolls back outfit, weapon, boxes, and reserves")
+end
+
+local function bonus_capacity_limit_rejects_before_creation()
+    local env, materializer = bonus_fixture(nil, { capacity = 513 })
+    local result = materializer:apply({ runtime_id = 1 }, {
+        { section = "rifle_test", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_test", quantity = 1 }
+    }, activation_catalog())
+    gamma_arena_test_assert.is_false(result.ok, "oversized bonus descriptor fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_MATERIALIZE_BONUS_PLAN_INVALID",
+        "oversized bonus descriptor has a stable preflight error")
+    gamma_arena_test_assert.equals(env.next_id, 1000, "oversized bonus descriptor creates no physical items")
+    gamma_arena_test_assert.equals(#env.initialized, 0, "oversized bonus descriptor never reaches vendor initialization")
 end
 
 local function thirty_ammo_boxes_remain_with_two_bonus_magazines()
@@ -260,6 +376,10 @@ local cases = {
     { name = "item_materializer_accepts_one_entity_ammo_array", fn = accepts_one_entity_ammo_array },
     { name = "item_materializer_rolls_back_multi_entity_descriptor_result", fn = rolls_back_multi_entity_descriptor_result },
     { name = "item_materializer_waits_for_deferred_actor_weapon_activation", fn = waits_for_deferred_actor_weapon_activation },
+    { name = "item_materializer_bonus_initialization_waits_for_synchronous_equipment_verification", fn = bonus_initialization_waits_for_synchronous_equipment_verification },
+    { name = "item_materializer_bonus_initialization_waits_for_pending_equipment_and_runs_once", fn = bonus_initialization_waits_for_pending_equipment_and_runs_once },
+    { name = "item_materializer_equipment_failure_rolls_back_without_bonus_initialization", fn = equipment_failure_rolls_back_without_bonus_initialization },
+    { name = "item_materializer_bonus_capacity_limit_rejects_before_creation", fn = bonus_capacity_limit_rejects_before_creation },
     { name = "item_materializer_thirty_ammo_boxes_remain_with_two_bonus_magazines", fn = thirty_ammo_boxes_remain_with_two_bonus_magazines },
     { name = "item_materializer_bonus_initialization_failure_rolls_back_every_created_item", fn = bonus_initialization_failure_rolls_back_every_created_item }
 }
