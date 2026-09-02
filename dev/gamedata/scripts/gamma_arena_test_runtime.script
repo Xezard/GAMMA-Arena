@@ -1517,8 +1517,8 @@ local function fatal_main_menu_rejects_unshown_fatal_state()
 end
 
 local callback_names = {
-    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death", "actor_on_death",
-    "npc_on_net_spawn", "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
+    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death",
+    "npc_on_net_spawn", "npc_on_before_hit", "npc_on_hit_callback", "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
     "on_before_load_input", "actor_on_net_destroy", "on_before_level_changing"
 }
 
@@ -1909,11 +1909,27 @@ end
 
 local function unexpected_net_destroy_clears_external_route()
     local store = fake_store({ launch_pending = true, resume_pending = false })
-    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    local teardown_calls = 0
+    local deps = fake_orchestrator_deps(store)
+    deps.teardown = function(reason, preserve)
+        teardown_calls = teardown_calls + 1
+        gamma_arena_test_assert.equals(reason, "actor_destroyed", "ordinary actor destroy retains its teardown reason")
+        gamma_arena_test_assert.is_false(preserve, "ordinary actor destroy does not preserve the Arena session")
+        return gamma_arena_result.ok(true)
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
     orchestrator:on_game_load()
     orchestrator:actor_on_first_update()
-    orchestrator:actor_on_net_destroy()
+    local callbacks = gamma_arena_bootstrap.make_callbacks(orchestrator)
+    local destroyed = callbacks.actor_on_net_destroy()
+    local duplicate = callbacks.actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "ordinary actor destruction succeeds through the real callback router")
+    gamma_arena_test_assert.equals(duplicate, nil, "inactive duplicate ordinary actor destruction is guarded")
+    gamma_arena_test_assert.equals(teardown_calls, 1, "ordinary actor destruction retains one teardown")
     gamma_arena_test_assert.equals(store.clear_matching_count, 1, "unexpected actor destruction clears only this Arena session's resume route")
+    gamma_arena_test_assert.is_true(orchestrator.cleanup_required, "ordinary actor destruction retains cleanup ownership")
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "ordinary actor destruction deactivates Arena")
+    gamma_arena_test_assert.equals(orchestrator.runtime_stage, "CLEANING", "ordinary actor destruction retains CLEANING stage")
 end
 
 local function runtime_fatal_recovery_waits_for_cleanup_before_disconnect()
@@ -8464,8 +8480,9 @@ end
 local function runtime_natural_death_arms_confirms_and_neutralizes_once()
     local env = natural_death_environment()
     local flags = { ret_value = true }
-    local before = env.orchestrator:actor_on_before_death(77, flags)
-    local duplicate_before = env.orchestrator:actor_on_before_death(77, { ret_value = true })
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local before = callbacks.actor_on_before_death(77, flags)
+    local duplicate_before = callbacks.actor_on_before_death(77, { ret_value = true })
     local post_lethal_victory = env.orchestrator:queue_victory()
     gamma_arena_test_assert.is_true(before.ok, "Arena death arms")
     gamma_arena_test_assert.is_true(duplicate_before.ok and duplicate_before.value == false, "duplicate lethal callback is inert")
@@ -8478,11 +8495,10 @@ local function runtime_natural_death_arms_confirms_and_neutralizes_once()
     gamma_arena_test_assert.is_true(post_lethal_victory.ok and post_lethal_victory.value == false, "lethal arm wins any later same-frame victory callback")
     gamma_arena_test_assert.equals(env.orchestrator.pending_victory, false, "post-lethal victory cannot reopen in-level result flow")
 
-    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
-    local dead = callbacks.actor_on_death()
-    local duplicate_dead = callbacks.actor_on_death()
-    gamma_arena_test_assert.is_true(dead.ok, "real death confirms")
-    gamma_arena_test_assert.equals(duplicate_dead, nil, "inactive duplicate actor_on_death callback is guarded")
+    local destroyed = callbacks.actor_on_net_destroy()
+    local duplicate_destroyed = callbacks.actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "real net-destroy confirms the latched death")
+    gamma_arena_test_assert.equals(duplicate_destroyed, nil, "inactive duplicate actor_on_net_destroy callback is guarded")
     gamma_arena_test_assert.equals(env.confirm, 1, "one defeat intent is confirmed")
     gamma_arena_test_assert.equals(env.confirmed_token, "gad1:1000:natural", "confirmation reuses the armed token")
     gamma_arena_test_assert.equals(env.neutralize, 1, "owned opponents are neutralized")
@@ -8497,15 +8513,15 @@ local function runtime_natural_death_failures_never_cancel_engine_death()
     gamma_arena_test_assert.is_false(arm_failed.ok, "defeat arm failure remains observable")
     gamma_arena_test_assert.equals(arm_flags.ret_value, true, "arm failure never cancels engine death")
     gamma_arena_test_assert.equals(arm.actor_mutations, 0, "arm failure never heals the dying actor")
-    local arm_dead = gamma_arena_bootstrap.make_callbacks(arm.orchestrator).actor_on_death()
-    gamma_arena_test_assert.is_false(arm_dead.ok, "missing armed token remains observable after real death")
+    local arm_destroyed = gamma_arena_bootstrap.make_callbacks(arm.orchestrator).actor_on_net_destroy()
+    gamma_arena_test_assert.is_false(arm_destroyed.ok, "missing armed token remains observable after real net-destroy")
     gamma_arena_test_assert.equals(arm.neutralize, 1, "arm failure cannot prevent dead-actor opponent neutralization")
     gamma_arena_test_assert.is_false(arm.orchestrator:is_active(), "arm failure still clears dead in-level state")
 
     local confirm = natural_death_environment({ confirm_failure = true })
     local confirm_flags = { ret_value = true }
     gamma_arena_bootstrap.make_callbacks(confirm.orchestrator).actor_on_before_death(77, confirm_flags)
-    local confirmed = gamma_arena_bootstrap.make_callbacks(confirm.orchestrator).actor_on_death()
+    local confirmed = gamma_arena_bootstrap.make_callbacks(confirm.orchestrator).actor_on_net_destroy()
     gamma_arena_test_assert.is_false(confirmed.ok, "post-mortem confirm failure remains observable")
     gamma_arena_test_assert.equals(confirm_flags.ret_value, true, "confirm failure cannot retroactively cancel death")
     gamma_arena_test_assert.equals(confirm.neutralize, 1, "opponents are neutralized even when defeat confirmation fails")
@@ -8518,10 +8534,16 @@ local function runtime_natural_death_outside_active_arena_is_inert()
         env.orchestrator.runtime_stage = stage
         if stage == "INACTIVE" then env.orchestrator.active = false end
         local flags = { ret_value = true }
-        local before = env.orchestrator:actor_on_before_death(77, flags)
-        local dead = env.orchestrator:actor_on_death()
-        gamma_arena_test_assert.is_true(before.ok and before.value == false, stage .. " before-death is inert")
-        gamma_arena_test_assert.is_true(dead.ok and dead.value == false, stage .. " actor death is inert")
+        local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+        local before = callbacks.actor_on_before_death(77, flags)
+        local destroyed = callbacks.actor_on_net_destroy()
+        if stage == "INACTIVE" then
+            gamma_arena_test_assert.equals(before, nil, "inactive before-death callback is guarded")
+            gamma_arena_test_assert.equals(destroyed, nil, "inactive net-destroy callback is guarded")
+        else
+            gamma_arena_test_assert.is_true(before.ok and before.value == false, stage .. " before-death is inert")
+            gamma_arena_test_assert.is_true(destroyed.ok, stage .. " ordinary net-destroy remains valid")
+        end
         gamma_arena_test_assert.equals(flags.ret_value, true, stage .. " never mutates stock death flags")
         gamma_arena_test_assert.equals(env.arm + env.confirm + env.neutralize, 0, stage .. " writes no Arena defeat state")
     end

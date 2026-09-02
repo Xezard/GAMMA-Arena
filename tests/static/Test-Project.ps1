@@ -1607,9 +1607,14 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
         Assert-True ($Task5BootstrapContent.Contains($Marker)) "Bootstrap runtime readiness must cover $Marker"
     }
     Assert-True ($Task5BootstrapContent -match 'type\(result\.error\)\s*~=\s*"table"\s+or\s+type\(result\.error\.code\)\s*~=\s*"string"\s+or\s+type\(result\.error\.message\)\s*~=\s*"string"') 'Bootstrap registration Result validation must reject malformed failed error shapes'
-    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','actor_on_death','npc_on_net_spawn','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
+    $CallbackNamesStart = $Task5BootstrapContent.IndexOf('local callback_names = {')
+    $CallbackNamesEnd = if ($CallbackNamesStart -ge 0) { $Task5BootstrapContent.IndexOf('}', $CallbackNamesStart) } else { -1 }
+    Assert-True ($CallbackNamesStart -ge 0 -and $CallbackNamesEnd -gt $CallbackNamesStart) 'Bootstrap callback list must remain structurally testable'
+    $CallbackNamesBlock = if ($CallbackNamesStart -ge 0 -and $CallbackNamesEnd -gt $CallbackNamesStart) { $Task5BootstrapContent.Substring($CallbackNamesStart, $CallbackNamesEnd - $CallbackNamesStart) } else { '' }
+    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','npc_on_net_spawn','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
         Assert-True ($Task5BootstrapContent -match ('"' + [regex]::Escape($Callback) + '"')) "Bootstrap registration table must contain $Callback"
     }
+    Assert-True ($CallbackNamesBlock -notmatch '"actor_on_death"') 'Bootstrap must not register the nonexistent actor_on_death callback'
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_quit') 'Bootstrap must not treat closing MCM/main menu as quitting Arena'
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_init') 'Task 5 bootstrap must not duplicate the Task 4 main-menu callback'
     Assert-True ($Task5BootstrapContent -match 'reconcile\s*=\s*overrides\.reconcile\s+or\s+function\s*\(\s*config\s*\)[\s\S]{0,200}gamma_arena_migrations\.migrate') 'Production bootstrap must inject migration/reconciliation into every orchestrator'
@@ -1701,7 +1706,9 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Production event diagnostics must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'deferred_level_logged') 'Wrong-level launch diagnostics must be deduplicated instead of logging every frame'
-    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_death\s*\(\s*\)') 'Natural actor death callback must expose the no-argument Anomaly signature'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:finalize_actor_death\s*\(\s*\)') 'Natural actor death finalization must be internal'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_net_destroy[\s\S]{0,500}death_latched[\s\S]{0,300}finalize_actor_death') 'Actor net destroy must finalize a latched death'
+    Assert-True ($Task5OrchestratorContent -notmatch 'callback_name\s*==\s*"actor_on_death"') 'Callback error routing must not retain nonexistent actor_on_death cases'
     Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,1200}arm_defeat') 'Before-death handling must arm the persisted cross-VM defeat intent'
     $Task5BeforeDeathBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:actor_on_before_death[\s\S]*?[\r\n]+end').Value
     Assert-True ($Task5BeforeDeathBlock -notmatch 'ret_value|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
@@ -3053,7 +3060,9 @@ if ((Test-Path -LiteralPath $Task7CatalogPath) -and (Test-Path -LiteralPath $Tas
 }
 if (Test-Path -LiteralPath $Task7BootstrapPath) {
     $Task7BootstrapContent = Get-Content -LiteralPath $Task7BootstrapPath -Raw
-    Assert-True ($Task7BootstrapContent -match 'local\s+callback_names\s*=\s*\{[\s\S]{0,600}"actor_on_before_death"[\s\S]{0,160}"actor_on_death"') 'Bootstrap callback registration must retain actor_on_before_death followed by actor_on_death.'
+    $Task7CallbackNamesBlock = [regex]::Match($Task7BootstrapContent, 'local\s+callback_names\s*=\s*\{[\s\S]*?\}').Value
+    Assert-True ($Task7CallbackNamesBlock -match '"actor_on_before_death"') 'Bootstrap callback registration must retain actor_on_before_death.'
+    Assert-True ($Task7CallbackNamesBlock -notmatch '"actor_on_death"') 'Bootstrap callback registration must reject nonexistent actor_on_death.'
     $Task7ChargeStart = $Task7BootstrapContent.LastIndexOf('if equipment.phase == "CHARGE_OUTFIT" then')
     $Task7ChargeEnd = if ($Task7ChargeStart -ge 0) { $Task7BootstrapContent.IndexOf('equipment.role_index = equipment.role_index + 1', $Task7ChargeStart) } else { -1 }
     Assert-True ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) 'Powered-exo CHARGE_OUTFIT phase must remain structurally testable.'
@@ -3065,16 +3074,16 @@ if (Test-Path -LiteralPath $Task7BootstrapPath) {
 if (Test-Path -LiteralPath $Task7OrchestratorPath) {
     $Task7OrchestratorContent = Get-Content -LiteralPath $Task7OrchestratorPath -Raw
     $Task7BeforeDeathStart = $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_before_death')
-    $Task7AfterDeathStart = if ($Task7BeforeDeathStart -ge 0) { $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_death', $Task7BeforeDeathStart) } else { -1 }
-    Assert-True ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) 'Natural-death callback boundary must remain structurally testable.'
-    if ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) {
-        $Task7BeforeDeathBlock = $Task7OrchestratorContent.Substring($Task7BeforeDeathStart, $Task7AfterDeathStart - $Task7BeforeDeathStart)
+    $Task7FinalizeDeathStart = if ($Task7BeforeDeathStart -ge 0) { $Task7OrchestratorContent.IndexOf('function Orchestrator:finalize_actor_death', $Task7BeforeDeathStart) } else { -1 }
+    Assert-True ($Task7BeforeDeathStart -ge 0 -and $Task7FinalizeDeathStart -gt $Task7BeforeDeathStart) 'Natural-death arm/finalize boundary must remain structurally testable.'
+    if ($Task7BeforeDeathStart -ge 0 -and $Task7FinalizeDeathStart -gt $Task7BeforeDeathStart) {
+        $Task7BeforeDeathBlock = $Task7OrchestratorContent.Substring($Task7BeforeDeathStart, $Task7FinalizeDeathStart - $Task7BeforeDeathStart)
         Assert-True ($Task7BeforeDeathBlock -match 'arm_defeat') 'Natural death must arm a durable defeat intent before engine death.'
         Assert-True ($Task7BeforeDeathBlock -notmatch '\bret_value\s*=\s*(?:false|nil)\b') 'Natural death must not cancel lethal engine damage through flags.ret_value.'
         Assert-True ($Task7BeforeDeathBlock -notmatch 'hold_after_logical_death|release_logical_death_hold') 'Natural death must not invoke logical-death hold or revival behavior.'
     }
-    if ($Task7AfterDeathStart -ge 0) {
-        $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7AfterDeathStart)
+    if ($Task7FinalizeDeathStart -ge 0) {
+        $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7FinalizeDeathStart)
         Assert-True ($Task7DeathBlock -match 'confirm_defeat[\s\S]{0,1200}neutralize_owned_opponents') 'Real actor death must confirm defeat then neutralize owned opponents.'
     }
 }

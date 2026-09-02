@@ -975,12 +975,14 @@ end
     $PostDeathHoldResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $PostDeathHoldFixture) -CaptureOutput
     Assert-True ($PostDeathHoldResult.ExitCode -ne 0 -and $PostDeathHoldResult.Output -match 'Production Arena death control must not invoke logical-death hold, revival, invulnerability, or healing APIs\.') 'Static policy must reject logical-death holds introduced outside actor_on_before_death.'
 
-    $MissingDeathCallbackFixture = New-Task7Fixture 'missing-actor-death-callback'
-    $MissingDeathCallbackPath = Join-Path $MissingDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
-    $MissingDeathCallback = [regex]::Replace((Get-Content -LiteralPath $MissingDeathCallbackPath -Raw), '(?m)^\s*"actor_on_death",\r?\n', '', 1)
-    Write-FixtureFile $MissingDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $MissingDeathCallback
-    $MissingDeathCallbackResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $MissingDeathCallbackFixture) -CaptureOutput
-    Assert-True ($MissingDeathCallbackResult.ExitCode -ne 0 -and $MissingDeathCallbackResult.Output -match 'Bootstrap callback registration must retain actor_on_before_death followed by actor_on_death\.') 'Static policy must reject a missing actor_on_death registration through its intended policy failure.'
+    $UnsupportedDeathCallbackFixture = New-Task7Fixture 'unsupported-actor-death-callback'
+    $UnsupportedDeathCallbackPath = Join-Path $UnsupportedDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script'
+    $UnsupportedDeathCallbackSource = Get-Content -LiteralPath $UnsupportedDeathCallbackPath -Raw
+    $UnsupportedDeathCallback = $UnsupportedDeathCallbackSource.Replace('    "actor_on_before_death",', '    "actor_on_before_death",' + [Environment]::NewLine + '    "actor_on_death",')
+    Assert-True ($UnsupportedDeathCallback -ne $UnsupportedDeathCallbackSource) 'Unsupported actor-death fixture must preserve supported callbacks and add exactly the forbidden callback.'
+    Write-FixtureFile $UnsupportedDeathCallbackFixture 'src\gamedata\scripts\gamma_arena_bootstrap.script' $UnsupportedDeathCallback
+    $UnsupportedDeathCallbackResult = Invoke-PowerShellFile (Join-Path $RepoRoot 'tests\static\Test-Project.ps1') @('-RepoRoot', $UnsupportedDeathCallbackFixture) -CaptureOutput
+    Assert-True ($UnsupportedDeathCallbackResult.ExitCode -ne 0 -and $UnsupportedDeathCallbackResult.Output -match 'Bootstrap must not register the nonexistent actor_on_death callback') 'Static policy must reject an added actor_on_death registration while preserving every supported callback.'
 
     $DefeatStageFixture = New-Task7Fixture 'defeat-confirmation-bypassed'
     $DefeatStagePath = Join-Path $DefeatStageFixture 'src\gamedata\scripts\gamma_arena_session_store.script'
