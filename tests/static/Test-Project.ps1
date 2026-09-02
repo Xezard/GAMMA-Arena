@@ -3664,8 +3664,9 @@ foreach ($Contract in $MedicalPolicyContracts) {
 $MedicalPolicyDomain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
 Assert-True ($MedicalPolicyDomain -match 'gamma_arena_test_npc_medical_policy\.run\s*\(\s*run_case_fn\s*\)') 'Medical policy tests must run from the Dev domain suite.'
 $MedicalPolicyTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_npc_medical_policy.script') -Raw
-foreach ($CaseName in @('missing_keys', 'disabled_overlap', 'out_of_combat_overlap', 'non_overlap', 'medkit_overlap', 'bandage_overlap', 'both_overlaps', 'whitespace_empty_tokens', 'exact_matching', 'malformed_boolean', 'accessor_throw', 'non_string_value')) {
-    Assert-True ($MedicalPolicyTests -match [regex]::Escape($CaseName)) "Medical policy tests must cover $CaseName."
+foreach ($CaseName in @('missing_keys', 'enable_true', 'enable_on', 'enable_yes', 'enable_one', 'enable_false', 'enable_off', 'enable_no', 'enable_zero', 'in_combat_true', 'in_combat_on', 'in_combat_yes', 'in_combat_one', 'in_combat_false', 'in_combat_off', 'in_combat_no', 'in_combat_zero', 'non_overlap', 'medkit_overlap', 'bandage_overlap', 'both_overlaps', 'whitespace_empty_tokens', 'exact_matching', 'malformed_enable', 'malformed_in_combat', 'line_exist_throw', 'r_string_ex_throw', 'non_string_enable', 'non_string_medkits', 'non_string_bandages')) {
+    $CaseRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($CaseName) + '"\s*,'
+    Assert-True (([regex]::Matches($MedicalPolicyTests, $CaseRegistration)).Count -eq 1) "Medical policy tests must register exactly one executable case: $CaseName."
 }
 
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
