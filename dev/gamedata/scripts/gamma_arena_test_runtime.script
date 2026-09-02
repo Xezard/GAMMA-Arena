@@ -12103,6 +12103,75 @@ local function runtime_composed_non_device_items_reach_ready_cross_frame()
     gamma_arena_test_assert.equals(env.slots.knife, env.created[1], 'production non-device READY retains the exact equipped entity')
 end
 
+local function runtime_composed_actor_binds_mags_redux_bonus_ports()
+    local owner = { id = function() return 77 end }
+    local env, item_ports = task11_production_item_ports()
+    local mag_data = {}
+    local fill_calls = 0
+    item_ports.mags_redux_resolve_api = function()
+        return {
+            is_supported_weapon = function(section) return section == "rifle" end,
+            default_magazine = function() return "mag_rifle" end,
+            read_magazine = function(id) return mag_data[id] end,
+            is_carried = function() return false end,
+            fill_magazine = function(id, section, capacity, ammo)
+                fill_calls = fill_calls + 1
+                gamma_arena_test_assert.is_true(env.tags[id] ~= nil, "reserve magazine is registered before vendor initialization")
+                local loaded = {}
+                for index = 1, capacity do loaded[index] = ammo end
+                mag_data[id] = { section = section, loaded = loaded }
+                return true
+            end
+        }
+    end
+    item_ports.mags_redux_magazine_capacity = function(section)
+        gamma_arena_test_assert.equals(section, "mag_rifle", "production adapter reads the planned magazine")
+        return 30
+    end
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.actor = nil
+    deps.actor_item_ports = item_ports
+    local orchestrator = gamma_arena_bootstrap.compose(deps)
+    orchestrator.session = { schema_version = 2, session_id = "ga_task_mags", session_nonce = "ga_task_mags_nonce" }
+    local items = orchestrator.deps.actor.deps.items
+    local applied = items:apply(owner, {
+        { section = "rifle", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_a", quantity = 30 }
+    }, universal_catalog())
+    local ready = task6_drive_items_ready(items, applied)
+    gamma_arena_test_assert.is_true(ready.ok and ready.value.ready == true, "production Mags Redux loadout reaches READY")
+    local ammo_boxes, magazines = 0, 0
+    for _, entity in ipairs(env.created) do
+        if entity.section_value == "ammo_a" then
+            ammo_boxes = ammo_boxes + 1
+            gamma_arena_test_assert.equals(entity.create_options.ammo, 30, "selected ammo box remains full")
+        elseif entity.section_value == "mag_rifle" then
+            magazines = magazines + 1
+            gamma_arena_test_assert.equals(#mag_data[entity.runtime_id].loaded, 30, "reserve magazine is full")
+        end
+    end
+    gamma_arena_test_assert.equals(ammo_boxes, 30, "production integration preserves thirty selected boxes")
+    gamma_arena_test_assert.equals(magazines, 2, "production integration creates two reserve magazines")
+    gamma_arena_test_assert.equals(fill_calls, 2, "production integration initializes each reserve magazine exactly once")
+    local checkpoints = {}
+    for _, checkpoint in ipairs(deps._diagnostics.checkpoints) do
+        if checkpoint.code == "GA_MAGS_REDUX_RESERVE_READY" then checkpoints[#checkpoints + 1] = checkpoint end
+    end
+    gamma_arena_test_assert.equals(#checkpoints, 2, "production integration emits one checkpoint per initialized reserve")
+    for ordinal, checkpoint in ipairs(checkpoints) do
+        local field_count = 0
+        for _ in pairs(checkpoint.context) do field_count = field_count + 1 end
+        gamma_arena_test_assert.equals(field_count, 6, "reserve checkpoint contains only bounded scalar fields")
+        gamma_arena_test_assert.equals(checkpoint.code, "GA_MAGS_REDUX_RESERVE_READY", "reserve checkpoint code is exact")
+        gamma_arena_test_assert.equals(checkpoint.context.weapon_section, "rifle", "reserve checkpoint bounds weapon section")
+        gamma_arena_test_assert.equals(checkpoint.context.magazine_section, "mag_rifle", "reserve checkpoint bounds magazine section")
+        gamma_arena_test_assert.equals(checkpoint.context.reserve_ordinal, ordinal, "reserve checkpoint retains ordinal")
+        gamma_arena_test_assert.equals(checkpoint.context.capacity, 30, "reserve checkpoint retains capacity")
+        gamma_arena_test_assert.equals(checkpoint.context.ammo_section, "ammo_a", "reserve checkpoint bounds ammo section")
+        gamma_arena_test_assert.is_false(checkpoint.context.carried, "reserve checkpoint retains best-effort carried state")
+    end
+end
+
 local function runtime_universal_actor_device_rollback_neutralizes_once_before_any_release()
     local owner = { id = function() return 77 end }
     local catalog = universal_catalog()
@@ -12906,6 +12975,7 @@ local cases = {
     { name = 'runtime_composed_all_exact_actor_devices_reach_ready_cross_frame', fn = runtime_composed_all_exact_actor_devices_reach_ready_cross_frame },
     { name = 'runtime_universal_actor_device_timeout_boundary_and_wrap', fn = runtime_universal_actor_device_timeout_boundary_and_wrap },
     { name = 'runtime_composed_non_device_items_reach_ready_cross_frame', fn = runtime_composed_non_device_items_reach_ready_cross_frame },
+    { name = 'runtime_composed_actor_binds_mags_redux_bonus_ports', fn = runtime_composed_actor_binds_mags_redux_bonus_ports },
     { name = 'runtime_universal_actor_device_rollback_neutralizes_once_before_any_release', fn = runtime_universal_actor_device_rollback_neutralizes_once_before_any_release },
     { name = 'runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown', fn = runtime_universal_actor_device_provisional_tag_failures_wait_for_exact_shutdown },
     { name = 'runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe', fn = runtime_universal_actor_device_cleanup_covers_absent_offline_pending_reprobe },

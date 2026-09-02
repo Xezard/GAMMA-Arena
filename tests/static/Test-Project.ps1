@@ -2285,6 +2285,11 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($Task11HostilityBlock -match 'set_relation[\s\S]*force_set_goodwill') 'Hostile activation must apply relation then goodwill'
     Assert-True ($Task11HostilityBlock -notmatch 'make_object_visible_somewhen|set_enemy') 'Hostile activation must not seed omniscient memory or force a current target'
     Assert-True ($Task5BootstrapContent -notmatch 'ports\.reserve_magazines|reserve_magazines\s*=') 'Runtime must not regenerate the actor reserve-magazine floor'
+    foreach ($Marker in @('gamma_arena_mags_redux.new','mags_redux_resolve_api','mags_redux_magazine_capacity','rawget(_G, "magazine_binder")','rawget(_G, "mags_patches")','is_supported_weapon','weapon_default_magazine','get_mag_loaded','is_carried_mag','fill_mag','max_mag_size','bonus_descriptors','initialize_created','GA_MAGS_REDUX_RESERVE_READY')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Mags Redux production binding must cover $Marker"
+    }
+    Assert-True ($Task5BootstrapContent -notmatch 'function\s+mags_patches\.|function\s+magazine_binder\.') 'Gamma Arena must not override Mags Redux vendor functions'
+    Assert-True ($Task5BootstrapContent -match 'initialize_created\s*=\s*function\s*\([^,]+,\s*record,\s*descriptor\)[\s\S]{0,500}mags_redux:initialize\(record\.id') 'Mags Redux initialization must use the registered Arena ownership record id'
     Assert-True ($Task5BootstrapContent -match 'function\s+engine_inventory_slot\(ltx_slot\)[\s\S]{0,700}ltx_slot\s*\+\s*1') 'Actor loadout must translate zero-based LTX slots to one-based Lua inventory API slots'
     foreach ($Marker in @('WAIT_SLOT_VERIFY','CHARGE_OUTFIT','WAIT_MAGAZINE_VERIFY','WAIT_ACTIVE_VERIFY','outfit_requires_power','exo_is_object','exo_get_data','exo_init_data','exo_set_data')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment must retain cross-frame phase $Marker"
