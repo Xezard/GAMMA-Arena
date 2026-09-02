@@ -320,12 +320,12 @@ $Task4CurrentGeneratorContracts = @(
     [PSCustomObject]@{
         Protection = 'Task 4 current actor quarantine protection'
         Path = 'src\gamedata\scripts\gamma_arena_catalog.script'
-        Required = @('ACTOR_WEAPON_QUARANTINE', 'wpn_dtmdr\s*=\s*true', 'wpn_eft_mts_255_uh2\s*=\s*true', 'actor_weapon_quarantine_v1', 'snapshot\.actor_weapon_list')
+        Required = @('ACTOR_WEAPON_QUARANTINE', 'wpn_dtmdr\s*=\s*true', 'wpn_eft_mts_255_uh2\s*=\s*true', 'wpn_vssk_ekp8_18\s*=\s*true', 'actor_weapon_quarantine_v2', 'snapshot\.actor_weapon_list')
     },
     [PSCustomObject]@{
         Protection = 'Task 4 current actor quarantine protection'
         Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
-        Required = @('actor_weapon_quarantine_is_exact_and_actor_only', 'GA_ACTOR_WEAPON_QUARANTINED', 'actor generation never selects quarantined MTS-255 UH2')
+        Required = @('actor_weapon_quarantine_is_exact_and_actor_only', 'GA_ACTOR_WEAPON_QUARANTINED', 'actor generation never selects quarantined MTS-255 UH2', 'actor generation never selects quarantined VSSK EKP8-18', 'broken VSSK remains NPC-eligible', 'sibling VSSK optic remains actor eligible')
     },
     [PSCustomObject]@{
         Protection = 'Task 4 current affordability and diversity protection'
@@ -2439,9 +2439,11 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
     Assert-True ($Task3CatalogScriptContent -match 'ACTOR_WEAPON_QUARANTINE') 'Catalog must declare an explicit actor-only weapon quarantine.'
     Assert-True ($Task3CatalogScriptContent -match 'wpn_dtmdr\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_dtmdr section.'
-    Assert-True ($Task3CatalogScriptContent -match 'wpn_eft_mts_255_uh2\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_eft_mts_255_uh2 section.'
+Assert-True ($Task3CatalogScriptContent -match 'wpn_eft_mts_255_uh2\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_eft_mts_255_uh2 section.'
+Assert-True ($Task3CatalogScriptContent -match 'wpn_vssk_ekp8_18\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_vssk_ekp8_18 section.'
+Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v2') 'Actor quarantine policy identity must advance after the VSSK exclusion.'
     Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_list') 'Catalog must expose a deterministic actor weapon list.'
-    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v1') 'Catalog revision identity must include the actor quarantine policy.'
+    Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v2') 'Catalog revision identity must include the current actor quarantine policy.'
 }
 if (Test-Path -LiteralPath $DifficultyPath) {
     $DifficultyContent = Get-Content -LiteralPath $DifficultyPath -Raw
