@@ -2206,6 +2206,10 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
     $MedicalActivationBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:drive_online[\s\S]*?function\s+EntityAdapter:add_cleanup_error').Value
     Assert-True ($MedicalActivationBlock.IndexOf('hidden_charge_cleared') -ge 0 -and $MedicalActivationBlock.IndexOf('clear_hidden_charge') -lt $MedicalActivationBlock.IndexOf('set_actor_hostile')) 'Entity activation must clear stock hidden healing before combat hostility'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:begin_apply\(validated_spec,\s*session_id,\s*catalog,\s*npc_medical_owner\)') 'Entity application must receive the frozen NPC medical owner.'
+    Assert-True ($Task7EntityContent -match 'npc_medical_owner\s*==\s*nil[\s\S]{0,100}"arena"') 'Legacy entity callers must default NPC medical ownership to Arena.'
+    Assert-True ($MedicalActivationBlock -match 'self\.npc_medical_owner\s*==\s*"arena"[\s\S]{0,500}clear_hidden_charge') 'Only Arena-owned NPC medical activation may clear the hidden stock charge.'
+    Assert-True ($MedicalActivationBlock -match 'self\.npc_medical_owner\s*==\s*"external"[\s\S]{0,500}hidden_charge_cleared') 'Delegated medical ownership must satisfy READY without forged hidden-charge evidence.'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:consume_medical_item\s*\(') 'Entity adapter must expose guarded physical medicine consumption'
     foreach ($Marker in @('GA_ENTITY_MEDICAL_FIGHT_STALE','release_reason','consumed','current_fight_id')) {
         Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Physical medicine consumption must cover $Marker"
@@ -2413,7 +2417,7 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_preflight_publishes_npc_medical_ownership','runtime_preflight_rejects_invalid_npc_medical_config','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
     }
-    foreach ($Marker in @('runtime_orchestrator_forwards_preflight_npc_medical_owner','runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation','runtime_npc_medical_external_owner_is_dependency_free')) {
+    foreach ($Marker in @('runtime_orchestrator_forwards_preflight_npc_medical_owner','runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation','runtime_npc_medical_external_owner_is_dependency_free','runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation','runtime_entity_external_medical_owner_delegates_hidden_charge','runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation')) {
         $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Marker) + '\s*\}'
         Assert-True (([regex]::Matches($Task5DevTestContent, $Registration)).Count -eq 1) "Delegated NPC medical case must be registered exactly: $Marker"
     }
@@ -2447,6 +2451,10 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_OWNERSHIP') 'Orchestrator must emit one bounded NPC medical ownership diagnostic.'
     Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_AI_CONFIG_INVALID') 'Orchestrator must reject invalid NPC medical ownership metadata.'
     Assert-True ($Task5OrchestratorContent -match 'npc_medical_owner\s*=\s*self\.npc_medical_owner\s+or\s+"arena"') 'Orchestrator must pass the frozen NPC medical owner into start.'
+    $MedicalPrepareBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:prepare_fight[\s\S]*?function\s+Orchestrator:begin_countdown_after_equipment').Value
+    $MedicalRetryBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:drive_continuation[\s\S]*?function\s+Orchestrator:drive_runtime').Value
+    Assert-True ($MedicalPrepareBlock -match '"begin_apply"[\s\S]{0,500}self\.npc_medical_owner') 'Initial entity activation must receive the frozen NPC medical owner.'
+    Assert-True ($MedicalRetryBlock -match '"begin_apply"[\s\S]{0,500}self\.npc_medical_owner') 'Integrity-retry entity activation must receive the frozen NPC medical owner.'
 }
 
 $Task3DataFiles = @(

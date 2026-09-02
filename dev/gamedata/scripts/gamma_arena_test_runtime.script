@@ -4471,8 +4471,8 @@ local function pump_entity(adapter, env, limit)
     return result, adapter:registry_snapshot()
 end
 
-local function begin_entity_apply(adapter, env, spec, session_id)
-    local result = adapter:begin_apply(spec, session_id, entity_catalog())
+local function begin_entity_apply(adapter, env, spec, session_id, npc_medical_owner)
+    local result = adapter:begin_apply(spec, session_id, entity_catalog(), npc_medical_owner)
     if result.ok then env.opponents_enabled = true end
     return result
 end
@@ -7137,16 +7137,57 @@ local function runtime_entity_relations_friend_first_then_actor_hostile()
     local adapter = gamma_arena_entity_adapter.new(deps)
     begin_entity_apply(adapter, env, entity_spec(2), "session-relations"); local result, snapshot = pump_entity(adapter, env)
     gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "relations complete before ACTIVE")
-    local first_friend, first_hidden_clear, first_hostile = nil, nil, nil
+    local first_friend, first_hidden_clear, last_hidden_clear, first_hostile = nil, nil, nil, nil
     for index, event in ipairs(env.events) do
         if first_friend == nil and string.find(event, "^friend:") then first_friend = index end
-        if first_hidden_clear == nil and string.find(event, "^hidden_charge:") then first_hidden_clear = index end
+        if string.find(event, "^hidden_charge:") then first_hidden_clear = first_hidden_clear or index; last_hidden_clear = index end
         if first_hostile == nil and string.find(event, "^hostile:") then first_hostile = index end
         if string.find(event, "^hostile:") then gamma_arena_test_assert.is_true(string.find(event, ":-5000$") ~= nil, "actor goodwill is exactly -5000") end
     end
     gamma_arena_test_assert.is_true(first_friend ~= nil and first_hostile ~= nil and first_friend < first_hostile, "all NPC friendship is established before actor hostility")
-    gamma_arena_test_assert.is_true(first_hidden_clear ~= nil and first_hidden_clear < first_hostile, "stock hidden healing charges are cleared before hostility activates combat")
+    gamma_arena_test_assert.is_true(first_hidden_clear ~= nil and last_hidden_clear < first_hostile, "every stock hidden healing charge is cleared before any hostility activates combat")
     gamma_arena_test_assert.equals(env.hidden_charge_clears, 2, "every registered opponent clears its hidden healing charge once before ACTIVE")
+end
+
+local function runtime_entity_external_medical_owner_delegates_hidden_charge()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    local begun = begin_entity_apply(adapter, env, entity_spec(1), "session-external-medical", "external")
+    gamma_arena_test_assert.is_true(begun.ok, "external medical ownership begins the composed entity transaction")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "delegated medical ownership still reaches ACTIVE")
+    gamma_arena_test_assert.equals(env.hidden_charge_clears, 0, "delegated medical ownership never reads or clears the stock hidden charge")
+    gamma_arena_test_assert.equals(env.hostile_calls, 1, "delegated medical ownership preserves hostile activation")
+    local npc = snapshot.npcs[1]
+    local retained = { medkit = false, bandage = false }
+    for _, record in ipairs(snapshot.items) do
+        if record.source == "assigned" and record.parent_id == npc.id and retained[record.section] ~= nil
+            and record.released ~= true and env.objects[record.id] ~= nil then
+            retained[record.section] = true
+        end
+    end
+    gamma_arena_test_assert.is_true(retained.medkit, "delegated ownership retains the registered physical medkit")
+    gamma_arena_test_assert.is_true(retained.bandage, "delegated ownership retains the registered physical bandage")
+    gamma_arena_test_assert.is_false(npc.hidden_charge_cleared, "delegated READY evidence never pretends the stock charge was physically cleared")
+end
+
+local function runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation()
+    local arena_env, arena_deps = fake_entity_environment()
+    local arena = gamma_arena_entity_adapter.new(arena_deps)
+    local begun = begin_entity_apply(arena, arena_env, entity_spec(1), "session-default-medical")
+    gamma_arena_test_assert.is_true(begun.ok, "legacy entity callers default medical ownership to Arena")
+    local result, snapshot = pump_entity(arena, arena_env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "legacy Arena-owned activation remains valid")
+    gamma_arena_test_assert.equals(arena_env.hidden_charge_clears, 1, "legacy Arena ownership clears one hidden charge before hostility")
+
+    local invalid_env, invalid_deps = fake_entity_environment()
+    local invalid = gamma_arena_entity_adapter.new(invalid_deps)
+    local rejected = begin_entity_apply(invalid, invalid_env, entity_spec(1), "session-invalid-medical", "shared")
+    gamma_arena_test_assert.is_false(rejected.ok, "an explicit unknown medical owner fails closed")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "invalid entity medical ownership has the compatibility code")
+    gamma_arena_test_assert.equals(invalid_env.actor_loadout_calls, 0, "invalid ownership fails before actor loadout mutation")
+    gamma_arena_test_assert.equals(invalid_env.create_npc_count, 0, "invalid ownership fails before NPC creation")
+    gamma_arena_test_assert.equals(invalid:registry_snapshot().state, "IDLE", "invalid ownership leaves the entity transaction idle")
 end
 
 local function runtime_entity_tactical_begin_precedes_hostility()
@@ -7374,7 +7415,8 @@ local function task8_environment(options)
         victory_cleanup_updates = 0,
         ordered_calls = {},
         entity_stage_updates = 0,
-        actor_update_ticks = 0
+        actor_update_ticks = 0,
+        entity_medical_owners = {}
     }
     local actor = {
         begin_update = function()
@@ -7419,12 +7461,13 @@ local function task8_environment(options)
         cleanup = function() return gamma_arena_result.ok(true) end
     }
     local entities = {}
-    function entities:begin_apply(spec, session_id)
+    function entities:begin_apply(spec, session_id, catalog, npc_medical_owner)
         if env.actor_loadout_owned then return gamma_arena_result.err("GA_ACTOR_LOADOUT_BUSY", "stale actor loadout ownership") end
         env.actor_loadout_owned = true
         env.events[#env.events + 1] = "apply"
         env.applied = env.applied + 1
         env.applied_specs[#env.applied_specs + 1] = spec
+        env.entity_medical_owners[#env.entity_medical_owners + 1] = npc_medical_owner
         env.living = #spec.opponents()
         env.integrity_fault = nil
         local initial_state = (options.entity_ready_delay or 0) > 0 and "WAIT_ONLINE" or "READY"
@@ -7594,7 +7637,7 @@ local function task8_environment(options)
         end
         return gamma_arena_result.ok(true)
     end
-    store = fake_store()
+    store = fake_store(options.launch_from_preflight and { launch_pending = true, resume_pending = false } or nil)
     function store:clear_resume_if_matches()
         env.clear_intent = env.clear_intent + 1
         if options.clear_intent_error then return gamma_arena_result.err("GA_TEST_INTENT_CLEAR", "injected intent clear failure") end
@@ -7602,11 +7645,24 @@ local function task8_environment(options)
         self.intent_state.resume_pending = false
         return gamma_arena_result.ok(true)
     end
+    local save_guard = { installed = false, armed = false }
+    function save_guard:install() self.installed = true; return gamma_arena_result.ok(true) end
+    function save_guard:is_armed() return self.armed end
+    function save_guard:arm() self.armed = true; return gamma_arena_result.ok(true) end
+    function save_guard:maintain() return gamma_arena_result.ok(self.armed) end
+    function save_guard:disarm() self.armed = false; return gamma_arena_result.ok(true) end
+    function save_guard:breach() return gamma_arena_result.ok(true) end
     local deps = {
         store = store,
         config = {},
+        current_level = function() return gamma_arena_result.ok("l05_bar") end,
         reconcile = function() return gamma_arena_result.ok({ events = {} }) end,
-        preflight = function() return gamma_arena_result.ok(true) end,
+        preflight = function()
+            if options.npc_medical_owner ~= nil then
+                return gamma_arena_result.ok({ npc_medical_owner = options.npc_medical_owner })
+            end
+            return gamma_arena_result.ok(true)
+        end,
         identity = function() return gamma_arena_result.ok({ session_id = "ga_task8_session", session_nonce = "ga_task8_nonce" }) end,
         ui = { show_fatal = function(errors, callback) env.fatal_shown = env.fatal_shown + 1; return { errors = errors, callback = callback } end },
         notify = function() end,
@@ -7626,11 +7682,12 @@ local function task8_environment(options)
             return gamma_arena_result.ok(true)
         end,
         actor = actor,
+        save_guard = save_guard,
         entities = entities,
         npc_medical = npc_medical,
         audio = audio,
         checkpoint = checkpoint,
-        layout = function() return gamma_arena_result.ok(options.layout or { id = "rostok_arena_v1", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end,
+        layout = function() return gamma_arena_result.ok(options.layout or { id = "rostok_arena_v1", level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }) end,
         mode_policy = gamma_arena_mode_skirmish,
         catalogs = function()
             env.events[#env.events + 1] = "catalogs"
@@ -7639,6 +7696,7 @@ local function task8_environment(options)
                 generator_version = 11,
                 revision = 11,
                 fingerprint = "ga-catalog-v10-runtime-test",
+                layouts = { rostok_arena_v1 = { id = "rostok_arena_v1" } },
                 items = {
                     wpn_test = { section = "wpn_test", category = "weapon", ammo_sections = { "ammo_test" } },
                     ammo_test = { section = "ammo_test", category = "ammo", ammo_sections = {} }
@@ -7696,11 +7754,15 @@ local function task8_environment(options)
     }
     env.deps = deps
     env.orchestrator = gamma_arena_orchestrator.new(deps)
-    env.orchestrator.active = true
-    env.orchestrator.session = valid_session()
-    env.orchestrator.session.session_id = "ga_task8_session"
-    env.orchestrator.runtime_stage = "PREPARING"
-    env.orchestrator.machine_state = gamma_arena_state_machine.states.PREPARING
+    if options.launch_from_preflight then
+        gamma_arena_test_assert.is_true(env.orchestrator:on_game_load().ok, "launch-backed task8 fixture observes game load")
+    else
+        env.orchestrator.active = true
+        env.orchestrator.session = valid_session()
+        env.orchestrator.session.session_id = "ga_task8_session"
+        env.orchestrator.runtime_stage = "PREPARING"
+        env.orchestrator.machine_state = gamma_arena_state_machine.states.PREPARING
+    end
     return env
 end
 
@@ -8012,6 +8074,20 @@ local function task8_pump_integrity_retry_to_active(env)
         if env.orchestrator:runtime_stage_snapshot() == "ACTIVE" then break end
     end
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "integrity retry returns the same fight to ACTIVE")
+end
+
+local function runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation()
+    local env = task8_environment({ launch_from_preflight = true, npc_medical_owner = "external" })
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_first_update().ok, "external owner is accepted through the real launch preflight")
+    gamma_arena_test_assert.equals(env.orchestrator.npc_medical_owner, "external", "preflight freezes external medical ownership on the orchestrator")
+    task8_pump_to_active(env)
+    gamma_arena_test_assert.equals(env.entity_medical_owners[1], "external", "initial entity activation receives the frozen preflight medical owner")
+    env.integrity_fault = { cause = "vertical_escape", opponent_id = env.registry.npcs[1].id }
+    task8_pump_integrity_retry_to_active(env)
+    gamma_arena_test_assert.equals(#env.entity_medical_owners, 2, "integrity recovery performs exactly one entity reapply")
+    for _, owner in ipairs(env.entity_medical_owners) do
+        gamma_arena_test_assert.equals(owner, "external", "every initial and retry entity activation receives the frozen external owner")
+    end
 end
 
 local function runtime_orchestrator_integrity_retries_same_spec_twice()
@@ -13420,6 +13496,8 @@ local cases = {
     ,{ name = "runtime_entity_release_timeout_is_wrap_safe", fn = runtime_entity_release_timeout_is_wrap_safe }
     ,{ name = "runtime_entity_max_cardinality_cleanup_fits_default_budget", fn = runtime_entity_max_cardinality_cleanup_fits_default_budget }
     ,{ name = "runtime_entity_relations_friend_first_then_actor_hostile", fn = runtime_entity_relations_friend_first_then_actor_hostile }
+    ,{ name = "runtime_entity_external_medical_owner_delegates_hidden_charge", fn = runtime_entity_external_medical_owner_delegates_hidden_charge }
+    ,{ name = "runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation", fn = runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation }
     ,{ name = "runtime_entity_tactical_begin_precedes_hostility", fn = runtime_entity_tactical_begin_precedes_hostility }
     ,{ name = "runtime_entity_tactical_bind_failure_rolls_back", fn = runtime_entity_tactical_bind_failure_rolls_back }
     ,{ name = "runtime_entity_tactical_active_failure_is_fail_soft_once", fn = runtime_entity_tactical_active_failure_is_fail_soft_once }
@@ -13438,6 +13516,7 @@ local cases = {
     ,{ name = "runtime_task8_logs_one_immutable_spec_before_apply", fn = runtime_task8_logs_one_immutable_spec_before_apply }
     ,{ name = "runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation", fn = runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation }
     ,{ name = "runtime_task8_countdown_uses_global_time_not_frame_count", fn = runtime_task8_countdown_uses_global_time_not_frame_count }
+    ,{ name = "runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation", fn = runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation }
     ,{ name = "runtime_countdown_waits_for_fully_staged_ready_state", fn = runtime_countdown_waits_for_fully_staged_ready_state }
     ,{ name = "runtime_countdown_deadline_activates_and_releases_in_same_update", fn = runtime_countdown_deadline_activates_and_releases_in_same_update }
     ,{ name = "runtime_activation_failure_never_releases_input", fn = runtime_activation_failure_never_releases_input }

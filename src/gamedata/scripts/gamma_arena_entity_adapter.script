@@ -334,6 +334,7 @@ end
 function EntityAdapter:__init(deps)
     self.deps = deps
     self.state_value = "IDLE"
+    self.npc_medical_owner = "arena"
     self.session_id = nil
     self.actor_spec = nil
     self.catalog = nil
@@ -779,9 +780,15 @@ function EntityAdapter:persist_death_dropped(record)
     return gamma_arena_result.ok(true)
 end
 
-function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
+function EntityAdapter:begin_apply(validated_spec, session_id, catalog, npc_medical_owner)
     if self.state_value ~= "IDLE" and self.state_value ~= "CLEAN" then
         return fail("GA_ENTITY_TRANSACTION_BUSY", "Arena entity transaction is already in progress", { state = self.state_value })
+    end
+    local medical_owner = npc_medical_owner == nil and "arena" or npc_medical_owner
+    if medical_owner ~= "arena" and medical_owner ~= "external" then
+        return fail("GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Entity activation requires an exact NPC medical owner", {
+            owner = medical_owner
+        })
     end
     if type(validated_spec) ~= "table" or type(session_id) ~= "string" or session_id == ""
         or type(catalog) ~= "table" or type(catalog.items) ~= "table" then
@@ -848,6 +855,7 @@ function EntityAdapter:begin_apply(validated_spec, session_id, catalog)
     end
 
     self:__init(self.deps)
+    self.npc_medical_owner = medical_owner
     self.session_id = session_id
     self.fight_key = fight_key_result.value
     self.current_fight_id = fight_id_result.value
@@ -1383,7 +1391,7 @@ function EntityAdapter:drive_online()
             if not alive.value then return fail("GA_ENTITY_OPPONENT_NOT_ALIVE", "Arena opponent is not alive before activation", { id = record.id }) end
             record.proved_online = true
             objects[index] = object.value
-            if not record.hidden_charge_cleared then
+            if self.npc_medical_owner == "arena" and not record.hidden_charge_cleared then
                 local cleared = result_call("GA_NPC_MEDICAL_CHARGE_CLEAR_FAILED", self.deps.clear_hidden_charge, record.id, object.value)
                 if not cleared.ok then return cleared end
                 record.hidden_charge_cleared = true
@@ -1470,7 +1478,8 @@ function EntityAdapter:activate_ready()
     if not actor.ok or actor.value == nil then return actor.ok and fail("GA_ENTITY_ACTOR_MISSING", "Arena actor is unavailable during hostile activation") or actor end
     local objects = {}
     for index, record in ipairs(self.registry.npcs) do
-        if record.released or record.proved_online ~= true or record.hidden_charge_cleared ~= true
+        local medical_ready = self.npc_medical_owner == "external" or record.hidden_charge_cleared == true
+        if record.released or record.proved_online ~= true or not medical_ready
             or record.staged_friendly ~= true or record.equipped ~= true then
             return fail("GA_ENTITY_READY_INVALID", "Arena opponent READY evidence is incomplete", { id = record.id })
         end
