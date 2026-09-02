@@ -2354,6 +2354,182 @@ local function fake_actor_conditions(options)
     return actor, conditions
 end
 
+local function fake_booster_engine(options)
+    options = options or {}
+    local conditions = {
+        records = {},
+        rates = {},
+        clear_calls = 0,
+        corrections = {}
+    }
+    for _, record in ipairs(options.records or {}) do
+        conditions.records[record.type] = { type = record.type, time = record.time, value = record.value }
+        conditions.rates[record.type] = (conditions.rates[record.type] or 0) + record.value
+    end
+    function conditions:BoosterForEach(callback)
+        local keys = {}
+        for kind in pairs(self.records) do keys[#keys + 1] = kind end
+        table.sort(keys)
+        for _, kind in ipairs(keys) do
+            local record = self.records[kind]
+            if callback(kind, record.time, record.value) == true then break end
+        end
+    end
+    function conditions:ClearAllBoosters()
+        self.clear_calls = self.clear_calls + 1
+        for kind, record in pairs(self.records) do
+            self.rates[kind] = (self.rates[kind] or 0) - record.value
+        end
+        if options.retain_after_clear ~= true then self.records = {} end
+    end
+    function conditions:expire(kind)
+        local record = self.records[kind]
+        self.rates[kind] = self.rates[kind] - record.value
+        self.records[kind] = nil
+    end
+    function conditions:replace(kind, time, value)
+        local record = self.records[kind]
+        if record ~= nil and value * time < record.value * record.time then return false end
+        if record ~= nil then self.rates[kind] = self.rates[kind] - record.value end
+        self.records[kind] = { type = kind, time = time, value = value }
+        self.rates[kind] = (self.rates[kind] or 0) + value
+        return true
+    end
+    function conditions:correct(kind, value)
+        if options.throw_correction then error("injected correction failure") end
+        self.rates[kind] = (self.rates[kind] or 0) + value
+        self.corrections[#self.corrections + 1] = { type = kind, value = value }
+    end
+    function conditions:BoostHpRestore(value) self:correct(0, value) end
+    function conditions:BoostPowerRestore(value) self:correct(1, value) end
+    return conditions
+end
+
+local function fake_booster_reconciler(options)
+    options = options or {}
+    local engine = fake_booster_engine(options)
+    local actor = { id_value = options.actor_id or 17, conditions = engine }
+    local events = {}
+    local definitions = {
+        [0] = { name = "eBoostHpRestore", method = "BoostHpRestore" },
+        [1] = { name = "eBoostPowerRestore", method = "BoostPowerRestore" }
+    }
+    local service = gamma_arena_booster_reconciler.new({
+        actor_id = function(candidate) return gamma_arena_result.ok(candidate.id_value) end,
+        conditions = function(candidate) return gamma_arena_result.ok(candidate.conditions) end,
+        type_definitions = function() return gamma_arena_result.ok(definitions) end,
+        emit = function(code, fields)
+            events[#events + 1] = { code = code, fields = fields }
+            return true
+        end
+    })
+    return actor, engine, service, events
+end
+
+local function runtime_booster_reconciler_fixed_engine_creates_no_debt()
+    local actor, engine, service = fake_booster_reconciler({ records = { { type = 0, time = 12, value = 0.01 } } })
+    local cleared = service:clear(actor)
+    gamma_arena_test_assert.is_true(cleared.ok, "fixed engine booster clear succeeds")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "fixed engine clear removes the active effect")
+    gamma_arena_test_assert.equals(engine.clear_calls, 1, "fixed engine is cleared exactly once")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 0, "empty readback creates no compatibility debt")
+end
+
+local function runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt()
+    local actor, engine, service, events = fake_booster_reconciler({
+        retain_after_clear = true,
+        records = { { type = 0, time = 12, value = 0.01 }, { type = 1, time = 8, value = 0.2 } }
+    })
+    local cleared = service:clear(actor)
+    gamma_arena_test_assert.is_true(cleared.ok, "MT-TEST-shaped booster clear succeeds")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "health restoration is inactive at the round boundary")
+    gamma_arena_test_assert.equals(engine.rates[1], 0, "power restoration is inactive at the round boundary")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 2, "stale native records become explicit debt")
+    gamma_arena_test_assert.equals(events[1].code, "GA_ACTOR_BOOSTER_DEBT_ARMED", "debt creation is observable")
+end
+
+local function runtime_booster_reconciler_expiry_compensates_once()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "MT clear arms health restoration debt")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "Arena clear removes active health restoration")
+    engine:expire(0)
+    gamma_arena_test_assert.equals(engine.rates[0], -0.01, "fake engine performs the harmful second subtraction")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "duplicate subtraction is reconciled")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "exact compensation restores the clean baseline")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "expiry is compensated once")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 0, "settled debt is retired")
+    gamma_arena_test_assert.is_true(service:update(actor).ok, "empty debt update remains inert")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "retired debt cannot compensate twice")
+end
+
+local function runtime_booster_reconciler_replacement_preserves_new_effect()
+    local actor, engine, service, events = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 10, value = 0.01 } } })
+    service:clear(actor)
+    gamma_arena_test_assert.is_true(engine:replace(0, 20, 0.02), "stronger booster replaces the stale native record")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "replacement settles old debt")
+    gamma_arena_test_assert.equals(engine.rates[0], 0.02, "old duplicate subtraction is corrected without removing the new effect")
+    gamma_arena_test_assert.equals(events[#events].fields.trigger, "replaced", "replacement trigger is explicit")
+end
+
+local function runtime_booster_reconciler_weaker_replacement_keeps_debt()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 20, value = 0.02 } } })
+    service:clear(actor)
+    gamma_arena_test_assert.is_false(engine:replace(0, 1, 0.001), "weaker booster is rejected by the engine")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "unchanged stale record remains valid")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "rejected replacement never reactivates the old effect")
+    gamma_arena_test_assert.equals(#engine.corrections, 0, "matching stale record is not compensated early")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "unexpired debt remains armed")
+end
+
+local function runtime_booster_reconciler_repeated_clear_never_reactivates_old_effect()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "first clear succeeds")
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "repeated clear succeeds")
+    gamma_arena_test_assert.equals(engine.clear_calls, 2, "each requested boundary still invokes the authoritative engine clear")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "repeated clear compensates only its duplicate subtraction")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "repeated boundary needs one immediate correction")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "original expiry debt stays armed")
+end
+
+local function runtime_booster_reconciler_rejects_actor_identity_drift()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    service:clear(actor)
+    engine:expire(0)
+    local drifted = { id_value = actor.id_value + 1, conditions = engine }
+    local rejected = service:update(drifted)
+    gamma_arena_test_assert.is_false(rejected.ok, "actor identity drift fails closed")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_BOOSTER_ACTOR_MISMATCH", "actor mismatch code is exact")
+    gamma_arena_test_assert.equals(#engine.corrections, 0, "foreign actor cannot receive compensation")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "mismatched debt is retained for safe disposal")
+end
+
+local function runtime_booster_reconciler_rejects_invalid_records_and_unknown_types()
+    local invalid_actor, invalid_engine, invalid_service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = -1, value = 0.01 } } })
+    local invalid = invalid_service:clear(invalid_actor)
+    gamma_arena_test_assert.is_false(invalid.ok, "invalid booster record fails before mutation")
+    gamma_arena_test_assert.equals(invalid.error.code, "GA_ACTOR_BOOSTER_RECORD_INVALID", "invalid record code is exact")
+    gamma_arena_test_assert.equals(invalid_engine.clear_calls, 0, "invalid record cannot reach destructive clear")
+
+    local unknown_actor, unknown_engine, unknown_service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 99, time = 10, value = 0.01 } } })
+    local unknown = unknown_service:clear(unknown_actor)
+    gamma_arena_test_assert.is_false(unknown.ok, "unknown booster type fails before mutation")
+    gamma_arena_test_assert.equals(unknown.error.code, "GA_ACTOR_BOOSTER_TYPE_UNSUPPORTED", "unknown type code is exact")
+    gamma_arena_test_assert.equals(unknown_engine.clear_calls, 0, "unknown booster cannot reach destructive clear")
+end
+
+local function runtime_booster_reconciler_correction_failure_is_structured()
+    local actor, engine, service = fake_booster_reconciler({ throw_correction = true, retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    service:clear(actor)
+    engine:expire(0)
+    local failed = service:update(actor)
+    gamma_arena_test_assert.is_false(failed.ok, "throwing correction is contained")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_BOOSTER_COMPENSATE_FAILED", "correction failure code is exact")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "failed correction retains debt for retry")
+end
+
 local function runtime_bootstrap_engine_transients_clear_and_verify()
     for _, initial_alcohol in ipairs({ 0, 0.5, 1 }) do
         local actor, conditions = fake_actor_conditions({ alcohol = initial_alcohol })
@@ -13073,6 +13249,15 @@ local cases = {
     ,{ name = "runtime_bootstrap_engine_booster_readback_is_nonfatal", fn = runtime_bootstrap_engine_booster_readback_is_nonfatal }
     ,{ name = "runtime_bootstrap_missing_alcohol_mutator_fails_closed", fn = runtime_bootstrap_missing_alcohol_mutator_fails_closed }
     ,{ name = "runtime_bootstrap_gamma_transient_integrations_are_exact", fn = runtime_bootstrap_gamma_transient_integrations_are_exact }
+    ,{ name = "runtime_booster_reconciler_fixed_engine_creates_no_debt", fn = runtime_booster_reconciler_fixed_engine_creates_no_debt }
+    ,{ name = "runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt", fn = runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt }
+    ,{ name = "runtime_booster_reconciler_expiry_compensates_once", fn = runtime_booster_reconciler_expiry_compensates_once }
+    ,{ name = "runtime_booster_reconciler_replacement_preserves_new_effect", fn = runtime_booster_reconciler_replacement_preserves_new_effect }
+    ,{ name = "runtime_booster_reconciler_weaker_replacement_keeps_debt", fn = runtime_booster_reconciler_weaker_replacement_keeps_debt }
+    ,{ name = "runtime_booster_reconciler_repeated_clear_never_reactivates_old_effect", fn = runtime_booster_reconciler_repeated_clear_never_reactivates_old_effect }
+    ,{ name = "runtime_booster_reconciler_rejects_actor_identity_drift", fn = runtime_booster_reconciler_rejects_actor_identity_drift }
+    ,{ name = "runtime_booster_reconciler_rejects_invalid_records_and_unknown_types", fn = runtime_booster_reconciler_rejects_invalid_records_and_unknown_types }
+    ,{ name = "runtime_booster_reconciler_correction_failure_is_structured", fn = runtime_booster_reconciler_correction_failure_is_structured }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
     ,{ name = "runtime_actor_victory_reset_waits_for_inventory_absence", fn = runtime_actor_victory_reset_waits_for_inventory_absence }
     ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }

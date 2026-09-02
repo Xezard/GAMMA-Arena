@@ -1,0 +1,340 @@
+local Reconciler = {}
+Reconciler.__index = Reconciler
+
+local VALUE_EPSILON = 0.0000001
+local TIME_EPSILON = 0.001
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function valid_actor_id(value)
+    return finite(value) and value == math.floor(value) and value >= 0 and value <= 4294967295
+end
+
+local function dependency_result(code, fn, ...)
+    if type(fn) ~= "function" then
+        return fail(code, "Required booster reconciler dependency is unavailable")
+    end
+    local called, value = pcall(fn, ...)
+    if not called then
+        return fail(code, "Booster reconciler dependency failed safely", { reason = tostring(value) })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+local function record_matches(entry, record)
+    return entry.type == record.type
+        and math.abs(entry.value - record.value) <= VALUE_EPSILON
+        and record.time <= entry.last_time + TIME_EPSILON
+end
+
+function Reconciler:__init(deps)
+    self.deps = deps or {}
+    self.generation = 0
+    self.actor_id = nil
+    self.debt_by_type = {}
+end
+
+function Reconciler:emit(code, fields)
+    if type(self.deps.emit) == "function" then pcall(self.deps.emit, code, fields or {}) end
+end
+
+function Reconciler:actor_identity(actor)
+    local identity = dependency_result("GA_ACTOR_BOOSTER_ACTOR_ID_FAILED", self.deps.actor_id, actor)
+    if not identity.ok then return identity end
+    if not valid_actor_id(identity.value) then
+        return fail("GA_ACTOR_BOOSTER_ACTOR_ID_FAILED", "Booster reconciler requires a uint32 actor identity", {
+            observed_actor_id = identity.value
+        })
+    end
+    return identity
+end
+
+function Reconciler:condition_api(actor)
+    local api = dependency_result("GA_ACTOR_BOOSTER_CONDITIONS_FAILED", self.deps.conditions, actor)
+    if not api.ok then return api end
+    if api.value == nil then
+        return fail("GA_ACTOR_BOOSTER_CONDITIONS_FAILED", "Actor condition API is unavailable")
+    end
+    return api
+end
+
+function Reconciler:type_definitions(api)
+    local definitions = dependency_result("GA_ACTOR_BOOSTER_DEFINITIONS_FAILED", self.deps.type_definitions, api)
+    if not definitions.ok then return definitions end
+    if type(definitions.value) ~= "table" then
+        return fail("GA_ACTOR_BOOSTER_DEFINITIONS_FAILED", "Booster type definitions must be a table")
+    end
+    for kind, descriptor in pairs(definitions.value) do
+        if not finite(kind) or kind ~= math.floor(kind) or type(descriptor) ~= "table"
+            or type(descriptor.name) ~= "string" or descriptor.name == ""
+            or type(descriptor.method) ~= "string" or descriptor.method == "" then
+            return fail("GA_ACTOR_BOOSTER_DEFINITIONS_FAILED", "Booster type definition is invalid", {
+                booster_type = kind
+            })
+        end
+    end
+    return definitions
+end
+
+function Reconciler:records(api)
+    local definitions = self:type_definitions(api)
+    if not definitions.ok then return definitions end
+    local method_ok, method = pcall(function() return api.BoosterForEach end)
+    if not method_ok or type(method) ~= "function" then
+        return fail("GA_ACTOR_BOOSTER_ENUMERATE_FAILED", "BoosterForEach is unavailable")
+    end
+    local records = {}
+    local seen = {}
+    local invalid = nil
+    local called, reason = pcall(method, api, function(kind, time, value)
+        if invalid ~= nil then return true end
+        if not finite(kind) or kind ~= math.floor(kind) or not finite(time) or time < 0
+            or not finite(value) or value <= 0 then
+            invalid = fail("GA_ACTOR_BOOSTER_RECORD_INVALID", "Native booster record is invalid", {
+                booster_type = kind,
+                time = time,
+                value = value
+            })
+            return true
+        end
+        if definitions.value[kind] == nil then
+            invalid = fail("GA_ACTOR_BOOSTER_TYPE_UNSUPPORTED", "Native booster type has no exact correction method", {
+                booster_type = kind
+            })
+            return true
+        end
+        if seen[kind] then
+            invalid = fail("GA_ACTOR_BOOSTER_RECORD_INVALID", "Native booster enumeration contains a duplicate type", {
+                booster_type = kind
+            })
+            return true
+        end
+        seen[kind] = true
+        records[#records + 1] = { type = kind, time = time, value = value }
+        return false
+    end)
+    if not called then
+        return fail("GA_ACTOR_BOOSTER_ENUMERATE_FAILED", "Booster enumeration failed safely", {
+            reason = tostring(reason)
+        })
+    end
+    if invalid ~= nil then return invalid end
+    table.sort(records, function(left, right) return left.type < right.type end)
+    return gamma_arena_result.ok({ records = records, definitions = definitions.value })
+end
+
+function Reconciler:index_records(records)
+    local indexed = {}
+    for _, record in ipairs(records) do indexed[record.type] = record end
+    return indexed
+end
+
+function Reconciler:call_method(code, api, method_name, ...)
+    local method_ok, method = pcall(function() return api[method_name] end)
+    if not method_ok or type(method) ~= "function" then
+        return fail(code, "Required booster condition method is unavailable", { method = method_name })
+    end
+    local called, value = pcall(method, api, ...)
+    if not called then
+        return fail(code, "Booster condition method failed safely", {
+            method = method_name,
+            reason = tostring(value)
+        })
+    end
+    if value == false then
+        return fail(code, "Booster condition method reported failure", { method = method_name })
+    end
+    return gamma_arena_result.ok(value)
+end
+
+function Reconciler:compensate(api, definitions, entry, trigger)
+    local descriptor = definitions[entry.type]
+    if descriptor == nil then
+        return fail("GA_ACTOR_BOOSTER_TYPE_UNSUPPORTED", "Debt booster type has no exact correction method", {
+            booster_type = entry.type,
+            generation = entry.generation
+        })
+    end
+    local corrected = self:call_method("GA_ACTOR_BOOSTER_COMPENSATE_FAILED", api, descriptor.method, entry.value)
+    if not corrected.ok then
+        corrected.error.context.booster_type = entry.type
+        corrected.error.context.booster_name = descriptor.name
+        corrected.error.context.generation = entry.generation
+        corrected.error.context.trigger = trigger
+        return corrected
+    end
+    self:emit("GA_ACTOR_BOOSTER_DOUBLE_DISABLE_COMPENSATED", {
+        booster_type = entry.type,
+        booster_name = descriptor.name,
+        value = entry.value,
+        generation = entry.generation,
+        trigger = trigger
+    })
+    return gamma_arena_result.ok(true)
+end
+
+function Reconciler:reconcile(api, snapshot)
+    if next(self.debt_by_type) == nil then return gamma_arena_result.ok(0) end
+    local indexed = self:index_records(snapshot.records)
+    local debt = self:debt_snapshot()
+    local settled = 0
+    for _, entry in ipairs(debt) do
+        local record = indexed[entry.type]
+        if record ~= nil and record_matches(entry, record) then
+            self.debt_by_type[entry.type].last_time = record.time
+        else
+            local trigger = record == nil and "expired" or "replaced"
+            local corrected = self:compensate(api, snapshot.definitions, entry, trigger)
+            if not corrected.ok then return corrected end
+            self.debt_by_type[entry.type] = nil
+            settled = settled + 1
+        end
+    end
+    return gamma_arena_result.ok(settled)
+end
+
+function Reconciler:classify(records)
+    local already_stale = {}
+    local active = {}
+    for _, record in ipairs(records) do
+        local entry = self.debt_by_type[record.type]
+        if entry ~= nil and record_matches(entry, record) then
+            already_stale[#already_stale + 1] = record
+        else
+            active[#active + 1] = record
+        end
+    end
+    return already_stale, active
+end
+
+function Reconciler:clear(actor)
+    local identity = self:actor_identity(actor)
+    if not identity.ok then return identity end
+    if self.actor_id ~= nil and self.actor_id ~= identity.value and next(self.debt_by_type) ~= nil then
+        return fail("GA_ACTOR_BOOSTER_ACTOR_MISMATCH", "Booster debt belongs to a different actor", {
+            expected_actor_id = self.actor_id,
+            observed_actor_id = identity.value
+        })
+    end
+
+    local api = self:condition_api(actor)
+    if not api.ok then return api end
+    local before = self:records(api.value)
+    if not before.ok then return before end
+    local settled = self:reconcile(api.value, before.value)
+    if not settled.ok then return settled end
+    before = self:records(api.value)
+    if not before.ok then return before end
+
+    self.generation = self.generation + 1
+    local already_stale, active = self:classify(before.value.records)
+    local cleared = self:call_method("GA_ACTOR_BOOSTER_CLEAR_FAILED", api.value, "ClearAllBoosters")
+    if not cleared.ok then return cleared end
+
+    for _, record in ipairs(already_stale) do
+        local entry = self.debt_by_type[record.type]
+        local restored = self:compensate(api.value, before.value.definitions, entry, "repeated_clear")
+        if not restored.ok then return restored end
+    end
+
+    local after = self:records(api.value)
+    if not after.ok then return after end
+    local indexed_after = self:index_records(after.value.records)
+    for _, record in ipairs(already_stale) do
+        local retained = indexed_after[record.type]
+        if retained == nil then
+            self.debt_by_type[record.type] = nil
+        elseif not record_matches(self.debt_by_type[record.type], retained) then
+            return fail("GA_ACTOR_BOOSTER_READBACK_INVALID", "Stale booster readback changed during the clear boundary", {
+                booster_type = record.type,
+                generation = self.generation
+            })
+        else
+            self.debt_by_type[record.type].last_time = retained.time
+        end
+    end
+    for _, record in ipairs(active) do
+        local retained = indexed_after[record.type]
+        local expected = { type = record.type, value = record.value, last_time = record.time }
+        if retained ~= nil and record_matches(expected, retained) then
+            self.debt_by_type[record.type] = {
+                type = record.type,
+                value = record.value,
+                last_time = retained.time,
+                generation = self.generation
+            }
+            local descriptor = after.value.definitions[record.type]
+            self:emit("GA_ACTOR_BOOSTER_DEBT_ARMED", {
+                booster_type = record.type,
+                booster_name = descriptor.name,
+                value = record.value,
+                time = retained.time,
+                generation = self.generation
+            })
+        elseif retained ~= nil then
+            return fail("GA_ACTOR_BOOSTER_READBACK_INVALID", "Booster readback changed during the clear boundary", {
+                booster_type = record.type,
+                generation = self.generation
+            })
+        end
+    end
+    self.actor_id = identity.value
+    return gamma_arena_result.ok({ generation = self.generation, debt = #self:debt_snapshot() })
+end
+
+function Reconciler:update(actor)
+    if next(self.debt_by_type) == nil then return gamma_arena_result.ok({ settled = 0, debt = 0 }) end
+    local identity = self:actor_identity(actor)
+    if not identity.ok then return identity end
+    if self.actor_id == nil or self.actor_id ~= identity.value then
+        return fail("GA_ACTOR_BOOSTER_ACTOR_MISMATCH", "Booster debt belongs to a different actor", {
+            expected_actor_id = self.actor_id,
+            observed_actor_id = identity.value
+        })
+    end
+    local api = self:condition_api(actor)
+    if not api.ok then return api end
+    local snapshot = self:records(api.value)
+    if not snapshot.ok then return snapshot end
+    local reconciled = self:reconcile(api.value, snapshot.value)
+    if not reconciled.ok then return reconciled end
+    return gamma_arena_result.ok({ settled = reconciled.value, debt = #self:debt_snapshot() })
+end
+
+function Reconciler:discard(reason)
+    if reason ~= "game_load" and reason ~= "actor_destroyed" then
+        return fail("GA_ACTOR_BOOSTER_DISCARD_INVALID", "Booster debt may be discarded only at an actor lifetime boundary", {
+            reason = reason
+        })
+    end
+    self.actor_id = nil
+    self.debt_by_type = {}
+    return gamma_arena_result.ok(true)
+end
+
+function Reconciler:debt_snapshot()
+    local snapshot = {}
+    for _, entry in pairs(self.debt_by_type) do
+        snapshot[#snapshot + 1] = {
+            type = entry.type,
+            value = entry.value,
+            last_time = entry.last_time,
+            generation = entry.generation
+        }
+    end
+    table.sort(snapshot, function(left, right) return left.type < right.type end)
+    return snapshot
+end
+
+function new(deps)
+    local instance = setmetatable({}, Reconciler)
+    instance:__init(deps)
+    return instance
+end
