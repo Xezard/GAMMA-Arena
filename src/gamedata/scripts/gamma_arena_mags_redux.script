@@ -1,0 +1,173 @@
+local Adapter = {}
+Adapter.__index = Adapter
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function positive_integer(value)
+    return type(value) == "number" and value == value and value ~= math.huge
+        and value == math.floor(value) and value > 0
+end
+
+local function result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required Mags Redux dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then return fail(code, "Mags Redux dependency failed safely", { reason = tostring(value) }) end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+local function valid_api(api)
+    if type(api) ~= "table" then return false end
+    for _, key in ipairs({ "is_supported_weapon", "default_magazine", "read_magazine", "is_carried", "fill_magazine" }) do
+        if type(api[key]) ~= "function" then return false end
+    end
+    return true
+end
+
+local function dense_array(value)
+    if type(value) ~= "table" then return false end
+    local count = 0
+    for key in pairs(value) do
+        if not positive_integer(key) then return false end
+        if key > count then count = key end
+    end
+    for index = 1, count do
+        if value[index] == nil then return false end
+    end
+    return true
+end
+
+function Adapter:resolve()
+    if self.resolved then
+        if self.resolve_failure ~= nil then return self.resolve_failure end
+        return gamma_arena_result.ok(self.api)
+    end
+    self.resolved = true
+    local resolved = result_call("GA_MAGS_REDUX_API_INVALID", self.ports.resolve_api)
+    if not resolved.ok then self.resolve_failure = resolved; return resolved end
+    if resolved.value == nil then return gamma_arena_result.ok(nil) end
+    if not valid_api(resolved.value) then
+        self.resolve_failure = fail("GA_MAGS_REDUX_API_INVALID", "Detected Mags Redux API is incomplete")
+        return self.resolve_failure
+    end
+    self.api = resolved.value
+    return gamma_arena_result.ok(self.api)
+end
+
+function Adapter:bonus_descriptors(descriptors)
+    if not dense_array(descriptors) then
+        return fail("GA_MAGS_REDUX_PLAN_INVALID", "Equipped item descriptors must be a dense array")
+    end
+    local resolved = self:resolve()
+    if not resolved.ok then return resolved end
+    local api = resolved.value
+    if api == nil then return gamma_arena_result.ok({}) end
+
+    local bonus = {}
+    for _, descriptor in ipairs(descriptors) do
+        if type(descriptor) == "table" and descriptor.category == "weapon"
+            and descriptor.equipped_slot ~= nil and type(descriptor.section) == "string"
+            and descriptor.section ~= "" and type(descriptor.selected_ammo) == "string"
+            and descriptor.selected_ammo ~= "" then
+            local supported = result_call("GA_MAGS_REDUX_PLAN_FAILED", api.is_supported_weapon, descriptor.section)
+            if not supported.ok then return supported end
+            if supported.value == true then
+                local magazine = result_call("GA_MAGS_REDUX_PLAN_FAILED", api.default_magazine, descriptor.section)
+                if not magazine.ok then return magazine end
+                if type(magazine.value) ~= "string" or magazine.value == "" then
+                    return fail("GA_MAGS_REDUX_MAGAZINE_INVALID", "Supported weapon has no valid default magazine", {
+                        weapon_section = descriptor.section
+                    })
+                end
+                local capacity = result_call("GA_MAGS_REDUX_CAPACITY_INVALID", self.ports.magazine_capacity, magazine.value)
+                if not capacity.ok then return capacity end
+                if not positive_integer(capacity.value) then
+                    return fail("GA_MAGS_REDUX_CAPACITY_INVALID", "Default magazine capacity is invalid", {
+                        weapon_section = descriptor.section,
+                        magazine_section = magazine.value,
+                        capacity = capacity.value
+                    })
+                end
+                for ordinal = 1, 2 do
+                    bonus[#bonus + 1] = {
+                        section = magazine.value,
+                        category = "magazine",
+                        bonus_kind = "mags_redux",
+                        weapon_section = descriptor.section,
+                        selected_ammo = descriptor.selected_ammo,
+                        magazine_capacity = capacity.value,
+                        reserve_ordinal = ordinal
+                    }
+                end
+            end
+        end
+    end
+    return gamma_arena_result.ok(bonus)
+end
+
+function Adapter:initialize(id, descriptor)
+    if not positive_integer(id) or type(descriptor) ~= "table" or descriptor.bonus_kind ~= "mags_redux"
+        or type(descriptor.section) ~= "string" or descriptor.section == ""
+        or type(descriptor.selected_ammo) ~= "string" or descriptor.selected_ammo == ""
+        or not positive_integer(descriptor.magazine_capacity) then
+        return fail("GA_MAGS_REDUX_INIT_INVALID", "Reserve magazine initialization input is invalid", { id = id })
+    end
+    local resolved = self:resolve()
+    if not resolved.ok then return resolved end
+    local api = resolved.value
+    if api == nil then
+        return fail("GA_MAGS_REDUX_API_INVALID", "Mags Redux disappeared after reserve planning", { id = id })
+    end
+
+    local before = result_call("GA_MAGS_REDUX_STATE_INVALID", api.read_magazine, id)
+    if not before.ok then return before end
+    if before.value ~= nil then
+        if type(before.value) ~= "table" or before.value.section ~= descriptor.section
+            or not dense_array(before.value.loaded) or #before.value.loaded ~= 0 then
+            return fail("GA_MAGS_REDUX_STATE_INVALID", "New reserve magazine has unexpected vendor state", {
+                id = id,
+                magazine_section = descriptor.section
+            })
+        end
+    end
+
+    local filled = result_call("GA_MAGS_REDUX_FILL_FAILED", api.fill_magazine, id, descriptor.section,
+        descriptor.magazine_capacity, descriptor.selected_ammo)
+    if not filled.ok then return filled end
+    if filled.value == false then
+        return fail("GA_MAGS_REDUX_FILL_FAILED", "Mags Redux rejected reserve magazine filling", { id = id })
+    end
+
+    local verified = result_call("GA_MAGS_REDUX_VERIFY_FAILED", api.read_magazine, id)
+    if not verified.ok then return verified end
+    local data = verified.value
+    if type(data) ~= "table" or data.section ~= descriptor.section or not dense_array(data.loaded)
+        or #data.loaded ~= descriptor.magazine_capacity then
+        return fail("GA_MAGS_REDUX_VERIFY_FAILED", "Reserve magazine state verification failed", {
+            id = id,
+            magazine_section = descriptor.section,
+            expected_capacity = descriptor.magazine_capacity,
+            actual_capacity = type(data) == "table" and type(data.loaded) == "table" and #data.loaded or nil
+        })
+    end
+    for index = 1, descriptor.magazine_capacity do
+        if data.loaded[index] ~= descriptor.selected_ammo then
+            return fail("GA_MAGS_REDUX_VERIFY_FAILED", "Reserve magazine ammunition verification failed", {
+                id = id,
+                index = index,
+                expected = descriptor.selected_ammo,
+                actual = data.loaded[index]
+            })
+        end
+    end
+    local carried_ok, carried = pcall(api.is_carried, id)
+    return gamma_arena_result.ok({ carried = carried_ok and carried == true })
+end
+
+function new(ports)
+    if type(ports) ~= "table" or type(ports.resolve_api) ~= "function"
+        or type(ports.magazine_capacity) ~= "function" then return nil end
+    return setmetatable({ ports = ports, resolved = false, api = nil, resolve_failure = nil }, Adapter)
+end
