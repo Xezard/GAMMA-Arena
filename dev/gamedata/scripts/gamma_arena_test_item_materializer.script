@@ -152,10 +152,116 @@ local function waits_for_deferred_actor_weapon_activation()
         "ready result retains the activated logical slot")
 end
 
+local function bonus_fixture(fail_ordinal)
+    local env = {
+        next_id = 1000,
+        counts = {},
+        full_ammo_boxes = 0,
+        initialized = {},
+        rollback_attempts = {},
+        slots = {},
+        magazine = {}
+    }
+    local materializer = gamma_arena_item_materializer.new({
+        bonus_descriptors = function()
+            return {
+                {
+                    section = "mag_test",
+                    category = "magazine",
+                    bonus_kind = "mags_redux",
+                    weapon_section = "rifle_test",
+                    selected_ammo = "ammo_test",
+                    magazine_capacity = 30,
+                    reserve_ordinal = 1
+                },
+                {
+                    section = "mag_test",
+                    category = "magazine",
+                    bonus_kind = "mags_redux",
+                    weapon_section = "rifle_test",
+                    selected_ammo = "ammo_test",
+                    magazine_capacity = 30,
+                    reserve_ordinal = 2
+                }
+            }
+        end,
+        create_item = function(section, owner, options)
+            local entity = {
+                runtime_id = env.next_id,
+                section = section,
+                parent = owner.runtime_id,
+                ammo = options and options.ammo or nil
+            }
+            env.next_id = env.next_id + 1
+            env.counts[section] = (env.counts[section] or 0) + 1
+            if section == "ammo_test" and entity.ammo == 20 then
+                env.full_ammo_boxes = env.full_ammo_boxes + 1
+            end
+            return entity
+        end,
+        entity_id = function(entity) return entity.runtime_id end,
+        register = function(entity, descriptor)
+            return { id = entity.runtime_id, section = descriptor.section }
+        end,
+        verify_ownership = function() return true end,
+        initialize_created = function(entity, record, descriptor)
+            env.initialized[#env.initialized + 1] = {
+                id = record.id,
+                section = descriptor.section,
+                ordinal = descriptor.reserve_ordinal
+            }
+            if descriptor.reserve_ordinal == fail_ordinal then
+                return gamma_arena_result.err("GA_TEST_BONUS_INIT_FAILED", "injected reserve initialization failure")
+            end
+            return true
+        end,
+        resolve_item = function(entity) return entity end,
+        move_to_slot = function(owner, entity, slot) env.slots[slot] = entity; return true end,
+        item_in_slot = function(owner, slot) return env.slots[slot] end,
+        fill_magazine = function(entity, ammo) env.magazine[entity.runtime_id] = ammo; return true end,
+        magazine_ammo = function(entity) return env.magazine[entity.runtime_id] end,
+        activate_slot = function() return true end,
+        prepare_rollback = function() return true end,
+        rollback = function(entity)
+            env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
+            return true
+        end
+    })
+    return env, materializer
+end
+
+local function thirty_ammo_boxes_remain_with_two_bonus_magazines()
+    local env, materializer = bonus_fixture()
+    local result = materializer:apply({ runtime_id = 1 }, {
+        { section = "rifle_test", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_test", quantity = 30 }
+    }, activation_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "bonus magazine loadout materializes")
+    gamma_arena_test_assert.equals(env.counts.ammo_test, 30, "thirty selected boxes remain physical")
+    gamma_arena_test_assert.equals(env.full_ammo_boxes, 30, "every selected box remains full")
+    gamma_arena_test_assert.equals(env.counts.mag_test, 2, "two bonus magazines are created")
+    gamma_arena_test_assert.equals(#env.initialized, 2, "both bonus magazines are initialized")
+end
+
+local function bonus_initialization_failure_rolls_back_every_created_item()
+    local env, materializer = bonus_fixture(2)
+    local result = materializer:apply({ runtime_id = 1 }, {
+        { section = "rifle_test", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "ammo_test", quantity = 30 }
+    }, activation_catalog())
+    gamma_arena_test_assert.is_false(result.ok, "second reserve initialization failure fails materialization")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, 33, "weapon, boxes, and both magazines roll back")
+    gamma_arena_test_assert.equals(env.rollback_attempts[1], 1032, "rollback begins with the second reserve magazine")
+    gamma_arena_test_assert.equals(env.rollback_attempts[2], 1031, "rollback continues with the first reserve magazine")
+    gamma_arena_test_assert.equals(env.rollback_attempts[33], 1000, "rollback ends with the equipped weapon")
+end
+
 local cases = {
     { name = "item_materializer_accepts_one_entity_ammo_array", fn = accepts_one_entity_ammo_array },
     { name = "item_materializer_rolls_back_multi_entity_descriptor_result", fn = rolls_back_multi_entity_descriptor_result },
-    { name = "item_materializer_waits_for_deferred_actor_weapon_activation", fn = waits_for_deferred_actor_weapon_activation }
+    { name = "item_materializer_waits_for_deferred_actor_weapon_activation", fn = waits_for_deferred_actor_weapon_activation },
+    { name = "item_materializer_thirty_ammo_boxes_remain_with_two_bonus_magazines", fn = thirty_ammo_boxes_remain_with_two_bonus_magazines },
+    { name = "item_materializer_bonus_initialization_failure_rolls_back_every_created_item", fn = bonus_initialization_failure_rolls_back_every_created_item }
 }
 
 function run(run_case_fn)
