@@ -207,30 +207,24 @@ local function validate_tactical_director(probes, layout, level_is_valid, errors
 end
 
 local function validate_npc_medical_ai(probes, errors)
-    if type(probes.npc_medical_ini) ~= "function" then return end
+    if type(probes.npc_medical_ini) ~= "function" then return nil end
     local opened, config = safe_call(probes.npc_medical_ini)
     if not opened or config == nil then
         add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit config is unavailable")
-        return
+        return nil
     end
-    if not method_present(config, "line_exist") or not method_present(config, "r_string_ex") then
-        add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit config lacks physical-item accessors")
-        return
-    end
-    for _, key in ipairs({ "medkits", "bandages" }) do
-        local line_ok, exists = safe_call(config.line_exist, config, "plugin", key)
-        if not line_ok then
-            add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit physical-item lookup failed", { key = key })
-        elseif exists == true then
-            local value_ok, value = safe_call(config.r_string_ex, config, "plugin", key)
-            local normalized = value_ok and type(value) == "string" and string.gsub(value, "^%s*(.-)%s*$", "%1") or nil
-            if not value_ok then
-                add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit physical-item list could not be read", { key = key })
-            elseif normalized ~= nil and normalized ~= "" then
-                add_error(errors, "GA_NPC_MEDICAL_AI_CONFLICT", "Stock NPC medical AI also consumes physical Arena medicine", { key = key, value = normalized })
-            end
+    local called, policy = safe_call(gamma_arena_npc_medical_policy.read, config)
+    if not called or type(policy) ~= "table" or policy.ok ~= true or type(policy.value) ~= "table" then
+        local reason = policy
+        if called and type(policy) == "table" and type(policy.error) == "table" then
+            reason = policy.error.message or policy.error.code
         end
+        add_error(errors, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "Effective xr_eat_medkit policy is invalid", {
+            reason = string.sub(tostring(reason), 1, 256)
+        })
+        return nil
     end
+    return policy.value
 end
 
 local function resolve_path(probes, path, errors, resolved)
@@ -548,13 +542,16 @@ local function preflight_impl(probes)
     end
 
     validate_tactical_director(probes, layout, level_is_valid, errors)
-    validate_npc_medical_ai(probes, errors)
+    local medical_policy = validate_npc_medical_ai(probes, errors)
 
     if system ~= nil and type(catalogs) == "table" then validate_sections(system, catalogs, errors) end
     if #errors > 0 then
         return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "Arena runtime preflight failed", { errors = errors })
     end
-    return gamma_arena_result.ok(true)
+    return gamma_arena_result.ok({
+        npc_medical_owner = medical_policy.owner,
+        npc_medical_policy = medical_policy
+    })
 end
 
 function preflight(probes)

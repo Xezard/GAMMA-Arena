@@ -1642,9 +1642,15 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
     Assert-True ($Task5CompatContent -match 'engine_callable_present') 'Preflight must accept callable engine objects whose Lua type is not function'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.ini_file\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable ini_file engine object by Lua type'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.patrol\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable patrol engine object by Lua type'
-    foreach ($Marker in @('npc_medical_ini','medkits','bandages','GA_NPC_MEDICAL_AI_CONFLICT')) {
+    foreach ($Marker in @('npc_medical_ini','gamma_arena_npc_medical_policy.read','npc_medical_owner')) {
         Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "NPC medical compatibility preflight must cover $Marker"
     }
+    Assert-True ($Task5CompatContent -notmatch 'add_error\s*\([^\r\n]*["'']GA_NPC_MEDICAL_AI_CONFLICT["'']') 'NPC medical compatibility preflight must not retain an active conflict error path'
+    $Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+    $Task5BootstrapPreflightStart = $Task5BootstrapContent.IndexOf('local preflight_port = overrides.preflight')
+    $Task5BootstrapPreflightEnd = $Task5BootstrapContent.IndexOf('local audio = overrides.audio', $Task5BootstrapPreflightStart)
+    $Task5BootstrapPreflight = $Task5BootstrapContent.Substring($Task5BootstrapPreflightStart, $Task5BootstrapPreflightEnd - $Task5BootstrapPreflightStart)
+    Assert-True ($Task5BootstrapPreflight -match 'return\s+gamma_arena_result\.ok\s*\(\s*compatible\.value\s*\)') 'Bootstrap preflight must preserve compatibility ownership metadata after layout validation'
 }
 
 $Task5OrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
@@ -2342,7 +2348,7 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_entity_consumes_owned_medical_item_once','runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Physical medicine Dev tests must cover $Marker"
     }
-    foreach ($Marker in @('runtime_preflight_rejects_npc_medical_ai_conflict','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
+    foreach ($Marker in @('runtime_preflight_publishes_npc_medical_ownership','runtime_preflight_rejects_invalid_npc_medical_config','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
     }
 }

@@ -112,7 +112,12 @@ local function valid_preflight_probes()
     function tactical_ini:r_u32(section, key) return section == "director" and tactical_values[key] or nil end
     function tactical_ini:r_string_ex(section, key) return section == "director" and tactical_values[key] or nil end
 
-    local npc_medical_values = {}
+    local npc_medical_values = {
+        enable = "false",
+        in_combat = "false",
+        medkits = "",
+        bandages = ""
+    }
     local npc_medical_ini = {}
     function npc_medical_ini:section_exist(section) return section == "plugin" end
     function npc_medical_ini:line_exist(section, key) return section == "plugin" and npc_medical_values[key] ~= nil end
@@ -304,14 +309,31 @@ local function preflight_requires_tactical_director_config()
     end
 end
 
-local function preflight_rejects_npc_medical_ai_conflict()
-    for _, key in ipairs({ "medkits", "bandages" }) do
+local function preflight_publishes_npc_medical_ownership()
+    local cases = {
+        { label = "active medkit overlap", enable = "true", in_combat = "true", key = "medkits", value = "medkit", owner = "external" },
+        { label = "active bandage overlap", enable = "true", in_combat = "true", key = "bandages", value = "bandage", owner = "external" },
+        { label = "disabled overlap", enable = "false", in_combat = "true", key = "medkits", value = "medkit", owner = "arena" },
+        { label = "out-of-combat overlap", enable = "true", in_combat = "false", key = "bandages", value = "bandage", owner = "arena" }
+    }
+    for _, case in ipairs(cases) do
         local probes = valid_preflight_probes()
-        probes._npc_medical_values[key] = key == "medkits" and "medkit" or "bandage"
+        probes._npc_medical_values.enable = case.enable
+        probes._npc_medical_values.in_combat = case.in_combat
+        probes._npc_medical_values[case.key] = case.value
         local result = gamma_arena_compat.preflight(probes)
-        gamma_arena_test_assert.is_false(result.ok, "stock physical-item consumer conflict fails: " .. key)
-        gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_MEDICAL_AI_CONFLICT", 1, true) ~= nil, "stock consumer conflict has a stable code: " .. key)
+        gamma_arena_test_assert.is_true(result.ok, "valid NPC medical ownership passes preflight: " .. case.label)
+        gamma_arena_test_assert.equals(result.value.npc_medical_owner, case.owner, "preflight publishes NPC medical owner: " .. case.label)
+        gamma_arena_test_assert.equals(result.value.npc_medical_policy.owner, case.owner, "preflight publishes parsed NPC medical policy: " .. case.label)
     end
+end
+
+local function preflight_rejects_invalid_npc_medical_config()
+    local probes = valid_preflight_probes()
+    probes._npc_medical_values.enable = "sometimes"
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "malformed NPC medical boolean fails preflight")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_MEDICAL_AI_CONFIG_INVALID", 1, true) ~= nil, "malformed NPC medical boolean has a stable compatibility code")
 end
 
 local function preflight_aggregates_in_stable_order()
@@ -13056,7 +13078,8 @@ local cases = {
     { name = "runtime_preflight_accepts_actor_condition_properties", fn = preflight_accepts_actor_condition_properties },
     { name = "runtime_preflight_requires_tactical_director_apis", fn = preflight_requires_tactical_director_apis },
     { name = "runtime_preflight_requires_tactical_director_config", fn = preflight_requires_tactical_director_config },
-    { name = "runtime_preflight_rejects_npc_medical_ai_conflict", fn = preflight_rejects_npc_medical_ai_conflict },
+    { name = "runtime_preflight_publishes_npc_medical_ownership", fn = preflight_publishes_npc_medical_ownership },
+    { name = "runtime_preflight_rejects_invalid_npc_medical_config", fn = preflight_rejects_invalid_npc_medical_config },
     { name = "runtime_preflight_aggregates_in_stable_order", fn = preflight_aggregates_in_stable_order },
     { name = "runtime_preflight_requires_task6_actor_checkpoint_ports", fn = preflight_requires_task6_actor_checkpoint_ports },
     { name = "runtime_preflight_requires_task7_entity_ports_and_ammo_metadata", fn = preflight_requires_task7_entity_ports_and_ammo_metadata },
