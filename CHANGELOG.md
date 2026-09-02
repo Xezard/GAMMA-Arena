@@ -4,7 +4,7 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
-- When optional Mags Redux is available, every equipped supported firearm now receives exactly two full bonus reserve magazines without deducting from selected Custom Setup loose ammunition; pouch capacity determines which magazines are immediately carried, while unsupported weapons retain normal behavior.
+- When optional Mags Redux is available, every equipped supported firearm now receives exactly two full bonus reserve magazines; selected Custom Setup ammo-box round counts remain exact, reserve rounds are not deducted from selected loose ammunition, and pouch capacity determines which magazines are immediately carried, while unsupported weapons retain normal behavior.
 
 ## 0.5.1 - 2026-08-31
 
