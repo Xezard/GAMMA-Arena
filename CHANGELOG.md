@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- When optional Mags Redux is available, every equipped supported firearm now receives exactly two full bonus reserve magazines without changing selected Custom Setup ammo-box counts; pouch capacity determines which magazines are immediately carried, while unsupported weapons retain normal behavior.
+
 ## 0.5.1 - 2026-08-31
 
 - Made Custom Setup opening, opponent-count changes, and rank changes incremental, eliminating repeated installed-catalog loading, validation, and cell rebuilding from the input path.

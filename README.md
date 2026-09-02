@@ -67,6 +67,8 @@ Gamma Arena is packaged as an additive `gamedata` tree and the static suite reje
 
 Review same-path conflicts in MO2 instead of treating either side as an automatic overwrite winner. Maintainers and advanced users can generate a read-only compatibility report for an existing profile from the repository tooling described under [Development](#development).
 
+Mags Redux is optional: without it, and for unsupported weapons, ammunition behavior remains unchanged. When it is available, every equipped supported firearm receives exactly two full reserve magazines. Selected Custom Setup ammo boxes retain their exact round counts; the reserve rounds are bonus rounds and are not deducted from loose ammunition. Mags Redux pouch capacity controls which magazines are immediately carried.
+
 ## Troubleshooting and bug reports
 
 If the Arena entry is missing or a fight fails to start:
