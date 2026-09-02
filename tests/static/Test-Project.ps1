@@ -1645,7 +1645,16 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
     foreach ($Marker in @('npc_medical_ini','gamma_arena_npc_medical_policy.read','npc_medical_owner')) {
         Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "NPC medical compatibility preflight must cover $Marker"
     }
-    Assert-True ($Task5CompatContent -notmatch 'add_error\s*\([^\r\n]*["'']GA_NPC_MEDICAL_AI_CONFLICT["'']') 'NPC medical compatibility preflight must not retain an active conflict error path'
+    $Task5NpcMedicalConflictAddErrorPattern = 'add_error\s*\(\s*errors\s*,\s*["'']GA_NPC_MEDICAL_AI_CONFLICT["'']'
+    Assert-True ($Task5CompatContent -notmatch $Task5NpcMedicalConflictAddErrorPattern) 'NPC medical compatibility preflight must not retain an active conflict error path'
+    $Task5NpcMedicalConflictMutation = $Task5CompatContent + @'
+add_error(
+    errors,
+    "GA_NPC_MEDICAL_AI_CONFLICT",
+    "injected forbidden path"
+)
+'@
+    Assert-True ($Task5NpcMedicalConflictMutation -match $Task5NpcMedicalConflictAddErrorPattern) 'NPC medical compatibility conflict guard must reject a multiline injected add_error path'
     $Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
     $Task5BootstrapPreflightStart = $Task5BootstrapContent.IndexOf('local preflight_port = overrides.preflight')
     $Task5BootstrapPreflightEnd = $Task5BootstrapContent.IndexOf('local audio = overrides.audio', $Task5BootstrapPreflightStart)
