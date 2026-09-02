@@ -524,6 +524,7 @@ function ActorAdapter:begin_update()
     self.update_tick = self.update_tick + 1
 end
 function ActorAdapter:discard_transient_services(reason) return reason end
+function ActorAdapter:observe_transient_state(phase) return phase end
 function new() return markers, effects end
 '@
     Write-FixtureFile $Root 'src\gamedata\scripts\gamma_arena_entity_adapter.script' @'
@@ -787,6 +788,7 @@ function run() end
         'src\gamedata\scripts\gamma_arena_validator.script',
         'src\gamedata\scripts\gamma_arena_layout_adapter.script',
         'src\gamedata\scripts\gamma_arena_booster_reconciler.script',
+        'src\gamedata\scripts\gamma_arena_actor_diagnostics.script',
         'src\gamedata\scripts\gamma_arena_bootstrap.script',
         'src\gamedata\scripts\gamma_arena_compat.script',
         'src\gamedata\scripts\gamma_arena_orchestrator.script',

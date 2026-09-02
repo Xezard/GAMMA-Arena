@@ -1,0 +1,212 @@
+local Diagnostics = {}
+Diagnostics.__index = Diagnostics
+
+local UINT32_MOD = 4294967296
+local HEALTH_LOG_INTERVAL_MS = 1000
+local BHS_FIELDS = {
+    "head", "head_timed", "torso", "torso_timed",
+    "rightarm", "rightarm_timed", "leftarm", "leftarm_timed",
+    "rightleg", "rightleg_timed", "leftleg", "leftleg_timed"
+}
+
+local function fail(code, message, context)
+    return gamma_arena_result.err(code, message, context or {})
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function scalar(value)
+    return type(value) == "string" or type(value) == "boolean" or finite(value)
+end
+
+local function result_call(code, fn, ...)
+    if type(fn) ~= "function" then return fail(code, "Required actor diagnostic dependency is unavailable") end
+    local called, value = pcall(fn, ...)
+    if not called then
+        return fail(code, "Actor diagnostic dependency failed safely", { reason = tostring(value) })
+    end
+    if type(value) == "table" and type(value.ok) == "boolean" then return value end
+    return gamma_arena_result.ok(value)
+end
+
+local function elapsed_ms(started, current)
+    if current >= started then return current - started end
+    return (UINT32_MOD - started) + current
+end
+
+local function copy_scalars(target, source)
+    if type(source) ~= "table" then return end
+    for key, value in pairs(source) do
+        if type(key) == "string" and scalar(value) then target[key] = value end
+    end
+end
+
+function Diagnostics:__init(deps)
+    self.deps = deps or {}
+    self.last_health = nil
+    self.last_drop_log_at = nil
+    self.accumulated_drop = 0
+end
+
+function Diagnostics:actor_state(actor)
+    local state = result_call("GA_ACTOR_DIAGNOSTIC_STATE_FAILED", self.deps.actor_state, actor)
+    if not state.ok then return state end
+    if type(state.value) ~= "table" then
+        return fail("GA_ACTOR_DIAGNOSTIC_STATE_FAILED", "Actor diagnostic state must be a table")
+    end
+    return state
+end
+
+function Diagnostics:clock()
+    local clock = result_call("GA_ACTOR_DIAGNOSTIC_CLOCK_FAILED", self.deps.clock)
+    if not clock.ok then return clock end
+    if not finite(clock.value) or clock.value ~= math.floor(clock.value)
+        or clock.value < 0 or clock.value >= UINT32_MOD then
+        return fail("GA_ACTOR_DIAGNOSTIC_CLOCK_FAILED", "Actor diagnostic clock must return uint32 milliseconds")
+    end
+    return clock
+end
+
+function Diagnostics:write(code, fields)
+    local written = result_call("GA_ACTOR_DIAGNOSTIC_WRITE_FAILED", self.deps.write, code, fields)
+    if not written.ok then return written end
+    if written.value == false then
+        return fail("GA_ACTOR_DIAGNOSTIC_WRITE_FAILED", "Actor diagnostic writer reported failure", { event = code })
+    end
+    return gamma_arena_result.ok(true)
+end
+
+function Diagnostics:context()
+    if type(self.deps.context) ~= "function" then return gamma_arena_result.ok({}) end
+    local context = result_call("GA_ACTOR_DIAGNOSTIC_CONTEXT_FAILED", self.deps.context)
+    if not context.ok then return context end
+    if type(context.value) ~= "table" then
+        return fail("GA_ACTOR_DIAGNOSTIC_CONTEXT_FAILED", "Actor diagnostic context must be a table")
+    end
+    return context
+end
+
+function Diagnostics:bhs_fields(actor)
+    local fields = {}
+    for _, name in ipairs(BHS_FIELDS) do fields["bhs_" .. name] = "unavailable" end
+    if type(self.deps.bhs_state) ~= "function" then return fields end
+    local state = result_call("GA_ACTOR_DIAGNOSTIC_BHS_FAILED", self.deps.bhs_state, actor)
+    if not state.ok or type(state.value) ~= "table" then return fields end
+    for _, name in ipairs(BHS_FIELDS) do
+        local value = state.value[name]
+        if scalar(value) then fields["bhs_" .. name] = value end
+    end
+    return fields
+end
+
+function Diagnostics:booster_records(actor)
+    if type(self.deps.booster_records) ~= "function" then return gamma_arena_result.ok({}) end
+    local snapshot = result_call("GA_ACTOR_DIAGNOSTIC_BOOSTERS_FAILED", self.deps.booster_records, actor)
+    if not snapshot.ok then return snapshot end
+    if type(snapshot.value) ~= "table" then
+        return fail("GA_ACTOR_DIAGNOSTIC_BOOSTERS_FAILED", "Actor booster diagnostic snapshot must be a table")
+    end
+    local records = {}
+    local seen = {}
+    for _, record in ipairs(snapshot.value) do
+        if type(record) ~= "table" or not finite(record.type) or record.type ~= math.floor(record.type)
+            or not finite(record.time) or not finite(record.value) or seen[record.type] then
+            return fail("GA_ACTOR_DIAGNOSTIC_BOOSTERS_FAILED", "Actor booster diagnostic record is invalid")
+        end
+        seen[record.type] = true
+        records[#records + 1] = {
+            type = record.type,
+            name = type(record.name) == "string" and record.name or "unavailable",
+            time = record.time,
+            value = record.value
+        }
+    end
+    table.sort(records, function(left, right) return left.type < right.type end)
+    return gamma_arena_result.ok(records)
+end
+
+function Diagnostics:debt_count()
+    if type(self.deps.debt_snapshot) ~= "function" then return "unavailable" end
+    local debt = result_call("GA_ACTOR_DIAGNOSTIC_DEBT_FAILED", self.deps.debt_snapshot)
+    if not debt.ok or type(debt.value) ~= "table" then return "unavailable" end
+    return #debt.value
+end
+
+function Diagnostics:snapshot(actor, phase, extra)
+    if type(phase) ~= "string" or phase == "" then
+        return fail("GA_ACTOR_DIAGNOSTIC_PHASE_INVALID", "Actor diagnostic phase must be a non-empty string")
+    end
+    local state = self:actor_state(actor)
+    if not state.ok then return state end
+    local context = self:context()
+    if not context.ok then return context end
+    local boosters = self:booster_records(actor)
+    if not boosters.ok then return boosters end
+
+    local fields = { phase = phase, booster_debt_count = self:debt_count() }
+    copy_scalars(fields, context.value)
+    copy_scalars(fields, state.value)
+    copy_scalars(fields, self:bhs_fields(actor))
+    copy_scalars(fields, extra)
+    local event_code = phase == "health_drop" and "GA_ACTOR_HEALTH_DROP" or "GA_ACTOR_TRANSIENT_SNAPSHOT"
+    local written = self:write(event_code, fields)
+    if not written.ok then return written end
+
+    for _, record in ipairs(boosters.value) do
+        local booster_fields = {
+            phase = phase,
+            booster_type = record.type,
+            booster_name = record.name,
+            booster_time = record.time,
+            booster_value = record.value
+        }
+        copy_scalars(booster_fields, context.value)
+        local booster_written = self:write("GA_ACTOR_BOOSTER_SNAPSHOT", booster_fields)
+        if not booster_written.ok then return booster_written end
+    end
+    return gamma_arena_result.ok({ boosters = #boosters.value })
+end
+
+function Diagnostics:update(actor, active)
+    if active ~= true then return gamma_arena_result.ok(false) end
+    local state = self:actor_state(actor)
+    if not state.ok then return state end
+    local health = state.value.health
+    if not finite(health) then
+        return fail("GA_ACTOR_DIAGNOSTIC_HEALTH_INVALID", "Actor health sample must be finite")
+    end
+
+    local delta = self.last_health ~= nil and self.last_health - health or 0
+    local emitted = nil
+    if delta > 0 then
+        self.accumulated_drop = self.accumulated_drop + delta
+        local now = self:clock()
+        if not now.ok then return now end
+        if self.last_drop_log_at == nil or elapsed_ms(self.last_drop_log_at, now.value) >= HEALTH_LOG_INTERVAL_MS then
+            emitted = self:snapshot(actor, "health_drop", { health_delta = self.accumulated_drop })
+            self.last_drop_log_at = now.value
+            self.accumulated_drop = 0
+        end
+    elseif delta < 0 then
+        self.accumulated_drop = 0
+        self.last_drop_log_at = nil
+    end
+    self.last_health = health
+    if emitted ~= nil and not emitted.ok then return emitted end
+    return gamma_arena_result.ok({ health = health, health_delta = delta })
+end
+
+function Diagnostics:reset()
+    self.last_health = nil
+    self.last_drop_log_at = nil
+    self.accumulated_drop = 0
+    return gamma_arena_result.ok(true)
+end
+
+function new(deps)
+    local instance = setmetatable({}, Diagnostics)
+    instance:__init(deps)
+    return instance
+end

@@ -1580,7 +1580,7 @@ local function resolve_booster_types(api)
     return gamma_arena_result.ok(resolved)
 end
 
-local function default_booster_reconciler(diagnostics)
+local function default_booster_reconciler(diagnostics, compensation_observer)
     return gamma_arena_booster_reconciler.new({
         actor_id = function(actor) return gamma_arena_result.ok(runtime_object_id(actor)) end,
         conditions = actor_condition_api,
@@ -1589,6 +1589,9 @@ local function default_booster_reconciler(diagnostics)
             pcall(gamma_arena_log.info, code, "Arena actor booster compatibility state changed", fields or {})
             if diagnostics ~= nil and type(diagnostics.checkpoint) == "function" then
                 pcall(diagnostics.checkpoint, diagnostics, code, fields or {})
+            end
+            if code == "GA_ACTOR_BOOSTER_DOUBLE_DISABLE_COMPENSATED" and type(compensation_observer) == "function" then
+                pcall(compensation_observer, fields or {})
             end
             return true
         end
@@ -1741,7 +1744,23 @@ local function clear_round_effectors(level_port)
     return gamma_arena_result.ok(true)
 end
 
-local function reset_gamma_actor_transients(actor, reconciler)
+local function observe_actor_snapshot(observer, actor, phase, extra)
+    local method_ok, method = pcall(function() return observer and observer.snapshot end)
+    if not method_ok or type(method) ~= "function" then return false end
+    local called, result = pcall(method, observer, actor, phase, extra)
+    if not called or (type(result) == "table" and result.ok == false) or result == false then
+        local detail = type(result) == "table" and result.error or nil
+        pcall(gamma_arena_log.warn, "GA_ACTOR_DIAGNOSTIC_SNAPSHOT_FAILED", "Actor condition snapshot failed safely", {
+            phase = phase,
+            cause = detail and detail.code or (called and "explicit false" or tostring(result))
+        })
+        return false
+    end
+    return true
+end
+
+local function reset_gamma_actor_transients(actor, reconciler, actor_diagnostics)
+    observe_actor_snapshot(actor_diagnostics, actor, "pre_transient_reset")
     if type(actor_effects) == "table" and type(actor_effects.disable_effects_timer) == "function" then
         local disabled, reason = pcall(actor_effects.disable_effects_timer, 100)
         if not disabled then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Actor effect scheduling reset failed safely", { reason = tostring(reason) }) end
@@ -1754,7 +1773,80 @@ local function reset_gamma_actor_transients(actor, reconciler)
     if not psy.ok then return psy end
     local effectors = clear_round_effectors()
     if not effectors.ok then return effectors end
+    observe_actor_snapshot(actor_diagnostics, actor, "post_transient_reset")
     return gamma_arena_result.ok(true)
+end
+
+local function runtime_actor_diagnostic_state(actor)
+    local state = {}
+    for target, source in pairs({
+        health = "health", power = "power", radiation = "radiation",
+        bleeding_speed = "bleeding", satiety = "satiety", psy_health = "psy_health"
+    }) do
+        local read, value = pcall(function() return actor and actor[source] end)
+        state[target] = read and finite_runtime_number(value) and value or "unavailable"
+    end
+    return gamma_arena_result.ok(state)
+end
+
+local function runtime_actor_booster_records(actor)
+    local conditions = actor_condition_api(actor)
+    if not conditions.ok then return conditions end
+    local definitions = resolve_booster_types(conditions.value)
+    if not definitions.ok then return definitions end
+    local records = {}
+    local enumerated = runtime_object_method("GA_ACTOR_DIAGNOSTIC_BOOSTERS_FAILED", conditions.value, "BoosterForEach", function(kind, time, value)
+        local descriptor = definitions.value[kind]
+        records[#records + 1] = {
+            type = kind,
+            name = descriptor and descriptor.name or "unsupported",
+            time = time,
+            value = value
+        }
+        return false
+    end)
+    if not enumerated.ok then return enumerated end
+    return gamma_arena_result.ok(records)
+end
+
+local function runtime_actor_bhs_state()
+    local bhs = zzz_player_injuries
+    if type(bhs) ~= "table" or type(bhs.health) ~= "table" or type(bhs.timedhp) ~= "table" then
+        return gamma_arena_result.ok(nil)
+    end
+    local state = {}
+    local read, reason = pcall(function()
+        for _, part in ipairs(BHS_PARTS) do
+            state[part] = bhs.health[part]
+            state[part .. "_timed"] = bhs.timedhp[part]
+        end
+    end)
+    if not read then
+        return gamma_arena_result.err("GA_ACTOR_DIAGNOSTIC_BHS_FAILED", "Body Health diagnostic state failed safely", {
+            reason = tostring(reason)
+        })
+    end
+    return gamma_arena_result.ok(state)
+end
+
+local function default_actor_diagnostics(diagnostics, booster_reconciler, active_instance)
+    return gamma_arena_actor_diagnostics.new({
+        clock = function() return gamma_arena_result.ok(time_global()) end,
+        actor_state = runtime_actor_diagnostic_state,
+        booster_records = runtime_actor_booster_records,
+        bhs_state = runtime_actor_bhs_state,
+        debt_snapshot = function() return gamma_arena_result.ok(booster_reconciler:debt_snapshot()) end,
+        context = function()
+            local instance = active_instance()
+            local session = instance and instance:session_snapshot() or nil
+            return gamma_arena_result.ok({
+                session_id = session and session.session_id or "unavailable",
+                fight_index = session and session.fight_index or "unavailable",
+                stage = instance and instance:runtime_stage_snapshot() or "unavailable"
+            })
+        end,
+        write = function(code, fields) return diagnostics:checkpoint(code, fields) end
+    })
 end
 
 local function runtime_weapon_diagnostic(context)
@@ -1767,7 +1859,7 @@ local function runtime_weapon_diagnostic(context)
     }, context)
 end
 
-local function default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, actor_item_ports, booster_reconciler)
+local function default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, actor_item_ports, booster_reconciler, actor_diagnostics)
     local effects = {}
     function effects.disable_effects_timer(duration)
         if actor_effects and type(actor_effects.disable_effects_timer) == "function" then
@@ -2181,7 +2273,7 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             return gamma_arena_result.ok(value)
         end,
         weapon_hide_timeout_ms = 5000,
-        reset_transient_state = function(actor) return reset_gamma_actor_transients(actor, booster_reconciler) end,
+        reset_transient_state = function(actor) return reset_gamma_actor_transients(actor, booster_reconciler, actor_diagnostics) end,
         update_transient_services = function()
             local debt_ok, debt = pcall(function() return booster_reconciler:debt_snapshot() end)
             if not debt_ok or type(debt) ~= "table" then
@@ -2193,7 +2285,30 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             local actor = db and db.actor or nil
             return booster_reconciler:update(actor)
         end,
-        discard_transient_services = function(reason) return booster_reconciler:discard(reason) end,
+        update_actor_diagnostics = function()
+            local instance = active_instance()
+            if instance == nil or instance:is_active() ~= true then return gamma_arena_result.ok(false) end
+            local called, result = pcall(function() return actor_diagnostics:update(db and db.actor or nil, true) end)
+            if not called or (type(result) == "table" and result.ok == false) or result == false then
+                local detail = type(result) == "table" and result.error or nil
+                pcall(gamma_arena_log.warn, "GA_ACTOR_DIAGNOSTIC_UPDATE_FAILED", "Actor health observation failed safely", {
+                    cause = detail and detail.code or (called and "explicit false" or tostring(result))
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        snapshot_actor_diagnostics = function(actor, phase, extra) return actor_diagnostics:snapshot(actor, phase, extra) end,
+        discard_transient_services = function(reason)
+            local discarded = booster_reconciler:discard(reason)
+            local reset = actor_diagnostics:reset()
+            if not discarded.ok then return discarded end
+            if type(reset) == "table" and reset.ok == false then
+                pcall(gamma_arena_log.warn, "GA_ACTOR_DIAGNOSTIC_RESET_FAILED", "Actor diagnostics reset failed safely", {
+                    cause = reset.error and reset.error.code or "unknown"
+                })
+            end
+            return gamma_arena_result.ok(true)
+        end,
         input = input,
         loadout = loadout,
         items = items
@@ -2937,8 +3052,14 @@ function compose(overrides)
         if context.actor == nil then context.actor = db and db.actor or nil end
         return runtime_weapon_diagnostic(context)
     end
-    local booster_reconciler = overrides.booster_reconciler or default_booster_reconciler(diagnostics)
-    local actor_adapter = overrides.actor or default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, overrides.actor_item_ports, booster_reconciler)
+    local actor_diagnostics = overrides.actor_diagnostics
+    local booster_reconciler = overrides.booster_reconciler or default_booster_reconciler(diagnostics, function(fields)
+        if actor_diagnostics ~= nil then
+            observe_actor_snapshot(actor_diagnostics, db and db.actor or nil, "booster_double_disable_compensated", fields)
+        end
+    end)
+    actor_diagnostics = actor_diagnostics or default_actor_diagnostics(diagnostics, booster_reconciler, active_instance)
+    local actor_adapter = overrides.actor or default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, overrides.actor_item_ports, booster_reconciler, actor_diagnostics)
     local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance, diagnostics)
     local npc_medical = overrides.npc_medical or default_npc_medical_controller(entity_adapter)
     local save_guard = overrides.save_guard or default_save_guard(diagnostics)

@@ -676,6 +676,7 @@ local function fake_orchestrator_deps(store)
     local actor_discard_reasons = {}
     local actor_adapter = {
         begin_update = function() return gamma_arena_result.ok(true) end,
+        observe_transient_state = function() return gamma_arena_result.ok(false) end,
         discard_transient_services = function(_, reason)
             actor_discard_reasons[#actor_discard_reasons + 1] = reason
             return gamma_arena_result.ok(true)
@@ -2162,6 +2163,8 @@ local function fake_actor_adapter_env()
             end
             return gamma_arena_result.ok(true)
         end,
+        update_actor_diagnostics = function() return gamma_arena_result.ok(true) end,
+        snapshot_actor_diagnostics = function() return gamma_arena_result.ok(true) end,
         discard_transient_services = function() return gamma_arena_result.ok(true) end,
         input = {
             acquire = function()
@@ -2599,6 +2602,110 @@ local function runtime_booster_reconciler_correction_failure_is_structured()
     gamma_arena_test_assert.is_false(failed.ok, "throwing correction is contained")
     gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_BOOSTER_COMPENSATE_FAILED", "correction failure code is exact")
     gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "failed correction retains debt for retry")
+end
+
+local function fake_actor_diagnostics(options)
+    options = options or {}
+    local env = {
+        now = options.now or 0,
+        health = options.health or 1,
+        health_writes = 0,
+        events = {},
+        boosters = options.boosters or {
+            { type = 0, name = "health_restore", time = 12, value = 0.01 },
+            { type = 1, name = "power_restore", time = 8, value = 0.2 }
+        }
+    }
+    local actor = setmetatable({}, {
+        __index = function(_, key)
+            if key == "health" then return env.health end
+            return nil
+        end,
+        __newindex = function(target, key, value)
+            if key == "health" then env.health_writes = env.health_writes + 1; env.health = value; return end
+            rawset(target, key, value)
+        end
+    })
+    local bhs = {
+        head = 11, head_timed = 0, torso = 10, torso_timed = 0,
+        rightarm = 5, rightarm_timed = 0, leftarm = 5, leftarm_timed = 0,
+        rightleg = 5, rightleg_timed = 0, leftleg = 5, leftleg_timed = 0
+    }
+    local service = gamma_arena_actor_diagnostics.new({
+        clock = function() return gamma_arena_result.ok(env.now) end,
+        actor_state = function(candidate)
+            gamma_arena_test_assert.is_true(candidate == actor, "diagnostics reads only the supplied actor")
+            return gamma_arena_result.ok({
+                health = env.health, power = 0.9, radiation = 0.1,
+                bleeding_speed = 0.02, satiety = 0.8, psy_health = 0.7
+            })
+        end,
+        booster_records = function() return gamma_arena_result.ok(clone(env.boosters)) end,
+        bhs_state = function() return gamma_arena_result.ok(clone(bhs)) end,
+        debt_snapshot = function() return gamma_arena_result.ok({ { type = 0 } }) end,
+        context = function() return gamma_arena_result.ok({ session_id = "ga_diag", fight_index = 4, stage = "ACTIVE" }) end,
+        write = function(code, fields)
+            env.events[#env.events + 1] = { code = code, fields = clone(fields) }
+            return gamma_arena_result.ok(true)
+        end
+    })
+    function env:set_health(value) self.health = value end
+    function env:advance(delta) self.now = (self.now + delta) % 4294967296 end
+    return actor, env, service
+end
+
+local function diagnostic_event_count(events, code)
+    local count = 0
+    for _, event in ipairs(events) do if event.code == code then count = count + 1 end end
+    return count
+end
+
+local function runtime_actor_diagnostics_transition_snapshot_is_bounded()
+    local actor, env, service = fake_actor_diagnostics()
+    local result = service:snapshot(actor, "pre_transient_reset", { reason = "next_fight" })
+    gamma_arena_test_assert.is_true(result.ok, "transition condition snapshot succeeds")
+    gamma_arena_test_assert.equals(env.events[1].code, "GA_ACTOR_TRANSIENT_SNAPSHOT", "transition emits the canonical snapshot event")
+    gamma_arena_test_assert.equals(env.events[1].fields.bhs_leftleg_timed, 0, "bounded snapshot includes the final BHS timed field")
+    local bytes = 0
+    for key, value in pairs(env.events[1].fields) do
+        gamma_arena_test_assert.is_true(type(value) == "string" or type(value) == "number" or type(value) == "boolean", "snapshot fields remain scalar")
+        bytes = bytes + #tostring(key) + #tostring(value) + 2
+    end
+    gamma_arena_test_assert.is_true(bytes < 1024, "transition snapshot fits the bounded diagnostic record")
+end
+
+local function runtime_actor_diagnostics_emits_each_booster_record()
+    local actor, env, service = fake_actor_diagnostics()
+    gamma_arena_test_assert.is_true(service:snapshot(actor, "post_transient_reset").ok, "post-reset snapshot succeeds")
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_BOOSTER_SNAPSHOT"), 2, "one event is emitted per current booster record")
+    gamma_arena_test_assert.equals(env.events[2].fields.booster_type, 0, "booster snapshots are sorted by runtime type")
+    gamma_arena_test_assert.equals(env.events[3].fields.booster_type, 1, "every booster type remains independently visible")
+end
+
+local function runtime_actor_diagnostics_logs_first_drop_then_rate_limits()
+    local actor, env, service = fake_actor_diagnostics({ health = 0.9, boosters = {} })
+    gamma_arena_test_assert.is_true(service:update(actor, true).ok, "first sample establishes the health baseline")
+    env:set_health(0.8); env:advance(100)
+    gamma_arena_test_assert.is_true(service:update(actor, true).ok, "first health drop is sampled")
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 1, "first decrease logs immediately")
+    env:set_health(0.7); env:advance(999)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 1, "another decrease before one second is accumulated")
+    env:set_health(0.6); env:advance(1)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 2, "accumulated decrease logs at one second")
+    local last = env.events[#env.events]
+    gamma_arena_test_assert.is_true(math.abs(last.fields.health_delta - 0.2) < 0.0000001, "rate-limited event includes the accumulated health drop")
+end
+
+local function runtime_actor_diagnostics_never_mutates_actor_health()
+    local actor, env, service = fake_actor_diagnostics({ health = 0.75 })
+    service:snapshot(actor, "pre_transient_reset")
+    service:update(actor, true)
+    env:set_health(0.5); env:advance(1)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(env.health_writes, 0, "diagnostic snapshots and sampling never write actor health")
+    gamma_arena_test_assert.equals(env.health, 0.5, "observer leaves the sampled health value unchanged")
 end
 
 local function runtime_bootstrap_engine_transients_clear_and_verify()
@@ -8606,7 +8713,7 @@ end
 
 local function natural_death_environment(options)
     options = options or {}
-    local env = { arm = 0, confirm = 0, tactical_stop = 0, neutralize = 0, actor_mutations = 0, battle_identity_clears = 0, audio_calls = {} }
+    local env = { arm = 0, confirm = 0, tactical_stop = 0, neutralize = 0, actor_mutations = 0, battle_identity_clears = 0, audio_calls = {}, actor_snapshots = {}, death_order = {} }
     local store = fake_store()
     function store:arm_defeat(_, context)
         env.arm = env.arm + 1
@@ -8623,6 +8730,7 @@ local function natural_death_environment(options)
     local deps = fake_orchestrator_deps(store)
     deps.battle_ui = {
         clear_identity = function()
+            env.death_order[#env.death_order + 1] = "clear_identity"
             env.battle_identity_clears = env.battle_identity_clears + 1
             if options.battle_ui_clear_error then
                 return gamma_arena_result.err("GA_TEST_BATTLE_UI_CLEAR", "injected death boundary clear failure")
@@ -8643,6 +8751,11 @@ local function natural_death_environment(options)
     }
     deps.actor.hold_after_logical_death = function()
         env.actor_mutations = env.actor_mutations + 1
+        return gamma_arena_result.ok(true)
+    end
+    deps.actor.observe_transient_state = function(_, phase, extra)
+        env.death_order[#env.death_order + 1] = "snapshot"
+        env.actor_snapshots[#env.actor_snapshots + 1] = { phase = phase, extra = clone(extra or {}) }
         return gamma_arena_result.ok(true)
     end
     deps.entities = {
@@ -8668,6 +8781,16 @@ local function natural_death_environment(options)
     }
     env.orchestrator = orchestrator
     return env
+end
+
+local function runtime_actor_before_death_forces_final_snapshot()
+    local env = natural_death_environment()
+    local observed = env.orchestrator:actor_on_before_death(77, { ret_value = true })
+    gamma_arena_test_assert.is_true(observed.ok, "before-death flow remains valid")
+    gamma_arena_test_assert.equals(#env.actor_snapshots, 1, "before-death forces one final actor condition snapshot")
+    gamma_arena_test_assert.equals(env.actor_snapshots[1].phase, "actor_before_death", "final snapshot phase is exact")
+    gamma_arena_test_assert.equals(env.death_order[1], "snapshot", "final actor snapshot precedes battle identity removal")
+    gamma_arena_test_assert.equals(env.death_order[2], "clear_identity", "battle identity clears after condition evidence is captured")
 end
 
 local function runtime_natural_death_arms_confirms_and_neutralizes_once()
@@ -13389,6 +13512,11 @@ local cases = {
     ,{ name = "runtime_booster_reconciler_rejects_actor_identity_drift", fn = runtime_booster_reconciler_rejects_actor_identity_drift }
     ,{ name = "runtime_booster_reconciler_rejects_invalid_records_and_unknown_types", fn = runtime_booster_reconciler_rejects_invalid_records_and_unknown_types }
     ,{ name = "runtime_booster_reconciler_correction_failure_is_structured", fn = runtime_booster_reconciler_correction_failure_is_structured }
+    ,{ name = "runtime_actor_diagnostics_transition_snapshot_is_bounded", fn = runtime_actor_diagnostics_transition_snapshot_is_bounded }
+    ,{ name = "runtime_actor_diagnostics_emits_each_booster_record", fn = runtime_actor_diagnostics_emits_each_booster_record }
+    ,{ name = "runtime_actor_diagnostics_logs_first_drop_then_rate_limits", fn = runtime_actor_diagnostics_logs_first_drop_then_rate_limits }
+    ,{ name = "runtime_actor_diagnostics_never_mutates_actor_health", fn = runtime_actor_diagnostics_never_mutates_actor_health }
+    ,{ name = "runtime_actor_before_death_forces_final_snapshot", fn = runtime_actor_before_death_forces_final_snapshot }
     ,{ name = "runtime_actor_input_ownership_is_idempotent", fn = runtime_actor_input_ownership_is_idempotent }
     ,{ name = "runtime_actor_victory_reset_waits_for_inventory_absence", fn = runtime_actor_victory_reset_waits_for_inventory_absence }
     ,{ name = "runtime_actor_rejects_coincident_patrol_points", fn = runtime_actor_rejects_coincident_patrol_points }

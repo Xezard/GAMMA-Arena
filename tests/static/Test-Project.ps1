@@ -257,6 +257,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_layout_adapter.script'; Namespace = 'gamma_arena_layout_adapter'; Required = @('(?m)^function\s+new\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_booster_reconciler.script'; Namespace = 'gamma_arena_booster_reconciler'; Required = @('function\s+Reconciler:clear', 'function\s+Reconciler:update', 'function\s+Reconciler:discard', 'function\s+Reconciler:debt_snapshot', 'ClearAllBoosters', 'BoosterForEach', 'GA_ACTOR_BOOSTER_RECORD_INVALID', 'GA_ACTOR_BOOSTER_TYPE_UNSUPPORTED', 'GA_ACTOR_BOOSTER_ACTOR_MISMATCH', 'GA_ACTOR_BOOSTER_COMPENSATE_FAILED', 'GA_ACTOR_BOOSTER_DEBT_ARMED', 'GA_ACTOR_BOOSTER_DOUBLE_DISABLE_COMPENSATED') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_actor_diagnostics.script'; Namespace = 'gamma_arena_actor_diagnostics'; Required = @('function\s+Diagnostics:snapshot', 'function\s+Diagnostics:update', 'function\s+Diagnostics:reset', 'GA_ACTOR_TRANSIENT_SNAPSHOT', 'GA_ACTOR_BOOSTER_SNAPSHOT', 'GA_ACTOR_HEALTH_DROP', '1000') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script'; Namespace = 'gamma_arena_test_layout_adapter'; Required = @('(?m)^function\s+run\s*\(') }
@@ -1992,6 +1993,7 @@ if (Test-Path -LiteralPath $Task6ActorPath) {
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:reset_transient_state') 'Actor adapter must expose one authoritative transient reset boundary'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:begin_update[\s\S]{0,350}update_transient_services[\s\S]{0,350}update_tick\s*=\s*self\.update_tick\s*\+\s*1') 'Actor updates must reconcile transient services before advancing world progress'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:discard_transient_services') 'Actor adapter must expose actor-lifetime transient disposal'
+    Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:observe_transient_state') 'Actor adapter must expose bounded before-death transient observation'
     Assert-True ($Task6ActorContent -match 'interrupt_item_use[\s\S]{0,900}acquire_input') 'Item-use interruption must precede Arena input acquisition in the rematch boundary'
     Assert-True ($Task6ActorContent -match 'reset_transient_state[\s\S]{0,1500}loadout\.cleanup') 'Transient cleanup must precede rematch loadout cleanup'
     Assert-True ($Task6ActorContent -match 'function\s+ActorAdapter:normalize_for_arena[\s\S]{0,1300}if\s+acquired\.value\s*==\s*true\s+then[\s\S]{0,220}release_input') 'Normalization rollback may release only an input lease acquired by that invocation'
@@ -2041,6 +2043,9 @@ foreach ($Marker in @('BOOSTER_TYPE_DESCRIPTORS','gamma_arena_booster_reconciler
     Assert-True ($Task6BootstrapContent.Contains($Marker)) "Booster reconciler composition is missing marker: $Marker"
 }
 Assert-True ($Task6BootstrapContent -match 'reconciler:clear\(actor\)') 'Bootstrap transient cleanup must delegate booster mutation to the reconciler'
+foreach ($Marker in @('gamma_arena_actor_diagnostics.new','pre_transient_reset','post_transient_reset','booster_double_disable_compensated','update_actor_diagnostics')) {
+    Assert-True ($Task6BootstrapContent.Contains($Marker)) "Actor condition diagnostics composition is missing marker: $Marker"
+}
 Assert-True ($Task6BootstrapContent -match 'if\s+wound_count\s*~=\s*0\s+then') 'Native wound readback must remain a strict reset postcondition'
 Assert-True ($Task6BootstrapContent -notmatch 'wound_count\s*~=\s*0\s+or\s+booster_count\s*~=\s*0') 'Contradictory MT-TEST booster enumeration must not share the fatal wound postcondition'
 $RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
@@ -2053,9 +2058,13 @@ foreach ($Name in @('runtime_booster_reconciler_fixed_engine_creates_no_debt','r
 foreach ($Name in @('runtime_actor_begin_update_reconciles_booster_debt_first','runtime_actor_begin_update_failure_blocks_world_progress','runtime_bootstrap_transient_reset_delegates_booster_clear_once','runtime_bootstrap_resolves_all_exported_booster_types','runtime_game_load_discards_actor_bound_booster_debt','runtime_actor_destroy_discards_actor_bound_booster_debt')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Booster lifecycle runtime regression must cover $Name"
 }
+foreach ($Name in @('runtime_actor_diagnostics_transition_snapshot_is_bounded','runtime_actor_diagnostics_emits_each_booster_record','runtime_actor_diagnostics_logs_first_drop_then_rate_limits','runtime_actor_diagnostics_never_mutates_actor_health','runtime_actor_before_death_forces_final_snapshot')) {
+    Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Actor diagnostics runtime regression must cover $Name"
+}
 foreach ($Marker in @('discard_transient_services','"game_load"','"actor_destroyed"')) {
     Assert-True ($Task5OrchestratorContent.Contains($Marker)) "Orchestrator booster lifecycle is missing marker: $Marker"
 }
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,500}observe_transient_state[\s\S]{0,500}clear_battle_identity') 'Before-death handling must snapshot actor conditions before clearing battle identity'
 foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition orchestration regression must cover $Name"
 }
