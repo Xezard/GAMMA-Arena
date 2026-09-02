@@ -3644,6 +3644,30 @@ $CatalogCacheCase = 'runtime_catalog_default_success_is_reused_only_for_default_
 $CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*' + $CatalogCacheCase + '\s*\}'
 Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $CatalogCacheRegistration)).Count -eq 1) 'Runtime catalog cache case must be registered exactly once.'
 
+$MedicalPolicyContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_npc_medical_policy.script'; Namespace = 'gamma_arena_npc_medical_policy'; Required = @('(?m)^function\s+read\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_npc_medical_policy.script'; Namespace = 'gamma_arena_test_npc_medical_policy'; Required = @('(?m)^function\s+run\s*\(', 'read_table_driven_policy_cases') }
+)
+foreach ($Contract in $MedicalPolicyContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Medical policy script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Medical policy script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Medical policy script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Medical policy script is missing its contract: $($Contract.Path)"
+        }
+    }
+}
+$MedicalPolicyDomain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($MedicalPolicyDomain -match 'gamma_arena_test_npc_medical_policy\.run\s*\(\s*run_case_fn\s*\)') 'Medical policy tests must run from the Dev domain suite.'
+$MedicalPolicyTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_npc_medical_policy.script') -Raw
+foreach ($CaseName in @('missing_keys', 'disabled_overlap', 'out_of_combat_overlap', 'non_overlap', 'medkit_overlap', 'bandage_overlap', 'both_overlaps', 'whitespace_empty_tokens', 'exact_matching', 'malformed_boolean', 'accessor_throw', 'non_string_value')) {
+    Assert-True ($MedicalPolicyTests -match [regex]::Escape($CaseName)) "Medical policy tests must cover $CaseName."
+}
+
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
 if (Test-Path -LiteralPath $SmokeHarnessPath) {
     $SmokeHarnessContent = Get-Content -LiteralPath $SmokeHarnessPath -Raw
