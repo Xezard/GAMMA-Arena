@@ -1522,6 +1522,26 @@ local function finite_runtime_number(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
+local BOOSTER_TYPE_DESCRIPTORS = {
+    { enum = "eBoostHpRestore", name = "health_restore", method = "BoostHpRestore" },
+    { enum = "eBoostPowerRestore", name = "power_restore", method = "BoostPowerRestore" },
+    { enum = "eBoostRadiationRestore", name = "radiation_restore", method = "BoostRadiationRestore" },
+    { enum = "eBoostBleedingRestore", name = "bleeding_restore", method = "BoostBleedingRestore" },
+    { enum = "eBoostMaxWeight", name = "max_weight", method = "BoostMaxWeight" },
+    { enum = "eBoostRadiationProtection", name = "radiation_protection", method = "BoostRadiationProtection" },
+    { enum = "eBoostTelepaticProtection", name = "telepatic_protection", method = "BoostTelepaticProtection" },
+    { enum = "eBoostChemicalBurnProtection", name = "chemical_burn_protection", method = "BoostChemicalBurnProtection" },
+    { enum = "eBoostBurnImmunity", name = "burn_immunity", method = "BoostBurnImmunity" },
+    { enum = "eBoostShockImmunity", name = "shock_immunity", method = "BoostShockImmunity" },
+    { enum = "eBoostRadiationImmunity", name = "radiation_immunity", method = "BoostRadiationImmunity" },
+    { enum = "eBoostTelepaticImmunity", name = "telepatic_immunity", method = "BoostTelepaticImmunity" },
+    { enum = "eBoostChemicalBurnImmunity", name = "chemical_burn_immunity", method = "BoostChemicalBurnImmunity" },
+    { enum = "eBoostExplImmunity", name = "explosion_immunity", method = "BoostExplImmunity" },
+    { enum = "eBoostStrikeImmunity", name = "strike_immunity", method = "BoostStrikeImmunity" },
+    { enum = "eBoostFireWoundImmunity", name = "fire_wound_immunity", method = "BoostFireWoundImmunity" },
+    { enum = "eBoostWoundImmunity", name = "wound_immunity", method = "BoostWoundImmunity" }
+}
+
 local function runtime_object_method(code, object, method_name, ...)
     local looked_up, method = pcall(function() return object and object[method_name] end)
     if not looked_up or type(method) ~= "function" then
@@ -1534,15 +1554,64 @@ local function runtime_object_method(code, object, method_name, ...)
     return gamma_arena_result.ok(value)
 end
 
-local function clear_engine_actor_transients(actor)
+local function actor_condition_api(actor)
     local cast = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", actor, "cast_Actor")
     if not cast.ok or cast.value == nil then return cast.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor cast is unavailable") or cast end
     local conditions = runtime_object_method("GA_ACTOR_CONDITIONS_API_MISSING", cast.value, "conditions")
     if not conditions.ok or conditions.value == nil then return conditions.ok and gamma_arena_result.err("GA_ACTOR_CONDITIONS_API_MISSING", "Actor conditions are unavailable") or conditions end
+    return conditions
+end
+
+local function resolve_booster_types(api)
+    local resolved = {}
+    for _, descriptor in ipairs(BOOSTER_TYPE_DESCRIPTORS) do
+        local enum_ok, kind = pcall(function() return api and api[descriptor.enum] end)
+        local method_ok, method = pcall(function() return api and api[descriptor.method] end)
+        if not enum_ok or not finite_runtime_number(kind) or kind ~= math.floor(kind) or kind < 0
+            or resolved[kind] ~= nil or not method_ok or type(method) ~= "function" then
+            return gamma_arena_result.err("GA_ACTOR_BOOSTER_TYPE_MAP_FAILED", "Installed booster enum or correction method is unavailable", {
+                enum = descriptor.enum,
+                method = descriptor.method,
+                booster_type = kind
+            })
+        end
+        resolved[kind] = { name = descriptor.name, method = descriptor.method }
+    end
+    return gamma_arena_result.ok(resolved)
+end
+
+local function default_booster_reconciler(diagnostics)
+    return gamma_arena_booster_reconciler.new({
+        actor_id = function(actor) return gamma_arena_result.ok(runtime_object_id(actor)) end,
+        conditions = actor_condition_api,
+        type_definitions = resolve_booster_types,
+        emit = function(code, fields)
+            pcall(gamma_arena_log.info, code, "Arena actor booster compatibility state changed", fields or {})
+            if diagnostics ~= nil and type(diagnostics.checkpoint) == "function" then
+                pcall(diagnostics.checkpoint, diagnostics, code, fields or {})
+            end
+            return true
+        end
+    })
+end
+
+local function clear_engine_actor_transients(actor, reconciler)
+    local conditions = actor_condition_api(actor)
+    if not conditions.ok then return conditions end
     local api = conditions.value
     local wounds = runtime_object_method("GA_ACTOR_WOUND_CLEAR_FAILED", api, "ClearWounds")
     if not wounds.ok then return wounds end
-    local boosters = runtime_object_method("GA_ACTOR_BOOSTER_CLEAR_FAILED", api, "ClearAllBoosters")
+    local reconciler_ok, clear = pcall(function() return reconciler and reconciler.clear end)
+    if not reconciler_ok or type(clear) ~= "function" then
+        return gamma_arena_result.err("GA_ACTOR_BOOSTER_CLEAR_FAILED", "Booster reconciler is unavailable")
+    end
+    local cleared_ok, boosters = pcall(function() return reconciler:clear(actor) end)
+    if not cleared_ok then
+        return gamma_arena_result.err("GA_ACTOR_BOOSTER_CLEAR_FAILED", "Booster reconciler failed safely", { reason = tostring(boosters) })
+    end
+    if type(boosters) ~= "table" or type(boosters.ok) ~= "boolean" then
+        return gamma_arena_result.err("GA_ACTOR_BOOSTER_CLEAR_FAILED", "Booster reconciler returned an invalid Result")
+    end
     if not boosters.ok then return boosters end
     -- Monolith exports only the mutator. Alcohol is normalized to 0..1 and
     -- clamped by the next condition update, so -1 deterministically clears it.
@@ -1555,24 +1624,13 @@ local function clear_engine_actor_transients(actor)
         return false
     end)
     if not wound_readback.ok then return wound_readback end
-    local booster_count = 0
-    local booster_readback = runtime_object_method("GA_ACTOR_TRANSIENT_VERIFY_FAILED", api, "BoosterForEach", function()
-        booster_count = booster_count + 1
-        return false
-    end)
-    if not booster_readback.ok then return booster_readback end
     if wound_count ~= 0 then
         return gamma_arena_result.err("GA_ACTOR_TRANSIENT_VERIFY_FAILED", "Actor transient conditions survived reset", {
-            wounds = wound_count,
-            boosters = booster_count
+            wounds = wound_count
         })
     end
-    if booster_count ~= 0 then
-        pcall(gamma_arena_log.warn, "GA_ACTOR_BOOSTER_READBACK_STALE", "MT-TEST enumerated stale booster records after authoritative engine clear", {
-            boosters = booster_count
-        })
-    end
-    return gamma_arena_result.ok({ booster_readback_stale = booster_count })
+    local debt = type(boosters.value) == "table" and boosters.value.debt or 0
+    return gamma_arena_result.ok({ booster_debt = debt })
 end
 
 local function reset_gamma_body_health(actor, ports)
@@ -1683,12 +1741,12 @@ local function clear_round_effectors(level_port)
     return gamma_arena_result.ok(true)
 end
 
-local function reset_gamma_actor_transients(actor)
+local function reset_gamma_actor_transients(actor, reconciler)
     if type(actor_effects) == "table" and type(actor_effects.disable_effects_timer) == "function" then
         local disabled, reason = pcall(actor_effects.disable_effects_timer, 100)
         if not disabled then return gamma_arena_result.err("GA_ACTOR_EFFECT_RESET_FAILED", "Actor effect scheduling reset failed safely", { reason = tostring(reason) }) end
     end
-    local engine = clear_engine_actor_transients(actor)
+    local engine = clear_engine_actor_transients(actor, reconciler)
     if not engine.ok then return engine end
     local body = mod_body_health_reset(actor)
     if not body.ok then return body end
@@ -1709,7 +1767,7 @@ local function runtime_weapon_diagnostic(context)
     }, context)
 end
 
-local function default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, actor_item_ports)
+local function default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, actor_item_ports, booster_reconciler)
     local effects = {}
     function effects.disable_effects_timer(duration)
         if actor_effects and type(actor_effects.disable_effects_timer) == "function" then
@@ -2123,7 +2181,19 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             return gamma_arena_result.ok(value)
         end,
         weapon_hide_timeout_ms = 5000,
-        reset_transient_state = reset_gamma_actor_transients,
+        reset_transient_state = function(actor) return reset_gamma_actor_transients(actor, booster_reconciler) end,
+        update_transient_services = function()
+            local debt_ok, debt = pcall(function() return booster_reconciler:debt_snapshot() end)
+            if not debt_ok or type(debt) ~= "table" then
+                return gamma_arena_result.err("GA_ACTOR_TRANSIENT_RECONCILE_FAILED", "Booster debt snapshot is unavailable", {
+                    reason = debt_ok and "invalid snapshot" or tostring(debt)
+                })
+            end
+            if #debt == 0 then return gamma_arena_result.ok(false) end
+            local actor = db and db.actor or nil
+            return booster_reconciler:update(actor)
+        end,
+        discard_transient_services = function(reason) return booster_reconciler:discard(reason) end,
         input = input,
         loadout = loadout,
         items = items
@@ -2867,7 +2937,8 @@ function compose(overrides)
         if context.actor == nil then context.actor = db and db.actor or nil end
         return runtime_weapon_diagnostic(context)
     end
-    local actor_adapter = overrides.actor or default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, overrides.actor_item_ports)
+    local booster_reconciler = overrides.booster_reconciler or default_booster_reconciler(diagnostics)
+    local actor_adapter = overrides.actor or default_actor_adapter(active_instance, diagnostics, weapon_diagnostics, overrides.actor_item_ports, booster_reconciler)
     local entity_adapter = overrides.entities or default_entity_adapter(actor_adapter, active_instance, diagnostics)
     local npc_medical = overrides.npc_medical or default_npc_medical_controller(entity_adapter)
     local save_guard = overrides.save_guard or default_save_guard(diagnostics)
@@ -3216,8 +3287,12 @@ function request_restart()
     end)
 end
 
-function test_clear_engine_actor_transients(actor)
-    return clear_engine_actor_transients(actor)
+function test_clear_engine_actor_transients(actor, reconciler)
+    return clear_engine_actor_transients(actor, reconciler)
+end
+
+function test_resolve_booster_types(api)
+    return resolve_booster_types(api)
 end
 
 function test_reset_gamma_body_health(actor, ports)

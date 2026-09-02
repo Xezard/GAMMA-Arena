@@ -673,8 +673,13 @@ local function fake_orchestrator_deps(store)
         self.checkpoints[#self.checkpoints + 1] = { code = code, context = clone(context) }
         return gamma_arena_result.ok(true)
     end
+    local actor_discard_reasons = {}
     local actor_adapter = {
         begin_update = function() return gamma_arena_result.ok(true) end,
+        discard_transient_services = function(_, reason)
+            actor_discard_reasons[#actor_discard_reasons + 1] = reason
+            return gamma_arena_result.ok(true)
+        end,
         normalize_for_arena = function() return gamma_arena_result.ok(true) end,
         verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
         enforce_boundary = function() return gamma_arena_result.ok({ breach = false, zone = "bar_arena_sr" }) end,
@@ -730,6 +735,7 @@ local function fake_orchestrator_deps(store)
         diagnostics = diagnostics,
         _save_guard = save_guard,
         _diagnostics = diagnostics,
+        _actor_transient_discards = actor_discard_reasons,
         checkpoint = checkpoint_adapter,
         layout = function() return gamma_arena_result.ok({ level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end,
         catalogs = function()
@@ -765,6 +771,28 @@ local function fake_orchestrator_deps(store)
         log = { info = function() return gamma_arena_result.ok(true) end }
     }
     return deps
+end
+
+local function runtime_game_load_discards_actor_bound_booster_debt()
+    local deps = fake_orchestrator_deps(fake_store())
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    local loaded = orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(loaded.ok, "game-load boundary remains valid")
+    gamma_arena_test_assert.equals(#deps._actor_transient_discards, 1, "game load discards one actor-bound transient generation")
+    gamma_arena_test_assert.equals(deps._actor_transient_discards[1], "game_load", "game-load discard reason is exact")
+end
+
+local function runtime_actor_destroy_discards_actor_bound_booster_debt()
+    local deps = fake_orchestrator_deps(fake_store())
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator.active = true
+    orchestrator.session = valid_session()
+    orchestrator.runtime_stage = "ACTIVE"
+    local destroyed = orchestrator:actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "actor-destroy boundary remains valid")
+    gamma_arena_test_assert.equals(#deps._actor_transient_discards, 2, "actor destroy discards the live actor-bound generation")
+    gamma_arena_test_assert.equals(deps._actor_transient_discards[2], "actor_destroyed", "actor-destroy discard reason is exact")
 end
 
 local function launch_consumes_before_preflight_once()
@@ -1963,6 +1991,8 @@ local function fake_actor_adapter_env()
         active_slot = 2,
         hide_weapon_failure = false,
         transient_reset_calls = 0,
+        transient_update_calls = 0,
+        transient_update_failure = false,
         interrupt_failure = false,
         interrupt_throw = false,
         input_failure = false,
@@ -2124,6 +2154,15 @@ local function fake_actor_adapter_env()
             end
             return gamma_arena_result.ok(true)
         end,
+        update_transient_services = function()
+            env.transient_update_calls = env.transient_update_calls + 1
+            if env.trace_transient_updates then env.ordered_calls[#env.ordered_calls + 1] = "reconcile" end
+            if env.transient_update_failure then
+                return gamma_arena_result.err("GA_TEST_TRANSIENT_UPDATE", "injected transient update failure")
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        discard_transient_services = function() return gamma_arena_result.ok(true) end,
         input = {
             acquire = function()
                 env.input_acquires = env.input_acquires + 1
@@ -2135,6 +2174,28 @@ local function fake_actor_adapter_env()
         }
     }
     return env, gamma_arena_actor_adapter.new(deps)
+end
+
+local function runtime_actor_begin_update_reconciles_booster_debt_first()
+    local env, adapter = fake_actor_adapter_env()
+    env.trace_transient_updates = true
+    local began = adapter:begin_update()
+    gamma_arena_test_assert.is_true(began.ok, "actor update begins after transient reconciliation")
+    gamma_arena_test_assert.equals(began.value, 1, "first completed actor update receives tick one")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "reconcile", "booster debt reconciliation is the first actor-update operation")
+    gamma_arena_test_assert.equals(env.transient_update_calls, 1, "transient services update once per actor update")
+end
+
+local function runtime_actor_begin_update_failure_blocks_world_progress()
+    local env, adapter = fake_actor_adapter_env()
+    env.transient_update_failure = true
+    local failed = adapter:begin_update()
+    gamma_arena_test_assert.is_false(failed.ok, "transient reconciliation failure blocks the actor update")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_TRANSIENT_UPDATE", "structured reconciliation failure identity is preserved")
+    env.transient_update_failure = false
+    local retried = adapter:begin_update()
+    gamma_arena_test_assert.is_true(retried.ok, "actor update retries after transient reconciliation recovers")
+    gamma_arena_test_assert.equals(retried.value, 1, "failed reconciliation never advances the actor update tick")
 end
 
 local function runtime_actor_rematch_boundary_aborts_before_input_lock()
@@ -2354,6 +2415,16 @@ local function fake_actor_conditions(options)
     return actor, conditions
 end
 
+local function fake_direct_booster_clear(conditions)
+    local service = { clear_calls = 0 }
+    function service:clear()
+        self.clear_calls = self.clear_calls + 1
+        conditions:ClearAllBoosters()
+        return gamma_arena_result.ok({ debt = conditions.booster_count })
+    end
+    return service
+end
+
 local function fake_booster_engine(options)
     options = options or {}
     local conditions = {
@@ -2533,11 +2604,13 @@ end
 local function runtime_bootstrap_engine_transients_clear_and_verify()
     for _, initial_alcohol in ipairs({ 0, 0.5, 1 }) do
         local actor, conditions = fake_actor_conditions({ alcohol = initial_alcohol })
-        local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+        local service = fake_direct_booster_clear(conditions)
+        local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, service)
         gamma_arena_test_assert.is_true(result.ok, "engine transient reset succeeds with the installed condition APIs")
         gamma_arena_test_assert.equals(conditions.wound_count, 0, "engine wounds are authoritatively cleared")
         gamma_arena_test_assert.equals(conditions.booster_count, 0, "engine boosters are authoritatively cleared")
         gamma_arena_test_assert.equals(conditions.booster_clear_calls, 1, "authoritative engine booster cleanup runs exactly once")
+        gamma_arena_test_assert.equals(service.clear_calls, 1, "bootstrap delegates booster cleanup exactly once")
         gamma_arena_test_assert.equals(conditions.alcohol, initial_alcohol - 1, "write-only alcohol mutation precedes the engine clamp")
         gamma_arena_test_assert.equals(conditions.alcohol_change_calls, 1, "engine alcohol reset uses the exported write-only API once")
         gamma_arena_test_assert.equals(conditions.last_alcohol_delta, -1, "engine alcohol reset covers the normalized Monolith range")
@@ -2549,21 +2622,35 @@ local function runtime_bootstrap_engine_transients_clear_and_verify()
 end
 
 local function runtime_bootstrap_engine_booster_readback_is_nonfatal()
-    local stale_actor, stale_conditions = fake_actor_conditions({ retain_boosters = true })
-    local stale = gamma_arena_bootstrap.test_clear_engine_actor_transients(stale_actor)
-    gamma_arena_test_assert.is_true(stale.ok, "MT-TEST stale booster enumeration cannot abort an authoritative engine clear")
-    gamma_arena_test_assert.equals(stale.value.booster_readback_stale, 2, "stale booster count remains diagnostic evidence")
-    gamma_arena_test_assert.equals(stale_conditions.booster_count, 2, "fixture preserves the installed MT-TEST readback contradiction")
-    gamma_arena_test_assert.equals(stale_conditions.booster_clear_calls, 1, "stale readback never triggers a second destructive booster clear")
+    local stale_actor, stale_conditions, stale_service = fake_booster_reconciler({
+        retain_after_clear = true,
+        records = { { type = 0, time = 12, value = 0.01 } }
+    })
+    stale_conditions.wound_count = 0
+    stale_conditions.alcohol = 0.5
+    function stale_conditions:ClearWounds() self.wound_count = 0 end
+    function stale_conditions:WoundForEach(callback)
+        for index = 1, self.wound_count do callback({ index = index }) end
+    end
+    function stale_conditions:ChangeAlcohol(delta) self.alcohol = self.alcohol + delta end
+    local cast = { conditions = function() return stale_conditions end }
+    stale_actor.cast_Actor = function() return cast end
+    local stale = gamma_arena_bootstrap.test_clear_engine_actor_transients(stale_actor, stale_service)
+    gamma_arena_test_assert.is_true(stale.ok, "MT-TEST stale booster enumeration is converted to compatibility debt")
+    gamma_arena_test_assert.equals(stale.value.booster_debt, 1, "one stale native record arms one debt entry")
+    gamma_arena_test_assert.equals(stale_conditions.rates[0], 0, "stale health restoration contribution remains removed")
+    gamma_arena_test_assert.equals(#stale_service:debt_snapshot(), 1, "stale booster debt remains armed for expiry reconciliation")
+    gamma_arena_test_assert.equals(stale_conditions.clear_calls, 1, "stale readback never triggers a second destructive booster clear")
 
     local wounded_actor = fake_actor_conditions({ retain_wounds = true })
-    local wounded = gamma_arena_bootstrap.test_clear_engine_actor_transients(wounded_actor)
+    local wounded_conditions = wounded_actor:cast_Actor():conditions()
+    local wounded = gamma_arena_bootstrap.test_clear_engine_actor_transients(wounded_actor, fake_direct_booster_clear(wounded_conditions))
     gamma_arena_test_assert.is_false(wounded.ok, "surviving engine wound remains a fatal reset failure")
     gamma_arena_test_assert.equals(wounded.error.code, "GA_ACTOR_TRANSIENT_VERIFY_FAILED", "wound readback failure code is stable")
 
     local actor = fake_actor_conditions()
     actor.cast_Actor = nil
-    local missing = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+    local missing = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, { clear = function() return gamma_arena_result.ok(true) end })
     gamma_arena_test_assert.is_false(missing.ok, "missing required condition API fails closed")
     gamma_arena_test_assert.equals(missing.error.code, "GA_ACTOR_CONDITIONS_API_MISSING", "missing condition API code is stable")
 end
@@ -2571,9 +2658,47 @@ end
 local function runtime_bootstrap_missing_alcohol_mutator_fails_closed()
     local actor, conditions = fake_actor_conditions()
     conditions.ChangeAlcohol = nil
-    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor)
+    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, fake_direct_booster_clear(conditions))
     gamma_arena_test_assert.is_false(result.ok, "missing installed alcohol mutator fails closed")
     gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_ALCOHOL_CLEAR_FAILED", "missing alcohol mutator code is stable")
+end
+
+local function runtime_bootstrap_transient_reset_delegates_booster_clear_once()
+    local actor, conditions = fake_actor_conditions()
+    local service = fake_direct_booster_clear(conditions)
+    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, service)
+    gamma_arena_test_assert.is_true(result.ok, "delegated transient reset succeeds")
+    gamma_arena_test_assert.equals(service.clear_calls, 1, "bootstrap invokes the reconciler once")
+    gamma_arena_test_assert.equals(conditions.booster_clear_calls, 1, "the reconciler owns the only native clear")
+end
+
+local function runtime_bootstrap_resolves_all_exported_booster_types()
+    local names = {
+        { "eBoostHpRestore", "BoostHpRestore" }, { "eBoostPowerRestore", "BoostPowerRestore" },
+        { "eBoostRadiationRestore", "BoostRadiationRestore" }, { "eBoostBleedingRestore", "BoostBleedingRestore" },
+        { "eBoostMaxWeight", "BoostMaxWeight" }, { "eBoostRadiationProtection", "BoostRadiationProtection" },
+        { "eBoostTelepaticProtection", "BoostTelepaticProtection" }, { "eBoostChemicalBurnProtection", "BoostChemicalBurnProtection" },
+        { "eBoostBurnImmunity", "BoostBurnImmunity" }, { "eBoostShockImmunity", "BoostShockImmunity" },
+        { "eBoostRadiationImmunity", "BoostRadiationImmunity" }, { "eBoostTelepaticImmunity", "BoostTelepaticImmunity" },
+        { "eBoostChemicalBurnImmunity", "BoostChemicalBurnImmunity" }, { "eBoostExplImmunity", "BoostExplImmunity" },
+        { "eBoostStrikeImmunity", "BoostStrikeImmunity" }, { "eBoostFireWoundImmunity", "BoostFireWoundImmunity" },
+        { "eBoostWoundImmunity", "BoostWoundImmunity" }
+    }
+    local api = {}
+    for index, descriptor in ipairs(names) do
+        api[descriptor[1]] = 100 + index
+        api[descriptor[2]] = function() end
+    end
+    local resolved = gamma_arena_bootstrap.test_resolve_booster_types(api)
+    gamma_arena_test_assert.is_true(resolved.ok, "all installed booster enums resolve through the condition object")
+    local count = 0
+    for _ in pairs(resolved.value) do count = count + 1 end
+    for _, expected in ipairs(names) do
+        local descriptor = resolved.value[api[expected[1]]]
+        gamma_arena_test_assert.is_true(type(descriptor) == "table", "resolved map uses runtime enum values")
+        gamma_arena_test_assert.equals(descriptor.method, expected[2], "resolved map binds the exact correction method")
+    end
+    gamma_arena_test_assert.equals(count, 17, "every exported booster type is represented exactly once")
 end
 
 local function runtime_bootstrap_gamma_transient_integrations_are_exact()
@@ -13249,6 +13374,12 @@ local cases = {
     ,{ name = "runtime_bootstrap_engine_booster_readback_is_nonfatal", fn = runtime_bootstrap_engine_booster_readback_is_nonfatal }
     ,{ name = "runtime_bootstrap_missing_alcohol_mutator_fails_closed", fn = runtime_bootstrap_missing_alcohol_mutator_fails_closed }
     ,{ name = "runtime_bootstrap_gamma_transient_integrations_are_exact", fn = runtime_bootstrap_gamma_transient_integrations_are_exact }
+    ,{ name = "runtime_actor_begin_update_reconciles_booster_debt_first", fn = runtime_actor_begin_update_reconciles_booster_debt_first }
+    ,{ name = "runtime_actor_begin_update_failure_blocks_world_progress", fn = runtime_actor_begin_update_failure_blocks_world_progress }
+    ,{ name = "runtime_bootstrap_transient_reset_delegates_booster_clear_once", fn = runtime_bootstrap_transient_reset_delegates_booster_clear_once }
+    ,{ name = "runtime_bootstrap_resolves_all_exported_booster_types", fn = runtime_bootstrap_resolves_all_exported_booster_types }
+    ,{ name = "runtime_game_load_discards_actor_bound_booster_debt", fn = runtime_game_load_discards_actor_bound_booster_debt }
+    ,{ name = "runtime_actor_destroy_discards_actor_bound_booster_debt", fn = runtime_actor_destroy_discards_actor_bound_booster_debt }
     ,{ name = "runtime_booster_reconciler_fixed_engine_creates_no_debt", fn = runtime_booster_reconciler_fixed_engine_creates_no_debt }
     ,{ name = "runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt", fn = runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt }
     ,{ name = "runtime_booster_reconciler_expiry_compensates_once", fn = runtime_booster_reconciler_expiry_compensates_once }
