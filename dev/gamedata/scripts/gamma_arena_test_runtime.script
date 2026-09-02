@@ -804,6 +804,76 @@ local function launch_consumes_before_preflight_once()
     gamma_arena_test_assert.is_true(orchestrator:is_active(), "successful launch must activate")
 end
 
+local function runtime_orchestrator_forwards_preflight_npc_medical_owner()
+    local cases = {
+        {
+            label = "metadata",
+            preflight = gamma_arena_result.ok({
+                npc_medical_owner = "external",
+                npc_medical_policy = {
+                    owner = "external",
+                    enable = true,
+                    in_combat = true,
+                    medkit_overlap = true,
+                    bandage_overlap = false,
+                    ignored = "must not escape preflight"
+                }
+            }),
+            owner = "external"
+        },
+        { label = "legacy boolean", preflight = gamma_arena_result.ok(true), owner = "arena" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        local deps = fake_orchestrator_deps(store)
+        local starts, ownership_logs = {}, {}
+        deps.preflight = function() return case.preflight end
+        deps.npc_medical = {
+            start = function(_, fight)
+                starts[#starts + 1] = clone(fight)
+                return gamma_arena_result.ok(true)
+            end,
+            stop = function() return gamma_arena_result.ok(false) end
+        }
+        deps.log.info = function(code, message, context)
+            if code == "GA_NPC_MEDICAL_OWNERSHIP" then ownership_logs[#ownership_logs + 1] = clone(context) end
+            return gamma_arena_result.ok(true)
+        end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, case.label .. " preflight activates")
+        gamma_arena_test_assert.is_true(orchestrator:start_npc_medical().ok, case.label .. " starts NPC medical")
+        gamma_arena_test_assert.equals(starts[1].npc_medical_owner, case.owner, case.label .. " owner reaches npc_medical:start")
+        gamma_arena_test_assert.equals(#ownership_logs, 1, case.label .. " emits one ownership diagnostic")
+        gamma_arena_test_assert.equals(ownership_logs[1].owner, case.owner, case.label .. " diagnostic records owner")
+        if case.label == "metadata" then
+            local fields = 0
+            for _ in pairs(ownership_logs[1]) do fields = fields + 1 end
+            gamma_arena_test_assert.equals(fields, 5, "ownership diagnostic is bounded to five policy fields")
+            gamma_arena_test_assert.equals(ownership_logs[1].enable, true, "ownership diagnostic stores enable")
+            gamma_arena_test_assert.equals(ownership_logs[1].in_combat, true, "ownership diagnostic stores in-combat")
+            gamma_arena_test_assert.equals(ownership_logs[1].medkit_overlap, true, "ownership diagnostic stores medkit overlap")
+            gamma_arena_test_assert.equals(ownership_logs[1].bandage_overlap, false, "ownership diagnostic stores bandage overlap")
+        end
+    end
+end
+
+local function runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local identities, normalizations = 0, 0
+    deps.preflight = function() return gamma_arena_result.ok({ npc_medical_owner = "shared" }) end
+    deps.identity = function() identities = identities + 1; return gamma_arena_result.ok({ session_id = "forbidden", session_nonce = "forbidden" }) end
+    deps.actor.normalize_for_arena = function() normalizations = normalizations + 1; return gamma_arena_result.ok(true) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "invalid medical owner fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "invalid medical owner has a stable code")
+    gamma_arena_test_assert.equals(identities, 0, "invalid medical owner fails before session creation")
+    gamma_arena_test_assert.equals(normalizations, 0, "invalid medical owner fails before actor mutation")
+end
+
 local function activation_requires_game_load_boundary()
     local store = fake_store({ launch_pending = true, resume_pending = false })
     local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
@@ -9448,7 +9518,9 @@ local function npc_medical_fixture(values)
     local env = {
         now = 0, health = values.health or 0.5, bleeding = values.bleeding or 0.3,
         alive = true, combat_capable = true, consumed = {}, health_pulses = 0,
-        bleeding_caps = {}, hidden_clears = 0, logs = {}
+        bleeding_caps = {}, hidden_clears = 0, logs = {},
+        registry_reads = 0, charge_clears = 0, status_reads = 0,
+        consumes = 0, health_changes = 0
     }
     env.npc = { runtime_id = 301 }
     local registry = {
@@ -9461,18 +9533,25 @@ local function npc_medical_fixture(values)
     }
     local controller = gamma_arena_npc_medical.new({
         clock = function() return env.now end,
-        registry_snapshot = function() return clone(registry) end,
-        clear_hidden_charge = function() env.hidden_clears = env.hidden_clears + 1; return gamma_arena_result.ok(true) end,
+        registry_snapshot = function() env.registry_reads = env.registry_reads + 1; return clone(registry) end,
+        clear_hidden_charge = function()
+            env.charge_clears = env.charge_clears + 1
+            env.hidden_clears = env.hidden_clears + 1
+            return gamma_arena_result.ok(true)
+        end,
         status = function()
+            env.status_reads = env.status_reads + 1
             return gamma_arena_result.ok({ npc = env.npc, health = env.health, bleeding = env.bleeding, alive = env.alive, combat_capable = env.combat_capable })
         end,
         consume_medical_item = function(fight_id, npc_id, section)
+            env.consumes = env.consumes + 1
             if values.consume_false then return gamma_arena_result.ok(false) end
             env.consumed[#env.consumed + 1] = section
             for _, item in ipairs(registry.items) do if item.parent_id == npc_id and item.section == section then item.released = true end end
             return gamma_arena_result.ok({ npc = env.npc, item_id = section == "medkit" and 401 or 402, section = section })
         end,
         change_health = function(npc, delta)
+            env.health_changes = env.health_changes + 1
             env.health_pulses = env.health_pulses + 1
             env.health = math.min(1, env.health + delta)
             return gamma_arena_result.ok(true)
@@ -9484,9 +9563,30 @@ local function npc_medical_fixture(values)
         end,
         log = function(code) env.logs[#env.logs + 1] = code; return gamma_arena_result.ok(true) end
     })
-    gamma_arena_test_assert.is_true(controller:start({ fight_id = "ga-medical-test" }).ok, "medical controller starts")
+    gamma_arena_test_assert.is_true(controller:start({
+        fight_id = "ga-medical-test",
+        npc_medical_owner = values.npc_medical_owner or "arena"
+    }).ok, "medical controller starts")
     function env:advance(delta) self.now = (self.now + delta) % 4294967296 end
     return env, controller, registry
+end
+
+local function runtime_npc_medical_external_owner_is_dependency_free()
+    local env, controller = npc_medical_fixture({ npc_medical_owner = "external", health = 0.1, bleeding = 1 })
+    gamma_arena_test_assert.is_true(controller.active, "delegated medical controller retains active lifecycle ownership")
+    gamma_arena_test_assert.is_true(controller:update().ok, "delegated update is a successful no-op")
+    env:advance(5000)
+    gamma_arena_test_assert.is_true(controller:update().ok, "delegated updates remain no-ops across time")
+    gamma_arena_test_assert.is_true(controller:stop("teardown").ok, "delegated controller stops symmetrically")
+    gamma_arena_test_assert.equals(env.registry_reads, 0, "delegated mode does not read registry")
+    gamma_arena_test_assert.equals(env.charge_clears, 0, "delegated mode never clears healing_charge")
+    gamma_arena_test_assert.equals(env.status_reads, 0, "delegated mode does not inspect NPC medicine")
+    gamma_arena_test_assert.equals(env.consumes, 0, "delegated mode does not consume physical items")
+    gamma_arena_test_assert.equals(env.health_changes, 0, "delegated mode does not apply healing")
+    gamma_arena_test_assert.equals(controller.owner, "arena", "stop resets delegated ownership without dependencies")
+    local delegated_logs = 0
+    for _, code in ipairs(env.logs) do if code == "GA_NPC_MEDICAL_DELEGATED" then delegated_logs = delegated_logs + 1 end end
+    gamma_arena_test_assert.equals(delegated_logs, 1, "delegated ownership is logged once")
 end
 
 local function runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses()
@@ -13094,6 +13194,8 @@ local cases = {
     { name = "runtime_preflight_rejects_missing_profile_value_apis", fn = preflight_rejects_missing_profile_value_apis },
     { name = "runtime_preflight_normalizes_effective_arena_enemy_community", fn = preflight_normalizes_effective_arena_enemy_community },
     { name = "runtime_launch_consumes_before_preflight_once", fn = launch_consumes_before_preflight_once },
+    { name = "runtime_orchestrator_forwards_preflight_npc_medical_owner", fn = runtime_orchestrator_forwards_preflight_npc_medical_owner },
+    { name = "runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation", fn = runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation },
     { name = "runtime_activation_requires_game_load_boundary", fn = activation_requires_game_load_boundary },
     { name = "runtime_launch_defers_on_fake_start_then_activates_on_rostok", fn = launch_defers_on_fake_start_then_activates_on_rostok },
     { name = "runtime_launch_transition_diagnostics_are_event_based", fn = launch_transition_diagnostics_are_event_based },
@@ -13185,6 +13287,7 @@ local cases = {
     ,{ name = "runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items", fn = runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items }
     ,{ name = "runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses", fn = runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses }
     ,{ name = "runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed", fn = runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed }
+    ,{ name = "runtime_npc_medical_external_owner_is_dependency_free", fn = runtime_npc_medical_external_owner_is_dependency_free }
     ,{ name = "runtime_entity_actor_loadout_precedes_spawn", fn = runtime_entity_actor_loadout_precedes_spawn }
     ,{ name = "runtime_entity_net_spawn_isolates_only_owned_npcs", fn = runtime_entity_net_spawn_isolates_only_owned_npcs }
     ,{ name = "runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults", fn = runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults }

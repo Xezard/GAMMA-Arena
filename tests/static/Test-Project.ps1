@@ -2360,6 +2360,10 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_preflight_publishes_npc_medical_ownership','runtime_preflight_rejects_invalid_npc_medical_config','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
     }
+    foreach ($Marker in @('runtime_orchestrator_forwards_preflight_npc_medical_owner','runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation','runtime_npc_medical_external_owner_is_dependency_free')) {
+        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Marker) + '\s*\}'
+        Assert-True (([regex]::Matches($Task5DevTestContent, $Registration)).Count -eq 1) "Delegated NPC medical case must be registered exactly: $Marker"
+    }
 }
 
 $MedicalGeneratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_medical_generator.script'
@@ -2375,6 +2379,21 @@ if (Test-Path -LiteralPath $NpcMedicalPath) {
         Assert-True ($NpcMedicalContent -match [regex]::Escape($Marker)) "NPC medical state machine must contain $Marker"
     }
     Assert-True ($NpcMedicalContent -notmatch '\bmath\.(random|randomseed)\b') 'NPC medical state machine must not use global randomness'
+    Assert-True ($NpcMedicalContent -match 'GA_NPC_MEDICAL_DELEGATED') 'Delegated NPC medical mode must expose its ownership diagnostic.'
+    $NpcMedicalStartBlock = [regex]::Match($NpcMedicalContent, '(?ms)^function\s+NpcMedical:start\(.*?^end\s*$').Value
+    Assert-True ($NpcMedicalStartBlock -match 'owner\s*~=\s*"arena"\s+and\s+owner\s*~=\s*"external"') 'NPC medical start must validate the exact owner set.'
+    $NpcMedicalUpdateBlock = [regex]::Match($NpcMedicalContent, '(?ms)^function\s+NpcMedical:update\(.*?^end\s*$').Value
+    $ActiveGuardIndex = $NpcMedicalUpdateBlock.IndexOf('if not self.active')
+    $OwnerGuardIndex = $NpcMedicalUpdateBlock.IndexOf('if self.owner == "external"')
+    $ClockIndex = $NpcMedicalUpdateBlock.IndexOf('self:clock()')
+    Assert-True ($ActiveGuardIndex -ge 0 -and $OwnerGuardIndex -gt $ActiveGuardIndex -and $ClockIndex -gt $OwnerGuardIndex) 'NPC medical update guard order must be active, external owner, then dependencies.'
+}
+
+if (Test-Path -LiteralPath $Task5OrchestratorPath) {
+    Assert-True ($Task5OrchestratorContent -match 'npc_medical_owner') 'Orchestrator must retain NPC medical ownership metadata.'
+    Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_OWNERSHIP') 'Orchestrator must emit one bounded NPC medical ownership diagnostic.'
+    Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_AI_CONFIG_INVALID') 'Orchestrator must reject invalid NPC medical ownership metadata.'
+    Assert-True ($Task5OrchestratorContent -match 'npc_medical_owner\s*=\s*self\.npc_medical_owner\s+or\s+"arena"') 'Orchestrator must pass the frozen NPC medical owner into start.'
 }
 
 $Task3DataFiles = @(

@@ -205,6 +205,8 @@ function Orchestrator:__init(deps)
     self.cleanup_required = false
     self.fight_spec = nil
     self.catalog_snapshot = nil
+    self.npc_medical_owner = "arena"
+    self.npc_medical_policy = nil
     self.countdown_started = nil
     self.countdown_value = nil
     self.active_started = nil
@@ -253,7 +255,8 @@ function Orchestrator:start_npc_medical()
     return call_method("GA_NPC_MEDICAL_START_FAILED", self.deps.npc_medical, "start", {
         fight_id = fight_id,
         session_id = self.session and self.session.session_id or nil,
-        fight_index = self.session and self.session.fight_index or nil
+        fight_index = self.session and self.session.fight_index or nil,
+        npc_medical_owner = self.npc_medical_owner or "arena"
     })
 end
 
@@ -947,6 +950,34 @@ function Orchestrator:activate_once()
         })
         local preflight = self:run_preflight(activation_catalog)
         if not preflight.ok then return self:enter_fatal(preflight, true) end
+        local medical_owner = "arena"
+        local medical_policy = nil
+        if type(preflight.value) == "table" then
+            medical_owner = preflight.value.npc_medical_owner
+            if medical_owner ~= "arena" and medical_owner ~= "external" then
+                return self:enter_fatal(fail("GA_NPC_MEDICAL_AI_CONFIG_INVALID", "NPC medical ownership metadata is invalid", {
+                    owner = medical_owner
+                }), true)
+            end
+            local source = preflight.value.npc_medical_policy
+            if type(source) == "table" then
+                medical_policy = {}
+                if type(source.enable) == "boolean" then medical_policy.enable = source.enable end
+                if type(source.in_combat) == "boolean" then medical_policy.in_combat = source.in_combat end
+                if type(source.medkit_overlap) == "boolean" then medical_policy.medkit_overlap = source.medkit_overlap end
+                if type(source.bandage_overlap) == "boolean" then medical_policy.bandage_overlap = source.bandage_overlap end
+            end
+        end
+        self.npc_medical_owner = medical_owner
+        self.npc_medical_policy = medical_policy
+        local medical_context = { owner = medical_owner }
+        if medical_policy ~= nil then
+            medical_context.enable = medical_policy.enable
+            medical_context.in_combat = medical_policy.in_combat
+            medical_context.medkit_overlap = medical_policy.medkit_overlap
+            medical_context.bandage_overlap = medical_policy.bandage_overlap
+        end
+        self:diagnostic("GA_NPC_MEDICAL_OWNERSHIP", "owner=" .. medical_owner, medical_context)
         local session = self:create_session(consumed.value, activation_catalog, activation_layout)
         if not session.ok then return self:enter_fatal(session, true) end
         local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
