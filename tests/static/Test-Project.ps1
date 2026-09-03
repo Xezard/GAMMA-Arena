@@ -2376,6 +2376,11 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($FinalMagsAdapterContent -match '\{\s*"is_supported_weapon"[\s\S]{0,220}"refresh_loadout"[\s\S]{0,220}"fill_magazine"') 'A present Mags Redux API must require the refresh capability.'
     $FinalMagsPlanBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:bonus_descriptors[\s\S]*?(?=\r?\nfunction\s+Adapter:initialize)').Value
     Assert-True ($FinalMagsPlanBlock -match 'if\s+not\s+resolved\.ok\s+then[\s\S]{0,500}contextualize') 'Mags Redux planning must add the complete descriptor context to API resolution failures.'
+    $FinalMagsResolveBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:resolve[\s\S]*?(?=\r?\nfunction\s+Adapter:bonus_descriptors)').Value
+    Assert-True ($FinalMagsResolveBlock -match 'api_resolution_failed' -and $FinalMagsResolveBlock -match 'api_incomplete') 'Direct Mags Redux resolution failures must distinguish resolver and incomplete-API diagnostics.'
+    Assert-True ($FinalMagsResolveBlock -match 'descriptor_context') 'Direct Mags Redux resolution failures must use the complete bounded six-field context.'
+    Assert-True ($FinalMagsPlanBlock -match 'dense_array_length\(descriptors\)[\s\S]{0,500}descriptor_context') 'Malformed Mags Redux descriptor arrays must use the complete bounded six-field context.'
+    Assert-True ($FinalMagsPlanBlock -match 'rawget\(descriptors,\s*1\)') 'Malformed Mags Redux descriptor arrays may inspect only the first raw descriptor for diagnostic identity.'
     $FinalMagsAdvanceBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:advance_pending[\s\S]*?(?=\r?\nfunction\s+Materializer:update)').Value
     Assert-True ($FinalMagsAdvanceBlock -match 'if\s+entry\s*==\s*nil\s+then[\s\S]{0,600}initialize_bonus_items[\s\S]{0,600}active_equipped_entry') 'Pending materialization must initialize reserves after all equipment verification and before activation.'
     Assert-True ($FinalMagsAdvanceBlock -match 'pending\.bonus_initialized\s*~=\s*true[\s\S]{0,400}pending\.bonus_initialized\s*=\s*true') 'Pending reserve initialization must have an exact-once completion guard.'
@@ -2388,7 +2393,9 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Name in @(
         'mags_redux_refreshes_vendor_loadout_before_each_fill',
         'mags_redux_rejects_pathological_capacities_before_vendor_fill',
-        'mags_redux_rejects_huge_sparse_loaded_index_in_key_count_time'
+        'mags_redux_rejects_huge_sparse_loaded_index_in_key_count_time',
+        'mags_redux_direct_resolution_failures_have_complete_context',
+        'mags_redux_malformed_descriptor_arrays_have_complete_context'
     )) {
         Assert-True ($FinalMagsAdapterTests -match [regex]::Escape($Name)) "Final Mags Redux adapter regression must cover $Name."
     }

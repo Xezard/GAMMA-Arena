@@ -41,6 +41,7 @@ local function fixture(options)
     local adapter = gamma_arena_mags_redux.new({
         resolve_api = function()
             if options.absent then return nil end
+            if options.resolve_throws then error(options.resolve_throws) end
             if options.partial then return { is_supported_weapon = api.is_supported_weapon } end
             return api
         end,
@@ -69,6 +70,44 @@ local function assert_descriptor_context(context, expected, label)
     gamma_arena_test_assert.equals(context.reserve_ordinal, expected.reserve_ordinal, label .. " context retains reserve ordinal")
     gamma_arena_test_assert.equals(context.expected_capacity, expected.expected_capacity, label .. " context retains expected capacity")
     gamma_arena_test_assert.equals(context.observed_state, expected.observed_state, label .. " context retains bounded observed state")
+end
+
+local function direct_resolution_failures_have_complete_context()
+    for _, case in ipairs({
+        { label = "thrown API resolution", options = { resolve_throws = "resolver exploded" }, observed_state = "api_resolution_failed" },
+        { label = "partial API resolution", options = { partial = true }, observed_state = "api_incomplete" }
+    }) do
+        local _, adapter = fixture(case.options)
+        local result = adapter:resolve()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_API_INVALID",
+            case.label .. " has a stable error")
+        assert_descriptor_context(result.error.context, {
+            weapon_section = "unavailable", magazine_section = "unavailable", ammo_section = "unavailable",
+            reserve_ordinal = 0, expected_capacity = 0, observed_state = case.observed_state
+        }, case.label)
+    end
+end
+
+local function malformed_descriptor_arrays_have_complete_context()
+    local _, adapter = fixture()
+    local first = weapon(string.rep("w", 120), "weapon_2", string.rep("a", 120))
+    local sparse = { [1] = first, [4294967295] = weapon("unreachable", "weapon_1", "unreachable") }
+    local result = adapter:bonus_descriptors(sparse)
+    gamma_arena_test_assert.is_false(result.ok, "sparse descriptor array fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_PLAN_INVALID",
+        "sparse descriptor array has a stable error")
+    assert_descriptor_context(result.error.context, {
+        weapon_section = string.rep("w", 96), magazine_section = "unavailable", ammo_section = string.rep("a", 96),
+        reserve_ordinal = 0, expected_capacity = 0, observed_state = "descriptor_array_invalid"
+    }, "sparse descriptor array")
+
+    local malformed = adapter:bonus_descriptors("not-a-table")
+    gamma_arena_test_assert.is_false(malformed.ok, "non-table descriptor array fails closed")
+    assert_descriptor_context(malformed.error.context, {
+        weapon_section = "unavailable", magazine_section = "unavailable", ammo_section = "unavailable",
+        reserve_ordinal = 0, expected_capacity = 0, observed_state = "descriptor_array_invalid"
+    }, "non-table descriptor array")
 end
 
 local function absent_api_is_a_noop()
@@ -184,6 +223,8 @@ local function wrong_loaded_ammo_fails_verification()
 end
 
 local cases = {
+    { name = "mags_redux_direct_resolution_failures_have_complete_context", fn = direct_resolution_failures_have_complete_context },
+    { name = "mags_redux_malformed_descriptor_arrays_have_complete_context", fn = malformed_descriptor_arrays_have_complete_context },
     { name = "mags_redux_absent_api_is_a_noop", fn = absent_api_is_a_noop },
     { name = "mags_redux_partial_api_fails_closed", fn = partial_api_fails_closed },
     { name = "mags_redux_unsupported_weapon_is_skipped", fn = unsupported_weapon_is_skipped },
