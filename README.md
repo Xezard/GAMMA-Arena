@@ -67,8 +67,6 @@ Gamma Arena is packaged as an additive `gamedata` tree and the static suite reje
 
 Review same-path conflicts in MO2 instead of treating either side as an automatic overwrite winner. Maintainers and advanced users can generate a read-only compatibility report for an existing profile from the repository tooling described under [Development](#development).
 
-Gamma Arena reads the effective `xr_eat_medkit` INI before a fight. Opponent medicine is delegated to `xr_eat_medkit` only when `enable=true`, `in_combat=true`, and its configured item lists contain the exact physical section `medkit` or `bandage`. Disabled, out-of-combat, and non-overlapping configurations retain Gamma Arena's medical controller. Delegation does not remove the physical medicine spawned by the Arena: the external controller may consume those items, while Gamma Arena's medical controller performs no actions. If the effective configuration is unreadable or malformed, Gamma Arena fails closed instead of guessing which controller owns opponent medicine.
-
 Mags Redux is optional: without it, and for unsupported weapons, ammunition behavior remains unchanged. When it is available, every equipped supported firearm receives exactly two full reserve magazines. Selected Custom Setup ammo boxes retain their exact round counts; the reserve rounds are bonus rounds and are not deducted from loose ammunition. Mags Redux pouch capacity controls which magazines are immediately carried.
 
 ## Troubleshooting and bug reports
