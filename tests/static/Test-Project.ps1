@@ -2379,6 +2379,14 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     foreach ($Marker in @('gamma_arena_mags_redux.new','mags_redux_resolve_api','mags_redux_magazine_capacity','rawget(_G, "magazine_binder")','rawget(_G, "mags_patches")','is_supported_weapon','weapon_default_magazine','get_mag_loaded','is_carried_mag','fill_mag','max_mag_size','bonus_descriptors','initialize_created','GA_MAGS_REDUX_RESERVE_READY')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Mags Redux production binding must cover $Marker"
     }
+    $MagsReduxOrphanNamespaceCase = 'runtime_mags_redux_orphan_patch_namespace_is_absent'
+    $MagsReduxOrphanNamespaceRegistration = '\{\s*name\s*=\s*["'']' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '["'']\s*,\s*fn\s*=\s*' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\s*\}'
+    Assert-True (([regex]::Matches($Task5DevTestContent, $MagsReduxOrphanNamespaceRegistration)).Count -eq 1) "Mags Redux orphan-namespace regression must be registered exactly: $MagsReduxOrphanNamespaceCase -> $MagsReduxOrphanNamespaceCase."
+    $MagsReduxOrphanNamespaceBody = [regex]::Match($Task5DevTestContent, 'local\s+function\s+' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\(\)[\s\S]*?\r?\nend').Value
+    Assert-True ($MagsReduxOrphanNamespaceBody -match 'gamma_arena_bootstrap\.resolve_mags_redux_vendor_api\(nil,\s*\{' -and $MagsReduxOrphanNamespaceBody -match 'orphan patches namespace is not a Mags Redux core') 'Mags Redux orphan-namespace regression must classify an orphan patches table as absent.'
+    Assert-True ($Task5BootstrapContent -match '(?m)^function\s+resolve_mags_redux_vendor_api\s*\(') 'Bootstrap must export the Mags Redux vendor API classifier.'
+    Assert-True ($Task5BootstrapContent -match 'type\(binder\)\s*~=\s*"table"\s+or\s+type\(binder\.is_supported_weapon\)\s*~=\s*"function"') 'Mags Redux classifier must require the magazine_binder.is_supported_weapon core sentinel.'
+    Assert-True ($Task5BootstrapContent -match 'resolve_mags_redux_vendor_api\(rawget\(_G,\s*"magazine_binder"\),\s*rawget\(_G,\s*"mags_patches"\)\)') 'Default actor-item resolver must delegate raw vendor namespaces to the Mags Redux classifier.'
     Assert-True ($Task5BootstrapContent -notmatch 'function\s+mags_patches\.|function\s+magazine_binder\.') 'Gamma Arena must not override Mags Redux vendor functions'
     Assert-True ($Task5BootstrapContent -match 'initialize_created\s*=\s*function\s*\([^,]+,\s*record,\s*descriptor\)[\s\S]{0,500}mags_redux:initialize\(record\.id') 'Mags Redux initialization must use the registered Arena ownership record id'
     $FinalMagsAdapterContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_mags_redux.script') -Raw
@@ -2399,7 +2407,7 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     $FinalMagsRefreshIndex = $FinalMagsInitializeBlock.IndexOf('api.refresh_loadout')
     $FinalMagsFillIndex = $FinalMagsInitializeBlock.IndexOf('api.fill_magazine')
     Assert-True ($FinalMagsRefreshIndex -ge 0 -and $FinalMagsFillIndex -gt $FinalMagsRefreshIndex) 'Mags Redux must refresh vendor loadout slots before every reserve fill.'
-    Assert-True ($Task5BootstrapContent -match 'refresh_loadout\s*=\s*binder\s+and\s+binder\.validate_loadout') 'Bootstrap must bind magazine_binder.validate_loadout as the vendor loadout refresh.'
+    Assert-True ($Task5BootstrapContent -match 'refresh_loadout\s*=\s*binder\.validate_loadout') 'Bootstrap must bind magazine_binder.validate_loadout as the vendor loadout refresh.'
     Assert-True ($FinalMagsAdapterContent -match '\{\s*"is_supported_weapon"[\s\S]{0,220}"refresh_loadout"[\s\S]{0,220}"fill_magazine"') 'A present Mags Redux API must require the refresh capability.'
     $FinalMagsPlanBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:bonus_descriptors[\s\S]*?(?=\r?\nfunction\s+Adapter:initialize)').Value
     Assert-True ($FinalMagsPlanBlock -match 'if\s+not\s+resolved\.ok\s+then[\s\S]{0,500}contextualize') 'Mags Redux planning must add the complete descriptor context to API resolution failures.'
