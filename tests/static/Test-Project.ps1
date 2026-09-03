@@ -1686,7 +1686,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         $FatalContent = $Task5OrchestratorContent.Substring($FatalStart, $FatalEnd - $FatalStart)
         Assert-True ($FatalContent -match 'self\.activation_attempted\s*=\s*true') 'Fatal routing must latch the activation attempt'
         Assert-True ($FatalContent -match 'self\.awaiting_activation\s*=\s*false') 'Fatal routing must stop per-frame activation retries'
-        Assert-True ($FatalContent -match 'self\.death_latched\s*=\s*false[\s\S]{0,160}self\.defeat_token\s*=\s*nil[\s\S]{0,160}self\.death_flags\s*=\s*nil') 'Fatal routing must drop stale in-memory death-arm references'
+        Assert-True ($FatalContent -match 'if\s+not\s+preserve_cancelled_death\s+then\s+self:release_death_arm\(\)\s+end') 'Fatal routing must drop stale in-memory death-arm references only after durable cleanup'
     }
     $ActivationStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:activate_once')
     $ActivationEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:layout_snapshot')
@@ -1720,10 +1720,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) 'Cancelled death abort must remain structurally testable before finalization'
     if ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) {
         $Task5AbortDeathBlock = $Task5OrchestratorContent.Substring($Task5AbortDeathStart, $Task5FinalizeDeathStart - $Task5AbortDeathStart)
-        $Task5ClearDefeatIndex = $Task5AbortDeathBlock.IndexOf('clear_defeat')
-        $Task5UnlatchIndex = $Task5AbortDeathBlock.IndexOf('self.death_latched = false')
-        Assert-True ($Task5ClearDefeatIndex -ge 0 -and $Task5UnlatchIndex -gt $Task5ClearDefeatIndex) 'Cancelled death must clear persisted ownership before releasing its in-memory latch'
-        Assert-True ($Task5AbortDeathBlock -match 'self\.defeat_token\s*=\s*nil[\s\S]{0,100}self\.death_flags\s*=\s*nil') 'Successful death abort must release token and shared flags reference'
+        Assert-True ($Task5AbortDeathBlock -match 'return\s+self:clear_cancelled_death_arm\(\)') 'Cancelled death abort must use the common durable clear-before-release operation'
     }
     if ($Task5FinalizeDeathStart -ge 0) {
         $Task5FinalizeDeathEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:npc_on_before_hit', $Task5FinalizeDeathStart)
@@ -1779,9 +1776,19 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_preflight_accepts_natural_death_without_invulnerability','runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_task6_actor_checkpoint_ports','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_arena_enemy_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_launch_defers_on_fake_start_then_activates_on_rostok','runtime_ordinary_no_intent_activation_latches_once','runtime_first_activation_failure_routes_fatal','runtime_activation_reconciles_before_intent_inspection_once','runtime_activation_version_changes_clear_resume_before_checkpoint_routing','runtime_activation_reconciliation_failures_are_fatal_before_inspection','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_unexpected_net_destroy_clears_external_route','runtime_orchestrator_npc_net_spawn_is_active_only','runtime_npc_net_spawn_errors_defer_fatal_ui_to_update','runtime_entity_net_spawn_isolates_only_owned_npcs','runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults','runtime_entity_activation_rejects_runtime_community_drift')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
     }
-    foreach ($Marker in @('runtime_cancelled_death_arm_aborts_on_next_update','runtime_cancelled_death_arm_aborts_before_net_destroy','runtime_already_cancelled_death_never_arms','runtime_cancelled_death_clear_failure_routes_fatal')) {
+    foreach ($Marker in @('runtime_cancelled_death_arm_aborts_on_next_update','runtime_cancelled_death_arm_aborts_before_net_destroy','runtime_already_cancelled_death_never_arms','runtime_cancelled_death_clear_failure_routes_fatal','runtime_cancelled_death_fatal_retry_durably_clears_real_store','runtime_cancelled_death_fatal_menu_cleanup_is_durable','runtime_cancelled_death_game_load_cleanup_is_durable')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Death cancellation Dev tests must cover $Marker"
     }
+    $Task5OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+    $DeathFatalBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:enter_fatal[\s\S]*?(?=\r?\nfunction\s+Orchestrator:on_callback_error)').Value
+    $DeathClearBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:clear_cancelled_death_arm[\s\S]*?(?=\r?\nfunction\s+Orchestrator:fatal_main_menu_action)').Value
+    Assert-True ($DeathClearBlock -match 'clear_defeat[\s\S]{0,300}if\s+not\s+cleared\.ok\s+then\s+return\s+cleared\s+end[\s\S]{0,200}release_death_arm') 'Cancelled defeat ownership must be released only after durable clear succeeds.'
+    Assert-True ($DeathFatalBlock -match 'death_arm_cancelled\(\)[\s\S]{0,500}clear_cancelled_death_arm') 'Fatal routing must make one bounded durable-clear retry for a cancelled defeat arm.'
+    Assert-True ($DeathFatalBlock -match 'preserve_cancelled_death[\s\S]{0,1800}if\s+not\s+preserve_cancelled_death\s+then\s+self:release_death_arm\(\)') 'Fatal routing must preserve cancelled death ownership when durable cleanup still fails.'
+    $DeathMenuBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:fatal_main_menu_action[\s\S]*?(?=\r?\nfunction\s+Orchestrator:enter_fatal)').Value
+    Assert-True ($DeathMenuBlock -match 'clear_transient[\s\S]{0,300}cleared\.ok\s+and\s+self:death_arm_cancelled\(\)[\s\S]{0,120}release_death_arm') 'Fatal main-menu reset must release cancelled death ownership only after transient persistence clears.'
+    $DeathGameLoadBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:on_game_load[\s\S]*?(?=\r?\nfunction\s+Orchestrator:load_state)').Value
+    Assert-True ($DeathGameLoadBlock -match 'clear_cancelled_death_arm\(\)[\s\S]{0,160}if\s+not\s+death_cleanup\.ok\s+then\s+return\s+self:enter_fatal\(death_cleanup\)\s+end[\s\S]{0,1600}death_latched\s*=\s*false') 'Game-load reset must finish cancelled defeat cleanup before clearing the in-memory latch.'
 }
 
 $Task9UiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_result.script'
@@ -2367,6 +2374,8 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($FinalMagsRefreshIndex -ge 0 -and $FinalMagsFillIndex -gt $FinalMagsRefreshIndex) 'Mags Redux must refresh vendor loadout slots before every reserve fill.'
     Assert-True ($Task5BootstrapContent -match 'refresh_loadout\s*=\s*binder\s+and\s+binder\.validate_loadout') 'Bootstrap must bind magazine_binder.validate_loadout as the vendor loadout refresh.'
     Assert-True ($FinalMagsAdapterContent -match '\{\s*"is_supported_weapon"[\s\S]{0,220}"refresh_loadout"[\s\S]{0,220}"fill_magazine"') 'A present Mags Redux API must require the refresh capability.'
+    $FinalMagsPlanBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:bonus_descriptors[\s\S]*?(?=\r?\nfunction\s+Adapter:initialize)').Value
+    Assert-True ($FinalMagsPlanBlock -match 'if\s+not\s+resolved\.ok\s+then[\s\S]{0,500}contextualize') 'Mags Redux planning must add the complete descriptor context to API resolution failures.'
     $FinalMagsAdvanceBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:advance_pending[\s\S]*?(?=\r?\nfunction\s+Materializer:update)').Value
     Assert-True ($FinalMagsAdvanceBlock -match 'if\s+entry\s*==\s*nil\s+then[\s\S]{0,600}initialize_bonus_items[\s\S]{0,600}active_equipped_entry') 'Pending materialization must initialize reserves after all equipment verification and before activation.'
     Assert-True ($FinalMagsAdvanceBlock -match 'pending\.bonus_initialized\s*~=\s*true[\s\S]{0,400}pending\.bonus_initialized\s*=\s*true') 'Pending reserve initialization must have an exact-once completion guard.'

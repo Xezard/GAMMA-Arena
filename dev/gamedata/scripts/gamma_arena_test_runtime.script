@@ -8697,12 +8697,12 @@ local function runtime_cancelled_death_clear_failure_routes_fatal()
     local failed = callbacks.actor_on_update()
     gamma_arena_test_assert.is_false(failed.ok, "cancelled defeat clear failure remains structured")
     gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_DEFEAT_CLEAR", "cancelled defeat clear preserves its exact cause")
-    gamma_arena_test_assert.equals(env.clear_defeat, 1, "failed cancelled defeat clear is attempted once")
+    gamma_arena_test_assert.equals(env.clear_defeat, 2, "failed cancelled defeat clear performs one bounded fatal retry")
     gamma_arena_test_assert.equals(env.fatal_shown, 1, "cancelled defeat clear failure routes fatal through the real callback boundary")
     gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "cancelled defeat clear failure enters ERROR")
-    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "fatal cancellation recovery drops the in-memory death latch")
-    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, nil, "fatal cancellation recovery drops the in-memory defeat token")
-    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "fatal cancellation recovery drops the shared flags reference")
+    gamma_arena_test_assert.is_true(env.orchestrator.death_latched, "failed fatal retry preserves the in-memory death latch")
+    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, "gad1:1000:task8_death", "failed fatal retry preserves the defeat token")
+    gamma_arena_test_assert.is_true(env.orchestrator.death_flags == flags, "failed fatal retry preserves the exact shared flags reference")
     gamma_arena_test_assert.equals(env.confirm + env.neutralize, 0, "clear failure never misclassifies cancellation as true death")
 end
 
@@ -12039,6 +12039,161 @@ local function task11_memory_config()
     return config
 end
 
+local function task11_persisted_defeat_key_count(config)
+    local count = 0
+    for key in pairs(config.values) do
+        if type(key) == "string" and string.match(key, "^defeat_") then count = count + 1 end
+    end
+    return count
+end
+
+local function task11_retained_cancelled_death_with_real_store()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local production_clear_defeat = store.clear_defeat
+    local production_clear_transient = store.clear_transient
+    local fixture = {
+        env = env,
+        config = config,
+        store = store,
+        clear_attempts = 0,
+        transient_attempts = 0,
+        allow_defeat_clear = false,
+        allow_transient_clear = false
+    }
+    function store:clear_defeat(active_config)
+        fixture.clear_attempts = fixture.clear_attempts + 1
+        if not fixture.allow_defeat_clear then
+            return gamma_arena_result.err("GA_TEST_PERSISTENT_DEFEAT_CLEAR", "injected persistent clear failure")
+        end
+        return production_clear_defeat(self, active_config)
+    end
+    function store:clear_transient(active_config)
+        fixture.transient_attempts = fixture.transient_attempts + 1
+        if not fixture.allow_transient_clear then
+            return gamma_arena_result.err("GA_TEST_TRANSIENT_CLEAR", "injected transient clear failure")
+        end
+        return production_clear_transient(self, active_config)
+    end
+    env.orchestrator.deps.config = config
+    env.orchestrator.deps.store = store
+    fixture.callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    fixture.flags = { ret_value = true }
+    gamma_arena_test_assert.is_true(fixture.callbacks.actor_on_before_death(77, fixture.flags).ok,
+        "real Store arms the retained cancellation fixture")
+    fixture.token = env.orchestrator.defeat_token
+    fixture.flags.ret_value = false
+    gamma_arena_test_assert.is_false(fixture.callbacks.actor_on_update().ok,
+        "persistent clear failure enters fatal routing")
+    gamma_arena_test_assert.equals(fixture.clear_attempts, 2,
+        "retained cancellation fixture exhausts only the normal attempt and one fatal retry")
+    gamma_arena_test_assert.equals(config.values.defeat_stage, "armed",
+        "persistent failure leaves the real Store armed for the recovery boundary")
+    return fixture
+end
+
+local function runtime_cancelled_death_fatal_retry_durably_clears_real_store()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local production_clear_defeat = store.clear_defeat
+    local clear_attempts = 0
+    function store:clear_defeat(active_config)
+        clear_attempts = clear_attempts + 1
+        if clear_attempts == 1 then
+            return gamma_arena_result.err("GA_TEST_TRANSIENT_DEFEAT_CLEAR", "injected one-shot clear failure")
+        end
+        return production_clear_defeat(self, active_config)
+    end
+    env.orchestrator.deps.config = config
+    env.orchestrator.deps.store = store
+
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = true }
+    local armed = callbacks.actor_on_before_death(77, flags)
+    gamma_arena_test_assert.is_true(armed.ok, "real Store arms the cancellable defeat")
+    gamma_arena_test_assert.equals(config.values.defeat_stage, "armed", "real Store persists the armed stage before cancellation")
+    flags.ret_value = false
+
+    local failed = callbacks.actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "one-shot clear failure remains observable after fatal cleanup")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_TRANSIENT_DEFEAT_CLEAR", "fatal cleanup preserves the triggering clear error")
+    gamma_arena_test_assert.equals(clear_attempts, 2, "fatal routing performs exactly one bounded clear retry")
+    local inspected = store:inspect_intents(config)
+    gamma_arena_test_assert.is_true(inspected.ok and inspected.value.defeat_pending == false,
+        "real Store reports no defeat intent after the successful fatal retry")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(config), 0,
+        "fatal reset releases the latch only after every persisted defeat key is absent")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "successful durable retry releases the death latch")
+    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, nil, "successful durable retry drops the defeat token")
+    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "successful durable retry drops the shared flags reference")
+end
+
+local function runtime_cancelled_death_fatal_menu_cleanup_is_durable()
+    local recovered = task11_retained_cancelled_death_with_real_store()
+    recovered.allow_transient_clear = true
+    gamma_arena_test_assert.is_true(recovered.env.orchestrator:fatal_main_menu_action().ok,
+        "fatal main-menu cleanup succeeds after storage recovery")
+    gamma_arena_test_assert.equals(recovered.transient_attempts, 1,
+        "fatal main-menu boundary makes one bounded transient cleanup attempt")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(recovered.config), 0,
+        "fatal main-menu cleanup removes every persisted defeat key")
+    gamma_arena_test_assert.is_false(recovered.env.orchestrator.death_latched,
+        "fatal main-menu cleanup releases the latch only after persistence succeeds")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.defeat_token, nil,
+        "fatal main-menu cleanup releases the token")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.death_flags, nil,
+        "fatal main-menu cleanup releases the shared flags reference")
+
+    local retained = task11_retained_cancelled_death_with_real_store()
+    gamma_arena_test_assert.is_true(retained.env.orchestrator:fatal_main_menu_action().ok,
+        "fatal main-menu disconnect remains bounded when transient cleanup fails")
+    gamma_arena_test_assert.equals(retained.transient_attempts, 1,
+        "failed fatal main-menu cleanup is attempted once")
+    gamma_arena_test_assert.equals(retained.config.values.defeat_stage, "armed",
+        "failed fatal main-menu cleanup leaves the real Store armed")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_latched,
+        "failed fatal main-menu cleanup retains the latch")
+    gamma_arena_test_assert.equals(retained.env.orchestrator.defeat_token, retained.token,
+        "failed fatal main-menu cleanup retains the token")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_flags == retained.flags,
+        "failed fatal main-menu cleanup retains the exact shared flags reference")
+end
+
+local function runtime_cancelled_death_game_load_cleanup_is_durable()
+    local recovered = task11_retained_cancelled_death_with_real_store()
+    recovered.allow_defeat_clear = true
+    gamma_arena_test_assert.is_true(recovered.env.orchestrator:on_game_load().ok,
+        "game-load reset succeeds after durable defeat cleanup")
+    gamma_arena_test_assert.equals(recovered.clear_attempts, 3,
+        "game-load boundary makes one bounded recovery attempt")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(recovered.config), 0,
+        "game-load reset removes every persisted defeat key")
+    gamma_arena_test_assert.is_false(recovered.env.orchestrator.death_latched,
+        "game-load reset releases the latch only after persistence succeeds")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.defeat_token, nil,
+        "game-load reset releases the token")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.death_flags, nil,
+        "game-load reset releases the shared flags reference")
+
+    local retained = task11_retained_cancelled_death_with_real_store()
+    local failed = retained.env.orchestrator:on_game_load()
+    gamma_arena_test_assert.is_false(failed.ok, "game-load cleanup failure remains structured")
+    gamma_arena_test_assert.equals(retained.clear_attempts, 4,
+        "failed game-load cleanup and fatal routing each make one bounded attempt")
+    gamma_arena_test_assert.equals(retained.config.values.defeat_stage, "armed",
+        "failed game-load cleanup leaves the real Store armed")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_latched,
+        "failed game-load cleanup retains the latch")
+    gamma_arena_test_assert.equals(retained.env.orchestrator.defeat_token, retained.token,
+        "failed game-load cleanup retains the token")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_flags == retained.flags,
+        "failed game-load cleanup retains the exact shared flags reference")
+end
+
 local function runtime_custom_session_creation_copies_validated_recipe()
     local catalog = gamma_arena_test_custom_config.make_catalog()
     local logical_layout = catalog.layouts.rostok_arena_v1
@@ -13681,6 +13836,9 @@ local cases = {
     ,{ name = "runtime_cancelled_death_arm_aborts_before_net_destroy", fn = runtime_cancelled_death_arm_aborts_before_net_destroy }
     ,{ name = "runtime_already_cancelled_death_never_arms", fn = runtime_already_cancelled_death_never_arms }
     ,{ name = "runtime_cancelled_death_clear_failure_routes_fatal", fn = runtime_cancelled_death_clear_failure_routes_fatal }
+    ,{ name = "runtime_cancelled_death_fatal_retry_durably_clears_real_store", fn = runtime_cancelled_death_fatal_retry_durably_clears_real_store }
+    ,{ name = "runtime_cancelled_death_fatal_menu_cleanup_is_durable", fn = runtime_cancelled_death_fatal_menu_cleanup_is_durable }
+    ,{ name = "runtime_cancelled_death_game_load_cleanup_is_durable", fn = runtime_cancelled_death_game_load_cleanup_is_durable }
     ,{ name = "runtime_natural_death_failures_never_cancel_engine_death", fn = runtime_natural_death_failures_never_cancel_engine_death }
     ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
     ,{ name = "runtime_audio_defeat_failure_never_cancels_death", fn = runtime_audio_defeat_failure_never_cancels_death }

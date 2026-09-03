@@ -581,6 +581,20 @@ function Orchestrator:log_result_error(result)
     end
 end
 
+function Orchestrator:release_death_arm()
+    self.death_latched = false
+    self.defeat_token = nil
+    self.death_flags = nil
+end
+
+function Orchestrator:clear_cancelled_death_arm()
+    if not self:death_arm_cancelled() then return gamma_arena_result.ok(false) end
+    local cleared = call_method("GA_DEFEAT_CLEAR_FAILED", self.deps.store, "clear_defeat", self.deps.config)
+    if not cleared.ok then return cleared end
+    self:release_death_arm()
+    return gamma_arena_result.ok(true)
+end
+
 function Orchestrator:fatal_main_menu_action()
     if self.machine_state ~= gamma_arena_state_machine.states.ERROR or not self.fatal_shown then
         return fail("GA_FATAL_ACTION_INVALID", "Fatal main-menu action requires terminal Arena state")
@@ -589,6 +603,7 @@ function Orchestrator:fatal_main_menu_action()
 
     local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
     if not cleared.ok then self:log_result_error(cleared) end
+    if cleared.ok and self:death_arm_cancelled() then self:release_death_arm() end
     local teardown = self:teardown_once("fatal_exit", false)
     if not teardown.ok then self:log_result_error(teardown) end
 
@@ -617,6 +632,14 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         fight_index = self.session and self.session.fight_index or nil
     })
     local errors = error_results(result)
+    local preserve_cancelled_death = false
+    if self:death_arm_cancelled() then
+        local defeat_cleared = self:clear_cancelled_death_arm()
+        if not defeat_cleared.ok then
+            append_unique_error(errors, defeat_cleared)
+            preserve_cancelled_death = true
+        end
+    end
     local medical = self:stop_npc_medical("fatal")
     if not medical.ok then append_unique_error(errors, medical) end
     local ui_cleanup = self:clear_runtime_ui()
@@ -625,6 +648,10 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         local clear_method = self.session ~= nil and "clear_resume_if_matches" or "clear_transient"
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, clear_method, self.deps.config, self.session)
         if not cleared.ok then append_unique_error(errors, cleared) end
+        if cleared.ok and preserve_cancelled_death and clear_method == "clear_transient" then
+            self:release_death_arm()
+            preserve_cancelled_death = false
+        end
     end
     local cleanup_session = self.session
     self.active = false
@@ -632,9 +659,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.machine_state = gamma_arena_state_machine.states.ERROR
     self.cleanup_required = true
     self.pending_victory = false
-    self.death_latched = false
-    self.defeat_token = nil
-    self.death_flags = nil
+    if not preserve_cancelled_death then self:release_death_arm() end
     self.result_kind = nil
     self.pending_callback_error = nil
     self.result_action_locked = true
@@ -719,6 +744,8 @@ function Orchestrator:on_game_load()
     self:audio_event("stop_all", self:audio_context({ reason = "game_load" }))
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
+    local death_cleanup = self:clear_cancelled_death_arm()
+    if not death_cleanup.ok then return self:enter_fatal(death_cleanup) end
     self.game_load_seen = true
     self.active = false
     self.session = nil
@@ -1681,13 +1708,7 @@ function Orchestrator:death_arm_cancelled()
 end
 
 function Orchestrator:abort_actor_death()
-    if not self:death_arm_cancelled() then return gamma_arena_result.ok(false) end
-    local cleared = call_method("GA_DEFEAT_CLEAR_FAILED", self.deps.store, "clear_defeat", self.deps.config)
-    if not cleared.ok then return cleared end
-    self.death_latched = false
-    self.defeat_token = nil
-    self.death_flags = nil
-    return gamma_arena_result.ok(true)
+    return self:clear_cancelled_death_arm()
 end
 
 function Orchestrator:abort_cancelled_actor_death()
