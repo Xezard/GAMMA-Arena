@@ -7782,6 +7782,44 @@ local function task8_pump_to_active(env)
     gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "fight becomes ACTIVE")
 end
 
+local function task8_death_environment(options)
+    options = options or {}
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    env.arm = 0
+    env.confirm = 0
+    env.clear_defeat = 0
+    env.tactical_stop = 0
+    env.neutralize = 0
+
+    function env.deps.store:arm_defeat(_, context)
+        env.arm = env.arm + 1
+        env.armed_context = clone(context)
+        if options.arm_failure then return gamma_arena_result.err("GA_TEST_ARM", "injected defeat arm failure") end
+        return gamma_arena_result.ok({ token = "gad1:1000:task8_death" })
+    end
+    function env.deps.store:confirm_defeat(_, token)
+        env.confirm = env.confirm + 1
+        env.confirmed_token = token
+        if options.confirm_failure then return gamma_arena_result.err("GA_TEST_CONFIRM", "injected defeat confirm failure") end
+        return gamma_arena_result.ok(true)
+    end
+    function env.deps.store:clear_defeat()
+        env.clear_defeat = env.clear_defeat + 1
+        if options.clear_defeat_failure then return gamma_arena_result.err("GA_TEST_DEFEAT_CLEAR", "injected defeat clear failure") end
+        return gamma_arena_result.ok(true)
+    end
+    function env.deps.entities:stop_tactical()
+        env.tactical_stop = env.tactical_stop + 1
+        return gamma_arena_result.ok(true)
+    end
+    function env.deps.entities:neutralize_owned_opponents()
+        env.neutralize = env.neutralize + 1
+        return gamma_arena_result.ok(true)
+    end
+    return env
+end
+
 local function runtime_battle_identity_lifecycle_is_active_only()
     local env = task8_environment()
     task8_pump_to_countdown(env)
@@ -8565,8 +8603,8 @@ local function runtime_natural_death_arms_confirms_and_neutralizes_once()
     gamma_arena_test_assert.equals(flags.ret_value, true, "Arena never cancels lethal damage")
     gamma_arena_test_assert.equals(env.actor_mutations, 0, "Arena never heals or holds the dying actor")
     gamma_arena_test_assert.equals(env.arm, 1, "one defeat intent is armed")
-    gamma_arena_test_assert.equals(env.tactical_stop, 1, "before-death stops tactical control once")
-    gamma_arena_test_assert.equals(env.battle_identity_clears, 1, "before-death clears battle identity once")
+    gamma_arena_test_assert.equals(env.tactical_stop, 0, "before-death keeps tactical control reversible")
+    gamma_arena_test_assert.equals(env.battle_identity_clears, 0, "before-death keeps battle identity visible until true death")
     gamma_arena_test_assert.equals(env.armed_context.difficulty_id, "master", "defeat handoff preserves difficulty")
     gamma_arena_test_assert.is_true(post_lethal_victory.ok and post_lethal_victory.value == false, "lethal arm wins any later same-frame victory callback")
     gamma_arena_test_assert.equals(env.orchestrator.pending_victory, false, "post-lethal victory cannot reopen in-level result flow")
@@ -8578,8 +8616,94 @@ local function runtime_natural_death_arms_confirms_and_neutralizes_once()
     gamma_arena_test_assert.equals(env.confirm, 1, "one defeat intent is confirmed")
     gamma_arena_test_assert.equals(env.confirmed_token, "gad1:1000:natural", "confirmation reuses the armed token")
     gamma_arena_test_assert.equals(env.neutralize, 1, "owned opponents are neutralized")
+    gamma_arena_test_assert.equals(env.tactical_stop, 1, "true post-death finalization stops tactical control once")
+    gamma_arena_test_assert.equals(env.battle_identity_clears, 1, "true post-death finalization clears battle identity once")
     gamma_arena_test_assert.is_false(env.orchestrator:is_active(), "dead actor clears in-level Arena activity")
     gamma_arena_test_assert.equals(env.orchestrator.pending_victory, false, "death clears a queued victory")
+end
+
+local function runtime_cancelled_death_arm_aborts_on_next_update()
+    local env = task8_death_environment()
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = true }
+    local medical_updates = env.npc_medical_updates
+    local audio_updates = #env.audio_calls
+
+    local armed = callbacks.actor_on_before_death(77, flags)
+    gamma_arena_test_assert.is_true(armed.ok, "before-death callback arms through the real bootstrap router")
+    gamma_arena_test_assert.equals(env.arm, 1, "cancelable death owns one persisted arm")
+    gamma_arena_test_assert.equals(env.npc_medical_stops, 0, "reversible arm keeps NPC medical active")
+    gamma_arena_test_assert.equals(env.battle_identity_clears, 0, "reversible arm keeps battle identity visible")
+    gamma_arena_test_assert.equals(env.tactical_stop, 0, "reversible arm keeps tactical control active")
+    gamma_arena_test_assert.equals(#env.audio_calls, audio_updates, "reversible arm emits no defeat audio")
+
+    flags.ret_value = false
+    local updated = callbacks.actor_on_update()
+    gamma_arena_test_assert.is_true(updated.ok, "later subscriber cancellation is observed on the next real actor update")
+    gamma_arena_test_assert.equals(env.clear_defeat, 1, "cancelled arm clears its persisted defeat exactly once")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "cancelled arm releases the death latch")
+    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, nil, "cancelled arm drops the token")
+    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "cancelled arm drops the shared flags reference")
+    gamma_arena_test_assert.is_true(env.orchestrator:is_active(), "cancelled death keeps the live Arena fight active")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "ACTIVE", "cancelled death keeps ACTIVE reconciliation")
+    gamma_arena_test_assert.is_true(env.npc_medical_updates > medical_updates, "cancelled death continues active medical reconciliation")
+    gamma_arena_test_assert.equals(env.npc_medical_stops + env.battle_identity_clears + env.tactical_stop, 0,
+        "cancelled update performs no post-death shutdown")
+    gamma_arena_test_assert.equals(env.confirm + env.neutralize, 0, "cancelled update never confirms or neutralizes")
+
+    gamma_arena_test_assert.is_true(callbacks.actor_on_net_destroy().ok, "later unrelated net-destroy takes ordinary teardown")
+    gamma_arena_test_assert.equals(env.clear_defeat, 1, "later net-destroy cannot clear the cancelled arm twice")
+    gamma_arena_test_assert.equals(env.confirm + env.neutralize, 0, "later unrelated net-destroy can never confirm a cancelled death")
+end
+
+local function runtime_cancelled_death_arm_aborts_before_net_destroy()
+    local env = task8_death_environment()
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = true }
+    gamma_arena_test_assert.is_true(callbacks.actor_on_before_death(77, flags).ok, "net-destroy cancellation fixture arms")
+    flags.ret_value = false
+
+    local destroyed = callbacks.actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "net-destroy aborts a cancelled arm before ordinary teardown")
+    gamma_arena_test_assert.equals(env.clear_defeat, 1, "net-destroy clears the cancelled persisted arm exactly once")
+    gamma_arena_test_assert.equals(env.confirm + env.neutralize, 0, "cancelled net-destroy never enters death finalization")
+    gamma_arena_test_assert.equals(env.clear_intent, 1, "cancelled net-destroy continues the ordinary resume cleanup path")
+    gamma_arena_test_assert.equals(env.orchestrator:runtime_stage_snapshot(), "CLEANING", "cancelled net-destroy completes ordinary teardown")
+end
+
+local function runtime_already_cancelled_death_never_arms()
+    local env = task8_death_environment()
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = false }
+    local audio_calls = #env.audio_calls
+
+    local ignored = callbacks.actor_on_before_death(77, flags)
+    gamma_arena_test_assert.is_true(ignored.ok and ignored.value == false, "an already-cancelled shared flag is inert")
+    gamma_arena_test_assert.equals(env.arm + env.clear_defeat + env.confirm + env.neutralize, 0, "already-cancelled damage owns no defeat state")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "already-cancelled damage never latches")
+    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "already-cancelled damage retains no flags reference")
+    gamma_arena_test_assert.equals(env.npc_medical_stops + env.battle_identity_clears + env.tactical_stop, 0,
+        "already-cancelled damage performs no shutdown")
+    gamma_arena_test_assert.equals(#env.audio_calls, audio_calls, "already-cancelled damage emits no defeat audio")
+end
+
+local function runtime_cancelled_death_clear_failure_routes_fatal()
+    local env = task8_death_environment({ clear_defeat_failure = true })
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = true }
+    gamma_arena_test_assert.is_true(callbacks.actor_on_before_death(77, flags).ok, "clear-failure fixture arms")
+    flags.ret_value = false
+
+    local failed = callbacks.actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "cancelled defeat clear failure remains structured")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_DEFEAT_CLEAR", "cancelled defeat clear preserves its exact cause")
+    gamma_arena_test_assert.equals(env.clear_defeat, 1, "failed cancelled defeat clear is attempted once")
+    gamma_arena_test_assert.equals(env.fatal_shown, 1, "cancelled defeat clear failure routes fatal through the real callback boundary")
+    gamma_arena_test_assert.equals(env.orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "cancelled defeat clear failure enters ERROR")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "fatal cancellation recovery drops the in-memory death latch")
+    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, nil, "fatal cancellation recovery drops the in-memory defeat token")
+    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "fatal cancellation recovery drops the shared flags reference")
+    gamma_arena_test_assert.equals(env.confirm + env.neutralize, 0, "clear failure never misclassifies cancellation as true death")
 end
 
 local function runtime_natural_death_failures_never_cancel_engine_death()
@@ -8629,10 +8753,13 @@ local function runtime_audio_defeat_failure_never_cancels_death()
     local env = natural_death_environment({ audio_error = true })
     local flags = { ret_value = true }
     local result = env.orchestrator:actor_on_before_death(77, flags)
-    gamma_arena_test_assert.is_true(result.ok, "defeat audio failure cannot reject natural death arming")
-    gamma_arena_test_assert.equals(#env.audio_calls, 1, "natural death emits one defeat audio event")
-    gamma_arena_test_assert.equals(env.audio_calls[1].method, "defeat", "natural death uses the defeat event")
+    gamma_arena_test_assert.is_true(result.ok, "defeat audio remains deferred while natural death is only armed")
+    gamma_arena_test_assert.equals(#env.audio_calls, 0, "reversible death arm emits no defeat audio")
     gamma_arena_test_assert.equals(env.arm, 1, "defeat intent remains armed after audio failure")
+    local finalized = env.orchestrator:actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(finalized.ok, "defeat audio failure cannot reject true death finalization")
+    gamma_arena_test_assert.equals(#env.audio_calls, 1, "true death emits one defeat audio event")
+    gamma_arena_test_assert.equals(env.audio_calls[1].method, "defeat", "true death uses the defeat event")
     gamma_arena_test_assert.equals(env.tactical_stop, 1, "tactical stop remains ordered after audio failure")
     gamma_arena_test_assert.equals(flags.ret_value, true, "audio failure never cancels lethal damage")
 end
@@ -13550,6 +13677,10 @@ local cases = {
     ,{ name = "runtime_task8_duplicate_result_clicks_are_idempotent", fn = runtime_task8_duplicate_result_clicks_are_idempotent }
     ,{ name = "runtime_task8_one_hundred_fights_leave_empty_registries", fn = runtime_task8_one_hundred_fights_leave_empty_registries }
     ,{ name = "runtime_natural_death_arms_confirms_and_neutralizes_once", fn = runtime_natural_death_arms_confirms_and_neutralizes_once }
+    ,{ name = "runtime_cancelled_death_arm_aborts_on_next_update", fn = runtime_cancelled_death_arm_aborts_on_next_update }
+    ,{ name = "runtime_cancelled_death_arm_aborts_before_net_destroy", fn = runtime_cancelled_death_arm_aborts_before_net_destroy }
+    ,{ name = "runtime_already_cancelled_death_never_arms", fn = runtime_already_cancelled_death_never_arms }
+    ,{ name = "runtime_cancelled_death_clear_failure_routes_fatal", fn = runtime_cancelled_death_clear_failure_routes_fatal }
     ,{ name = "runtime_natural_death_failures_never_cancel_engine_death", fn = runtime_natural_death_failures_never_cancel_engine_death }
     ,{ name = "runtime_natural_death_outside_active_arena_is_inert", fn = runtime_natural_death_outside_active_arena_is_inert }
     ,{ name = "runtime_audio_defeat_failure_never_cancels_death", fn = runtime_audio_defeat_failure_never_cancels_death }

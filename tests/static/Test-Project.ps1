@@ -1686,6 +1686,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         $FatalContent = $Task5OrchestratorContent.Substring($FatalStart, $FatalEnd - $FatalStart)
         Assert-True ($FatalContent -match 'self\.activation_attempted\s*=\s*true') 'Fatal routing must latch the activation attempt'
         Assert-True ($FatalContent -match 'self\.awaiting_activation\s*=\s*false') 'Fatal routing must stop per-frame activation retries'
+        Assert-True ($FatalContent -match 'self\.death_latched\s*=\s*false[\s\S]{0,160}self\.defeat_token\s*=\s*nil[\s\S]{0,160}self\.death_flags\s*=\s*nil') 'Fatal routing must drop stale in-memory death-arm references'
     }
     $ActivationStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:activate_once')
     $ActivationEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:layout_snapshot')
@@ -1711,7 +1712,34 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
     Assert-True ($Task5OrchestratorContent -notmatch 'callback_name\s*==\s*"actor_on_death"') 'Callback error routing must not retain nonexistent actor_on_death cases'
     Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,1200}arm_defeat') 'Before-death handling must arm the persisted cross-VM defeat intent'
     $Task5BeforeDeathBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:actor_on_before_death[\s\S]*?[\r\n]+end').Value
-    Assert-True ($Task5BeforeDeathBlock -notmatch 'ret_value|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
+    Assert-True ($Task5BeforeDeathBlock -notmatch '\bret_value\s*=\s*(?:false|nil)\b|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
+    Assert-True ($Task5BeforeDeathBlock -match 'find_death_flags[\s\S]{0,300}ret_value[\s\S]{0,160}gamma_arena_result\.ok\(false\)') 'An already-cancelled shared death flag must remain inert before arming'
+    Assert-True ($Task5BeforeDeathBlock -notmatch 'clear_battle_identity|stop_npc_medical|audio_event|stop_tactical') 'Before-death arming must remain reversible until true actor destruction'
+    $Task5AbortDeathStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:abort_actor_death')
+    $Task5FinalizeDeathStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:finalize_actor_death')
+    Assert-True ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) 'Cancelled death abort must remain structurally testable before finalization'
+    if ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) {
+        $Task5AbortDeathBlock = $Task5OrchestratorContent.Substring($Task5AbortDeathStart, $Task5FinalizeDeathStart - $Task5AbortDeathStart)
+        $Task5ClearDefeatIndex = $Task5AbortDeathBlock.IndexOf('clear_defeat')
+        $Task5UnlatchIndex = $Task5AbortDeathBlock.IndexOf('self.death_latched = false')
+        Assert-True ($Task5ClearDefeatIndex -ge 0 -and $Task5UnlatchIndex -gt $Task5ClearDefeatIndex) 'Cancelled death must clear persisted ownership before releasing its in-memory latch'
+        Assert-True ($Task5AbortDeathBlock -match 'self\.defeat_token\s*=\s*nil[\s\S]{0,100}self\.death_flags\s*=\s*nil') 'Successful death abort must release token and shared flags reference'
+    }
+    if ($Task5FinalizeDeathStart -ge 0) {
+        $Task5FinalizeDeathEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:npc_on_before_hit', $Task5FinalizeDeathStart)
+        $Task5FinalizeDeathBlock = $Task5OrchestratorContent.Substring($Task5FinalizeDeathStart, $Task5FinalizeDeathEnd - $Task5FinalizeDeathStart)
+        foreach ($Marker in @('clear_battle_identity','stop_npc_medical','audio_event','stop_tactical','confirm_defeat','neutralize_owned_opponents')) {
+            Assert-True ($Task5FinalizeDeathBlock -match [regex]::Escape($Marker)) "True post-death finalizer must own $Marker"
+        }
+    }
+    $Task5UpdateStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:update_runtime')
+    $Task5UpdateEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:reconcile_active_victory', $Task5UpdateStart)
+    $Task5UpdateBlock = $Task5OrchestratorContent.Substring($Task5UpdateStart, $Task5UpdateEnd - $Task5UpdateStart)
+    Assert-True ($Task5UpdateBlock.IndexOf('abort_cancelled_actor_death') -ge 0 -and $Task5UpdateBlock.IndexOf('abort_cancelled_actor_death') -lt $Task5UpdateBlock.IndexOf('local runtime = self:drive_runtime()')) 'Actor update must abort a later cancellation before regular active reconciliation'
+    $Task5NetDestroyStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:actor_on_net_destroy')
+    $Task5NetDestroyEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:on_before_level_changing', $Task5NetDestroyStart)
+    $Task5NetDestroyBlock = $Task5OrchestratorContent.Substring($Task5NetDestroyStart, $Task5NetDestroyEnd - $Task5NetDestroyStart)
+    Assert-True ($Task5NetDestroyBlock.IndexOf('abort_cancelled_actor_death') -ge 0 -and $Task5NetDestroyBlock.IndexOf('abort_cancelled_actor_death') -lt $Task5NetDestroyBlock.IndexOf('finalize_actor_death')) 'Actor net-destroy must abort cancellation before any death confirmation'
     Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:(show_defeat|defeat_next_action)') 'Natural death must remove the in-level logical-defeat UI and retry path'
     foreach ($Marker in @('npc_medical','start_npc_medical','update_npc_medical','stop_npc_medical')) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator must compose NPC medical lifecycle marker $Marker"
@@ -1750,6 +1778,9 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     Assert-True ($Task5DevTestContent -match $RuntimeBootstrapStatusPattern) "Regression case must be registered exactly: $($RuntimeBootstrapStatusRegistration.Name) -> $($RuntimeBootstrapStatusRegistration.Function)."
     foreach ($Marker in @('runtime_preflight_accepts_natural_death_without_invulnerability','runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_task6_actor_checkpoint_ports','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_arena_enemy_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_launch_defers_on_fake_start_then_activates_on_rostok','runtime_ordinary_no_intent_activation_latches_once','runtime_first_activation_failure_routes_fatal','runtime_activation_reconciles_before_intent_inspection_once','runtime_activation_version_changes_clear_resume_before_checkpoint_routing','runtime_activation_reconciliation_failures_are_fatal_before_inspection','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_unexpected_net_destroy_clears_external_route','runtime_orchestrator_npc_net_spawn_is_active_only','runtime_npc_net_spawn_errors_defer_fatal_ui_to_update','runtime_entity_net_spawn_isolates_only_owned_npcs','runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults','runtime_entity_activation_rejects_runtime_community_drift')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
+    }
+    foreach ($Marker in @('runtime_cancelled_death_arm_aborts_on_next_update','runtime_cancelled_death_arm_aborts_before_net_destroy','runtime_already_cancelled_death_never_arms','runtime_cancelled_death_clear_failure_routes_fatal')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Death cancellation Dev tests must cover $Marker"
     }
 }
 
