@@ -1,0 +1,247 @@
+local function weapon(section, slot, ammo)
+    return {
+        section = section,
+        category = "weapon",
+        equipped_slot = slot,
+        selected_ammo = ammo
+    }
+end
+
+local function fixture(options)
+    options = options or {}
+    local env = { storage = {}, fills = {}, capacity_reads = {}, refreshes = 0, events = {} }
+    local supported = options.supported or { rifle_a = true, pistol_b = true }
+    local defaults = options.defaults or { rifle_a = "mag_a", pistol_b = "mag_b" }
+    local capacities = options.capacities or { mag_a = 30, mag_b = 12 }
+    local api = {
+        is_supported_weapon = function(section) return supported[section] == true end,
+        default_magazine = function(section) return defaults[section] end,
+        read_magazine = function(id) return env.storage[id] end,
+        is_carried = function() return options.carried ~= false end,
+        refresh_loadout = function()
+            env.refreshes = env.refreshes + 1
+            env.events[#env.events + 1] = "refresh"
+            return options.refresh_result == nil and true or options.refresh_result
+        end,
+        fill_magazine = function(id, section, amount, ammo)
+            env.events[#env.events + 1] = "fill"
+            env.fills[#env.fills + 1] = { id = id, section = section, amount = amount, ammo = ammo }
+            local loaded = {}
+            if options.sparse_loaded then
+                loaded[4294967295] = ammo
+            else
+                for index = 1, amount do
+                    loaded[index] = options.wrong_ammo and "ammo_wrong" or ammo
+                end
+            end
+            env.storage[id] = { section = section, loaded = loaded }
+            return options.fill_result == nil and true or options.fill_result
+        end
+    }
+    local adapter = gamma_arena_mags_redux.new({
+        resolve_api = function()
+            if options.absent then return nil end
+            if options.resolve_throws then error(options.resolve_throws) end
+            if options.partial then return { is_supported_weapon = api.is_supported_weapon } end
+            return api
+        end,
+        magazine_capacity = function(section)
+            env.capacity_reads[#env.capacity_reads + 1] = section
+            return capacities[section]
+        end
+    })
+    return env, adapter
+end
+
+local function assert_descriptor_context(context, expected, label)
+    local field_count = 0
+    for _, value in pairs(context) do
+        field_count = field_count + 1
+        gamma_arena_test_assert.is_true(type(value) == "string" or type(value) == "number",
+            label .. " context values are bounded scalars")
+        if type(value) == "string" then
+            gamma_arena_test_assert.is_true(#value <= 96, label .. " context strings are bounded")
+        end
+    end
+    gamma_arena_test_assert.equals(field_count, 6, label .. " context contains exactly six fields")
+    gamma_arena_test_assert.equals(context.weapon_section, expected.weapon_section, label .. " context retains weapon")
+    gamma_arena_test_assert.equals(context.magazine_section, expected.magazine_section, label .. " context retains magazine")
+    gamma_arena_test_assert.equals(context.ammo_section, expected.ammo_section, label .. " context retains ammunition")
+    gamma_arena_test_assert.equals(context.reserve_ordinal, expected.reserve_ordinal, label .. " context retains reserve ordinal")
+    gamma_arena_test_assert.equals(context.expected_capacity, expected.expected_capacity, label .. " context retains expected capacity")
+    gamma_arena_test_assert.equals(context.observed_state, expected.observed_state, label .. " context retains bounded observed state")
+end
+
+local function direct_resolution_failures_have_complete_context()
+    for _, case in ipairs({
+        { label = "thrown API resolution", options = { resolve_throws = "resolver exploded" }, observed_state = "api_resolution_failed" },
+        { label = "partial API resolution", options = { partial = true }, observed_state = "api_incomplete" }
+    }) do
+        local _, adapter = fixture(case.options)
+        local result = adapter:resolve()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_API_INVALID",
+            case.label .. " has a stable error")
+        assert_descriptor_context(result.error.context, {
+            weapon_section = "unavailable", magazine_section = "unavailable", ammo_section = "unavailable",
+            reserve_ordinal = 0, expected_capacity = 0, observed_state = case.observed_state
+        }, case.label)
+    end
+end
+
+local function malformed_descriptor_arrays_have_complete_context()
+    local _, adapter = fixture()
+    local first = weapon(string.rep("w", 120), "weapon_2", string.rep("a", 120))
+    local sparse = { [1] = first, [4294967295] = weapon("unreachable", "weapon_1", "unreachable") }
+    local result = adapter:bonus_descriptors(sparse)
+    gamma_arena_test_assert.is_false(result.ok, "sparse descriptor array fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_PLAN_INVALID",
+        "sparse descriptor array has a stable error")
+    assert_descriptor_context(result.error.context, {
+        weapon_section = string.rep("w", 96), magazine_section = "unavailable", ammo_section = string.rep("a", 96),
+        reserve_ordinal = 0, expected_capacity = 0, observed_state = "descriptor_array_invalid"
+    }, "sparse descriptor array")
+
+    local malformed = adapter:bonus_descriptors("not-a-table")
+    gamma_arena_test_assert.is_false(malformed.ok, "non-table descriptor array fails closed")
+    assert_descriptor_context(malformed.error.context, {
+        weapon_section = "unavailable", magazine_section = "unavailable", ammo_section = "unavailable",
+        reserve_ordinal = 0, expected_capacity = 0, observed_state = "descriptor_array_invalid"
+    }, "non-table descriptor array")
+end
+
+local function absent_api_is_a_noop()
+    local _, adapter = fixture({ absent = true })
+    local result = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    gamma_arena_test_assert.is_true(result.ok, "absent Mags Redux is compatible")
+    gamma_arena_test_assert.equals(#result.value, 0, "absent Mags Redux plans no bonus items")
+end
+
+local function partial_api_fails_closed()
+    local _, adapter = fixture({ partial = true })
+    local result = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    gamma_arena_test_assert.is_false(result.ok, "partial Mags Redux API fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_API_INVALID", "partial API has a stable error")
+    assert_descriptor_context(result.error.context, {
+        weapon_section = "rifle_a", magazine_section = "unavailable", ammo_section = "ammo_a",
+        reserve_ordinal = 0, expected_capacity = 512, observed_state = "api_resolution_failed"
+    }, "partial API")
+end
+
+local function unsupported_weapon_is_skipped()
+    local _, adapter = fixture({ supported = {} })
+    local result = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    gamma_arena_test_assert.is_true(result.ok, "unsupported weapon planning succeeds")
+    gamma_arena_test_assert.equals(#result.value, 0, "unsupported weapon receives no magazines")
+end
+
+local function supported_weapons_receive_two_each()
+    local _, adapter = fixture()
+    local result = adapter:bonus_descriptors({
+        weapon("rifle_a", "weapon_2", "ammo_a"),
+        weapon("pistol_b", "weapon_1", "ammo_b")
+    })
+    gamma_arena_test_assert.is_true(result.ok, "supported weapon planning succeeds")
+    gamma_arena_test_assert.equals(#result.value, 4, "two supported weapons receive four magazines")
+    gamma_arena_test_assert.equals(result.value[1].section, "mag_a", "rifle default magazine is selected")
+    gamma_arena_test_assert.equals(result.value[1].selected_ammo, "ammo_a", "rifle ammunition is retained")
+    gamma_arena_test_assert.equals(result.value[2].reserve_ordinal, 2, "second rifle reserve ordinal is stable")
+    gamma_arena_test_assert.equals(result.value[3].section, "mag_b", "pistol default magazine is selected")
+    gamma_arena_test_assert.equals(result.value[4].magazine_capacity, 12, "pistol magazine capacity is retained")
+end
+
+local function initialization_verifies_loaded_content()
+    local env, adapter = fixture()
+    local planned = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    local result = adapter:initialize(701, planned.value[1])
+    gamma_arena_test_assert.is_true(result.ok, "new reserve magazine initializes")
+    gamma_arena_test_assert.is_true(result.value.carried, "available pouch slot is reported")
+    gamma_arena_test_assert.equals(#env.storage[701].loaded, 30, "reserve magazine is full")
+    gamma_arena_test_assert.equals(env.storage[701].loaded[30], "ammo_a", "last loaded round is verified")
+end
+
+local function refreshes_vendor_loadout_before_each_fill()
+    local env, adapter = fixture()
+    local planned = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    local result = adapter:initialize(704, planned.value[1])
+    gamma_arena_test_assert.is_true(result.ok, "reserve initialization refreshes vendor loadout")
+    gamma_arena_test_assert.equals(env.refreshes, 1, "one reserve performs one vendor loadout refresh")
+    gamma_arena_test_assert.equals(env.events[1], "refresh", "vendor loadout refresh precedes fill")
+    gamma_arena_test_assert.equals(env.events[2], "fill", "fill follows the refreshed pouch snapshot")
+end
+
+local function rejects_pathological_capacities_before_vendor_fill()
+    for _, capacity in ipairs({ 513, 4294967295 }) do
+        local env, adapter = fixture({ capacities = { mag_a = capacity } })
+        local result = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+        gamma_arena_test_assert.is_false(result.ok, "pathological capacity is rejected: " .. tostring(capacity))
+        gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_CAPACITY_INVALID",
+            "pathological capacity has a stable error")
+        assert_descriptor_context(result.error.context, {
+            weapon_section = "rifle_a", magazine_section = "mag_a", ammo_section = "ammo_a",
+            reserve_ordinal = 0, expected_capacity = 512, observed_state = "capacity:" .. tostring(capacity)
+        }, "pathological capacity")
+        gamma_arena_test_assert.equals(#env.fills, 0, "pathological capacity never reaches vendor fill")
+        gamma_arena_test_assert.equals(env.refreshes, 0, "pathological capacity never refreshes vendor state")
+    end
+end
+
+local function rejects_huge_sparse_loaded_index_in_key_count_time()
+    local env, adapter = fixture()
+    local planned = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    env.storage[705] = { section = "mag_a", loaded = { [4294967295] = "ammo_a" } }
+    local called, result = pcall(function() return adapter:initialize(705, planned.value[1]) end)
+    gamma_arena_test_assert.is_true(called, "huge sparse vendor state returns without iterating to its maximum key")
+    gamma_arena_test_assert.is_false(result.ok, "huge sparse vendor state fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_STATE_INVALID",
+        "huge sparse vendor state has a stable error")
+    assert_descriptor_context(result.error.context, {
+        weapon_section = "rifle_a", magazine_section = "mag_a", ammo_section = "ammo_a",
+        reserve_ordinal = 1, expected_capacity = 30, observed_state = "loaded_sparse:1:4294967295"
+    }, "huge sparse vendor state")
+    gamma_arena_test_assert.equals(#env.fills, 0, "huge sparse vendor state is rejected before fill")
+end
+
+local function pouch_exhaustion_is_not_a_loadout_failure()
+    local _, adapter = fixture({ carried = false })
+    local planned = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    local result = adapter:initialize(702, planned.value[1])
+    gamma_arena_test_assert.is_true(result.ok, "full inventory magazine survives pouch exhaustion")
+    gamma_arena_test_assert.is_false(result.value.carried, "pouch exhaustion is reported")
+end
+
+local function wrong_loaded_ammo_fails_verification()
+    local _, adapter = fixture({ wrong_ammo = true })
+    local planned = adapter:bonus_descriptors({ weapon("rifle_a", "weapon_2", "ammo_a") })
+    local result = adapter:initialize(703, planned.value[1])
+    gamma_arena_test_assert.is_false(result.ok, "wrong vendor ammunition fails verification")
+    gamma_arena_test_assert.equals(result.error.code, "GA_MAGS_REDUX_VERIFY_FAILED", "wrong ammunition has a stable error")
+    assert_descriptor_context(result.error.context, {
+        weapon_section = "rifle_a", magazine_section = "mag_a", ammo_section = "ammo_a",
+        reserve_ordinal = 1, expected_capacity = 30, observed_state = "ammo_mismatch:1:ammo_wrong"
+    }, "wrong ammunition")
+end
+
+local cases = {
+    { name = "mags_redux_direct_resolution_failures_have_complete_context", fn = direct_resolution_failures_have_complete_context },
+    { name = "mags_redux_malformed_descriptor_arrays_have_complete_context", fn = malformed_descriptor_arrays_have_complete_context },
+    { name = "mags_redux_absent_api_is_a_noop", fn = absent_api_is_a_noop },
+    { name = "mags_redux_partial_api_fails_closed", fn = partial_api_fails_closed },
+    { name = "mags_redux_unsupported_weapon_is_skipped", fn = unsupported_weapon_is_skipped },
+    { name = "mags_redux_supported_weapons_receive_two_each", fn = supported_weapons_receive_two_each },
+    { name = "mags_redux_initialization_verifies_loaded_content", fn = initialization_verifies_loaded_content },
+    { name = "mags_redux_refreshes_vendor_loadout_before_each_fill", fn = refreshes_vendor_loadout_before_each_fill },
+    { name = "mags_redux_rejects_pathological_capacities_before_vendor_fill", fn = rejects_pathological_capacities_before_vendor_fill },
+    { name = "mags_redux_rejects_huge_sparse_loaded_index_in_key_count_time", fn = rejects_huge_sparse_loaded_index_in_key_count_time },
+    { name = "mags_redux_pouch_exhaustion_is_not_a_loadout_failure", fn = pouch_exhaustion_is_not_a_loadout_failure },
+    { name = "mags_redux_wrong_loaded_ammo_fails_verification", fn = wrong_loaded_ammo_fails_verification }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases do
+        local case = cases[index]
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

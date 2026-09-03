@@ -60,6 +60,7 @@ end
 function NpcMedical:__init(deps)
     self.deps = deps
     self.active = false
+    self.owner = "arena"
     self.fight_id = nil
     self.last_reconcile_at = nil
     self.state_by_slot = {}
@@ -94,18 +95,37 @@ function NpcMedical:start(fight)
     if type(fight) ~= "table" or type(fight.fight_id) ~= "string" or fight.fight_id == "" then
         return fail("GA_NPC_MEDICAL_FIGHT_INVALID", "NPC medical controller requires an active fight identity")
     end
+    local owner = fight.npc_medical_owner
+    if owner ~= "arena" and owner ~= "external" then
+        return fail("GA_NPC_MEDICAL_AI_CONFIG_INVALID", "NPC medical controller requires an exact ownership policy", {
+            owner = owner
+        })
+    end
     if self.active then self:stop("restarted") end
     self.active = true
+    self.owner = owner
     self.fight_id = fight.fight_id
     self.last_reconcile_at = nil
     self.state_by_slot = {}
+    if owner == "external" then
+        self:log("GA_NPC_MEDICAL_DELEGATED", "NPC medical effects are delegated to the external controller", {
+            fight_id = self.fight_id,
+            owner = owner
+        })
+    end
     return gamma_arena_result.ok(true)
 end
 
 function NpcMedical:stop(reason)
-    if not self.active then return gamma_arena_result.ok(false) end
-    for _, state in pairs(self.state_by_slot) do self:cancel(state, reason or "stopped") end
+    if not self.active then
+        self.owner = "arena"
+        return gamma_arena_result.ok(false)
+    end
+    if self.owner ~= "external" then
+        for _, state in pairs(self.state_by_slot) do self:cancel(state, reason or "stopped") end
+    end
     self.active = false
+    self.owner = "arena"
     self.fight_id = nil
     self.last_reconcile_at = nil
     self.state_by_slot = {}
@@ -199,6 +219,7 @@ end
 
 function NpcMedical:update()
     if not self.active then return gamma_arena_result.ok(false) end
+    if self.owner == "external" then return gamma_arena_result.ok(false) end
     local now = self:clock()
     if not now.ok then return now end
     if self.last_reconcile_at ~= nil and elapsed_ms(self.last_reconcile_at, now.value) < RECONCILE_INTERVAL_MS then

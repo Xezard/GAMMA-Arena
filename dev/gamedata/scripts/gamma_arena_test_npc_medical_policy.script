@@ -1,0 +1,79 @@
+local function fake_ini(values, options)
+    local settings = values or {}
+    local behavior = options or {}
+    return {
+        line_exist = function(_, section, key)
+            if behavior.throw_line_exist then error("line_exist failed") end
+            return section == "plugin" and settings[key] ~= nil
+        end,
+        r_string_ex = function(_, section, key)
+            if behavior.throw_read then error("r_string_ex failed") end
+            if section ~= "plugin" then return nil end
+            return settings[key]
+        end
+    }
+end
+
+local cases = {
+    { name = "missing_keys", values = {}, owner = "arena", enable = false, in_combat = false },
+    { name = "enable_true", values = { enable = "TrUe", in_combat = "true", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "enable_on", values = { enable = "ON", in_combat = "true", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "enable_yes", values = { enable = "YeS", in_combat = "true", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "enable_one", values = { enable = "1", in_combat = "true", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "enable_false", values = { enable = "FaLsE", in_combat = "true", medkits = "medkit" }, owner = "arena", enable = false, in_combat = true, medkit_overlap = true },
+    { name = "enable_off", values = { enable = "OFF", in_combat = "true", medkits = "medkit" }, owner = "arena", enable = false, in_combat = true, medkit_overlap = true },
+    { name = "enable_no", values = { enable = "nO", in_combat = "true", medkits = "medkit" }, owner = "arena", enable = false, in_combat = true, medkit_overlap = true },
+    { name = "enable_zero", values = { enable = "0", in_combat = "true", medkits = "medkit" }, owner = "arena", enable = false, in_combat = true, medkit_overlap = true },
+    { name = "in_combat_true", values = { enable = "true", in_combat = "TrUe", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "in_combat_on", values = { enable = "true", in_combat = "ON", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "in_combat_yes", values = { enable = "true", in_combat = "YeS", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "in_combat_one", values = { enable = "true", in_combat = "1", medkits = "medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "in_combat_false", values = { enable = "true", in_combat = "FaLsE", medkits = "medkit" }, owner = "arena", enable = true, in_combat = false, medkit_overlap = true },
+    { name = "in_combat_off", values = { enable = "true", in_combat = "OFF", medkits = "medkit" }, owner = "arena", enable = true, in_combat = false, medkit_overlap = true },
+    { name = "in_combat_no", values = { enable = "true", in_combat = "nO", medkits = "medkit" }, owner = "arena", enable = true, in_combat = false, medkit_overlap = true },
+    { name = "in_combat_zero", values = { enable = "true", in_combat = "0", medkits = "medkit" }, owner = "arena", enable = true, in_combat = false, medkit_overlap = true },
+    { name = "non_overlap", values = { enable = "true", in_combat = "true", medkits = "medkit_army", bandages = "bandage_old" }, owner = "arena", enable = true, in_combat = true },
+    { name = "medkit_overlap", values = { enable = "yes", in_combat = "1", medkits = "medkit_army, medkit" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true },
+    { name = "bandage_overlap", values = { enable = "on", in_combat = "true", bandages = "bandage" }, owner = "external", enable = true, in_combat = true, bandage_overlap = true },
+    { name = "both_overlaps", values = { enable = "TRUE", in_combat = "YES", medkits = "medkit", bandages = "bandage" }, owner = "external", enable = true, in_combat = true, medkit_overlap = true, bandage_overlap = true },
+    { name = "whitespace_empty_tokens", values = { enable = " true ", in_combat = " on ", medkits = " ,  , ", bandages = "   " }, owner = "arena", enable = true, in_combat = true },
+    { name = "exact_matching", values = { enable = "true", in_combat = "true", medkits = "medkit_army, medkits", bandages = "bandage_old" }, owner = "arena", enable = true, in_combat = true },
+    { name = "malformed_enable", values = { enable = "sometimes", in_combat = "true" }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "malformed_in_combat", values = { enable = "true", in_combat = "sometimes" }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "line_exist_throw", values = {}, options = { throw_line_exist = true }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "r_string_ex_throw", values = { enable = "true" }, options = { throw_read = true }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "non_string_enable", values = { enable = true, in_combat = "true" }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "non_string_medkits", values = { enable = "true", in_combat = "true", medkits = 1 }, error = "GA_NPC_MEDICAL_POLICY_INVALID" },
+    { name = "non_string_bandages", values = { enable = "true", in_combat = "true", bandages = false }, error = "GA_NPC_MEDICAL_POLICY_INVALID" }
+}
+
+local function read_table_driven_policy_cases()
+    for index = 1, #cases do
+        local case = cases[index]
+        local result = gamma_arena_npc_medical_policy.read(fake_ini(case.values, case.options))
+        if case.error then
+            gamma_arena_test_assert.is_false(result.ok, case.name .. " fails closed")
+            gamma_arena_test_assert.equals(result.error.code, case.error, case.name .. " has stable error")
+        else
+            gamma_arena_test_assert.is_true(result.ok, case.name .. " parses")
+            gamma_arena_test_assert.equals(result.value.owner, case.owner, case.name .. " classifies owner")
+            gamma_arena_test_assert.equals(result.value.enable, case.enable == true, case.name .. " exposes enable")
+            gamma_arena_test_assert.equals(result.value.in_combat, case.in_combat == true, case.name .. " exposes in_combat")
+            gamma_arena_test_assert.equals(result.value.medkit_overlap, case.medkit_overlap == true, case.name .. " exposes medkit overlap")
+            gamma_arena_test_assert.equals(result.value.bandage_overlap, case.bandage_overlap == true, case.name .. " exposes bandage overlap")
+        end
+    end
+end
+
+local cases_to_run = {
+    { name = "npc_medical_policy_read_table_driven_policy_cases", fn = read_table_driven_policy_cases }
+}
+
+function run(run_case_fn)
+    local all_passed = true
+    for index = 1, #cases_to_run do
+        local case = cases_to_run[index]
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

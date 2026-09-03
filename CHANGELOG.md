@@ -7,6 +7,8 @@ All notable changes to Gamma Arena are documented in this file.
 - Fixed Modded Exes MT-TEST booster cleanup so active medicine effects are removed between fights without leaving permanent negative restoration rates when stale native timers later expire.
 - Added bounded transition, booster-compensation, and actor-health-drop diagnostics for round-boundary condition failures.
 - Quarantined only `wpn_vssk_ekp8_18` from actor loadouts after its confirmed active-slot timeout; NPCs and sibling VSSK sections remain eligible.
+- Removed the false `GA_NPC_MEDICAL_AI_CONFLICT` startup block: Gamma Arena now delegates opponent medical effects when the effective `xr_eat_medkit` INI has `enable=true`, `in_combat=true`, and exact `medkit` or `bandage` list overlap, while retaining Arena-spawned physical medicine for the external controller to consume and making Arena medical a no-op; other valid configurations keep Arena ownership, and unreadable or malformed configurations fail closed.
+- When optional Mags Redux is available, every equipped supported firearm now receives exactly two full bonus reserve magazines; selected Custom Setup ammo-box round counts remain exact, reserve rounds are not deducted from selected loose ammunition, and pouch capacity determines which magazines are immediately carried, while unsupported weapons retain normal behavior.
 
 ## 0.5.1 - 2026-08-31
 

@@ -6,6 +6,7 @@ local CATEGORIES = { outfit = true, helmet = true, knife = true, weapon = true, 
 local CATEGORY_LTX_SLOTS = { outfit = 6, helmet = 12, knife = 0 }
 local MAX_SAFE_INTEGER = 9007199254740991
 local CLOCK_WRAP_MS = 4294967296
+local MAX_MAGAZINE_CAPACITY = 512
 SLOT_ORDER.device = 6
 CATEGORIES.device = true
 CATEGORY_LTX_SLOTS.device = 9
@@ -194,6 +195,45 @@ function descriptors(items, catalog)
     return result
 end
 
+local function planned_descriptors(materializer, base)
+    local planned = {}
+    for index = 1, #base do planned[index] = base[index] end
+    if type(materializer.ports.bonus_descriptors) ~= "function" then
+        return gamma_arena_result.ok(planned)
+    end
+    local bonus = call("GA_ITEM_MATERIALIZE_BONUS_PLAN_FAILED", materializer.ports.bonus_descriptors, base)
+    if not bonus.ok then return bonus end
+    local count = dense_array_length(bonus.value, "bonus_descriptors", true)
+    if count == nil then
+        return failure("GA_ITEM_MATERIALIZE_BONUS_PLAN_INVALID", "Bonus item descriptors must be a dense array")
+    end
+    for index = 1, count do
+        local descriptor = bonus.value[index]
+        if type(descriptor) ~= "table" or type(descriptor.section) ~= "string" or descriptor.section == ""
+            or descriptor.category ~= "magazine" or descriptor.bonus_kind ~= "mags_redux"
+            or type(descriptor.weapon_section) ~= "string" or descriptor.weapon_section == ""
+            or type(descriptor.selected_ammo) ~= "string" or descriptor.selected_ammo == ""
+            or not finite_positive_integer(descriptor.magazine_capacity)
+            or descriptor.magazine_capacity > MAX_MAGAZINE_CAPACITY
+            or not finite_positive_integer(descriptor.reserve_ordinal) then
+            return failure("GA_ITEM_MATERIALIZE_BONUS_PLAN_INVALID", "Bonus item descriptor is malformed", { index = index })
+        end
+        planned[#planned + 1] = descriptor
+    end
+    return gamma_arena_result.ok(planned)
+end
+
+local function initialize_bonus_items(materializer, created)
+    for _, entry in ipairs(created) do
+        if entry.descriptor.bonus_kind ~= nil then
+            local initialized = call("GA_ITEM_MATERIALIZE_BONUS_INIT_FAILED", materializer.ports.initialize_created,
+                entry.entity, entry.record, entry.descriptor)
+            if not initialized.ok then return initialized end
+        end
+    end
+    return gamma_arena_result.ok(true)
+end
+
 local function entity_id(port, entity)
     local result = call("GA_ITEM_MATERIALIZE_ENTITY_INVALID", port.entity_id, entity)
     if not result.ok then return result end
@@ -296,6 +336,11 @@ function Materializer:advance_pending()
     if type(pending) ~= 'table' then return failure('GA_ITEM_MATERIALIZE_STATE_INVALID', 'Universal item materializer has no pending transaction') end
     local entry = pending.equipped[pending.index]
     if entry == nil then
+        if pending.bonus_initialized ~= true then
+            local initialized = initialize_bonus_items(self, pending.created)
+            if not initialized.ok then return self:rollback(pending.created, initialized) end
+            pending.bonus_initialized = true
+        end
         local active_entry = active_equipped_entry(pending.equipped)
         if active_entry ~= nil and pending.activation_submitted ~= true then
             pending.active_slot = active_entry.descriptor.equipped_slot
@@ -375,11 +420,13 @@ end
 function Materializer:apply(owner, items, catalog)
     local expanded = descriptors(items, catalog)
     if not expanded.ok then return expanded end
+    local planned = planned_descriptors(self, expanded.value)
+    if not planned.ok then return planned end
     local created = {}
     local equipped = {}
     local device_summary = nil
 
-    for index, descriptor in ipairs(expanded.value) do
+    for index, descriptor in ipairs(planned.value) do
         local options = nil
         if descriptor.category == "ammo" then
             if not finite_positive_integer(descriptor.box_size) then
@@ -487,6 +534,9 @@ function Materializer:apply(owner, items, catalog)
             device_summary = { section = entry.descriptor.section, id = entry.id, slot = 10, condition = condition.value }
         end
     end
+
+    local initialized = initialize_bonus_items(self, created)
+    if not initialized.ok then return self:rollback(created, initialized) end
 
     local active_entry = active_equipped_entry(equipped)
     local active_slot = active_entry and active_entry.descriptor.equipped_slot or nil

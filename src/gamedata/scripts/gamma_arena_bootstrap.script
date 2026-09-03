@@ -12,7 +12,6 @@ local callback_names = {
     "actor_on_first_update",
     "actor_on_update",
     "actor_on_before_death",
-    "actor_on_death",
     "npc_on_net_spawn",
     "npc_on_before_hit",
     "npc_on_hit_callback",
@@ -27,7 +26,6 @@ local callback_names = {
 
 local guarded_callbacks = {
     actor_on_before_death = true,
-    actor_on_death = true,
     npc_on_net_spawn = true,
     npc_on_before_hit = true,
     npc_on_hit_callback = true,
@@ -485,6 +483,24 @@ function new_actor_item_port(ports)
     local state = { name = "IDLE", summary = nil }
     local transaction = nil
     local exact_current_record, exact_provisional_record
+    local mags_redux = gamma_arena_mags_redux.new({
+        resolve_api = ports.mags_redux_resolve_api or function()
+            local binder = rawget(_G, "magazine_binder")
+            local patches = rawget(_G, "mags_patches")
+            if binder == nil and patches == nil then return nil end
+            return {
+                is_supported_weapon = binder and binder.is_supported_weapon,
+                default_magazine = binder and binder.weapon_default_magazine,
+                read_magazine = binder and binder.get_mag_loaded,
+                is_carried = binder and binder.is_carried_mag,
+                refresh_loadout = binder and binder.validate_loadout,
+                fill_magazine = patches and patches.fill_mag
+            }
+        end,
+        magazine_capacity = ports.mags_redux_magazine_capacity or function(section)
+            return system_ini():r_u32(section, "max_mag_size")
+        end
+    })
 
     local function shutdown_device(record, entity, require_active_transaction)
         if type(record) == 'table' and record.category == 'device' then
@@ -733,6 +749,24 @@ function new_actor_item_port(ports)
         magazine_ammo = function(weapon) return ports.magazine_ammo(weapon) end,
         activate_slot = function(owner, slot) return ports.activate_slot(owner, slot) end,
         active_item = function(owner) return ports.active_item(owner) end,
+        bonus_descriptors = function(descriptors)
+            return mags_redux:bonus_descriptors(descriptors)
+        end,
+        initialize_created = function(_, record, descriptor)
+            local initialized = mags_redux:initialize(record.id, descriptor)
+            if not initialized.ok then return initialized end
+            local checkpoint = actor_loadout_call("GA_MAGS_REDUX_CHECKPOINT_FAILED",
+                ports.mags_redux_checkpoint, "GA_MAGS_REDUX_RESERVE_READY", {
+                    weapon_section = descriptor.weapon_section,
+                    magazine_section = descriptor.section,
+                    reserve_ordinal = descriptor.reserve_ordinal,
+                    capacity = descriptor.magazine_capacity,
+                    ammo_section = descriptor.selected_ammo,
+                    carried = initialized.value.carried == true
+                })
+            if not checkpoint.ok then return checkpoint end
+            return initialized
+        end,
         prepare_rollback = function(created)
             local device_record, device_entity = nil, nil
             for _, entry in ipairs(created or {}) do
@@ -2205,6 +2239,12 @@ local function default_actor_adapter(active_instance, diagnostics, weapon_diagno
             return true
         end,
         active_item = function(actor) return actor:active_item() end,
+        mags_redux_checkpoint = function(code, fields)
+            if diagnostics == nil or type(diagnostics.checkpoint) ~= "function" then
+                return gamma_arena_result.err("GA_MAGS_REDUX_CHECKPOINT_FAILED", "Mags Redux diagnostics journal is unavailable")
+            end
+            return diagnostics:checkpoint(code, fields)
+        end,
         resolve_entity = function(id)
             local service = type(alife) == "function" and alife() or nil
             if service == nil or type(service.object) ~= "function" then
@@ -3092,7 +3132,7 @@ function compose(overrides)
         if not compatible.ok then return compatible end
         local resolved = layout_port("rostok_arena_v1", catalog_snapshot)
         if not resolved.ok then return resolved end
-        return gamma_arena_result.ok(true)
+        return gamma_arena_result.ok(compatible.value)
     end
     local audio = overrides.audio
     if audio == nil then audio = default_audio_controller(layout_port) end

@@ -183,6 +183,17 @@ local function find_flags(...)
     return nil
 end
 
+local function find_death_flags(...)
+    local count = select("#", ...)
+    for index = 1, count do
+        local candidate = select(index, ...)
+        if type(candidate) == "table" and type(rawget(candidate, "ret_value")) == "boolean" then
+            return candidate
+        end
+    end
+    return nil
+end
+
 function Orchestrator:__init(deps)
     self.deps = deps
     self.active = false
@@ -205,12 +216,15 @@ function Orchestrator:__init(deps)
     self.cleanup_required = false
     self.fight_spec = nil
     self.catalog_snapshot = nil
+    self.npc_medical_owner = "arena"
+    self.npc_medical_policy = nil
     self.countdown_started = nil
     self.countdown_value = nil
     self.active_started = nil
     self.pending_victory = false
     self.death_latched = false
     self.defeat_token = nil
+    self.death_flags = nil
     self.result_kind = nil
     self.result_action_locked = false
     self.pending_next_fight_index = nil
@@ -253,7 +267,8 @@ function Orchestrator:start_npc_medical()
     return call_method("GA_NPC_MEDICAL_START_FAILED", self.deps.npc_medical, "start", {
         fight_id = fight_id,
         session_id = self.session and self.session.session_id or nil,
-        fight_index = self.session and self.session.fight_index or nil
+        fight_index = self.session and self.session.fight_index or nil,
+        npc_medical_owner = self.npc_medical_owner or "arena"
     })
 end
 
@@ -566,6 +581,20 @@ function Orchestrator:log_result_error(result)
     end
 end
 
+function Orchestrator:release_death_arm()
+    self.death_latched = false
+    self.defeat_token = nil
+    self.death_flags = nil
+end
+
+function Orchestrator:clear_cancelled_death_arm()
+    if not self:death_arm_cancelled() then return gamma_arena_result.ok(false) end
+    local cleared = call_method("GA_DEFEAT_CLEAR_FAILED", self.deps.store, "clear_defeat", self.deps.config)
+    if not cleared.ok then return cleared end
+    self:release_death_arm()
+    return gamma_arena_result.ok(true)
+end
+
 function Orchestrator:fatal_main_menu_action()
     if self.machine_state ~= gamma_arena_state_machine.states.ERROR or not self.fatal_shown then
         return fail("GA_FATAL_ACTION_INVALID", "Fatal main-menu action requires terminal Arena state")
@@ -574,6 +603,7 @@ function Orchestrator:fatal_main_menu_action()
 
     local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, "clear_transient", self.deps.config)
     if not cleared.ok then self:log_result_error(cleared) end
+    if cleared.ok and self:death_arm_cancelled() then self:release_death_arm() end
     local teardown = self:teardown_once("fatal_exit", false)
     if not teardown.ok then self:log_result_error(teardown) end
 
@@ -602,6 +632,14 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         fight_index = self.session and self.session.fight_index or nil
     })
     local errors = error_results(result)
+    local preserve_cancelled_death = false
+    if self:death_arm_cancelled() then
+        local defeat_cleared = self:clear_cancelled_death_arm()
+        if not defeat_cleared.ok then
+            append_unique_error(errors, defeat_cleared)
+            preserve_cancelled_death = true
+        end
+    end
     local medical = self:stop_npc_medical("fatal")
     if not medical.ok then append_unique_error(errors, medical) end
     local ui_cleanup = self:clear_runtime_ui()
@@ -610,6 +648,10 @@ function Orchestrator:enter_fatal(result, intent_finalized)
         local clear_method = self.session ~= nil and "clear_resume_if_matches" or "clear_transient"
         local cleared = call_method("GA_TRANSIENT_CLEAR_FAILED", self.deps.store, clear_method, self.deps.config, self.session)
         if not cleared.ok then append_unique_error(errors, cleared) end
+        if cleared.ok and preserve_cancelled_death and clear_method == "clear_transient" then
+            self:release_death_arm()
+            preserve_cancelled_death = false
+        end
     end
     local cleanup_session = self.session
     self.active = false
@@ -617,6 +659,7 @@ function Orchestrator:enter_fatal(result, intent_finalized)
     self.machine_state = gamma_arena_state_machine.states.ERROR
     self.cleanup_required = true
     self.pending_victory = false
+    if not preserve_cancelled_death then self:release_death_arm() end
     self.result_kind = nil
     self.pending_callback_error = nil
     self.result_action_locked = true
@@ -660,7 +703,7 @@ function Orchestrator:on_callback_error(callback_name, reason)
         })
         return failure
     end
-    if callback_name == "actor_on_before_death" or callback_name == "actor_on_death" then
+    if callback_name == "actor_on_before_death" then
         pcall(gamma_arena_log.error, failure.error.code, failure.error.message, failure.error.context)
         return failure
     end
@@ -681,7 +724,7 @@ function Orchestrator:on_callback_result_error(callback_name, result, was_active
         })
         return result
     end
-    if callback_name == "actor_on_before_death" or callback_name == "actor_on_death" then
+    if callback_name == "actor_on_before_death" then
         local detail = result and result.error or {}
         pcall(gamma_arena_log.error, detail.code or "GA_CALLBACK_FAILED", detail.message or "Arena actor death callback failed safely", detail.context)
         return result
@@ -703,6 +746,8 @@ function Orchestrator:on_game_load()
     self:audio_event("stop_all", self:audio_context({ reason = "game_load" }))
     local ui_cleanup = self:clear_runtime_ui()
     if not ui_cleanup.ok then return self:enter_fatal(ui_cleanup) end
+    local death_cleanup = self:clear_cancelled_death_arm()
+    if not death_cleanup.ok then return self:enter_fatal(death_cleanup) end
     self.game_load_seen = true
     self.active = false
     self.session = nil
@@ -733,6 +778,7 @@ function Orchestrator:on_game_load()
     self.pending_victory = false
     self.death_latched = false
     self.defeat_token = nil
+    self.death_flags = nil
     self.result_kind = nil
     self.result_action_locked = false
     self.pending_next_fight_index = nil
@@ -961,6 +1007,34 @@ function Orchestrator:activate_once()
         })
         local preflight = self:run_preflight(activation_catalog)
         if not preflight.ok then return self:enter_fatal(preflight, true) end
+        local medical_owner = "arena"
+        local medical_policy = nil
+        if type(preflight.value) == "table" then
+            medical_owner = preflight.value.npc_medical_owner
+            if medical_owner ~= "arena" and medical_owner ~= "external" then
+                return self:enter_fatal(fail("GA_NPC_MEDICAL_AI_CONFIG_INVALID", "NPC medical ownership metadata is invalid", {
+                    owner = medical_owner
+                }), true)
+            end
+            local source = preflight.value.npc_medical_policy
+            if type(source) == "table" then
+                medical_policy = {}
+                if type(source.enable) == "boolean" then medical_policy.enable = source.enable end
+                if type(source.in_combat) == "boolean" then medical_policy.in_combat = source.in_combat end
+                if type(source.medkit_overlap) == "boolean" then medical_policy.medkit_overlap = source.medkit_overlap end
+                if type(source.bandage_overlap) == "boolean" then medical_policy.bandage_overlap = source.bandage_overlap end
+            end
+        end
+        self.npc_medical_owner = medical_owner
+        self.npc_medical_policy = medical_policy
+        local medical_context = { owner = medical_owner }
+        if medical_policy ~= nil then
+            medical_context.enable = medical_policy.enable
+            medical_context.in_combat = medical_policy.in_combat
+            medical_context.medkit_overlap = medical_policy.medkit_overlap
+            medical_context.bandage_overlap = medical_policy.bandage_overlap
+        end
+        self:diagnostic("GA_NPC_MEDICAL_OWNERSHIP", "owner=" .. medical_owner, medical_context)
         local session = self:create_session(consumed.value, activation_catalog, activation_layout)
         if not session.ok then return self:enter_fatal(session, true) end
         local advanced = self:advance(gamma_arena_state_machine.events.PREFLIGHT_SUCCEEDED)
@@ -1049,7 +1123,7 @@ end
 function Orchestrator:prepare_fight()
     local prepared = self:preflight_fight()
     if not prepared.ok then return prepared end
-    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot)
+    local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot, self.npc_medical_owner)
     if not applied.ok then return applied end
     self.countdown_value = nil
     self.pending_victory = false
@@ -1122,6 +1196,7 @@ function Orchestrator:observe_entity_activation()
     self:set_runtime_stage("ACTIVE")
     self.death_latched = false
     self.defeat_token = nil
+    self.death_flags = nil
     self.result_action_locked = false
     local medical = self:start_npc_medical()
     if not medical.ok then return medical end
@@ -1471,7 +1546,7 @@ function Orchestrator:drive_continuation()
     if continuation_kind == "victory_next" then
         self:set_runtime_stage("PREPARING")
     else
-        local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot)
+        local applied = call_method("GA_ENTITY_APPLY_FAILED", self.deps.entities, "begin_apply", self.fight_spec, self.session.session_id, self.catalog_snapshot, self.npc_medical_owner)
         if not applied.ok then return applied end
         local advanced = self:advance(gamma_arena_state_machine.events.NEXT_AFTER_DEFEAT)
         if not advanced.ok then return advanced end
@@ -1568,6 +1643,8 @@ function Orchestrator:update_runtime()
     end
     local began = call_method("GA_ACTOR_UPDATE_FAILED", self.deps.actor, "begin_update")
     if not began.ok then return began end
+    local death_abort = self:abort_cancelled_actor_death()
+    if not death_abort.ok then return death_abort end
     local activated = self:activate_once()
     if not activated.ok then return activated end
     local maintained = self:maintain_save_guard()
@@ -1618,18 +1695,19 @@ function Orchestrator:actor_on_before_death(...)
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" or self.death_latched then
         return gamma_arena_result.ok(false)
     end
+    local death_flags = find_death_flags(...)
+    if death_flags ~= nil and rawget(death_flags, "ret_value") == false then
+        return gamma_arena_result.ok(false)
+    end
     local observed = call_method("GA_ACTOR_DIAGNOSTIC_SNAPSHOT_FAILED", self.deps.actor, "observe_transient_state", "actor_before_death", self:audio_context())
     if not observed.ok then
         self:diagnostic("GA_ACTOR_DIAGNOSTIC_SNAPSHOT_FAILED", "Final actor condition snapshot failed safely", {
             cause = observed.error and observed.error.code or "unknown"
         })
     end
-    self:clear_battle_identity("actor_before_death")
-    local medical = self:stop_npc_medical("actor_before_death")
-    if not medical.ok then return medical end
     self.death_latched = true
+    self.death_flags = death_flags
     self.pending_victory = false
-    self:audio_event("defeat", self:audio_context())
     local armed = call_method("GA_DEFEAT_ARM_FAILED", self.deps.store, "arm_defeat", self.deps.config, {
         schema_version = 1,
         session_id = self.session.session_id,
@@ -1640,17 +1718,36 @@ function Orchestrator:actor_on_before_death(...)
     })
     if not armed.ok then return armed end
     self.defeat_token = armed.value.token
-    return call_method("GA_ENTITY_TACTICAL_STOP_FAILED", self.deps.entities, "stop_tactical")
+    return gamma_arena_result.ok(true)
 end
 
-function Orchestrator:actor_on_death()
+function Orchestrator:death_arm_cancelled()
+    return self.death_latched == true
+        and type(self.death_flags) == "table"
+        and rawget(self.death_flags, "ret_value") == false
+end
+
+function Orchestrator:abort_actor_death()
+    return self:clear_cancelled_death_arm()
+end
+
+function Orchestrator:abort_cancelled_actor_death()
+    if not self:death_arm_cancelled() then return gamma_arena_result.ok(false) end
+    return self:abort_actor_death()
+end
+
+function Orchestrator:finalize_actor_death()
     if not self:is_active() or self.runtime_stage ~= "ACTIVE" or not self.death_latched then
         return gamma_arena_result.ok(false)
     end
 
     local errors = {}
+    self:clear_battle_identity("actor_death")
     local medical = self:stop_npc_medical("actor_death")
     if not medical.ok then errors[#errors + 1] = medical.error end
+    self:audio_event("defeat", self:audio_context())
+    local tactical = call_method("GA_ENTITY_TACTICAL_STOP_FAILED", self.deps.entities, "stop_tactical")
+    if not tactical.ok then errors[#errors + 1] = tactical.error end
     if type(self.defeat_token) == "string" and self.defeat_token ~= "" then
         local confirmed = call_method("GA_DEFEAT_CONFIRM_FAILED", self.deps.store, "confirm_defeat", self.deps.config, self.defeat_token)
         if not confirmed.ok then errors[#errors + 1] = confirmed.error end
@@ -1681,7 +1778,9 @@ function Orchestrator:actor_on_death()
     self.countdown_started = nil
     self.countdown_value = nil
     self.active_started = nil
+    self.death_latched = false
     self.defeat_token = nil
+    self.death_flags = nil
     self.session = nil
 
     if #errors > 0 then
@@ -1762,6 +1861,9 @@ function Orchestrator:actor_on_net_destroy()
     local discarded = self:discard_transient_services("actor_destroyed")
     if not discarded.ok then return discarded end
     if not self:is_active() then return gamma_arena_result.ok(false) end
+    local death_abort = self:abort_cancelled_actor_death()
+    if not death_abort.ok then return death_abort end
+    if self.death_latched then return self:finalize_actor_death() end
     self.cleanup_required = true
     local ui_cleanup = self:clear_runtime_ui()
     local result = self:teardown_once("actor_destroyed", false)

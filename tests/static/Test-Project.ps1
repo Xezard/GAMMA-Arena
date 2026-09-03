@@ -253,6 +253,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_device_generator.script'; Namespace = 'gamma_arena_device_generator'; Required = @('(?m)^function\s+select\s*\(', '(?m)^function\s+generate\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_grenade_generator.script'; Namespace = 'gamma_arena_grenade_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+generate_enemy\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_medical_generator.script'; Namespace = 'gamma_arena_medical_generator'; Required = @('(?m)^function\s+generate_actor\s*\(', '(?m)^function\s+allocate_enemies\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mags_redux.script'; Namespace = 'gamma_arena_mags_redux'; Required = @('(?m)^function\s+new\s*\(', 'bonus_descriptors', 'initialize', 'GA_MAGS_REDUX_API_INVALID', 'GA_MAGS_REDUX_VERIFY_FAILED') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_npc_medical.script'; Namespace = 'gamma_arena_npc_medical'; Required = @('(?m)^function\s+new\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_validator.script'; Namespace = 'gamma_arena_validator'; Required = @('(?m)^function\s+validate\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_layout_adapter.script'; Namespace = 'gamma_arena_layout_adapter'; Required = @('(?m)^function\s+new\s*\(') },
@@ -261,6 +262,7 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'; Namespace = 'gamma_arena_test_generator'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_catalog_discovery.script'; Namespace = 'gamma_arena_test_catalog_discovery'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_layout_adapter.script'; Namespace = 'gamma_arena_test_layout_adapter'; Required = @('(?m)^function\s+run\s*\(') }
+    , [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_mags_redux.script'; Namespace = 'gamma_arena_test_mags_redux'; Required = @('(?m)^function\s+run\s*\(', 'mags_redux_absent_api_is_a_noop', 'mags_redux_partial_api_fails_closed', 'mags_redux_supported_weapons_receive_two_each', 'mags_redux_pouch_exhaustion_is_not_a_loadout_failure') }
     , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_spec.script'; Namespace = 'gamma_arena_fight_spec'; Required = @('(?m)^function\s+canonicalize\s*\(', '(?m)^function\s+stable_encode\s*\(', '(?m)^function\s+content_hash\s*\(', '(?m)^function\s+layout_hash\s*\(', '(?m)^function\s+copy\s*\(', 'GA_FIGHT_SPEC_ARRAY', 'GA_FIGHT_SPEC_ITEM_LIMIT', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'loadout\.kind\s*==\s*"items"', 'catalog\.fingerprint', 'catalog_schema_version', 'catalog_revision', 'layout_hash', 'schema_version\s*=\s*9', 'fight_id\s*=\s*"ga9-"', 'device\s*=\s*4') }
     , [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_fight_validator_v9.script'; Namespace = 'gamma_arena_fight_validator_v9'; Required = @('(?m)^function\s+validate\s*\(\s*spec\s*,\s*catalog\s*,\s*layout\s*,\s*runtime\s*\)', 'GA_FIGHTSPEC_UNKNOWN_FIELD', 'GA_FIGHTSPEC_FORBIDDEN_FIELD', 'GA_FIGHTSPEC_ITEM_LIMIT', 'max_physical_items_per_participant', 'exact_keys', 'catalog\.items', 'catalog\.ranks', 'catalog\.factions', 'profile\.alias', 'runtime_community', 'arena_enemy', 'opponent_spawn_slots', 'ammo_sections', 'helmet_allowed', 'healing', 'gamma_arena_fight_spec\.canonicalize', 'gamma_arena_fight_spec\.stable_encode', 'session_seed\s*=\s*function', 'fight_index\s*=\s*function', 'fight_id\s*=\s*function', 'actor\s*=\s*function', 'opponents\s*=\s*function', 'tactical_routes\s*=\s*function', 'stable_encode\s*=\s*function', '(?m)^local function\s+valid_vertex\s*\(', 'value\s*<\s*4294967295', 'used_opponent_slots', 'GA_FIGHTSPEC_OPPONENT_SLOT_DUPLICATE', 'GA_FIGHTSPEC_DEVICE_INVALID', 'GA_FIGHTSPEC_OPPONENT_DEVICE_INVALID', 'spec\.schema_version\s*~=\s*9', '"ga9-"') }
     , [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_fight_spec.script'; Namespace = 'gamma_arena_test_fight_spec'; Required = @('(?m)^function\s+run\s*\(', 'canonicalizes_v9_exact_identity_and_device_order', 'rejects_legacy_loadouts_and_invalid_devices', 'validator_enforces_v9_identity_versions_and_devices', 'validator_never_reruns_random_device_selection', 'fight_spec_enforces_per_participant_physical_item_cap', 'fight_spec_binds_identity_layout_and_dense_arrays', 'fight_spec_rejects_invalid_resolved_layout_identity_fields', 'validator_enforces_per_participant_physical_item_cap', 'validator_enforces_engine_vertex_uint32_boundaries', 'validator_enforces_physical_participant_contracts') }
@@ -1139,7 +1141,7 @@ $Uint32SeedRegistration = '\{\s*name\s*=\s*"fight_spec_accepts_full_uint32_sessi
 Assert-True (([regex]::Matches($Task7FightSpecTestContent, $Uint32SeedRegistration)).Count -eq 1) "Regression case must be registered exactly: fight_spec_accepts_full_uint32_session_seed_identity -> $Uint32SeedCase."
 
 $Task5UniversalRuntimeContracts = @(
-    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_LIMIT', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'box_size', 'equipped_slot') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_item_materializer.script'; Required = @('(?m)^function\s+descriptors\s*\(\s*items\s*,\s*catalog\s*\)', '(?m)^function\s+new\s*\(', '(?m)^local function\s+preflight_items\s*\(', '(?m)^local function\s+dense_array_length\s*\(', 'CATEGORY_LTX_SLOTS', 'MAX_SAFE_INTEGER', 'max_physical_items_per_participant', 'GA_ITEM_MATERIALIZE_ARRAY_INVALID', 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'GA_ITEM_MATERIALIZE_LIMIT', 'GA_ITEM_MATERIALIZE_UNKNOWN', 'GA_ITEM_MATERIALIZE_ROLLBACK_FAILED', 'GA_ITEM_MATERIALIZE_BONUS_PLAN_INVALID', 'bonus_descriptors', 'initialize_created', 'bonus_kind', 'box_size', 'equipped_slot') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_actor_adapter.script'; Required = @('function\s+ActorAdapter:apply_items', 'function\s+ActorAdapter:update_items') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_entity_adapter.script'; Required = @('function\s+EntityAdapter:materialize_items', 'function\s+EntityAdapter:stage_exact_rank', 'GA_ENTITY_RANK_MISMATCH', 'set_character_rank', 'character_rank') }
 )
@@ -1607,9 +1609,14 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
         Assert-True ($Task5BootstrapContent.Contains($Marker)) "Bootstrap runtime readiness must cover $Marker"
     }
     Assert-True ($Task5BootstrapContent -match 'type\(result\.error\)\s*~=\s*"table"\s+or\s+type\(result\.error\.code\)\s*~=\s*"string"\s+or\s+type\(result\.error\.message\)\s*~=\s*"string"') 'Bootstrap registration Result validation must reject malformed failed error shapes'
-    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','actor_on_death','npc_on_net_spawn','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
+    $CallbackNamesStart = $Task5BootstrapContent.IndexOf('local callback_names = {')
+    $CallbackNamesEnd = if ($CallbackNamesStart -ge 0) { $Task5BootstrapContent.IndexOf('}', $CallbackNamesStart) } else { -1 }
+    Assert-True ($CallbackNamesStart -ge 0 -and $CallbackNamesEnd -gt $CallbackNamesStart) 'Bootstrap callback list must remain structurally testable'
+    $CallbackNamesBlock = if ($CallbackNamesStart -ge 0 -and $CallbackNamesEnd -gt $CallbackNamesStart) { $Task5BootstrapContent.Substring($CallbackNamesStart, $CallbackNamesEnd - $CallbackNamesStart) } else { '' }
+    foreach ($Callback in @('on_game_load','actor_on_first_update','actor_on_update','actor_on_before_death','npc_on_net_spawn','npc_on_death_callback','save_state','load_state','on_before_save_input','on_before_load_input','actor_on_net_destroy','on_before_level_changing')) {
         Assert-True ($Task5BootstrapContent -match ('"' + [regex]::Escape($Callback) + '"')) "Bootstrap registration table must contain $Callback"
     }
+    Assert-True ($CallbackNamesBlock -notmatch '"actor_on_death"') 'Bootstrap must not register the nonexistent actor_on_death callback'
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_quit') 'Bootstrap must not treat closing MCM/main menu as quitting Arena'
     Assert-True ($Task5BootstrapContent -notmatch 'main_menu_on_init') 'Task 5 bootstrap must not duplicate the Task 4 main-menu callback'
     Assert-True ($Task5BootstrapContent -match 'reconcile\s*=\s*overrides\.reconcile\s+or\s+function\s*\(\s*config\s*\)[\s\S]{0,200}gamma_arena_migrations\.migrate') 'Production bootstrap must inject migration/reconciliation into every orchestrator'
@@ -1642,9 +1649,24 @@ if (Test-Path -LiteralPath $Task5CompatPath) {
     Assert-True ($Task5CompatContent -match 'engine_callable_present') 'Preflight must accept callable engine objects whose Lua type is not function'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.ini_file\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable ini_file engine object by Lua type'
     Assert-True ($Task5CompatContent -notmatch 'type\(p\.patrol\)\s*==\s*["'']function["'']') 'Preflight must not reject the callable patrol engine object by Lua type'
-    foreach ($Marker in @('npc_medical_ini','medkits','bandages','GA_NPC_MEDICAL_AI_CONFLICT')) {
+    foreach ($Marker in @('npc_medical_ini','gamma_arena_npc_medical_policy.read','npc_medical_owner')) {
         Assert-True ($Task5CompatContent -match [regex]::Escape($Marker)) "NPC medical compatibility preflight must cover $Marker"
     }
+    $Task5NpcMedicalConflictAddErrorPattern = 'add_error\s*\(\s*errors\s*,\s*["'']GA_NPC_MEDICAL_AI_CONFLICT["'']'
+    Assert-True ($Task5CompatContent -notmatch $Task5NpcMedicalConflictAddErrorPattern) 'NPC medical compatibility preflight must not retain an active conflict error path'
+    $Task5NpcMedicalConflictMutation = $Task5CompatContent + @'
+add_error(
+    errors,
+    "GA_NPC_MEDICAL_AI_CONFLICT",
+    "injected forbidden path"
+)
+'@
+    Assert-True ($Task5NpcMedicalConflictMutation -match $Task5NpcMedicalConflictAddErrorPattern) 'NPC medical compatibility conflict guard must reject a multiline injected add_error path'
+    $Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
+    $Task5BootstrapPreflightStart = $Task5BootstrapContent.IndexOf('local preflight_port = overrides.preflight')
+    $Task5BootstrapPreflightEnd = $Task5BootstrapContent.IndexOf('local audio = overrides.audio', $Task5BootstrapPreflightStart)
+    $Task5BootstrapPreflight = $Task5BootstrapContent.Substring($Task5BootstrapPreflightStart, $Task5BootstrapPreflightEnd - $Task5BootstrapPreflightStart)
+    Assert-True ($Task5BootstrapPreflight -match 'return\s+gamma_arena_result\.ok\s*\(\s*compatible\.value\s*\)') 'Bootstrap preflight must preserve compatibility ownership metadata after layout validation'
 }
 
 $Task5OrchestratorPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script'
@@ -1666,6 +1688,7 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         $FatalContent = $Task5OrchestratorContent.Substring($FatalStart, $FatalEnd - $FatalStart)
         Assert-True ($FatalContent -match 'self\.activation_attempted\s*=\s*true') 'Fatal routing must latch the activation attempt'
         Assert-True ($FatalContent -match 'self\.awaiting_activation\s*=\s*false') 'Fatal routing must stop per-frame activation retries'
+        Assert-True ($FatalContent -match 'if\s+not\s+preserve_cancelled_death\s+then\s+self:release_death_arm\(\)\s+end') 'Fatal routing must drop stale in-memory death-arm references only after durable cleanup'
     }
     $ActivationStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:activate_once')
     $ActivationEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:layout_snapshot')
@@ -1686,10 +1709,36 @@ if (Test-Path -LiteralPath $Task5OrchestratorPath) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Production event diagnostics must cover $Marker"
     }
     Assert-True ($Task5OrchestratorContent -match 'deferred_level_logged') 'Wrong-level launch diagnostics must be deduplicated instead of logging every frame'
-    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_death\s*\(\s*\)') 'Natural actor death callback must expose the no-argument Anomaly signature'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:finalize_actor_death\s*\(\s*\)') 'Natural actor death finalization must be internal'
+    Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_net_destroy[\s\S]{0,500}death_latched[\s\S]{0,300}finalize_actor_death') 'Actor net destroy must finalize a latched death'
+    Assert-True ($Task5OrchestratorContent -notmatch 'callback_name\s*==\s*"actor_on_death"') 'Callback error routing must not retain nonexistent actor_on_death cases'
     Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,1200}arm_defeat') 'Before-death handling must arm the persisted cross-VM defeat intent'
     $Task5BeforeDeathBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:actor_on_before_death[\s\S]*?[\r\n]+end').Value
-    Assert-True ($Task5BeforeDeathBlock -notmatch 'ret_value|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
+    Assert-True ($Task5BeforeDeathBlock -notmatch '\bret_value\s*=\s*(?:false|nil)\b|hold_after_logical_death|normalize_status|health') 'Arena before-death handling must never cancel lethal damage or mutate the dying actor'
+    Assert-True ($Task5BeforeDeathBlock -match 'find_death_flags[\s\S]{0,300}ret_value[\s\S]{0,160}gamma_arena_result\.ok\(false\)') 'An already-cancelled shared death flag must remain inert before arming'
+    Assert-True ($Task5BeforeDeathBlock -notmatch 'clear_battle_identity|stop_npc_medical|audio_event|stop_tactical') 'Before-death arming must remain reversible until true actor destruction'
+    $Task5AbortDeathStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:abort_actor_death')
+    $Task5FinalizeDeathStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:finalize_actor_death')
+    Assert-True ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) 'Cancelled death abort must remain structurally testable before finalization'
+    if ($Task5AbortDeathStart -ge 0 -and $Task5FinalizeDeathStart -gt $Task5AbortDeathStart) {
+        $Task5AbortDeathBlock = $Task5OrchestratorContent.Substring($Task5AbortDeathStart, $Task5FinalizeDeathStart - $Task5AbortDeathStart)
+        Assert-True ($Task5AbortDeathBlock -match 'return\s+self:clear_cancelled_death_arm\(\)') 'Cancelled death abort must use the common durable clear-before-release operation'
+    }
+    if ($Task5FinalizeDeathStart -ge 0) {
+        $Task5FinalizeDeathEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:npc_on_before_hit', $Task5FinalizeDeathStart)
+        $Task5FinalizeDeathBlock = $Task5OrchestratorContent.Substring($Task5FinalizeDeathStart, $Task5FinalizeDeathEnd - $Task5FinalizeDeathStart)
+        foreach ($Marker in @('clear_battle_identity','stop_npc_medical','audio_event','stop_tactical','confirm_defeat','neutralize_owned_opponents')) {
+            Assert-True ($Task5FinalizeDeathBlock -match [regex]::Escape($Marker)) "True post-death finalizer must own $Marker"
+        }
+    }
+    $Task5UpdateStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:update_runtime')
+    $Task5UpdateEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:reconcile_active_victory', $Task5UpdateStart)
+    $Task5UpdateBlock = $Task5OrchestratorContent.Substring($Task5UpdateStart, $Task5UpdateEnd - $Task5UpdateStart)
+    Assert-True ($Task5UpdateBlock.IndexOf('abort_cancelled_actor_death') -ge 0 -and $Task5UpdateBlock.IndexOf('abort_cancelled_actor_death') -lt $Task5UpdateBlock.IndexOf('local runtime = self:drive_runtime()')) 'Actor update must abort a later cancellation before regular active reconciliation'
+    $Task5NetDestroyStart = $Task5OrchestratorContent.IndexOf('function Orchestrator:actor_on_net_destroy')
+    $Task5NetDestroyEnd = $Task5OrchestratorContent.IndexOf('function Orchestrator:on_before_level_changing', $Task5NetDestroyStart)
+    $Task5NetDestroyBlock = $Task5OrchestratorContent.Substring($Task5NetDestroyStart, $Task5NetDestroyEnd - $Task5NetDestroyStart)
+    Assert-True ($Task5NetDestroyBlock.IndexOf('abort_cancelled_actor_death') -ge 0 -and $Task5NetDestroyBlock.IndexOf('abort_cancelled_actor_death') -lt $Task5NetDestroyBlock.IndexOf('finalize_actor_death')) 'Actor net-destroy must abort cancellation before any death confirmation'
     Assert-True ($Task5OrchestratorContent -notmatch 'function\s+Orchestrator:(show_defeat|defeat_next_action)') 'Natural death must remove the in-level logical-defeat UI and retry path'
     foreach ($Marker in @('npc_medical','start_npc_medical','update_npc_medical','stop_npc_medical')) {
         Assert-True ($Task5OrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator must compose NPC medical lifecycle marker $Marker"
@@ -1729,6 +1778,19 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_preflight_accepts_natural_death_without_invulnerability','runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_task6_actor_checkpoint_ports','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_arena_enemy_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_launch_defers_on_fake_start_then_activates_on_rostok','runtime_ordinary_no_intent_activation_latches_once','runtime_first_activation_failure_routes_fatal','runtime_activation_reconciles_before_intent_inspection_once','runtime_activation_version_changes_clear_resume_before_checkpoint_routing','runtime_activation_reconciliation_failures_are_fatal_before_inspection','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_unexpected_net_destroy_clears_external_route','runtime_orchestrator_npc_net_spawn_is_active_only','runtime_npc_net_spawn_errors_defer_fatal_ui_to_update','runtime_entity_net_spawn_isolates_only_owned_npcs','runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults','runtime_entity_activation_rejects_runtime_community_drift')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
     }
+    foreach ($Marker in @('runtime_cancelled_death_arm_aborts_on_next_update','runtime_cancelled_death_arm_aborts_before_net_destroy','runtime_already_cancelled_death_never_arms','runtime_cancelled_death_clear_failure_routes_fatal','runtime_cancelled_death_fatal_retry_durably_clears_real_store','runtime_cancelled_death_fatal_menu_cleanup_is_durable','runtime_cancelled_death_game_load_cleanup_is_durable')) {
+        Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Death cancellation Dev tests must cover $Marker"
+    }
+    $Task5OrchestratorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
+    $DeathFatalBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:enter_fatal[\s\S]*?(?=\r?\nfunction\s+Orchestrator:on_callback_error)').Value
+    $DeathClearBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:clear_cancelled_death_arm[\s\S]*?(?=\r?\nfunction\s+Orchestrator:fatal_main_menu_action)').Value
+    Assert-True ($DeathClearBlock -match 'clear_defeat[\s\S]{0,300}if\s+not\s+cleared\.ok\s+then\s+return\s+cleared\s+end[\s\S]{0,200}release_death_arm') 'Cancelled defeat ownership must be released only after durable clear succeeds.'
+    Assert-True ($DeathFatalBlock -match 'death_arm_cancelled\(\)[\s\S]{0,500}clear_cancelled_death_arm') 'Fatal routing must make one bounded durable-clear retry for a cancelled defeat arm.'
+    Assert-True ($DeathFatalBlock -match 'preserve_cancelled_death[\s\S]{0,1800}if\s+not\s+preserve_cancelled_death\s+then\s+self:release_death_arm\(\)') 'Fatal routing must preserve cancelled death ownership when durable cleanup still fails.'
+    $DeathMenuBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:fatal_main_menu_action[\s\S]*?(?=\r?\nfunction\s+Orchestrator:enter_fatal)').Value
+    Assert-True ($DeathMenuBlock -match 'clear_transient[\s\S]{0,300}cleared\.ok\s+and\s+self:death_arm_cancelled\(\)[\s\S]{0,120}release_death_arm') 'Fatal main-menu reset must release cancelled death ownership only after transient persistence clears.'
+    $DeathGameLoadBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:on_game_load[\s\S]*?(?=\r?\nfunction\s+Orchestrator:load_state)').Value
+    Assert-True ($DeathGameLoadBlock -match 'clear_cancelled_death_arm\(\)[\s\S]{0,160}if\s+not\s+death_cleanup\.ok\s+then\s+return\s+self:enter_fatal\(death_cleanup\)\s+end[\s\S]{0,1600}death_latched\s*=\s*false') 'Game-load reset must finish cancelled defeat cleanup before clearing the in-memory latch.'
 }
 
 $Task9UiScriptPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_result.script'
@@ -2066,7 +2128,7 @@ foreach ($Name in @('runtime_actor_diagnostics_transition_snapshot_is_bounded','
 foreach ($Marker in @('discard_transient_services','"game_load"','"actor_destroyed"')) {
     Assert-True ($Task5OrchestratorContent.Contains($Marker)) "Orchestrator booster lifecycle is missing marker: $Marker"
 }
-Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,500}observe_transient_state[\s\S]{0,500}clear_battle_identity') 'Before-death handling must snapshot actor conditions before clearing battle identity'
+Assert-True ($Task5OrchestratorContent -match 'function\s+Orchestrator:actor_on_before_death[\s\S]{0,700}observe_transient_state[\s\S]{0,700}arm_defeat') 'Before-death handling must snapshot actor conditions before arming defeat'
 foreach ($Name in @('runtime_victory_next_locks_before_result_ui_closes','runtime_victory_next_boundary_failure_retains_result','runtime_countdown_waits_for_fully_staged_ready_state','runtime_countdown_deadline_activates_and_releases_in_same_update','runtime_activation_failure_never_releases_input','runtime_manual_and_integrity_transitions_share_boundary')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition orchestration regression must cover $Name"
 }
@@ -2209,6 +2271,10 @@ if (Test-Path -LiteralPath $Task7EntityPath) {
     Assert-True ($Task7EntityContent -notmatch 'ensure_weapon_equipped|GA_ENTITY_EQUIP_TIMEOUT') 'NPC activation must not wait for a weapon to become active before hostility starts combat AI'
     $MedicalActivationBlock = [regex]::Match($Task7EntityContent, 'function\s+EntityAdapter:drive_online[\s\S]*?function\s+EntityAdapter:add_cleanup_error').Value
     Assert-True ($MedicalActivationBlock.IndexOf('hidden_charge_cleared') -ge 0 -and $MedicalActivationBlock.IndexOf('clear_hidden_charge') -lt $MedicalActivationBlock.IndexOf('set_actor_hostile')) 'Entity activation must clear stock hidden healing before combat hostility'
+    Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:begin_apply\(validated_spec,\s*session_id,\s*catalog,\s*npc_medical_owner\)') 'Entity application must receive the frozen NPC medical owner.'
+    Assert-True ($Task7EntityContent -match 'npc_medical_owner\s*==\s*nil[\s\S]{0,100}"arena"') 'Legacy entity callers must default NPC medical ownership to Arena.'
+    Assert-True ($MedicalActivationBlock -match 'self\.npc_medical_owner\s*==\s*"arena"[\s\S]{0,500}clear_hidden_charge') 'Only Arena-owned NPC medical activation may clear the hidden stock charge.'
+    Assert-True ($MedicalActivationBlock -match 'self\.npc_medical_owner\s*==\s*"external"[\s\S]{0,500}hidden_charge_cleared') 'Delegated medical ownership must satisfy READY without forged hidden-charge evidence.'
     Assert-True ($Task7EntityContent -match 'function\s+EntityAdapter:consume_medical_item\s*\(') 'Entity adapter must expose guarded physical medicine consumption'
     foreach ($Marker in @('GA_ENTITY_MEDICAL_FIGHT_STALE','release_reason','consumed','current_fight_id')) {
         Assert-True ($Task7EntityContent -match [regex]::Escape($Marker)) "Physical medicine consumption must cover $Marker"
@@ -2310,6 +2376,66 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
     Assert-True ($Task11HostilityBlock -match 'set_relation[\s\S]*force_set_goodwill') 'Hostile activation must apply relation then goodwill'
     Assert-True ($Task11HostilityBlock -notmatch 'make_object_visible_somewhen|set_enemy') 'Hostile activation must not seed omniscient memory or force a current target'
     Assert-True ($Task5BootstrapContent -notmatch 'ports\.reserve_magazines|reserve_magazines\s*=') 'Runtime must not regenerate the actor reserve-magazine floor'
+    foreach ($Marker in @('gamma_arena_mags_redux.new','mags_redux_resolve_api','mags_redux_magazine_capacity','rawget(_G, "magazine_binder")','rawget(_G, "mags_patches")','is_supported_weapon','weapon_default_magazine','get_mag_loaded','is_carried_mag','fill_mag','max_mag_size','bonus_descriptors','initialize_created','GA_MAGS_REDUX_RESERVE_READY')) {
+        Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Mags Redux production binding must cover $Marker"
+    }
+    Assert-True ($Task5BootstrapContent -notmatch 'function\s+mags_patches\.|function\s+magazine_binder\.') 'Gamma Arena must not override Mags Redux vendor functions'
+    Assert-True ($Task5BootstrapContent -match 'initialize_created\s*=\s*function\s*\([^,]+,\s*record,\s*descriptor\)[\s\S]{0,500}mags_redux:initialize\(record\.id') 'Mags Redux initialization must use the registered Arena ownership record id'
+    $FinalMagsAdapterContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_mags_redux.script') -Raw
+    $FinalMagsMaterializerContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_materializer.script') -Raw
+    $FinalMagsAdapterTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_mags_redux.script') -Raw
+    $FinalMagsMaterializerTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_item_materializer.script') -Raw
+    Assert-True ($FinalMagsAdapterContent -match 'MAX_MAGAZINE_CAPACITY\s*=\s*512') 'Mags Redux reserves must have an explicit 512-round ceiling.'
+    Assert-True ($FinalMagsMaterializerContent -match 'MAX_MAGAZINE_CAPACITY\s*=\s*512') 'Bonus descriptor preflight must enforce the explicit 512-round ceiling.'
+    $FinalMagsDenseBlock = [regex]::Match($FinalMagsAdapterContent, 'local\s+function\s+dense_array_length[\s\S]*?(?=local\s+function|function\s+Adapter:)').Value
+    Assert-True ($FinalMagsDenseBlock.Length -gt 0) 'Mags Redux dense-array validation must expose its bounded length helper.'
+    Assert-True ($FinalMagsDenseBlock -match 'for\s+key\s+in\s+pairs\s*\(' -and $FinalMagsDenseBlock -match 'maximum\s*==\s*count') 'Mags Redux dense-array validation must compare key count with maximum index.'
+    Assert-True ($FinalMagsDenseBlock -notmatch 'for\s+\w+\s*=\s*1\s*,') 'Mags Redux dense-array validation must never iterate through a third-party maximum index.'
+    Assert-True ($FinalMagsAdapterContent -match 'MAX_CONTEXT_TEXT\s*=\s*96') 'Mags Redux descriptor diagnostics must use an explicit bounded text ceiling.'
+    foreach ($Field in @('weapon_section','magazine_section','ammo_section','reserve_ordinal','expected_capacity','observed_state')) {
+        Assert-True ($FinalMagsAdapterContent -match ('(?m)^\s*' + [regex]::Escape($Field) + '\s*=')) "Mags Redux descriptor diagnostics must include $Field."
+    }
+    $FinalMagsInitializeBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:initialize[\s\S]*?(?=\r?\nfunction\s+new)').Value
+    $FinalMagsRefreshIndex = $FinalMagsInitializeBlock.IndexOf('api.refresh_loadout')
+    $FinalMagsFillIndex = $FinalMagsInitializeBlock.IndexOf('api.fill_magazine')
+    Assert-True ($FinalMagsRefreshIndex -ge 0 -and $FinalMagsFillIndex -gt $FinalMagsRefreshIndex) 'Mags Redux must refresh vendor loadout slots before every reserve fill.'
+    Assert-True ($Task5BootstrapContent -match 'refresh_loadout\s*=\s*binder\s+and\s+binder\.validate_loadout') 'Bootstrap must bind magazine_binder.validate_loadout as the vendor loadout refresh.'
+    Assert-True ($FinalMagsAdapterContent -match '\{\s*"is_supported_weapon"[\s\S]{0,220}"refresh_loadout"[\s\S]{0,220}"fill_magazine"') 'A present Mags Redux API must require the refresh capability.'
+    $FinalMagsPlanBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:bonus_descriptors[\s\S]*?(?=\r?\nfunction\s+Adapter:initialize)').Value
+    Assert-True ($FinalMagsPlanBlock -match 'if\s+not\s+resolved\.ok\s+then[\s\S]{0,500}contextualize') 'Mags Redux planning must add the complete descriptor context to API resolution failures.'
+    $FinalMagsResolveBlock = [regex]::Match($FinalMagsAdapterContent, 'function\s+Adapter:resolve[\s\S]*?(?=\r?\nfunction\s+Adapter:bonus_descriptors)').Value
+    Assert-True ($FinalMagsResolveBlock -match 'api_resolution_failed' -and $FinalMagsResolveBlock -match 'api_incomplete') 'Direct Mags Redux resolution failures must distinguish resolver and incomplete-API diagnostics.'
+    Assert-True ($FinalMagsResolveBlock -match 'descriptor_context') 'Direct Mags Redux resolution failures must use the complete bounded six-field context.'
+    Assert-True ($FinalMagsPlanBlock -match 'dense_array_length\(descriptors\)[\s\S]{0,500}descriptor_context') 'Malformed Mags Redux descriptor arrays must use the complete bounded six-field context.'
+    Assert-True ($FinalMagsPlanBlock -match 'rawget\(descriptors,\s*1\)') 'Malformed Mags Redux descriptor arrays may inspect only the first raw descriptor for diagnostic identity.'
+    $FinalMagsAdvanceBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:advance_pending[\s\S]*?(?=\r?\nfunction\s+Materializer:update)').Value
+    Assert-True ($FinalMagsAdvanceBlock -match 'if\s+entry\s*==\s*nil\s+then[\s\S]{0,600}initialize_bonus_items[\s\S]{0,600}active_equipped_entry') 'Pending materialization must initialize reserves after all equipment verification and before activation.'
+    Assert-True ($FinalMagsAdvanceBlock -match 'pending\.bonus_initialized\s*~=\s*true[\s\S]{0,400}pending\.bonus_initialized\s*=\s*true') 'Pending reserve initialization must have an exact-once completion guard.'
+    $FinalMagsApplyBlock = [regex]::Match($FinalMagsMaterializerContent, 'function\s+Materializer:apply[\s\S]*?(?=\r?\nfunction\s+new)').Value
+    $FinalMagsSyncEquipIndex = $FinalMagsApplyBlock.IndexOf('for _, entry in ipairs(equipped) do')
+    $FinalMagsSyncInitIndex = $FinalMagsApplyBlock.LastIndexOf('initialize_bonus_items')
+    $FinalMagsSyncActiveIndex = $FinalMagsApplyBlock.LastIndexOf('local active_entry')
+    Assert-True ($FinalMagsSyncEquipIndex -ge 0 -and $FinalMagsSyncInitIndex -gt $FinalMagsSyncEquipIndex -and $FinalMagsSyncActiveIndex -gt $FinalMagsSyncInitIndex) 'Synchronous materialization must initialize reserves only after equipment and weapon verification.'
+    Assert-True (([regex]::Matches($FinalMagsMaterializerContent, 'initialize_bonus_items\s*\(')).Count -eq 3) 'Reserve initialization must have one helper and exactly one sync and one pending call site.'
+    foreach ($Name in @(
+        'mags_redux_refreshes_vendor_loadout_before_each_fill',
+        'mags_redux_rejects_pathological_capacities_before_vendor_fill',
+        'mags_redux_rejects_huge_sparse_loaded_index_in_key_count_time',
+        'mags_redux_direct_resolution_failures_have_complete_context',
+        'mags_redux_malformed_descriptor_arrays_have_complete_context'
+    )) {
+        Assert-True ($FinalMagsAdapterTests -match [regex]::Escape($Name)) "Final Mags Redux adapter regression must cover $Name."
+    }
+    foreach ($Name in @(
+        'item_materializer_bonus_initialization_waits_for_synchronous_equipment_verification',
+        'item_materializer_bonus_initialization_waits_for_pending_equipment_and_runs_once',
+        'item_materializer_equipment_failure_rolls_back_without_bonus_initialization',
+        'item_materializer_bonus_capacity_limit_rejects_before_creation'
+    )) {
+        Assert-True ($FinalMagsMaterializerTests -match [regex]::Escape($Name)) "Final Mags Redux materializer regression must cover $Name."
+    }
+    Assert-True ($Task5DevTestContent -match 'vendor pouch refresh follows outfit equip and weapon magazine verification') 'Composed Mags Redux regression must require outfit-dependent pouch refresh after weapon verification.'
+    Assert-True ($Task5DevTestContent -match 'refresh_calls,\s*2') 'Composed Mags Redux regression must prove exactly one refresh per reserve.'
     Assert-True ($Task5BootstrapContent -match 'function\s+engine_inventory_slot\(ltx_slot\)[\s\S]{0,700}ltx_slot\s*\+\s*1') 'Actor loadout must translate zero-based LTX slots to one-based Lua inventory API slots'
     foreach ($Marker in @('WAIT_SLOT_VERIFY','CHARGE_OUTFIT','WAIT_MAGAZINE_VERIFY','WAIT_ACTIVE_VERIFY','outfit_requires_power','exo_is_object','exo_get_data','exo_init_data','exo_set_data')) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Actor equipment must retain cross-frame phase $Marker"
@@ -2362,8 +2488,12 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
     foreach ($Marker in @('runtime_entity_consumes_owned_medical_item_once','runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Physical medicine Dev tests must cover $Marker"
     }
-    foreach ($Marker in @('runtime_preflight_rejects_npc_medical_ai_conflict','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
+    foreach ($Marker in @('runtime_preflight_publishes_npc_medical_ownership','runtime_preflight_rejects_invalid_npc_medical_config','runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses','runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed','runtime_npc_medical_lifecycle_is_active_only')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
+    }
+    foreach ($Marker in @('runtime_orchestrator_forwards_preflight_npc_medical_owner','runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation','runtime_npc_medical_external_owner_is_dependency_free','runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation','runtime_entity_external_medical_owner_delegates_hidden_charge','runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation')) {
+        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Marker) + '\s*\}'
+        Assert-True (([regex]::Matches($Task5DevTestContent, $Registration)).Count -eq 1) "Delegated NPC medical case must be registered exactly: $Marker"
     }
 }
 
@@ -2380,6 +2510,25 @@ if (Test-Path -LiteralPath $NpcMedicalPath) {
         Assert-True ($NpcMedicalContent -match [regex]::Escape($Marker)) "NPC medical state machine must contain $Marker"
     }
     Assert-True ($NpcMedicalContent -notmatch '\bmath\.(random|randomseed)\b') 'NPC medical state machine must not use global randomness'
+    Assert-True ($NpcMedicalContent -match 'GA_NPC_MEDICAL_DELEGATED') 'Delegated NPC medical mode must expose its ownership diagnostic.'
+    $NpcMedicalStartBlock = [regex]::Match($NpcMedicalContent, '(?ms)^function\s+NpcMedical:start\(.*?^end\s*$').Value
+    Assert-True ($NpcMedicalStartBlock -match 'owner\s*~=\s*"arena"\s+and\s+owner\s*~=\s*"external"') 'NPC medical start must validate the exact owner set.'
+    $NpcMedicalUpdateBlock = [regex]::Match($NpcMedicalContent, '(?ms)^function\s+NpcMedical:update\(.*?^end\s*$').Value
+    $ActiveGuardIndex = $NpcMedicalUpdateBlock.IndexOf('if not self.active')
+    $OwnerGuardIndex = $NpcMedicalUpdateBlock.IndexOf('if self.owner == "external"')
+    $ClockIndex = $NpcMedicalUpdateBlock.IndexOf('self:clock()')
+    Assert-True ($ActiveGuardIndex -ge 0 -and $OwnerGuardIndex -gt $ActiveGuardIndex -and $ClockIndex -gt $OwnerGuardIndex) 'NPC medical update guard order must be active, external owner, then dependencies.'
+}
+
+if (Test-Path -LiteralPath $Task5OrchestratorPath) {
+    Assert-True ($Task5OrchestratorContent -match 'npc_medical_owner') 'Orchestrator must retain NPC medical ownership metadata.'
+    Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_OWNERSHIP') 'Orchestrator must emit one bounded NPC medical ownership diagnostic.'
+    Assert-True ($Task5OrchestratorContent -match 'GA_NPC_MEDICAL_AI_CONFIG_INVALID') 'Orchestrator must reject invalid NPC medical ownership metadata.'
+    Assert-True ($Task5OrchestratorContent -match 'npc_medical_owner\s*=\s*self\.npc_medical_owner\s+or\s+"arena"') 'Orchestrator must pass the frozen NPC medical owner into start.'
+    $MedicalPrepareBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:prepare_fight[\s\S]*?function\s+Orchestrator:begin_countdown_after_equipment').Value
+    $MedicalRetryBlock = [regex]::Match($Task5OrchestratorContent, 'function\s+Orchestrator:drive_continuation[\s\S]*?function\s+Orchestrator:drive_runtime').Value
+    Assert-True ($MedicalPrepareBlock -match '"begin_apply"[\s\S]{0,500}self\.npc_medical_owner') 'Initial entity activation must receive the frozen NPC medical owner.'
+    Assert-True ($MedicalRetryBlock -match '"begin_apply"[\s\S]{0,500}self\.npc_medical_owner') 'Integrity-retry entity activation must receive the frozen NPC medical owner.'
 }
 
 $Task3DataFiles = @(
@@ -3041,7 +3190,9 @@ if ((Test-Path -LiteralPath $Task7CatalogPath) -and (Test-Path -LiteralPath $Tas
 }
 if (Test-Path -LiteralPath $Task7BootstrapPath) {
     $Task7BootstrapContent = Get-Content -LiteralPath $Task7BootstrapPath -Raw
-    Assert-True ($Task7BootstrapContent -match 'local\s+callback_names\s*=\s*\{[\s\S]{0,600}"actor_on_before_death"[\s\S]{0,160}"actor_on_death"') 'Bootstrap callback registration must retain actor_on_before_death followed by actor_on_death.'
+    $Task7CallbackNamesBlock = [regex]::Match($Task7BootstrapContent, 'local\s+callback_names\s*=\s*\{[\s\S]*?\}').Value
+    Assert-True ($Task7CallbackNamesBlock -match '"actor_on_before_death"') 'Bootstrap callback registration must retain actor_on_before_death.'
+    Assert-True ($Task7CallbackNamesBlock -notmatch '"actor_on_death"') 'Bootstrap callback registration must reject nonexistent actor_on_death.'
     $Task7ChargeStart = $Task7BootstrapContent.LastIndexOf('if equipment.phase == "CHARGE_OUTFIT" then')
     $Task7ChargeEnd = if ($Task7ChargeStart -ge 0) { $Task7BootstrapContent.IndexOf('equipment.role_index = equipment.role_index + 1', $Task7ChargeStart) } else { -1 }
     Assert-True ($Task7ChargeStart -ge 0 -and $Task7ChargeEnd -gt $Task7ChargeStart) 'Powered-exo CHARGE_OUTFIT phase must remain structurally testable.'
@@ -3053,16 +3204,16 @@ if (Test-Path -LiteralPath $Task7BootstrapPath) {
 if (Test-Path -LiteralPath $Task7OrchestratorPath) {
     $Task7OrchestratorContent = Get-Content -LiteralPath $Task7OrchestratorPath -Raw
     $Task7BeforeDeathStart = $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_before_death')
-    $Task7AfterDeathStart = if ($Task7BeforeDeathStart -ge 0) { $Task7OrchestratorContent.IndexOf('function Orchestrator:actor_on_death', $Task7BeforeDeathStart) } else { -1 }
-    Assert-True ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) 'Natural-death callback boundary must remain structurally testable.'
-    if ($Task7BeforeDeathStart -ge 0 -and $Task7AfterDeathStart -gt $Task7BeforeDeathStart) {
-        $Task7BeforeDeathBlock = $Task7OrchestratorContent.Substring($Task7BeforeDeathStart, $Task7AfterDeathStart - $Task7BeforeDeathStart)
+    $Task7FinalizeDeathStart = if ($Task7BeforeDeathStart -ge 0) { $Task7OrchestratorContent.IndexOf('function Orchestrator:finalize_actor_death', $Task7BeforeDeathStart) } else { -1 }
+    Assert-True ($Task7BeforeDeathStart -ge 0 -and $Task7FinalizeDeathStart -gt $Task7BeforeDeathStart) 'Natural-death arm/finalize boundary must remain structurally testable.'
+    if ($Task7BeforeDeathStart -ge 0 -and $Task7FinalizeDeathStart -gt $Task7BeforeDeathStart) {
+        $Task7BeforeDeathBlock = $Task7OrchestratorContent.Substring($Task7BeforeDeathStart, $Task7FinalizeDeathStart - $Task7BeforeDeathStart)
         Assert-True ($Task7BeforeDeathBlock -match 'arm_defeat') 'Natural death must arm a durable defeat intent before engine death.'
         Assert-True ($Task7BeforeDeathBlock -notmatch '\bret_value\s*=\s*(?:false|nil)\b') 'Natural death must not cancel lethal engine damage through flags.ret_value.'
         Assert-True ($Task7BeforeDeathBlock -notmatch 'hold_after_logical_death|release_logical_death_hold') 'Natural death must not invoke logical-death hold or revival behavior.'
     }
-    if ($Task7AfterDeathStart -ge 0) {
-        $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7AfterDeathStart)
+    if ($Task7FinalizeDeathStart -ge 0) {
+        $Task7DeathBlock = $Task7OrchestratorContent.Substring($Task7FinalizeDeathStart)
         Assert-True ($Task7DeathBlock -match 'confirm_defeat[\s\S]{0,1200}neutralize_owned_opponents') 'Real actor death must confirm defeat then neutralize owned opponents.'
     }
 }
@@ -3665,6 +3816,31 @@ Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+result\.
 $CatalogCacheCase = 'runtime_catalog_default_success_is_reused_only_for_default_source'
 $CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*' + $CatalogCacheCase + '\s*\}'
 Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $CatalogCacheRegistration)).Count -eq 1) 'Runtime catalog cache case must be registered exactly once.'
+
+$MedicalPolicyContracts = @(
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_npc_medical_policy.script'; Namespace = 'gamma_arena_npc_medical_policy'; Required = @('(?m)^function\s+read\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_npc_medical_policy.script'; Namespace = 'gamma_arena_test_npc_medical_policy'; Required = @('(?m)^function\s+run\s*\(', 'read_table_driven_policy_cases') }
+)
+foreach ($Contract in $MedicalPolicyContracts) {
+    $ScriptPath = Join-Path $RepoRoot $Contract.Path
+    Assert-True (Test-Path -LiteralPath $ScriptPath) "Medical policy script is missing: $($Contract.Path)"
+    if (Test-Path -LiteralPath $ScriptPath) {
+        $ScriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+        $NamespacePattern = [regex]::Escape($Contract.Namespace)
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*(?:local\s+)?" + $NamespacePattern + "\s*=")) "Medical policy script must not create a self-named namespace table: $($Contract.Path)"
+        Assert-True ($ScriptContent -notmatch ("(?m)^\s*function\s+" + $NamespacePattern + "\.")) "Medical policy script must not use self-qualified function definitions: $($Contract.Path)"
+        foreach ($RequiredPattern in $Contract.Required) {
+            Assert-True ($ScriptContent -match $RequiredPattern) "Medical policy script is missing its contract: $($Contract.Path)"
+        }
+    }
+}
+$MedicalPolicyDomain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($MedicalPolicyDomain -match 'gamma_arena_test_npc_medical_policy\.run\s*\(\s*run_case_fn\s*\)') 'Medical policy tests must run from the Dev domain suite.'
+$MedicalPolicyTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_npc_medical_policy.script') -Raw
+foreach ($CaseName in @('missing_keys', 'enable_true', 'enable_on', 'enable_yes', 'enable_one', 'enable_false', 'enable_off', 'enable_no', 'enable_zero', 'in_combat_true', 'in_combat_on', 'in_combat_yes', 'in_combat_one', 'in_combat_false', 'in_combat_off', 'in_combat_no', 'in_combat_zero', 'non_overlap', 'medkit_overlap', 'bandage_overlap', 'both_overlaps', 'whitespace_empty_tokens', 'exact_matching', 'malformed_enable', 'malformed_in_combat', 'line_exist_throw', 'r_string_ex_throw', 'non_string_enable', 'non_string_medkits', 'non_string_bandages')) {
+    $CaseRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($CaseName) + '"\s*,'
+    Assert-True (([regex]::Matches($MedicalPolicyTests, $CaseRegistration)).Count -eq 1) "Medical policy tests must register exactly one executable case: $CaseName."
+}
 
 $SmokeHarnessPath = Join-Path $RepoRoot 'tests\smoke\Test-Regression.ps1'
 if (Test-Path -LiteralPath $SmokeHarnessPath) {
