@@ -99,6 +99,8 @@ From Windows PowerShell, enter the repository and run the complete local suite:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-GammaArena.ps1
 ```
 
+`VERSION` is the sole source of the Gamma Arena release version. The build stamps that value into the staged runtime migration script; do not replace its `@GAMMA_ARENA_VERSION@` marker in source control.
+
 Build the deterministic release package:
 
 ```powershell

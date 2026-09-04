@@ -119,7 +119,6 @@ foreach ($ProtectionLabel in @(
 $Task7RepositoryCheckout = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 $Task7VersionPath = Join-Path $RepoRoot 'VERSION'
 $AddonVersion = if (Test-Path -LiteralPath $Task7VersionPath -PathType Leaf) { (Get-Content -LiteralPath $Task7VersionPath -Raw).Trim() } else { '' }
-if ($Task7RepositoryCheckout) { Assert-True ($AddonVersion -ceq '0.5.1') 'Task 7 release version must be exactly 0.5.1.' }
 Assert-True ($AddonVersion -match '^\d+\.\d+\.\d+$') 'VERSION must be a plain SemVer triplet.'
 if ($Task7RepositoryCheckout) {
 $Task7BuildPath = Join-Path $RepoRoot 'tools\Build-GammaArena.ps1'
@@ -1117,7 +1116,7 @@ foreach ($Marker in @('FightSpec v9','catalog schema `10`','generator_version = 
     Assert-True ($Task7SessionSchemaDoc.Contains($Marker)) "Task 7 session schema documentation is stale: $Marker"
 }
 $Task7CompatibilityManifestDoc = Get-Content -LiteralPath (Join-Path $RepoRoot 'schemas\compatibility-manifest-v1.md') -Raw
-foreach ($Marker in @('"0.5.1"','fight_spec_schema_version` | integer | `9`','catalog_schema_version` | integer | `10`','catalog_revision` | integer | `11`','generator_version` | integer | `11`')) {
+foreach ($Marker in @('repository `VERSION`','fight_spec_schema_version` | integer | `9`','catalog_schema_version` | integer | `10`','catalog_revision` | integer | `11`','generator_version` | integer | `11`')) {
     Assert-True ($Task7CompatibilityManifestDoc.Contains($Marker)) "Task 7 compatibility manifest documentation is stale: $Marker"
 }
 $Task7GeneratorTest = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_generator.script') -Raw
@@ -1351,7 +1350,7 @@ foreach ($RelativePath in $Task4DataFiles) {
 $MigrationPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script'
 if (Test-Path -LiteralPath $MigrationPath) {
     $MigrationContent = Get-Content -LiteralPath $MigrationPath -Raw
-    Assert-True ($MigrationContent -match ('CURRENT_ADDON_VERSION\s*=\s*"' + [regex]::Escape($AddonVersion) + '"')) 'Runtime add-on version must match VERSION.'
+    Assert-True (([regex]::Matches($MigrationContent, '@GAMMA_ARENA_VERSION@')).Count -eq 1) 'Runtime add-on version source must contain exactly one build marker.'
     Assert-True ($MigrationContent -match 'GA_SETTINGS_SCHEMA_NEWER') 'Settings migration must reject future schemas'
     Assert-True ($MigrationContent -match 'events') 'Settings reads and migrations must report events'
     Assert-True ($MigrationContent -match 'settings_schema_version') 'Settings migration must write schema v1'

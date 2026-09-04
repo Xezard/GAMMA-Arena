@@ -72,6 +72,8 @@ if ($LegacyArtifactPaths.Count -ne 0) {
 }
 
 Copy-GameDataTree (Join-Path $RepoRoot 'src\gamedata') $StageGameData
+$RuntimeVersionPath = Join-Path $StageGameData 'scripts\gamma_arena_migrations.script'
+& (Join-Path $RepoRoot 'tools\Expand-GammaArenaVersion.ps1') -Path $RuntimeVersionPath -Version $Version
 Copy-RepositoryFile 'schemas\fight-spec-v9.md'
 if ($Configuration -eq 'Dev') {
     Copy-GameDataTree (Join-Path $RepoRoot 'dev\gamedata') $StageGameData
