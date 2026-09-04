@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.2 - 2026-09-04
+
 - Fixed Modded Exes MT-TEST booster cleanup so active medicine effects are removed between fights without leaving permanent negative restoration rates when stale native timers later expire.
 - Added bounded transition, booster-compensation, and actor-health-drop diagnostics for round-boundary condition failures.
 - Quarantined only `wpn_vssk_ekp8_18` from actor loadouts after its confirmed active-slot timeout; NPCs and sibling VSSK sections remain eligible.
