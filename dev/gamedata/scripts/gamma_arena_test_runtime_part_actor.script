@@ -1,0 +1,1285 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+function fake_vector(x, y, z)
+    local value = { x = x, y = y, z = z }
+    function value:sub(other)
+        return fake_vector(self.x - other.x, self.y - other.y, self.z - other.z)
+    end
+    function value:getH()
+        return self.x + self.z
+    end
+    return value
+end
+
+function fake_actor_adapter_env()
+    local env = {
+        active = true,
+        owned = true,
+        iterating = false,
+        released = {},
+        release_requests = {},
+        release_queue = {},
+        release_delay_ms = 0,
+        never_finishes = false,
+        never_finishes_ids = {},
+        release_fail_ids = {},
+        release_submission_count = 0,
+        inventory_callback_sequence = nil,
+        inventory_callback_count = 0,
+        actor_id_sequence = nil,
+        actor_id_reads = 0,
+        equality_calls = 0,
+        now = 0,
+        input_acquires = 0,
+        input_releases = 0,
+        ordered_calls = {},
+        interrupt_calls = 0,
+        hide_weapon_calls = 0,
+        active_slot_reads = 0,
+        active_slot = 2,
+        hide_weapon_failure = false,
+        transient_reset_calls = 0,
+        transient_update_calls = 0,
+        transient_update_failure = false,
+        interrupt_failure = false,
+        interrupt_throw = false,
+        input_failure = false,
+        transient_reset_failure = false,
+        effect_calls = 0,
+        body_health_reset_calls = 0,
+        bhs = {
+            maxhp = { head = 11, torso = 11, leftarm = 5, rightarm = 5, leftleg = 5, rightleg = 5 },
+            health = { head = 2, torso = 3, leftarm = 1, rightarm = 2, leftleg = 1, rightleg = 2 },
+            timedhp = { head = 1, torso = 1, leftarm = 1, rightarm = 1, leftleg = 1, rightleg = 1 }
+        },
+        boundary_inside = true,
+        boundary_checks = 0,
+        positions = {
+            actor_spawn = fake_vector(1, 2, 3),
+            actor_look = fake_vector(5, 2, 9)
+        }
+    }
+    local actor = { items = {}, actor_id = 700, money_value = 2500 }
+    function actor:id()
+        env.actor_id_reads = env.actor_id_reads + 1
+        if env.actor_id_sequence ~= nil then return env.actor_id_sequence[env.actor_id_reads] end
+        return self.actor_id
+    end
+    function actor:money() return self.money_value end
+    function actor:give_money(value) self.money_delta = value; self.money_value = self.money_value + value end
+    function actor:iterate_inventory(callback, context)
+        env.iterating = true
+        if env.inventory_callback_sequence ~= nil then
+            for index = 1, env.inventory_callback_count do callback(context, env.inventory_callback_sequence[index]) end
+        else
+            local snapshot = {}
+            for index = 1, #self.items do snapshot[index] = self.items[index] end
+            for index = 1, #snapshot do callback(context, snapshot[index]) end
+        end
+        env.iterating = false
+    end
+    function actor:set_health_ex(value) self.health_value = value end
+    actor.power = 0.25
+    actor.radiation = 0.5
+    actor.bleeding = 0.75
+    actor.psy_health = 0.5
+    function actor:set_actor_position(value) self.position_value = value; env.boundary_inside = true end
+    function actor:set_actor_direction(value) self.direction_value = value end
+    function actor:set_invulnerable(value) self.invulnerable_value = value end
+    function actor:position() return self.position_value or fake_vector(0, 0, 0) end
+    env.actor = actor
+    local function poison_game_object_equality()
+        env.equality_calls = env.equality_calls + 1
+        error("native game_object equality invoked")
+    end
+    setmetatable(actor, { __eq = poison_game_object_equality })
+    function env:actor_alias()
+        return setmetatable({
+            actor_id = actor.actor_id,
+            items = actor.items,
+            money_value = actor.money_value
+        }, {
+            __index = actor,
+            __eq = poison_game_object_equality
+        })
+    end
+    function env:add_item(id, options)
+        options = options or {}
+        local item = { item_id = id, options = options, parent_calls = 0, id_calls = 0 }
+        function item:id()
+            self.id_calls = self.id_calls + 1
+            if self.options.item_id_throw then error("injected item id failure") end
+            return self.item_id
+        end
+        function item:parent()
+            self.parent_calls = self.parent_calls + 1
+            if self.options.parent_throw then error("injected parent lookup failure") end
+            if self.options.parent_missing then return nil end
+            return self.options.parent or actor
+        end
+        function item:section()
+            if self.options.section_throw then error("injected item section failure") end
+            return self.options.section or ("section_" .. tostring(self.item_id))
+        end
+        actor.items[#actor.items + 1] = item
+        return item
+    end
+    function env:remove_item(id)
+        for index = #actor.items, 1, -1 do
+            if actor.items[index].item_id == id then table.remove(actor.items, index) end
+        end
+    end
+    function env:advance(delta)
+        self.now = (self.now + delta) % 4294967296
+        for index = #self.release_queue, 1, -1 do
+            local queued = self.release_queue[index]
+            local elapsed = (self.now - queued.submitted_at) % 4294967296
+            if not self.never_finishes and not self.never_finishes_ids[queued.id] and elapsed >= queued.delay_ms then
+                self:remove_item(queued.id)
+                table.remove(self.release_queue, index)
+            end
+        end
+    end
+    local function release(id)
+        gamma_arena_test_assert.is_false(env.iterating, "inventory mutation must happen only after iteration")
+        env.release_submission_count = env.release_submission_count + 1
+        if env.release_fail_ids[id] then return gamma_arena_result.err("GA_ACTOR_INVENTORY_RELEASE_FAILED", "injected release failure") end
+        env.released[#env.released + 1] = id
+        env.release_requests[id] = (env.release_requests[id] or 0) + 1
+        local delay = type(env.release_delay_ms) == "function" and env.release_delay_ms(id) or env.release_delay_ms
+        env.release_queue[#env.release_queue + 1] = { id = id, submitted_at = env.now, delay_ms = delay }
+        return gamma_arena_result.ok(true)
+    end
+    local deps = {
+        actor = function() return actor end,
+        is_session_active = function() return env.active end,
+        is_actor_owned = function(candidate) return env.owned and candidate:id() == actor:id() end,
+        release_item_id = release,
+        clock = function() return env.now end,
+        inventory_drain_timeout_ms = 10000,
+        item_section = function(item) return item:section() end,
+        patrol = function(path)
+            local object = {}
+            function object:point() return env.positions[path] end
+            return object
+        end,
+        boundary_contains = function(candidate, zone_name)
+            env.boundary_checks = env.boundary_checks + 1
+            gamma_arena_test_assert.is_true(candidate == actor, "boundary checks only the owned actor")
+            gamma_arena_test_assert.equals(zone_name, "bar_arena_sr", "boundary uses the configured restrictor")
+            return gamma_arena_result.ok(env.boundary_inside)
+        end,
+        effects = { disable_effects_timer = function() env.effect_calls = env.effect_calls + 1 end },
+        interrupt_item_use = function()
+            env.interrupt_calls = env.interrupt_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "interrupt"
+            if env.interrupt_throw then error("injected item-use interrupt exception") end
+            if env.interrupt_failure then return gamma_arena_result.err("GA_TEST_INTERRUPT", "injected item-use interrupt failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        hide_weapon = function(candidate)
+            env.hide_weapon_calls = env.hide_weapon_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "hide_weapon"
+            gamma_arena_test_assert.is_true(candidate == actor, "weapon hide only touches the owned Arena actor")
+            if env.hide_weapon_failure then return gamma_arena_result.err("GA_TEST_HIDE_WEAPON", "injected weapon-hide failure") end
+            return gamma_arena_result.ok(true)
+        end,
+        active_slot = function(candidate)
+            env.active_slot_reads = env.active_slot_reads + 1
+            gamma_arena_test_assert.is_true(candidate == actor, "active-slot proof only reads the owned Arena actor")
+            return gamma_arena_result.ok(env.active_slot)
+        end,
+        weapon_hide_timeout_ms = 5000,
+        reset_transient_state = function(candidate)
+            env.transient_reset_calls = env.transient_reset_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "transients"
+            if env.transient_reset_failure then return gamma_arena_result.err("GA_TEST_TRANSIENT", "injected transient reset failure") end
+            gamma_arena_test_assert.is_true(candidate == actor, "body-health reset only touches the owned Arena actor")
+            env.body_health_reset_calls = env.body_health_reset_calls + 1
+            for part, maximum in pairs(env.bhs.maxhp) do
+                env.bhs.health[part] = maximum
+                env.bhs.timedhp[part] = 0
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        update_transient_services = function()
+            env.transient_update_calls = env.transient_update_calls + 1
+            if env.trace_transient_updates then env.ordered_calls[#env.ordered_calls + 1] = "reconcile" end
+            if env.transient_update_failure then
+                return gamma_arena_result.err("GA_TEST_TRANSIENT_UPDATE", "injected transient update failure")
+            end
+            return gamma_arena_result.ok(true)
+        end,
+        update_actor_diagnostics = function() return gamma_arena_result.ok(true) end,
+        snapshot_actor_diagnostics = function() return gamma_arena_result.ok(true) end,
+        discard_transient_services = function() return gamma_arena_result.ok(true) end,
+        input = {
+            acquire = function()
+                env.input_acquires = env.input_acquires + 1
+                env.ordered_calls[#env.ordered_calls + 1] = "input"
+                if env.input_failure then return gamma_arena_result.err("GA_TEST_INPUT", "injected input acquisition failure") end
+                return gamma_arena_result.ok(true)
+            end,
+            release = function() env.input_releases = env.input_releases + 1; return gamma_arena_result.ok(true) end
+        }
+    }
+    return env, gamma_arena_actor_adapter.new(deps)
+end
+
+function runtime_actor_begin_update_reconciles_booster_debt_first()
+    local env, adapter = fake_actor_adapter_env()
+    env.trace_transient_updates = true
+    local began = adapter:begin_update()
+    gamma_arena_test_assert.is_true(began.ok, "actor update begins after transient reconciliation")
+    gamma_arena_test_assert.equals(began.value, 1, "first completed actor update receives tick one")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "reconcile", "booster debt reconciliation is the first actor-update operation")
+    gamma_arena_test_assert.equals(env.transient_update_calls, 1, "transient services update once per actor update")
+end
+
+function runtime_actor_begin_update_failure_blocks_world_progress()
+    local env, adapter = fake_actor_adapter_env()
+    env.transient_update_failure = true
+    local failed = adapter:begin_update()
+    gamma_arena_test_assert.is_false(failed.ok, "transient reconciliation failure blocks the actor update")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_TRANSIENT_UPDATE", "structured reconciliation failure identity is preserved")
+    env.transient_update_failure = false
+    local retried = adapter:begin_update()
+    gamma_arena_test_assert.is_true(retried.ok, "actor update retries after transient reconciliation recovers")
+    gamma_arena_test_assert.equals(retried.value, 1, "failed reconciliation never advances the actor update tick")
+end
+
+function runtime_actor_rematch_boundary_aborts_before_input_lock()
+    local env, adapter = fake_actor_adapter_env()
+    local result = adapter:begin_rematch_boundary()
+    gamma_arena_test_assert.is_true(result.ok, "rematch boundary succeeds")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "interrupt", "LAM2 interruption precedes Arena input ownership")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "input", "Arena input ownership is the final boundary mutation")
+    gamma_arena_test_assert.equals(env.interrupt_calls, 1, "item presentation is interrupted once")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "input is acquired once")
+end
+
+function runtime_actor_rematch_boundary_failure_never_acquires_input()
+    local env, adapter = fake_actor_adapter_env()
+    env.interrupt_failure = true
+    local result = adapter:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(result.ok, "throwing/present item integration fails the boundary")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_INTERRUPT", "boundary preserves the structured integration failure")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "failed interruption cannot acquire the Arena input lease")
+
+    local throwing_env, throwing = fake_actor_adapter_env()
+    throwing_env.interrupt_throw = true
+    local thrown = throwing:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(thrown.ok, "throwing item integration fails safely")
+    gamma_arena_test_assert.equals(thrown.error.code, "GA_ACTOR_ITEM_USE_INTERRUPT_FAILED", "throwing interruption is classified")
+    gamma_arena_test_assert.equals(throwing_env.input_acquires, 0, "throwing interruption cannot acquire input")
+
+    local input_env, input = fake_actor_adapter_env()
+    input_env.input_failure = true
+    local rejected = input:begin_rematch_boundary()
+    gamma_arena_test_assert.is_false(rejected.ok, "failed required input acquisition rejects rematch boundary")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_TEST_INPUT", "input acquisition failure identity is preserved")
+    gamma_arena_test_assert.equals(input_env.input_releases, 0, "failed acquisition owns no lease to release")
+end
+
+function runtime_actor_victory_cleanup_hides_weapon_before_release()
+    local env, adapter = fake_actor_adapter_env()
+    local loadout_cleanup_calls = 0
+    env:add_item(12, { section = "wpn_lr300" })
+    adapter.deps.loadout = {
+        cleanup = function()
+            loadout_cleanup_calls = loadout_cleanup_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "loadout"
+            return gamma_arena_result.ok(true)
+        end
+    }
+
+    adapter:begin_update()
+    local started = adapter:begin_victory_cleanup()
+    gamma_arena_test_assert.is_true(started.ok and started.value.pending, "victory cleanup begins asynchronously")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "interrupt", "item animation is interrupted first")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "hide_weapon", "slot zero is requested without taking modal UI input")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "early victory cleanup leaves result-modal input available")
+
+    local same_update = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(same_update.ok and same_update.value.pending, "same-update active-slot observation cannot authorize release")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 0, "equipped loadout remains intact before a later hide proof")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "inventory release is not submitted before hide proof")
+
+    env.active_slot = 0
+    adapter:begin_update()
+    local draining = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(draining.ok and draining.value.pending, "proved hidden weapon advances into inventory drain")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 1, "owned loadout cleanup starts after slot-zero proof")
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "remaining inventory is released once after the loadout cleanup")
+
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().value == true, "later absence proof completes early cleanup")
+    local reset = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(reset.ok and reset.value == true, "rematch normalization reuses completed early cleanup")
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "rematch reset never resubmits an early inventory release")
+    gamma_arena_test_assert.equals(loadout_cleanup_calls, 1, "rematch reset never repeats early loadout cleanup")
+    gamma_arena_test_assert.equals(env.transient_reset_calls, 1, "remaining rematch transients reset after the button boundary")
+end
+
+function runtime_actor_victory_cleanup_hide_wait_is_bounded_and_wrap_safe()
+    local env, adapter = fake_actor_adapter_env()
+    env.now = 4294967294
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "weapon hide begins near uint32 wrap")
+    env:advance(4999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().ok, "weapon hide remains pending below deadline across wrap")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_false(timed_out.ok, "weapon hide fails at the exact bounded deadline")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_WEAPON_HIDE_TIMEOUT", "weapon-hide timeout identity is stable")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_ms, 5000, "weapon-hide timeout reports wrap-safe elapsed time")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "timed-out equipped weapon is never submitted for inventory release")
+end
+
+function runtime_actor_victory_cleanup_is_idempotent()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "first victory-cleanup start succeeds")
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "duplicate victory-cleanup start is benign")
+    gamma_arena_test_assert.equals(env.interrupt_calls, 1, "duplicate start never repeats item interruption")
+    gamma_arena_test_assert.equals(env.input_acquires, 0, "duplicate early cleanup never acquires result-modal input")
+    gamma_arena_test_assert.equals(env.hide_weapon_calls, 1, "duplicate start never repeats slot-zero request")
+end
+
+function runtime_actor_victory_cleanup_survives_session_deactivation()
+    local env, adapter = fake_actor_adapter_env()
+    env:add_item(33, { section = "wpn_ak74" })
+    adapter.deps.loadout = { cleanup = function() return gamma_arena_result.ok(true) end }
+
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "victory cleanup captures the active Arena actor")
+    env.active = false
+    env.active_slot = 0
+    adapter:begin_update()
+    local draining = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_true(draining.ok and draining.value.pending, "captured victory cleanup continues after session deactivation")
+    gamma_arena_test_assert.equals(env.release_requests[33], 1, "deactivated-session cleanup releases the captured actor inventory once")
+
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:update_victory_cleanup().value == true, "deactivated-session cleanup completes after authoritative absence")
+end
+
+function runtime_actor_victory_cleanup_rejects_changed_actor_identity()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:begin_victory_cleanup().ok, "victory cleanup captures the original actor identity")
+    env.active = false
+    env.actor.actor_id = env.actor.actor_id + 1
+    env.active_slot = 0
+    adapter:begin_update()
+    local rejected = adapter:update_victory_cleanup()
+    gamma_arena_test_assert.is_false(rejected.ok, "victory cleanup fails closed when the actor identity changes")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_NOT_OWNED", "changed actor identity has a stable failure code")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "changed actor identity is never mutated")
+end
+
+function runtime_actor_preowned_input_survives_normalize_failure()
+    local env, adapter = fake_actor_adapter_env()
+    gamma_arena_test_assert.is_true(adapter:begin_rematch_boundary().ok, "fixture pre-acquires the rematch input lease")
+    env.actor.money = function() error("injected money read failure") end
+    local failed = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }, true)
+    gamma_arena_test_assert.is_false(failed.ok, "normalization failure remains observable")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "normalization reuses the pre-owned rematch lease")
+    gamma_arena_test_assert.equals(env.input_releases, 0, "normalization cannot release a lease owned before this invocation")
+    gamma_arena_test_assert.is_true(adapter.input_owned, "pre-owned rematch input remains held for fatal teardown")
+end
+
+function runtime_actor_rematch_transients_clear_once_before_loadout_cleanup()
+    local env, adapter = fake_actor_adapter_env()
+    local cleanup_calls = 0
+    adapter.deps.loadout = {
+        cleanup = function()
+            cleanup_calls = cleanup_calls + 1
+            env.ordered_calls[#env.ordered_calls + 1] = "loadout"
+            return gamma_arena_result.ok({ pending = true })
+        end
+    }
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    local second = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending, "first rematch reset waits for loadout cleanup")
+    gamma_arena_test_assert.is_true(second.ok and second.value.pending, "repeated rematch reset remains pending")
+    gamma_arena_test_assert.equals(env.ordered_calls[1], "transients", "round transients clear before loadout cleanup")
+    gamma_arena_test_assert.equals(env.ordered_calls[2], "loadout", "loadout cleanup follows the one-shot transient clear")
+    gamma_arena_test_assert.equals(env.transient_reset_calls, 1, "pending loadout updates never repeat transient cleanup")
+    gamma_arena_test_assert.equals(cleanup_calls, 2, "loadout cleanup remains retryable while pending")
+end
+
+function runtime_actor_transient_failure_prevents_loadout_cleanup()
+    local env, adapter = fake_actor_adapter_env()
+    local cleanup_calls = 0
+    env.transient_reset_failure = true
+    adapter.deps.loadout = { cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end }
+    adapter:begin_update()
+    local result = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "transient reset failure stops rematch")
+    gamma_arena_test_assert.equals(result.error.code, "GA_TEST_TRANSIENT", "transient failure identity is preserved")
+    gamma_arena_test_assert.equals(cleanup_calls, 0, "loadout cleanup cannot run after failed transient reset")
+end
+
+function fake_actor_conditions(options)
+    options = options or {}
+    local initial_alcohol = options.alcohol ~= nil and options.alcohol or 0.5
+    local conditions = {
+        wound_count = options.wounds or 2,
+        booster_count = options.boosters or 2,
+        alcohol = initial_alcohol,
+        alcohol_effector_active = initial_alcohol > 0.0001,
+        booster_clear_calls = 0,
+        alcohol_change_calls = 0,
+        last_alcohol_delta = nil
+    }
+    function conditions:ClearWounds()
+        if not options.retain_wounds then self.wound_count = 0 end
+    end
+    function conditions:ClearAllBoosters()
+        self.booster_clear_calls = self.booster_clear_calls + 1
+        if not options.retain_boosters then self.booster_count = 0 end
+    end
+    function conditions:ChangeAlcohol(delta)
+        self.alcohol_change_calls = self.alcohol_change_calls + 1
+        self.last_alcohol_delta = delta
+        self.alcohol = self.alcohol + delta
+    end
+    function conditions:UpdateConditionForTest()
+        self.alcohol = math.max(0, math.min(1, self.alcohol))
+        self.alcohol_effector_active = self.alcohol > 0.0001
+    end
+    function conditions:WoundForEach(callback)
+        for index = 1, self.wound_count do callback({ index = index }) end
+    end
+    function conditions:BoosterForEach(callback)
+        for index = 1, self.booster_count do callback(index, 1, 1) end
+    end
+    local cast = { conditions = function() return conditions end }
+    local actor = { cast_Actor = function() return cast end }
+    return actor, conditions
+end
+
+function fake_direct_booster_clear(conditions)
+    local service = { clear_calls = 0 }
+    function service:clear()
+        self.clear_calls = self.clear_calls + 1
+        conditions:ClearAllBoosters()
+        return gamma_arena_result.ok({ debt = conditions.booster_count })
+    end
+    return service
+end
+
+function fake_booster_engine(options)
+    options = options or {}
+    local conditions = {
+        records = {},
+        rates = {},
+        clear_calls = 0,
+        corrections = {}
+    }
+    for _, record in ipairs(options.records or {}) do
+        conditions.records[record.type] = { type = record.type, time = record.time, value = record.value }
+        conditions.rates[record.type] = (conditions.rates[record.type] or 0) + record.value
+    end
+    function conditions:BoosterForEach(callback)
+        local keys = {}
+        for kind in pairs(self.records) do keys[#keys + 1] = kind end
+        table.sort(keys)
+        for _, kind in ipairs(keys) do
+            local record = self.records[kind]
+            if callback(kind, record.time, record.value) == true then break end
+        end
+    end
+    function conditions:ClearAllBoosters()
+        self.clear_calls = self.clear_calls + 1
+        for kind, record in pairs(self.records) do
+            self.rates[kind] = (self.rates[kind] or 0) - record.value
+        end
+        if options.retain_after_clear ~= true then self.records = {} end
+    end
+    function conditions:expire(kind)
+        local record = self.records[kind]
+        self.rates[kind] = self.rates[kind] - record.value
+        self.records[kind] = nil
+    end
+    function conditions:replace(kind, time, value)
+        local record = self.records[kind]
+        if record ~= nil and value * time < record.value * record.time then return false end
+        if record ~= nil then self.rates[kind] = self.rates[kind] - record.value end
+        self.records[kind] = { type = kind, time = time, value = value }
+        self.rates[kind] = (self.rates[kind] or 0) + value
+        return true
+    end
+    function conditions:correct(kind, value)
+        if options.throw_correction then error("injected correction failure") end
+        self.rates[kind] = (self.rates[kind] or 0) + value
+        self.corrections[#self.corrections + 1] = { type = kind, value = value }
+    end
+    function conditions:BoostHpRestore(value) self:correct(0, value) end
+    function conditions:BoostPowerRestore(value) self:correct(1, value) end
+    return conditions
+end
+
+function fake_booster_reconciler(options)
+    options = options or {}
+    local engine = fake_booster_engine(options)
+    local actor = { id_value = options.actor_id or 17, conditions = engine }
+    local events = {}
+    local definitions = {
+        [0] = { name = "eBoostHpRestore", method = "BoostHpRestore" },
+        [1] = { name = "eBoostPowerRestore", method = "BoostPowerRestore" }
+    }
+    local service = gamma_arena_booster_reconciler.new({
+        actor_id = function(candidate) return gamma_arena_result.ok(candidate.id_value) end,
+        conditions = function(candidate) return gamma_arena_result.ok(candidate.conditions) end,
+        type_definitions = function() return gamma_arena_result.ok(definitions) end,
+        emit = function(code, fields)
+            events[#events + 1] = { code = code, fields = fields }
+            return true
+        end
+    })
+    return actor, engine, service, events
+end
+
+function runtime_booster_reconciler_fixed_engine_creates_no_debt()
+    local actor, engine, service = fake_booster_reconciler({ records = { { type = 0, time = 12, value = 0.01 } } })
+    local cleared = service:clear(actor)
+    gamma_arena_test_assert.is_true(cleared.ok, "fixed engine booster clear succeeds")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "fixed engine clear removes the active effect")
+    gamma_arena_test_assert.equals(engine.clear_calls, 1, "fixed engine is cleared exactly once")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 0, "empty readback creates no compatibility debt")
+end
+
+function runtime_booster_reconciler_mt_clear_removes_effects_and_arms_debt()
+    local actor, engine, service, events = fake_booster_reconciler({
+        retain_after_clear = true,
+        records = { { type = 0, time = 12, value = 0.01 }, { type = 1, time = 8, value = 0.2 } }
+    })
+    local cleared = service:clear(actor)
+    gamma_arena_test_assert.is_true(cleared.ok, "MT-TEST-shaped booster clear succeeds")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "health restoration is inactive at the round boundary")
+    gamma_arena_test_assert.equals(engine.rates[1], 0, "power restoration is inactive at the round boundary")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 2, "stale native records become explicit debt")
+    gamma_arena_test_assert.equals(events[1].code, "GA_ACTOR_BOOSTER_DEBT_ARMED", "debt creation is observable")
+end
+
+function runtime_booster_reconciler_expiry_compensates_once()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "MT clear arms health restoration debt")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "Arena clear removes active health restoration")
+    engine:expire(0)
+    gamma_arena_test_assert.equals(engine.rates[0], -0.01, "fake engine performs the harmful second subtraction")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "duplicate subtraction is reconciled")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "exact compensation restores the clean baseline")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "expiry is compensated once")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 0, "settled debt is retired")
+    gamma_arena_test_assert.is_true(service:update(actor).ok, "empty debt update remains inert")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "retired debt cannot compensate twice")
+end
+
+function runtime_booster_reconciler_replacement_preserves_new_effect()
+    local actor, engine, service, events = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 10, value = 0.01 } } })
+    service:clear(actor)
+    gamma_arena_test_assert.is_true(engine:replace(0, 20, 0.02), "stronger booster replaces the stale native record")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "replacement settles old debt")
+    gamma_arena_test_assert.equals(engine.rates[0], 0.02, "old duplicate subtraction is corrected without removing the new effect")
+    gamma_arena_test_assert.equals(events[#events].fields.trigger, "replaced", "replacement trigger is explicit")
+end
+
+function runtime_booster_reconciler_weaker_replacement_keeps_debt()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 20, value = 0.02 } } })
+    service:clear(actor)
+    gamma_arena_test_assert.is_false(engine:replace(0, 1, 0.001), "weaker booster is rejected by the engine")
+    local reconciled = service:update(actor)
+    gamma_arena_test_assert.is_true(reconciled.ok, "unchanged stale record remains valid")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "rejected replacement never reactivates the old effect")
+    gamma_arena_test_assert.equals(#engine.corrections, 0, "matching stale record is not compensated early")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "unexpired debt remains armed")
+end
+
+function runtime_booster_reconciler_repeated_clear_never_reactivates_old_effect()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "first clear succeeds")
+    gamma_arena_test_assert.is_true(service:clear(actor).ok, "repeated clear succeeds")
+    gamma_arena_test_assert.equals(engine.clear_calls, 2, "each requested boundary still invokes the authoritative engine clear")
+    gamma_arena_test_assert.equals(engine.rates[0], 0, "repeated clear compensates only its duplicate subtraction")
+    gamma_arena_test_assert.equals(#engine.corrections, 1, "repeated boundary needs one immediate correction")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "original expiry debt stays armed")
+end
+
+function runtime_booster_reconciler_rejects_actor_identity_drift()
+    local actor, engine, service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    service:clear(actor)
+    engine:expire(0)
+    local drifted = { id_value = actor.id_value + 1, conditions = engine }
+    local rejected = service:update(drifted)
+    gamma_arena_test_assert.is_false(rejected.ok, "actor identity drift fails closed")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_BOOSTER_ACTOR_MISMATCH", "actor mismatch code is exact")
+    gamma_arena_test_assert.equals(#engine.corrections, 0, "foreign actor cannot receive compensation")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "mismatched debt is retained for safe disposal")
+end
+
+function runtime_booster_reconciler_rejects_invalid_records_and_unknown_types()
+    local invalid_actor, invalid_engine, invalid_service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 0, time = -1, value = 0.01 } } })
+    local invalid = invalid_service:clear(invalid_actor)
+    gamma_arena_test_assert.is_false(invalid.ok, "invalid booster record fails before mutation")
+    gamma_arena_test_assert.equals(invalid.error.code, "GA_ACTOR_BOOSTER_RECORD_INVALID", "invalid record code is exact")
+    gamma_arena_test_assert.equals(invalid_engine.clear_calls, 0, "invalid record cannot reach destructive clear")
+
+    local unknown_actor, unknown_engine, unknown_service = fake_booster_reconciler({ retain_after_clear = true, records = { { type = 99, time = 10, value = 0.01 } } })
+    local unknown = unknown_service:clear(unknown_actor)
+    gamma_arena_test_assert.is_false(unknown.ok, "unknown booster type fails before mutation")
+    gamma_arena_test_assert.equals(unknown.error.code, "GA_ACTOR_BOOSTER_TYPE_UNSUPPORTED", "unknown type code is exact")
+    gamma_arena_test_assert.equals(unknown_engine.clear_calls, 0, "unknown booster cannot reach destructive clear")
+end
+
+function runtime_booster_reconciler_correction_failure_is_structured()
+    local actor, engine, service = fake_booster_reconciler({ throw_correction = true, retain_after_clear = true, records = { { type = 0, time = 12, value = 0.01 } } })
+    service:clear(actor)
+    engine:expire(0)
+    local failed = service:update(actor)
+    gamma_arena_test_assert.is_false(failed.ok, "throwing correction is contained")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_BOOSTER_COMPENSATE_FAILED", "correction failure code is exact")
+    gamma_arena_test_assert.equals(#service:debt_snapshot(), 1, "failed correction retains debt for retry")
+end
+
+function fake_actor_diagnostics(options)
+    options = options or {}
+    local env = {
+        now = options.now or 0,
+        health = options.health or 1,
+        health_writes = 0,
+        events = {},
+        boosters = options.boosters or {
+            { type = 0, name = "health_restore", time = 12, value = 0.01 },
+            { type = 1, name = "power_restore", time = 8, value = 0.2 }
+        }
+    }
+    local actor = setmetatable({}, {
+        __index = function(_, key)
+            if key == "health" then return env.health end
+            return nil
+        end,
+        __newindex = function(target, key, value)
+            if key == "health" then env.health_writes = env.health_writes + 1; env.health = value; return end
+            rawset(target, key, value)
+        end
+    })
+    local bhs = {
+        head = 11, head_timed = 0, torso = 10, torso_timed = 0,
+        rightarm = 5, rightarm_timed = 0, leftarm = 5, leftarm_timed = 0,
+        rightleg = 5, rightleg_timed = 0, leftleg = 5, leftleg_timed = 0
+    }
+    local service = gamma_arena_actor_diagnostics.new({
+        clock = function() return gamma_arena_result.ok(env.now) end,
+        actor_state = function(candidate)
+            gamma_arena_test_assert.is_true(candidate == actor, "diagnostics reads only the supplied actor")
+            return gamma_arena_result.ok({
+                health = env.health, power = 0.9, radiation = 0.1,
+                bleeding_speed = 0.02, satiety = 0.8, psy_health = 0.7
+            })
+        end,
+        booster_records = function() return gamma_arena_result.ok(clone(env.boosters)) end,
+        bhs_state = function() return gamma_arena_result.ok(clone(bhs)) end,
+        debt_snapshot = function() return gamma_arena_result.ok({ { type = 0 } }) end,
+        context = function() return gamma_arena_result.ok({ session_id = "ga_diag", fight_index = 4, stage = "ACTIVE" }) end,
+        write = function(code, fields)
+            env.events[#env.events + 1] = { code = code, fields = clone(fields) }
+            return gamma_arena_result.ok(true)
+        end
+    })
+    function env:set_health(value) self.health = value end
+    function env:advance(delta) self.now = (self.now + delta) % 4294967296 end
+    return actor, env, service
+end
+
+function diagnostic_event_count(events, code)
+    local count = 0
+    for _, event in ipairs(events) do if event.code == code then count = count + 1 end end
+    return count
+end
+
+function runtime_actor_diagnostics_transition_snapshot_is_bounded()
+    local actor, env, service = fake_actor_diagnostics()
+    local result = service:snapshot(actor, "pre_transient_reset", { reason = "next_fight" })
+    gamma_arena_test_assert.is_true(result.ok, "transition condition snapshot succeeds")
+    gamma_arena_test_assert.equals(env.events[1].code, "GA_ACTOR_TRANSIENT_SNAPSHOT", "transition emits the canonical snapshot event")
+    gamma_arena_test_assert.equals(env.events[1].fields.bhs_leftleg_timed, 0, "bounded snapshot includes the final BHS timed field")
+    local bytes = 0
+    for key, value in pairs(env.events[1].fields) do
+        gamma_arena_test_assert.is_true(type(value) == "string" or type(value) == "number" or type(value) == "boolean", "snapshot fields remain scalar")
+        bytes = bytes + #tostring(key) + #tostring(value) + 2
+    end
+    gamma_arena_test_assert.is_true(bytes < 1024, "transition snapshot fits the bounded diagnostic record")
+end
+
+function runtime_actor_diagnostics_emits_each_booster_record()
+    local actor, env, service = fake_actor_diagnostics()
+    gamma_arena_test_assert.is_true(service:snapshot(actor, "post_transient_reset").ok, "post-reset snapshot succeeds")
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_BOOSTER_SNAPSHOT"), 2, "one event is emitted per current booster record")
+    gamma_arena_test_assert.equals(env.events[2].fields.booster_type, 0, "booster snapshots are sorted by runtime type")
+    gamma_arena_test_assert.equals(env.events[3].fields.booster_type, 1, "every booster type remains independently visible")
+end
+
+function runtime_actor_diagnostics_logs_first_drop_then_rate_limits()
+    local actor, env, service = fake_actor_diagnostics({ health = 0.9, boosters = {} })
+    gamma_arena_test_assert.is_true(service:update(actor, true).ok, "first sample establishes the health baseline")
+    env:set_health(0.8); env:advance(100)
+    gamma_arena_test_assert.is_true(service:update(actor, true).ok, "first health drop is sampled")
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 1, "first decrease logs immediately")
+    env:set_health(0.7); env:advance(999)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 1, "another decrease before one second is accumulated")
+    env:set_health(0.6); env:advance(1)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(diagnostic_event_count(env.events, "GA_ACTOR_HEALTH_DROP"), 2, "accumulated decrease logs at one second")
+    local last = env.events[#env.events]
+    gamma_arena_test_assert.is_true(math.abs(last.fields.health_delta - 0.2) < 0.0000001, "rate-limited event includes the accumulated health drop")
+end
+
+function runtime_actor_diagnostics_never_mutates_actor_health()
+    local actor, env, service = fake_actor_diagnostics({ health = 0.75 })
+    service:snapshot(actor, "pre_transient_reset")
+    service:update(actor, true)
+    env:set_health(0.5); env:advance(1)
+    service:update(actor, true)
+    gamma_arena_test_assert.equals(env.health_writes, 0, "diagnostic snapshots and sampling never write actor health")
+    gamma_arena_test_assert.equals(env.health, 0.5, "observer leaves the sampled health value unchanged")
+end
+
+function runtime_bootstrap_engine_transients_clear_and_verify()
+    for _, initial_alcohol in ipairs({ 0, 0.5, 1 }) do
+        local actor, conditions = fake_actor_conditions({ alcohol = initial_alcohol })
+        local service = fake_direct_booster_clear(conditions)
+        local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, service)
+        gamma_arena_test_assert.is_true(result.ok, "engine transient reset succeeds with the installed condition APIs")
+        gamma_arena_test_assert.equals(conditions.wound_count, 0, "engine wounds are authoritatively cleared")
+        gamma_arena_test_assert.equals(conditions.booster_count, 0, "engine boosters are authoritatively cleared")
+        gamma_arena_test_assert.equals(conditions.booster_clear_calls, 1, "authoritative engine booster cleanup runs exactly once")
+        gamma_arena_test_assert.equals(service.clear_calls, 1, "bootstrap delegates booster cleanup exactly once")
+        gamma_arena_test_assert.equals(conditions.alcohol, initial_alcohol - 1, "write-only alcohol mutation precedes the engine clamp")
+        gamma_arena_test_assert.equals(conditions.alcohol_change_calls, 1, "engine alcohol reset uses the exported write-only API once")
+        gamma_arena_test_assert.equals(conditions.last_alcohol_delta, -1, "engine alcohol reset covers the normalized Monolith range")
+        gamma_arena_test_assert.is_true(conditions.GetAlcohol == nil, "fixture matches installed Monolith without a Lua alcohol getter")
+        conditions:UpdateConditionForTest()
+        gamma_arena_test_assert.equals(conditions.alcohol, 0, "next engine condition update clamps alcohol to zero")
+        gamma_arena_test_assert.is_false(conditions.alcohol_effector_active, "next engine condition update removes the alcohol effector")
+    end
+end
+
+function runtime_bootstrap_engine_booster_readback_is_nonfatal()
+    local stale_actor, stale_conditions, stale_service = fake_booster_reconciler({
+        retain_after_clear = true,
+        records = { { type = 0, time = 12, value = 0.01 } }
+    })
+    stale_conditions.wound_count = 0
+    stale_conditions.alcohol = 0.5
+    function stale_conditions:ClearWounds() self.wound_count = 0 end
+    function stale_conditions:WoundForEach(callback)
+        for index = 1, self.wound_count do callback({ index = index }) end
+    end
+    function stale_conditions:ChangeAlcohol(delta) self.alcohol = self.alcohol + delta end
+    local cast = { conditions = function() return stale_conditions end }
+    stale_actor.cast_Actor = function() return cast end
+    local stale = gamma_arena_bootstrap.test_clear_engine_actor_transients(stale_actor, stale_service)
+    gamma_arena_test_assert.is_true(stale.ok, "MT-TEST stale booster enumeration is converted to compatibility debt")
+    gamma_arena_test_assert.equals(stale.value.booster_debt, 1, "one stale native record arms one debt entry")
+    gamma_arena_test_assert.equals(stale_conditions.rates[0], 0, "stale health restoration contribution remains removed")
+    gamma_arena_test_assert.equals(#stale_service:debt_snapshot(), 1, "stale booster debt remains armed for expiry reconciliation")
+    gamma_arena_test_assert.equals(stale_conditions.clear_calls, 1, "stale readback never triggers a second destructive booster clear")
+
+    local wounded_actor = fake_actor_conditions({ retain_wounds = true })
+    local wounded_conditions = wounded_actor:cast_Actor():conditions()
+    local wounded = gamma_arena_bootstrap.test_clear_engine_actor_transients(wounded_actor, fake_direct_booster_clear(wounded_conditions))
+    gamma_arena_test_assert.is_false(wounded.ok, "surviving engine wound remains a fatal reset failure")
+    gamma_arena_test_assert.equals(wounded.error.code, "GA_ACTOR_TRANSIENT_VERIFY_FAILED", "wound readback failure code is stable")
+
+    local actor = fake_actor_conditions()
+    actor.cast_Actor = nil
+    local missing = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, { clear = function() return gamma_arena_result.ok(true) end })
+    gamma_arena_test_assert.is_false(missing.ok, "missing required condition API fails closed")
+    gamma_arena_test_assert.equals(missing.error.code, "GA_ACTOR_CONDITIONS_API_MISSING", "missing condition API code is stable")
+end
+
+function runtime_bootstrap_missing_alcohol_mutator_fails_closed()
+    local actor, conditions = fake_actor_conditions()
+    conditions.ChangeAlcohol = nil
+    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, fake_direct_booster_clear(conditions))
+    gamma_arena_test_assert.is_false(result.ok, "missing installed alcohol mutator fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_ALCOHOL_CLEAR_FAILED", "missing alcohol mutator code is stable")
+end
+
+function runtime_bootstrap_transient_reset_delegates_booster_clear_once()
+    local actor, conditions = fake_actor_conditions()
+    local service = fake_direct_booster_clear(conditions)
+    local result = gamma_arena_bootstrap.test_clear_engine_actor_transients(actor, service)
+    gamma_arena_test_assert.is_true(result.ok, "delegated transient reset succeeds")
+    gamma_arena_test_assert.equals(service.clear_calls, 1, "bootstrap invokes the reconciler once")
+    gamma_arena_test_assert.equals(conditions.booster_clear_calls, 1, "the reconciler owns the only native clear")
+end
+
+function runtime_bootstrap_resolves_all_exported_booster_types()
+    local names = {
+        { "eBoostHpRestore", "BoostHpRestore" }, { "eBoostPowerRestore", "BoostPowerRestore" },
+        { "eBoostRadiationRestore", "BoostRadiationRestore" }, { "eBoostBleedingRestore", "BoostBleedingRestore" },
+        { "eBoostMaxWeight", "BoostMaxWeight" }, { "eBoostRadiationProtection", "BoostRadiationProtection" },
+        { "eBoostTelepaticProtection", "BoostTelepaticProtection" }, { "eBoostChemicalBurnProtection", "BoostChemicalBurnProtection" },
+        { "eBoostBurnImmunity", "BoostBurnImmunity" }, { "eBoostShockImmunity", "BoostShockImmunity" },
+        { "eBoostRadiationImmunity", "BoostRadiationImmunity" }, { "eBoostTelepaticImmunity", "BoostTelepaticImmunity" },
+        { "eBoostChemicalBurnImmunity", "BoostChemicalBurnImmunity" }, { "eBoostExplImmunity", "BoostExplImmunity" },
+        { "eBoostStrikeImmunity", "BoostStrikeImmunity" }, { "eBoostFireWoundImmunity", "BoostFireWoundImmunity" },
+        { "eBoostWoundImmunity", "BoostWoundImmunity" }
+    }
+    local api = {}
+    local enum_namespace = {}
+    for index, descriptor in ipairs(names) do
+        enum_namespace[descriptor[1]] = 100 + index
+        api[descriptor[2]] = function() end
+    end
+    local resolved = gamma_arena_bootstrap.test_resolve_booster_types(api, enum_namespace)
+    gamma_arena_test_assert.is_true(resolved.ok, "split engine booster bindings resolve")
+    gamma_arena_test_assert.is_true(api.eBoostHpRestore == nil, "enum values are not copied onto the condition instance")
+    local count = 0
+    for _ in pairs(resolved.value) do count = count + 1 end
+    for _, expected in ipairs(names) do
+        local descriptor = resolved.value[enum_namespace[expected[1]]]
+        gamma_arena_test_assert.is_true(type(descriptor) == "table", "resolved map uses runtime enum values")
+        gamma_arena_test_assert.equals(descriptor.method, expected[2], "resolved map binds the exact correction method")
+    end
+    gamma_arena_test_assert.equals(count, 17, "every exported booster type is represented exactly once")
+end
+
+function runtime_bootstrap_rejects_incomplete_booster_bindings()
+    local api = { BoostHpRestore = function() end }
+    local missing_enum = gamma_arena_bootstrap.test_resolve_booster_types(api, {})
+    gamma_arena_test_assert.is_false(missing_enum.ok, "missing class enum fails closed")
+    gamma_arena_test_assert.equals(missing_enum.error.code, "GA_ACTOR_BOOSTER_TYPE_MAP_FAILED", "missing enum failure code is exact")
+    gamma_arena_test_assert.is_false(missing_enum.error.context.enum_available, "missing enum is identified")
+
+    local missing_method = gamma_arena_bootstrap.test_resolve_booster_types({}, { eBoostHpRestore = 0 })
+    gamma_arena_test_assert.is_false(missing_method.ok, "missing instance method fails closed")
+    gamma_arena_test_assert.equals(missing_method.error.code, "GA_ACTOR_BOOSTER_TYPE_MAP_FAILED", "missing method failure code is exact")
+    gamma_arena_test_assert.is_false(missing_method.error.context.method_available, "missing method is identified")
+end
+
+function runtime_bootstrap_gamma_transient_integrations_are_exact()
+    local parts = { "head", "torso", "rightarm", "leftarm", "rightleg", "leftleg" }
+    local bhs = { health = {}, maxhp = {}, timedhp = {}, head_tbl = { previous = 1, stage = 2, volume = 0.75 } }
+    for _, part in ipairs(parts) do bhs.health[part] = 1; bhs.maxhp[part] = part == "head" and 11 or 5; bhs.timedhp[part] = 2 end
+    function bhs.save_state(out)
+        out.head_tbl = { previous = bhs.head_tbl.previous, stage = bhs.head_tbl.stage, volume = bhs.head_tbl.volume }
+    end
+    function bhs.load_state(value) bhs.head_tbl = value.head_tbl end
+    local persisted, removed_event, command = {}, nil, nil
+    local utils = {
+        save_var = function(_, key, value) persisted[key] = value end,
+        load_var = function(_, key) return persisted[key] end
+    }
+    local reset = gamma_arena_bootstrap.test_reset_gamma_body_health({}, {
+        bhs = bhs,
+        utils = utils,
+        remove_time_event = function(kind, name) removed_event = { kind = kind, name = name } end,
+        execute = function(value) command = value end
+    })
+    gamma_arena_test_assert.is_true(reset.ok, "complete BHS integration resets successfully")
+    for _, part in ipairs(parts) do
+        gamma_arena_test_assert.equals(bhs.health[part], bhs.maxhp[part], "BHS part is fully restored: " .. part)
+        gamma_arena_test_assert.equals(bhs.timedhp[part], 0, "BHS timed treatment is cleared: " .. part)
+    end
+    gamma_arena_test_assert.equals(bhs.head_tbl.previous, bhs.maxhp.head, "BHS concussion baseline becomes healthy")
+    gamma_arena_test_assert.equals(bhs.head_tbl.stage, 0, "BHS concussion stage is cleared")
+    gamma_arena_test_assert.equals(bhs.head_tbl.volume, 0.75, "BHS configured effect volume is preserved")
+    gamma_arena_test_assert.equals(removed_event.kind, 0, "BHS delayed stage event namespace is exact")
+    gamma_arena_test_assert.equals(removed_event.name, "set_stage_two", "BHS delayed stage event is cancelled")
+    gamma_arena_test_assert.equals(command, "snd_volume_eff 0.75", "BHS effect volume is restored")
+
+    local psy_calls = {}
+    local psy = {
+        set_psy_health = function(value) psy_calls[#psy_calls + 1] = value end,
+        remove_all_psy_ppe_effects = function() psy_calls[#psy_calls + 1] = "clear" end
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_bootstrap.test_reset_gamma_psy(psy).ok, "GAMMA psy integration resets successfully")
+    gamma_arena_test_assert.equals(psy_calls[1], 1, "GAMMA psy health is restored first")
+    gamma_arena_test_assert.equals(psy_calls[2], "clear", "GAMMA psy PPE is removed second")
+
+    local pp, cam = {}, {}
+    local effectors = gamma_arena_bootstrap.test_clear_round_effectors({
+        remove_pp_effector = function(id) pp[#pp + 1] = id end,
+        remove_cam_effector = function(id) cam[#cam + 1] = id end
+    })
+    gamma_arena_test_assert.is_true(effectors.ok, "bounded Arena effector cleanup succeeds")
+    gamma_arena_test_assert.equals(#pp, 21, "only the bounded PP allowlist is removed")
+    gamma_arena_test_assert.equals(pp[1], 2011, "condition PP range starts exactly")
+    gamma_arena_test_assert.equals(pp[8], 99133, "BHS PP allowlist is exact")
+    gamma_arena_test_assert.equals(pp[9], 655808, "BHS blur allowlist starts exactly")
+    gamma_arena_test_assert.equals(pp[21], 655820, "BHS blur allowlist ends exactly")
+    gamma_arena_test_assert.equals(#cam, 8, "only the bounded camera allowlist is removed")
+    gamma_arena_test_assert.equals(cam[1], 1001, "bleed camera effector is removed")
+    gamma_arena_test_assert.equals(cam[8], 99271, "BHS camera allowlist is exact")
+end
+
+function runtime_actor_inventory_release_is_deferred_and_verified()
+    local env, adapter = fake_actor_adapter_env()
+    local first = env:add_item(12)
+    local second = env:add_item(13)
+    adapter:begin_update()
+    local normalized = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(normalized.ok, "owned Arena actor normalization must start")
+    gamma_arena_test_assert.equals(env.released[1], 12, "inventory IDs retain deterministic iteration order")
+    gamma_arena_test_assert.equals(env.released[2], 13, "equipped/inventory items are released after collection")
+    gamma_arena_test_assert.equals(first.parent_calls, 1, "real client item parent object is inspected")
+    gamma_arena_test_assert.equals(second.parent_calls, 1, "every inventory item uses game_object:parent()")
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "inventory cannot be verified on the purge update")
+    env:advance(0)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "a later update confirms the inventory is empty")
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:verify_inventory_empty().value, "inventory verification is idempotent")
+end
+
+function runtime_actor_inventory_drain_waits_for_looted_items()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 4000
+    env:add_item(12, { section = "wpn_ak74" })
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    local cleanup_calls = 0
+    adapter.deps.loadout = { cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end }
+
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and first.value.pending, "initial inventory drain stays pending")
+    for poll = 1, 3 do
+        env:advance(1000)
+        adapter:begin_update()
+        local pending = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending and pending.value.stage == "inventory_absence", "looted inventory remains a successful pending result for poll " .. poll)
+    end
+    gamma_arena_test_assert.equals(env.release_requests[12], 1, "initial weapon release is submitted once")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "initial ammo release is submitted once")
+    gamma_arena_test_assert.equals(cleanup_calls, 1, "victory cleanup runs once while drain is pending")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "victory drain retains one input lease")
+    env:advance(1000)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).value, "authoritative asynchronous removal completes the drain")
+end
+
+function runtime_actor_inventory_drain_releases_newly_surfaced_item_once()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "initial purge succeeds")
+    env:add_item(13)
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "newly surfaced item keeps inventory drain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "newly surfaced item is submitted once")
+    env:advance(1)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "unchanged submitted items remain pending")
+    gamma_arena_test_assert.equals(env.release_requests[13], 1, "later polls never duplicate new-item submission")
+
+    env:add_item(99)
+    env.release_fail_ids[99] = true
+    env:advance(1)
+    adapter:begin_update()
+    local failed = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(failed.ok, "new-item release submission failure is immediate")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_ACTOR_INVENTORY_RELEASE_FAILED", "new-item release failure code")
+end
+
+function runtime_actor_inventory_drain_times_out_with_sorted_evidence()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(13, { section = "ammo_5.45x39_fmj" })
+    env:add_item(12, { section_throw = true })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "never-finishing purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "drain remains pending before exact inactivity deadline")
+    env:remove_item(13)
+    env:add_item(14, { section = "wpn_lr300" })
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "same-count id replacement is progress")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "progress immediately before deadline resets inactivity")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "drain times out at the exact inactivity boundary")
+    gamma_arena_test_assert.equals(timed_out.error.code, "GA_ACTOR_INVENTORY_NOT_EMPTY", "drain timeout code")
+    local context = timed_out.error.context
+    gamma_arena_test_assert.equals(context.remaining_count, 2, "timeout reports remaining count")
+    gamma_arena_test_assert.equals(context.remaining_ids[1], 12, "timeout sorts remaining ids")
+    gamma_arena_test_assert.equals(context.remaining_ids[2], 14, "timeout replaces stale ids in evidence")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].id, 12, "timeout section evidence retains first sorted id")
+    gamma_arena_test_assert.equals(context.remaining_sections[1].section, "<unavailable>", "section failures are diagnostic only")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].id, 14, "timeout section evidence retains second sorted id")
+    gamma_arena_test_assert.equals(context.remaining_sections[2].section, "wpn_lr300", "timeout retains readable sections")
+    gamma_arena_test_assert.equals(context.poll_count, 4, "timeout counts every verification poll")
+    gamma_arena_test_assert.equals(context.elapsed_since_progress_ms, 10000, "timeout uses exact inactivity boundary")
+    gamma_arena_test_assert.equals(context.total_elapsed_ms, 19999, "progress does not reset total elapsed")
+    gamma_arena_test_assert.equals(context.timeout_ms, 10000, "timeout evidence retains configured timeout")
+end
+
+function runtime_actor_inventory_drain_timeout_is_wrap_safe()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env.now = 4294967290
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" }).ok, "wrap-safe purge starts")
+    env:advance(9999)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_false(adapter:verify_inventory_empty().value, "wrapped clock remains pending below timeout")
+    env:advance(1)
+    adapter:begin_update()
+    local timed_out = adapter:verify_inventory_empty()
+    gamma_arena_test_assert.is_false(timed_out.ok, "wrapped clock reaches timeout")
+    gamma_arena_test_assert.equals(timed_out.error.context.elapsed_since_progress_ms, 10000, "wrapped elapsed time is exact")
+    gamma_arena_test_assert.equals(timed_out.error.context.total_elapsed_ms, 10000, "wrapped total elapsed is exact")
+end
+
+function runtime_actor_inventory_drain_rejects_unowned_public_actor()
+    local env, adapter = fake_actor_adapter_env()
+    local foreign = {
+        id = function() return env.actor.actor_id + 1 end,
+        iterate_inventory = function() error("foreign actor must not be inspected") end
+    }
+    adapter:begin_update()
+    local result = adapter:purge_inventory(foreign)
+    gamma_arena_test_assert.is_false(result.ok, "public purge argument must be the currently owned Arena actor")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_NOT_OWNED", "public foreign actor uses ownership guard")
+    gamma_arena_test_assert.equals(env.release_submission_count, 0, "public foreign actor submits no releases")
+end
+
+function runtime_actor_inventory_native_identity_uses_ids()
+    local env, adapter = fake_actor_adapter_env()
+    local alias = env:actor_alias()
+    env:add_item(12, { parent = alias })
+    adapter:begin_update()
+    local called, result = pcall(function() return adapter:purge_inventory(alias) end)
+    gamma_arena_test_assert.is_true(called, "native game_object identity must not invoke __eq")
+    gamma_arena_test_assert.is_true(result.ok, "equal numeric actor IDs must authorize cleanup")
+    gamma_arena_test_assert.equals(env.equality_calls, 0, "native equality is never evaluated")
+    gamma_arena_test_assert.equals(env.released[1], 12, "owned item is released after ID proof")
+end
+
+function runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed()
+    local equality_calls = 0
+    local function poison_game_object_equality()
+        equality_calls = equality_calls + 1
+        error("bootstrap native game_object equality invoked")
+    end
+    local function proxy(mode, value)
+        local object = {}
+        if mode == "method" then
+            function object:id() return value end
+        elseif mode == "throw" then
+            function object:id() error("injected bootstrap actor id failure") end
+        elseif mode == "field" then
+            object.id = value
+        end
+        return setmetatable(object, { __eq = poison_game_object_equality })
+    end
+
+    local actor = proxy("method", 700)
+    local alias = proxy("method", 700)
+    gamma_arena_test_assert.is_true(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, true, "l05_bar"), "equal finite numeric ids prove Arena actor ownership")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, false, "l05_bar"), "inactive Arena session fails actor ownership closed")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, actor, true, "jupiter"), "wrong level fails actor ownership closed")
+    gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(proxy("method", 701), actor, true, "l05_bar"), "mismatched actor id fails ownership closed")
+
+    local invalid_objects = {
+        { label = "missing object", value = nil },
+        { label = "missing id method", value = proxy("missing") },
+        { label = "numeric id field", value = proxy("field", 700) },
+        { label = "throwing id method", value = proxy("throw") },
+        { label = "nil id", value = proxy("method", nil) },
+        { label = "infinite id", value = proxy("method", math.huge) },
+        { label = "negative infinite id", value = proxy("method", -math.huge) },
+        { label = "NaN id", value = proxy("method", math.huge - math.huge) },
+        { label = "negative id", value = proxy("method", -1) },
+        { label = "fractional id", value = proxy("method", 1.5) }
+    }
+    for _, case in ipairs(invalid_objects) do
+        gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(case.value, actor, true, "l05_bar"), case.label .. " candidate fails ownership closed")
+        gamma_arena_test_assert.is_false(gamma_arena_bootstrap.actor_ownership_matches(alias, case.value, true, "l05_bar"), case.label .. " current actor fails ownership closed")
+    end
+    gamma_arena_test_assert.equals(equality_calls, 0, "bootstrap actor ownership never evaluates native equality")
+end
+
+function runtime_actor_inventory_drain_rejects_direct_nil_and_invalid_snapshot_values()
+    local actor_id_cases = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(actor_id_cases) do
+        local env, adapter = fake_actor_adapter_env()
+        env.actor.actor_id = case.value
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid public actor id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_ID_INVALID", "invalid actor id error code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid actor id submits no releases")
+    end
+
+    local nil_env, nil_adapter = fake_actor_adapter_env()
+    nil_env.inventory_callback_sequence = { [1] = nil }
+    nil_env.inventory_callback_count = 1
+    nil_adapter:begin_update()
+    local nil_result = nil_adapter:purge_inventory(nil_env.actor)
+    gamma_arena_test_assert.is_false(nil_result.ok, "explicit nil inventory callback item fails closed")
+    gamma_arena_test_assert.equals(nil_result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "nil callback item code")
+    gamma_arena_test_assert.equals(nil_env.release_submission_count, 0, "nil callback item submits no releases")
+
+    local invalid_item_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_item_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env:add_item(case.value)
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid item id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_ITEM_INVALID", "invalid item id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid item id submits no releases")
+    end
+
+    local invalid_parent_ids = { { value = nil }, { value = -1 }, { value = 1.5 } }
+    for _, case in ipairs(invalid_parent_ids) do
+        local env, adapter = fake_actor_adapter_env()
+        env:add_item(46, { parent = { id = function() return case.value end } })
+        adapter:begin_update()
+        local result = adapter:purge_inventory(env.actor)
+        gamma_arena_test_assert.is_false(result.ok, "invalid parent id fails closed")
+        gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INVENTORY_OWNER_INVALID", "invalid parent id code")
+        gamma_arena_test_assert.equals(env.release_submission_count, 0, "invalid parent id submits no releases")
+    end
+end
+
+function runtime_actor_inventory_drain_submits_sorted_deduplicated_ids()
+    local env, adapter = fake_actor_adapter_env()
+    env.release_delay_ms = 20000
+    env:add_item(30)
+    env:add_item(10)
+    env:add_item(30)
+    env:add_item(2)
+    adapter:begin_update()
+    local result = adapter:purge_inventory(env.actor)
+    gamma_arena_test_assert.is_true(result.ok, "unsorted duplicate inventory snapshot purges")
+    gamma_arena_test_assert.equals(result.value, 3, "deduplicated snapshot count")
+    gamma_arena_test_assert.equals(env.release_submission_count, 3, "each observed id submits exactly once")
+    gamma_arena_test_assert.equals(env.released[1], 2, "first submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[2], 10, "second submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.released[3], 30, "third submission uses numeric sort")
+    gamma_arena_test_assert.equals(env.release_requests[30], 1, "duplicate id submits once")
+    gamma_arena_test_assert.equals(adapter.inventory_drain.last_count, 0, "transaction starts with approved zero last count")
+end
+
+function runtime_actor_inventory_drain_cleanup_clears_transaction()
+    local env, adapter = fake_actor_adapter_env()
+    env.never_finishes = true
+    env:add_item(12)
+    adapter:begin_update()
+    gamma_arena_test_assert.is_true(adapter:purge_inventory(env.actor).ok, "active drain starts before cleanup")
+    gamma_arena_test_assert.is_true(adapter.inventory_drain ~= nil, "active drain is retained while release is pending")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup clears active drain")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "first cleanup clears transaction state")
+    gamma_arena_test_assert.equals(adapter.purge_tick, nil, "first cleanup clears same-update gate")
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "session cleanup remains idempotent")
+    gamma_arena_test_assert.equals(adapter.inventory_drain, nil, "repeated cleanup keeps transaction cleared")
+end
+
+function runtime_actor_normalization_uses_gamma_bleeding_sentinel()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(result.ok, "normalization succeeds")
+    gamma_arena_test_assert.equals(env.actor.health_value, 1, "health normalized")
+    gamma_arena_test_assert.equals(env.actor.power, 1, "power normalized through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.radiation, 0, "radiation normalized through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.bleeding, 1, "GAMMA cured bleeding sentinel is written through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.psy_health, 1, "psy health normalized through the real actor property")
+    gamma_arena_test_assert.equals(env.actor.money_delta, -2500, "Arena actor money is zeroed by delta")
+    gamma_arena_test_assert.equals(env.effect_calls, 1, "optional animation timer feature is invoked when present")
+    gamma_arena_test_assert.equals(env.actor.position_value.x, 1, "actor is teleported to the spawn anchor x")
+    gamma_arena_test_assert.equals(env.actor.position_value.y, 2, "actor is teleported to the spawn anchor y")
+    gamma_arena_test_assert.equals(env.actor.position_value.z, 3, "actor is teleported to the spawn anchor z")
+    gamma_arena_test_assert.equals(env.actor.direction_value, -10, "actor direction uses the negative spawn-to-look heading")
+end
+
+function runtime_actor_rematch_resets_gamma_body_health()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    local reset = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(reset.ok, "rematch normalization invokes optional GAMMA body health integration")
+    gamma_arena_test_assert.equals(env.body_health_reset_calls, 1, "body health is reset once per rematch normalization")
+    for part, maximum in pairs(env.bhs.maxhp) do
+        gamma_arena_test_assert.equals(env.bhs.health[part], maximum, "rematch fully heals BHS part " .. part)
+        gamma_arena_test_assert.equals(env.bhs.timedhp[part], 0, "rematch clears pending BHS treatment for " .. part)
+    end
+end
+
+function runtime_actor_input_ownership_is_idempotent()
+    local env, adapter = fake_actor_adapter_env()
+    adapter:begin_update()
+    adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "global input is acquired once by this adapter")
+    adapter:release_input()
+    adapter:release_input()
+    gamma_arena_test_assert.equals(env.input_releases, 1, "only owned input is released once")
+end
+
+function runtime_actor_victory_reset_waits_for_inventory_absence()
+    local env, adapter = fake_actor_adapter_env()
+    local cleanup_calls = 0
+    adapter.deps.loadout = {
+        cleanup = function() cleanup_calls = cleanup_calls + 1; return gamma_arena_result.ok(true) end
+    }
+    adapter:begin_update()
+    local first = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(first.ok and type(first.value) == "table" and first.value.pending == true, "victory reset remains pending until a later update proves inventory absence")
+    adapter:begin_update()
+    local second = adapter:reset_for_rematch({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_true(second.ok and second.value == true, "later update completes victory reset after absence proof")
+    gamma_arena_test_assert.equals(cleanup_calls, 1, "owned loadout cleanup begins once per victory reset")
+    gamma_arena_test_assert.equals(env.input_acquires, 1, "victory reset retains one input ownership lease")
+end
+
+function runtime_actor_rejects_coincident_patrol_points()
+    local env, adapter = fake_actor_adapter_env()
+    env.positions.actor_look = fake_vector(1, 2, 3)
+    adapter:begin_update()
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "coincident spawn/look anchors fail closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_PATROL_COINCIDENT", "coincident patrol error code")
+    gamma_arena_test_assert.equals(env.input_releases, 1, "normalization failure releases owned input")
+end
+
+function runtime_actor_rejects_campaign_actor()
+    local env, adapter = fake_actor_adapter_env()
+    env.active = false
+    local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+    gamma_arena_test_assert.is_false(result.ok, "inactive/campaign actor must never be normalized")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ACTOR_INACTIVE", "campaign guard code")
+end
+
+function runtime_actor_normalization_does_not_query_legacy_boundary()
+    for _, inside in ipairs({ true, false }) do
+        local env, adapter = fake_actor_adapter_env()
+        env.boundary_inside = inside
+        local result = adapter:normalize_for_arena({ actor_spawn_path = "actor_spawn", actor_look_path = "actor_look" })
+        gamma_arena_test_assert.is_true(result.ok, "normalization uses resolved ingress regardless of legacy boundary state")
+        gamma_arena_test_assert.equals(env.actor.position_value.x, 1, "normalization positions actor at the resolved ingress")
+        gamma_arena_test_assert.equals(env.boundary_checks, 0, "normalization never queries the removed boundary port")
+    end
+end

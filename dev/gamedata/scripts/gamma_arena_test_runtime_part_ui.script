@@ -1,0 +1,1293 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+local function catalogs(...)
+    return gamma_arena_test_runtime_part_preflight.catalogs(...)
+end
+
+function runtime_custom_ui_initializes_one_authoritative_faction()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.faction_ids = { "stalker", "bandit" }
+    catalog.factions.bandit = clone(catalog.factions.stalker)
+    catalog.factions.bandit.id = "bandit"
+    local model = gamma_arena_custom_setup_model.new(
+        catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    local full_snapshot = model.snapshot
+    local bounded_status_snapshot = model.status_snapshot
+    local full_snapshot_calls, status_snapshot_calls = 0, 0
+    model.snapshot = function(self)
+        full_snapshot_calls = full_snapshot_calls + 1
+        return full_snapshot(self)
+    end
+    model.status_snapshot = function(self)
+        status_snapshot_calls = status_snapshot_calls + 1
+        return bounded_status_snapshot(self)
+    end
+    local calls = 0
+    local initialized = gamma_arena_ui_custom.initialize_faction(model, function(count)
+        calls = calls + 1
+        gamma_arena_test_assert.equals(count, #catalog.faction_ids, "picker sees authoritative factions")
+        return 2
+    end)
+    gamma_arena_test_assert.is_true(initialized.ok, "initial faction selection succeeds")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "picker chooses exact faction")
+    gamma_arena_test_assert.equals(calls, 1, "uninitialized model is picked once")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "faction initialization never builds a full catalog snapshot")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 1,
+        "faction initialization reads one bounded status snapshot")
+
+    local preserved = gamma_arena_ui_custom.initialize_faction(model, function()
+        error("preselected model must not consume another random choice")
+    end)
+    gamma_arena_test_assert.is_true(preserved.ok, "preselected faction is preserved")
+    gamma_arena_test_assert.equals(full_snapshot(model).faction, catalog.faction_ids[2], "second initialization is inert")
+    gamma_arena_test_assert.equals(full_snapshot_calls, 0,
+        "preselected faction initialization remains full-snapshot free")
+    gamma_arena_test_assert.equals(status_snapshot_calls, 2,
+        "preselected faction initialization reads only bounded status")
+end
+
+function runtime_custom_faction_picker_layout_and_textures_are_bounded()
+    local faction_ids = {
+        "army", "bandit", "csky", "dolg", "ecolog", "freedom", "greh",
+        "isg", "killer", "monolith", "renegade", "stalker", "zombied"
+    }
+    local arranged = gamma_arena_ui_faction_picker.layout(faction_ids)
+    gamma_arena_test_assert.is_true(arranged.ok, "13-faction picker layout is accepted")
+    gamma_arena_test_assert.equals(#arranged.value, 13, "picker layout preserves every faction")
+    gamma_arena_test_assert.equals(arranged.value[1].row, 1, "first faction starts in row one")
+    gamma_arena_test_assert.equals(arranged.value[1].column, 1, "first faction starts in column one")
+    gamma_arena_test_assert.equals(arranged.value[13].row, 4, "thirteenth faction uses bounded row four")
+    gamma_arena_test_assert.equals(arranged.value[13].column, 1, "thirteenth faction wraps to column one")
+    gamma_arena_test_assert.equals(gamma_arena_ui_faction_picker.texture_id("stalker"),
+        "ui_mm_faction_stalker", "ordinary factions reuse GAMMA patch textures")
+    gamma_arena_test_assert.equals(gamma_arena_ui_faction_picker.texture_id("zombied"),
+        "ui_new_game_flair_zombied", "Zombified uses the verified new-game flair fallback")
+
+    faction_ids[14] = "overflow"
+    local overflow = gamma_arena_ui_faction_picker.layout(faction_ids)
+    gamma_arena_test_assert.is_false(overflow.ok, "picker rejects more factions than XML slots")
+    gamma_arena_test_assert.equals(overflow.error.code, "GA_CUSTOM_FACTION_LIMIT",
+        "picker overflow has an exact bounded error")
+end
+
+function runtime_custom_faction_picker_select_and_cancel_are_atomic()
+    local emitted = {}
+    local picker = gamma_arena_ui_faction_picker.new({
+        on_select = function(id) emitted[#emitted + 1] = id end
+    })
+    local opened = picker:open({ "stalker", "bandit" }, "stalker")
+    gamma_arena_test_assert.is_true(opened.ok, "picker opens with authoritative factions")
+    gamma_arena_test_assert.is_true(picker:is_open(), "opened picker exposes modal state")
+
+    local rejected = picker:select("dolg")
+    gamma_arena_test_assert.is_false(rejected.ok, "picker rejects an unavailable faction")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_FACTION_UNKNOWN",
+        "invalid picker selection has an exact error")
+    gamma_arena_test_assert.equals(#emitted, 0, "invalid selection emits no mutation")
+    gamma_arena_test_assert.is_true(picker:is_open(), "invalid selection keeps the picker open")
+
+    local selected = picker:select("bandit")
+    gamma_arena_test_assert.is_true(selected.ok, "available faction selection succeeds")
+    gamma_arena_test_assert.equals(emitted[1], "bandit", "selection emits the exact faction once")
+    gamma_arena_test_assert.equals(#emitted, 1, "selection callback is not duplicated")
+    gamma_arena_test_assert.is_false(picker:is_open(), "successful selection closes the picker")
+
+    gamma_arena_test_assert.is_true(picker:open({ "stalker", "bandit" }, "bandit").ok,
+        "picker can reopen with the current selection")
+    gamma_arena_test_assert.is_true(picker:close().ok, "cancel closes safely")
+    gamma_arena_test_assert.equals(#emitted, 1, "cancel emits no selection")
+end
+
+function runtime_custom_ui_applies_confirmed_faction_atomically()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.faction_ids = { "stalker", "bandit" }
+    catalog.factions.bandit = clone(catalog.factions.stalker)
+    catalog.factions.bandit.id = "bandit"
+    local model = gamma_arena_custom_setup_model.new(
+        catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "fixture selects an initial faction")
+
+    local applied = gamma_arena_ui_custom.apply_faction_selection(model, "bandit")
+    gamma_arena_test_assert.is_true(applied.ok, "confirmed faction applies through the model")
+    gamma_arena_test_assert.equals(model:snapshot().faction, "bandit", "confirmed faction becomes authoritative")
+
+    local rejected = gamma_arena_ui_custom.apply_faction_selection(model, "dolg")
+    gamma_arena_test_assert.is_false(rejected.ok, "unavailable confirmed faction is rejected")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_FACTION_UNKNOWN",
+        "unavailable confirmed faction preserves the domain error")
+    gamma_arena_test_assert.equals(model:snapshot().faction, "bandit",
+        "failed faction selection preserves the prior model snapshot")
+end
+
+function runtime_custom_ui_escape_cancels_picker_before_navigation()
+    local picker = { opened = true, closes = 0 }
+    function picker:is_open() return self.opened end
+    function picker:close() self.opened = false; self.closes = self.closes + 1; return gamma_arena_result.ok(true) end
+    local backs = 0
+    local function back() backs = backs + 1; return gamma_arena_result.ok(true) end
+
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.handle_escape(picker, back).ok,
+        "Escape closes an open picker")
+    gamma_arena_test_assert.equals(picker.closes, 1, "open picker closes exactly once")
+    gamma_arena_test_assert.equals(backs, 0, "picker cancellation does not navigate away")
+
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.handle_escape(picker, back).ok,
+        "Escape navigates when the picker is already closed")
+    gamma_arena_test_assert.equals(backs, 1, "closed picker delegates one back navigation")
+end
+
+function runtime_custom_ui_readiness_guidance_tracks_launch_state()
+    local incomplete = gamma_arena_ui_custom.readiness_presentation({
+        launch_enabled = false,
+        readiness = {
+            { id = "outfit", complete = true },
+            { id = "weapon", complete = false }
+        }
+    })
+    gamma_arena_test_assert.equals(incomplete.caption_id, "st_gamma_arena_custom_required_to_start",
+        "blocked launch keeps the explicit requirement heading")
+    gamma_arena_test_assert.equals(incomplete.checks[1].marker, "[x] ",
+        "complete requirement uses a font-safe checked marker")
+    gamma_arena_test_assert.equals(incomplete.checks[1].state, "complete",
+        "complete requirement exposes semantic state")
+    gamma_arena_test_assert.equals(incomplete.checks[2].marker, "[ ] ",
+        "incomplete requirement uses an open marker")
+    gamma_arena_test_assert.equals(incomplete.checks[2].state, "incomplete",
+        "incomplete requirement exposes semantic state")
+
+    local ready = gamma_arena_ui_custom.readiness_presentation({
+        launch_enabled = true,
+        readiness = { { id = "outfit", complete = true } }
+    })
+    gamma_arena_test_assert.equals(ready.caption_id, "st_gamma_arena_custom_ready_to_start",
+        "launchable setup reports readiness beside the primary action")
+    gamma_arena_test_assert.equals(ready.checks[1].marker, "[x] ",
+        "ready setup preserves checked requirement markers")
+end
+
+function runtime_custom_ui_distinguishes_incomplete_and_failed_status()
+    local incomplete = gamma_arena_ui_custom.status_presentation({
+        validation_code = "GA_CUSTOM_OUTFIT_REQUIRED"
+    })
+    gamma_arena_test_assert.equals(incomplete.state, "incomplete", "missing outfit is guidance")
+    gamma_arena_test_assert.equals(incomplete.string_id,
+        "st_gamma_arena_custom_incomplete_outfit", "missing outfit has localized guidance")
+
+    local rejected = gamma_arena_ui_custom.status_presentation({
+        validation_code = "GA_CUSTOM_AMMO_INCOMPATIBLE",
+        operation_error_code = "GA_CUSTOM_OVERSPEND"
+    })
+    gamma_arena_test_assert.equals(rejected.state, "error", "rejected edit is an error")
+    gamma_arena_test_assert.equals(rejected.string_id,
+        "st_gamma_arena_custom_error_budget", "operation error owns the visible message")
+
+    local infrastructure = gamma_arena_ui_custom.status_presentation({
+        infrastructure_error_code = "GA_ITEM_CATALOG_INVALID"
+    })
+    gamma_arena_test_assert.equals(infrastructure.state, "error", "catalog failure is an error")
+    gamma_arena_test_assert.equals(infrastructure.string_id,
+        "st_gamma_arena_custom_error_setup", "catalog failure has bounded fallback")
+
+    local ready = gamma_arena_ui_custom.status_presentation({})
+    gamma_arena_test_assert.equals(ready.state, "ready", "valid projection is ready")
+    gamma_arena_test_assert.equals(ready.string_id, "st_gamma_arena_custom_ready", "ready text is preserved")
+end
+
+function runtime_custom_ui_formats_ap_and_routes_native_hover()
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.format_price_text("775"),
+        "775 AP", "ordinary price has explicit unit")
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.format_price_text("x2 140"),
+        "x2 140 AP", "doubled grenade price has explicit unit")
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.arena_price_text("775", function()
+        return "Arena price"
+    end), "Arena price: 775 AP", "native value line contains only labeled Arena price")
+
+    local panel = { resets = 0 }
+    function panel:Update() self.resets = self.resets + 1 end
+    local calls = {}
+    local catalog = { Update = function(_, received) calls[#calls + 1] = received; return false end }
+    local selected = { Update = function(_, received) calls[#calls + 1] = received; return true end }
+    gamma_arena_test_assert.is_true(
+        gamma_arena_ui_custom.update_item_hover(catalog, selected, panel), "either hovered container owns panel")
+    gamma_arena_test_assert.equals(calls[1], panel, "catalog receives shared native panel")
+    gamma_arena_test_assert.equals(calls[2], panel, "selected container receives shared native panel")
+    gamma_arena_test_assert.equals(panel.resets, 0, "owned hover does not reset panel")
+
+    catalog.Update = function() return false end
+    selected.Update = function() return false end
+    gamma_arena_test_assert.is_false(
+        gamma_arena_ui_custom.update_item_hover(catalog, selected, panel), "absent hover returns false")
+    gamma_arena_test_assert.equals(panel.resets, 1, "absent hover resets native panel")
+
+    local updates = 0
+    local capability = { Update = function(_, received) updates = updates + 1; return received == panel end }
+    local proxy = setmetatable({}, { __index = capability })
+    gamma_arena_test_assert.is_true(
+        gamma_arena_ui_custom.update_item_hover(proxy, proxy, panel),
+        "hover uses capabilities instead of concrete Lua table identity")
+    gamma_arena_test_assert.equals(updates, 2, "both capability-backed containers update")
+end
+
+function runtime_custom_ui_click_and_drag_dispatch_identical_commands()
+    local calls = {}
+    local model = {
+        add_one = function(_, section)
+            calls[#calls + 1] = "add:" .. section
+            return gamma_arena_result.ok({})
+        end,
+        remove_one = function(_, section)
+            calls[#calls + 1] = "remove:" .. section
+            return gamma_arena_result.ok({})
+        end,
+        equip_replacing = function(_, section)
+            calls[#calls + 1] = "equip:" .. section
+            return gamma_arena_result.ok({})
+        end
+    }
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_transfer(
+        model, "loadout_to_inventory", "wpn_alpha").ok, "loadout click dispatches remove and refunds AP")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_drop(
+        model, "loadout", "wpn_alpha", true, false).ok, "loadout drop dispatches remove and refunds AP")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_transfer(
+        model, "inventory_to_loadout", "wpn_alpha").ok, "inventory click dispatches add and spends AP")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_drop(
+        model, "inventory", "wpn_alpha", false, true).ok, "inventory drop dispatches add and spends AP")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.dispatch_equip(
+        model, "wpn_alpha").ok, "right click dispatches atomic equip")
+    gamma_arena_test_assert.equals(table.concat(calls, ","),
+        "remove:wpn_alpha,remove:wpn_alpha,add:wpn_alpha,add:wpn_alpha,equip:wpn_alpha",
+        "loadout refunds, catalog spending, valid drops, and equip route exact commands")
+
+    local outside = gamma_arena_ui_custom.dispatch_drop(
+        model, "loadout", "wpn_alpha", false, false)
+    gamma_arena_test_assert.is_true(outside.ok, "outside drop is safe")
+    gamma_arena_test_assert.is_false(outside.value.changed, "outside drop is an explicit no-op")
+    gamma_arena_test_assert.equals(#calls, 5, "outside drop never mutates model")
+end
+
+function runtime_custom_ui_rebuilds_catalog_left_and_selected_right()
+    local function fake_container()
+        local container = { cell = {}, sections = {} }
+        function container:Reset()
+            self.cell = {}
+            self.sections = {}
+        end
+        function container:AddItem(_, section)
+            self.sections[#self.sections + 1] = section
+            local cell = { section = section, flags = {} }
+            function cell:IsShown() return true end
+            function cell:Add_CustomText(value) self.custom_text = value end
+            function cell:Colorize(value) self.color = value end
+            cell.cell = { Enable = function(_, value) cell.enabled = value end }
+            self.cell[#self.cell + 1] = cell
+        end
+        function container:Scroll_Reinit() self.scrolled = true end
+        return container
+    end
+
+    local inventory = fake_container()
+    local loadout = fake_container()
+    gamma_arena_ui_custom.rebuild_panels(inventory, loadout, {
+        catalog_cells = {
+            { section = "catalog_alpha", effective_price = 75, price_text = 75 }
+        },
+        selected_cells = {
+            {
+                section = "selected_beta", effective_price = 425, price_text = 425,
+                quantity = 2, selected = true, equipped_slot = "weapon_1"
+            }
+        }
+    })
+
+    gamma_arena_test_assert.equals(#inventory.sections, 1, "left inventory contains one catalog cell")
+    gamma_arena_test_assert.equals(inventory.sections[1], "catalog_alpha",
+        "left inventory receives only the catalog projection")
+    gamma_arena_test_assert.equals(#loadout.sections, 1, "right loadout contains one selected cell")
+    gamma_arena_test_assert.equals(loadout.sections[1], "selected_beta",
+        "right loadout receives only the selected projection")
+    gamma_arena_test_assert.equals(inventory.cell[1].custom_text, "75 AP",
+        "catalog rebuild never renders a selected quantity suffix")
+    gamma_arena_test_assert.equals(loadout.cell[1].custom_text, "425 AP x2 W1",
+        "selected rebuild preserves quantity and equip projection")
+    gamma_arena_test_assert.is_true(inventory.cell[1].enabled and loadout.cell[1].enabled,
+        "both rebuilt cells remain enabled for hover and interaction")
+end
+
+function runtime_custom_ui_launch_projection_is_authoritative()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local model = gamma_arena_custom_setup_model.new(catalog, layout)
+    local emitted = {}
+    local ports = {
+        random_session_seed = function() return gamma_arena_result.ok(77) end,
+        parse_manual_seed = gamma_arena_session_store.parse_manual_seed,
+        emit_start = function(request)
+            emitted[#emitted + 1] = request
+            return gamma_arena_result.ok(request)
+        end
+    }
+    local initial_projection = gamma_arena_ui_custom.project(model, "weapon")
+    gamma_arena_test_assert.is_false(initial_projection.launch_enabled, "initial invalid draft disables Start")
+    gamma_arena_test_assert.equals(initial_projection.validation_code, "GA_CUSTOM_FACTION_UNKNOWN", "validation error is projected")
+    local blocked = gamma_arena_ui_custom.submit(model, "", ports)
+    gamma_arena_test_assert.is_false(blocked.ok, "invalid draft emits no custom request")
+    gamma_arena_test_assert.equals(#emitted, 0, "invalid draft does not cross emit boundary")
+
+    model:set_faction("stalker")
+    model:add_item("outfit_field", 1, "outfit")
+    model:add_item("wpn_alpha", 1); model:equip("wpn_alpha", "weapon_2")
+    model:add_item("ammo_alpha", 2)
+    model:add_item("wpn_knife", 1, "knife")
+    model:add_item("medkit", 1)
+    model:set_device("device_torch_nv_2")
+    local ready_projection = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(ready_projection.launch_enabled, "authoritatively valid draft enables Start")
+    gamma_arena_test_assert.equals(ready_projection.validation_code, nil, "valid projection clears error")
+    local submitted = gamma_arena_ui_custom.submit(model, "", ports)
+    gamma_arena_test_assert.is_true(submitted.ok, "valid draft emits custom request")
+    gamma_arena_test_assert.equals(#emitted, 1, "valid draft emits exactly once")
+    gamma_arena_test_assert.equals(emitted[1].schema_version, 2, "custom request uses schema 2")
+    gamma_arena_test_assert.equals(emitted[1].generation_recipe, "custom", "custom request selects custom recipe")
+    gamma_arena_test_assert.equals(emitted[1].difficulty_id, nil, "custom request has no random difficulty")
+    gamma_arena_test_assert.equals(emitted[1].session_seed, 77, "empty custom seed becomes random normalized seed")
+    gamma_arena_test_assert.equals(emitted[1].custom_config.faction, "stalker", "emitted request contains validated config copy")
+    gamma_arena_test_assert.equals(emitted[1].custom_config.actor_device, "device_torch_nv_2", "emitted request preserves dedicated device")
+    model:set_rank(1, "legend")
+    model:set_device(nil)
+    gamma_arena_test_assert.equals(emitted[1].custom_config.roster[1].rank, "novice", "emitted config is immutable from later edits")
+    gamma_arena_test_assert.equals(emitted[1].custom_config.actor_device, "device_torch_nv_2", "emitted device is immutable from later edits")
+end
+
+function runtime_custom_ui_projects_rejected_operation_until_success()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.expensive_medkit = clone(catalog.items.medkit)
+    catalog.items.expensive_medkit.section = "expensive_medkit"
+    catalog.items.expensive_medkit.price = 701
+    local model = gamma_arena_custom_setup_model.new(catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    local rejected = model:add_item("expensive_medkit", 1)
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_OVERSPEND", "rejected edit has operation-local code")
+    local projected = gamma_arena_ui_custom.project(model, "medicine")
+    gamma_arena_test_assert.equals(projected.validation_code, "GA_CUSTOM_FACTION_UNKNOWN", "full validation remains projected")
+    gamma_arena_test_assert.equals(projected.operation_error_code, "GA_CUSTOM_OVERSPEND", "rejected operation is projected")
+    gamma_arena_test_assert.equals(projected.summary_code, "GA_CUSTOM_OVERSPEND", "rejected operation owns bounded summary")
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "successful edit clears rejected-operation summary")
+    local cleared = gamma_arena_ui_custom.project(model, "medicine")
+    gamma_arena_test_assert.equals(cleared.operation_error_code, nil, "successful edit clears operation error")
+    gamma_arena_test_assert.equals(cleared.summary_code, cleared.validation_code, "summary returns to authoritative validation")
+end
+
+function runtime_custom_ui_catalog_failure_owns_summary()
+    local view = {
+        launch_enabled = true,
+        validation_code = 'GA_CUSTOM_CATALOG_INVALID',
+        summary_code = 'GA_CUSTOM_CATALOG_INVALID'
+    }
+    local failure = gamma_arena_result.err('GA_ITEM_CATALOG_CARRY_INVALID', 'Injected catalog failure', { field = 'max_walk_weight' })
+    local projected = gamma_arena_ui_custom.apply_catalog_result(view, failure)
+    gamma_arena_test_assert.is_false(projected.launch_enabled, 'catalog failure disables Start')
+    gamma_arena_test_assert.equals(projected.validation_code, 'GA_ITEM_CATALOG_CARRY_INVALID', 'primary catalog code owns validation')
+    gamma_arena_test_assert.equals(projected.summary_code, 'GA_ITEM_CATALOG_CARRY_INVALID', 'primary catalog code owns visible summary')
+end
+
+function runtime_custom_ui_catalog_projection_is_bounded_and_complete()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.categories = catalog.categories or {}
+    catalog.categories.weapon = {}
+    for index = 1, 4032 do
+        local section = string.format("wpn_page_%04d", index)
+        local item = clone(catalog.items.wpn_alpha)
+        item.section = section
+        catalog.items[section] = item
+        catalog.categories.weapon[index] = section
+    end
+    local model = gamma_arena_custom_setup_model.new(
+        catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+
+    local first = gamma_arena_ui_custom.project(model, "weapon", 1)
+    gamma_arena_test_assert.equals(#first.catalog_cells, 80,
+        "first Custom catalog page is bounded")
+    gamma_arena_test_assert.equals(first.catalog_page, 1, "first page index")
+    gamma_arena_test_assert.equals(first.catalog_page_count, 51, "page count rounds up")
+    gamma_arena_test_assert.equals(first.catalog_item_count, 4032, "full item count remains visible")
+    gamma_arena_test_assert.is_false(first.catalog_has_previous, "first page has no previous")
+    gamma_arena_test_assert.is_true(first.catalog_has_next, "first page has next")
+
+    local seen = {}
+    for page = 1, first.catalog_page_count do
+        local view = gamma_arena_ui_custom.project(model, "weapon", page)
+        gamma_arena_test_assert.is_true(#view.catalog_cells <= 80,
+            "every Custom catalog page is bounded")
+        for offset, cell in ipairs(view.catalog_cells) do
+            gamma_arena_test_assert.equals(cell.section,
+                catalog.categories.weapon[(page - 1) * 80 + offset],
+                "catalog page preserves exact source section order")
+            gamma_arena_test_assert.equals(seen[cell.section], nil,
+                "catalog section appears on one page")
+            seen[cell.section] = true
+        end
+    end
+    local last = gamma_arena_ui_custom.project(model, "weapon", 999)
+    gamma_arena_test_assert.equals(last.catalog_page, 51, "oversized page clamps")
+    gamma_arena_test_assert.equals(#last.catalog_cells, 32, "last page contains remainder")
+    gamma_arena_test_assert.is_true(last.catalog_has_previous, "last page has previous")
+    gamma_arena_test_assert.is_false(last.catalog_has_next, "last page has no next")
+    local seen_count = 0
+    for _ in pairs(seen) do seen_count = seen_count + 1 end
+    gamma_arena_test_assert.equals(seen_count, 4032,
+        "all valid Custom catalog items remain reachable")
+end
+
+function runtime_custom_presenter_filters_sorts_and_pages_deterministically()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.wpn_alpha.name_key = "fixture_wpn_alpha"
+    catalog.items.ammo_alpha.name_key = "fixture_ammo_alpha"
+    catalog.items.wpn_beta = clone(catalog.items.wpn_alpha)
+    catalog.items.wpn_beta.section = "wpn_beta"
+    catalog.items.wpn_beta.name_key = "fixture_wpn_beta"
+    catalog.items.wpn_gamma = clone(catalog.items.wpn_alpha)
+    catalog.items.wpn_gamma.section = "wpn_gamma"
+    catalog.items.wpn_gamma.name_key = "fixture_wpn_gamma"
+    catalog.items.wpn_gamma.price = catalog.items.wpn_alpha.price + 1
+    catalog.categories = {
+        weapon = { "wpn_beta", "wpn_gamma", "wpn_alpha" }, ammo = { "ammo_alpha" },
+        outfit = { "outfit_field" }, helmet = { "helmet_open" },
+        knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    local names = {
+        fixture_wpn_alpha = "Alpha Rifle",
+        fixture_wpn_beta = "Alpha Rifle",
+        fixture_wpn_gamma = "Gamma Rifle",
+        fixture_ammo_alpha = "Alpha Ammo"
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        page_size = 1,
+        translate = function(key) return names[key] or key end
+    })
+
+    local searched = presenter:project(model, {
+        filter = "all", search = "alpha rifle", sort = "price_asc", page = 1
+    })
+    gamma_arena_test_assert.equals(searched.catalog_item_count, 2,
+        "localized search retains both exact weapon variants")
+    gamma_arena_test_assert.equals(#searched.catalog_cells, 1, "page size is bounded")
+    gamma_arena_test_assert.equals(searched.catalog_cells[1].section, "wpn_alpha",
+        "same-name same-price ties use exact section")
+    gamma_arena_test_assert.is_true(searched.catalog_has_next, "second stable page remains reachable")
+
+    local second = presenter:project(model, {
+        filter = "weapon", search = "alpha rifle", sort = "price_asc", page = 2
+    })
+    gamma_arena_test_assert.equals(second.catalog_cells[1].section, "wpn_beta",
+        "second page preserves deterministic tie order")
+    local section_search = presenter:project(model, {
+        filter = "all", search = "ammo_alpha", sort = "name_asc", page = 1
+    })
+    gamma_arena_test_assert.equals(section_search.catalog_cells[1].section, "ammo_alpha",
+        "exact section fallback remains searchable")
+
+    local descending_presenter = gamma_arena_custom_setup_presenter.new({
+        page_size = 10,
+        translate = function(key) return names[key] or key end
+    })
+    local price_called, price_desc = pcall(descending_presenter.project, descending_presenter, model, {
+        filter = "weapon", search = "", sort = "price_desc", page = 1
+    })
+    gamma_arena_test_assert.is_true(price_called,
+        "price descending comparator preserves a strict order")
+    local price_sections = {}
+    for index, cell in ipairs(price_desc.catalog_cells) do price_sections[index] = cell.section end
+    gamma_arena_test_assert.equals(table.concat(price_sections, ","),
+        "wpn_gamma,wpn_alpha,wpn_beta", "price descending is stable across unequal and tied prices")
+
+    local name_called, name_desc = pcall(descending_presenter.project, descending_presenter, model, {
+        filter = "weapon", search = "", sort = "name_desc", page = 1
+    })
+    gamma_arena_test_assert.is_true(name_called,
+        "name descending comparator preserves a strict order")
+    local name_sections = {}
+    for index, cell in ipairs(name_desc.catalog_cells) do name_sections[index] = cell.section end
+    gamma_arena_test_assert.equals(table.concat(name_sections, ","),
+        "wpn_gamma,wpn_alpha,wpn_beta", "name descending is stable across unequal and tied names")
+end
+
+function runtime_custom_presenter_preview_and_readiness_are_authoritative()
+    local invalid_presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local invalid = invalid_presenter:project({}, {})
+    gamma_arena_test_assert.equals(invalid.count, 0, "invalid model has a safe empty roster")
+    gamma_arena_test_assert.equals(invalid.remaining, 0, "invalid model has safe empty points")
+    gamma_arena_test_assert.equals(#invalid.readiness, 5, "invalid model preserves checklist shape")
+
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.wpn_alpha.price = 701
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local before = model:snapshot()
+    local view = presenter:project(model, {
+        filter = "weapon", search = "", sort = "price_asc", page = 1
+    })
+    gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
+        "unaffordable preview is muted")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason,
+        "GA_CUSTOM_OVERSPEND", "preview exposes exact reason")
+    gamma_arena_test_assert.equals(#model:snapshot().actor_items, #before.actor_items,
+        "page preview never mutates draft")
+    gamma_arena_test_assert.equals(#view.readiness, 5, "readiness has five fixed checks")
+    for _, check in ipairs(view.readiness) do
+        gamma_arena_test_assert.is_false(check.complete, "empty draft keeps every requirement incomplete")
+    end
+
+    catalog = gamma_arena_test_custom_config.make_catalog()
+    model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    presenter = gamma_arena_custom_setup_presenter.new({ translate = function(key) return key end })
+    model:add_one("outfit_field")
+    model:add_one("wpn_knife")
+    model:add_one("wpn_alpha")
+    model:add_one("ammo_alpha")
+    model:add_one("medkit")
+    view = presenter:project(model, { filter = "all", sort = "price_asc", page = 1 })
+    for _, check in ipairs(view.readiness) do
+        gamma_arena_test_assert.is_true(check.complete, "complete inventory satisfies " .. check.id)
+    end
+    gamma_arena_test_assert.is_false(view.launch_enabled,
+        "checklist completion never bypasses missing faction validation")
+end
+
+function runtime_catalog_default_success_is_reused_only_for_default_source()
+    return gamma_arena_test_runtime_support.with_default_catalog_source(function()
+        local first = gamma_arena_catalog.load()
+        local original_audit, original_log = gamma_arena_weapon_safety.audit, gamma_arena_weapon_safety.log_report
+        local audits, logs = 0, 0
+        gamma_arena_weapon_safety.audit = function(...)
+            audits = audits + 1
+            return original_audit(...)
+        end
+        gamma_arena_weapon_safety.log_report = function(...)
+            logs = logs + 1
+            return original_log(...)
+        end
+        local second = gamma_arena_catalog.load()
+        gamma_arena_weapon_safety.audit, gamma_arena_weapon_safety.log_report = original_audit, original_log
+        gamma_arena_test_assert.equals(audits, 0, "cached catalog does not repeat resource audit")
+        gamma_arena_test_assert.equals(logs, 0, "cached catalog does not repeat rejection logging")
+        gamma_arena_test_assert.is_true(first.ok and second.ok,
+            "default runtime catalog loads successfully")
+        gamma_arena_test_assert.equals(second, first,
+            "default runtime catalog reuses one successful Result")
+        gamma_arena_test_assert.equals(second.value, first.value,
+            "default runtime catalog reuses one immutable snapshot")
+        gamma_arena_test_assert.is_true(type(first.value.weapon_safety) == "table", "runtime catalog has mandatory resource audit")
+
+        local injected_first = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
+        local injected_second = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
+        gamma_arena_test_assert.is_true(injected_first.ok and injected_second.ok,
+            "injected catalogs still load successfully")
+        gamma_arena_test_assert.is_true(injected_first ~= injected_second,
+            "injected catalog Results are not shared")
+        gamma_arena_test_assert.is_true(injected_first.value ~= injected_second.value,
+        "injected catalog snapshots are not cached")
+    end)
+end
+
+function runtime_custom_presenter_refreshes_status_without_catalog_snapshot()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+    local view = {
+        catalog_cells = catalog_cells,
+        filter = "weapon",
+        search = "alpha",
+        sort = "name_asc",
+        catalog_page = 2,
+        catalog_page_count = 3,
+        catalog_item_count = 161,
+        catalog_has_previous = true,
+        catalog_has_next = true,
+        selected_cells = { { section = "medkit" } },
+        readiness = { { id = "outfit", complete = true } }
+    }
+    local status_calls = 0
+    local model = {
+        catalog = { items = {} },
+        snapshot = function() error("full catalog snapshot must not run during status refresh") end,
+        status_snapshot = function()
+            status_calls = status_calls + 1
+            return {
+                validation = gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction is required"),
+                roster = { { rank = "veteran" }, { rank = "master" } },
+                count = 2,
+                capacity = 10,
+                actor_device = "device_torch_nv_2",
+                device_options = {
+                    {
+                        section = "device_torch_nv_2", price = 120, weight_mg = 900,
+                        selected = true, affordable = true, disabled = false, disabled_reason = nil
+                    }
+                },
+                budget = 900,
+                spent = 240,
+                remaining = 660,
+                weight_mg = 13000,
+                weight_limit_mg = 50000,
+                can_start = false,
+                last_operation = gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Too expensive")
+            }
+        end
+    }
+
+    local refreshed = presenter:refresh_status(model, view)
+    gamma_arena_test_assert.equals(status_calls, 1, "status refresh calls only status_snapshot once")
+    gamma_arena_test_assert.equals(refreshed, view, "status refresh updates the existing catalog view")
+    gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells,
+        "status refresh preserves existing catalog cells")
+    gamma_arena_test_assert.equals(refreshed.filter, "weapon", "status refresh preserves filter state")
+    gamma_arena_test_assert.equals(refreshed.catalog_page, 2, "status refresh preserves page state")
+    gamma_arena_test_assert.equals(refreshed.count, 2, "status refresh updates roster count")
+    gamma_arena_test_assert.equals(refreshed.roster[2].rank, "master", "status refresh updates roster rows")
+    gamma_arena_test_assert.equals(refreshed.actor_device, "device_torch_nv_2", "status refresh updates actor device")
+    gamma_arena_test_assert.equals(refreshed.device_options[1].section, "device_torch_nv_2",
+        "status refresh updates device options")
+    gamma_arena_test_assert.equals(refreshed.remaining, 660, "status refresh updates remaining budget")
+    gamma_arena_test_assert.equals(refreshed.weight_mg, 13000, "status refresh updates weight totals")
+end
+
+function runtime_custom_presenter_refreshes_affordability_without_model_preview()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local hard_context = { section = "hard_error" }
+    local view = {
+        remaining = 600,
+        catalog_cells = {
+            { section = "affordable", effective_price = 500, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
+            { section = "budget_only", effective_price = 700, disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } },
+            { section = "hard_error", effective_price = 100, disabled = true,
+                disabled_reason = "GA_CUSTOM_AMMO_ORPHAN", disabled_context = hard_context }
+        }
+    }
+    local same = presenter:refresh_affordability(view)
+    gamma_arena_test_assert.equals(same, view, "affordability refresh mutates the existing view")
+    gamma_arena_test_assert.is_false(view.catalog_cells[1].disabled, "fitting cell remains enabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "fitting cell clears stale disabled context")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "non-fitting cell remains budget-disabled")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_context, nil,
+        "retained overspend clears stale disabled context")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_reason, "GA_CUSTOM_AMMO_ORPHAN",
+        "hard rejection survives budget refresh")
+    gamma_arena_test_assert.equals(view.catalog_cells[3].disabled_context, hard_context,
+        "hard rejection preserves its disabled context identity")
+
+    view.remaining = 800
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_false(view.catalog_cells[2].disabled,
+        "budget increase enables a formerly overspent cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[2].disabled_reason, nil,
+        "budget increase clears only overspend reason")
+    gamma_arena_test_assert.is_true(view.catalog_cells[3].disabled,
+        "budget increase never clears a hard rejection")
+
+    view.remaining = 400
+    view.catalog_cells[1].disabled_context = { stale = true }
+    presenter:refresh_affordability(view)
+    gamma_arena_test_assert.is_true(view.catalog_cells[1].disabled,
+        "budget decrease disables a newly unaffordable cell")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "budget decrease assigns exact overspend reason")
+    gamma_arena_test_assert.equals(view.catalog_cells[1].disabled_context, nil,
+        "new overspend clears stale disabled context")
+
+    local malformed = {
+        remaining = 800,
+        catalog_cells = {
+            { section = "negative_price", effective_price = -1, disabled = false, disabled_reason = nil,
+                disabled_context = { stale = true } },
+            { section = "invalid_price", effective_price = "invalid", disabled = true,
+                disabled_reason = "GA_CUSTOM_OVERSPEND", disabled_context = { stale = true } }
+        }
+    }
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "negative projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "malformed projected price becomes a hard action failure")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_context, nil,
+        "negative projected price clears stale disabled context")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[2].disabled_context, nil,
+        "malformed projected price clears stale disabled context")
+
+    malformed.catalog_cells[1].effective_price = 1
+    presenter:refresh_affordability(malformed)
+    gamma_arena_test_assert.is_true(malformed.catalog_cells[1].disabled,
+        "hard action failure remains disabled after a later fitting price")
+    gamma_arena_test_assert.equals(malformed.catalog_cells[1].disabled_reason, "GA_CUSTOM_ACTION_FAILED",
+        "hard action failure is outside the mutable affordability reasons")
+
+    local carry_bonus = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    outfit = {
+                        { section = "bonus_outfit", category = "outfit", name_key = "bonus_outfit",
+                            base_price = 700, weight_mg = 5000, carry_bonus_mg = 10000,
+                            preview_multiplier = 1, preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600,
+                weight_mg = 49000, weight_limit_mg = 50000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "outfit", search = "", sort = "price_asc", page = 1 })
+    local carry_bonus_cell = carry_bonus.catalog_cells[1]
+    gamma_arena_test_assert.equals(carry_bonus_cell.hard_disabled_reason, nil,
+        "first outfit projects 54000 weight against its effective 60000 carry limit")
+    carry_bonus.remaining = 800
+    presenter:refresh_affordability(carry_bonus)
+    gamma_arena_test_assert.is_false(carry_bonus_cell.disabled,
+        "carry-bonus outfit becomes enabled when its independent budget block clears")
+    gamma_arena_test_assert.equals(carry_bonus_cell.disabled_reason, nil,
+        "valid 54000/60000 outfit projection has no stale overweight reason")
+
+    local dual = presenter:project({
+        catalog = { items = {} },
+        snapshot = function()
+            return {
+                categories = {
+                    weapon = {
+                        { section = "heavy_overbudget", category = "weapon", name_key = "heavy_overbudget",
+                            base_price = 700, weight_mg = 300, preview_multiplier = 1,
+                            preview_effective_price = 700 }
+                    }
+                },
+                validation = gamma_arena_result.ok({}),
+                actor_items = {}, device_options = {}, roster = {}, count = 0, capacity = 10,
+                budget = 600, spent = 0, remaining = 600, weight_mg = 800, weight_limit_mg = 1000,
+                can_start = false
+            }
+        end,
+        preview_add_one = function()
+            return gamma_arena_result.err("GA_CUSTOM_OVERSPEND", "Candidate exceeds budget", {
+                points = 700, budget = 600
+            })
+        end
+    }, { filter = "weapon", search = "", sort = "price_asc", page = 1 })
+    local dual_cell = dual.catalog_cells[1]
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERSPEND",
+        "full projection preserves the validation order's overspend result")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "full projection preserves simultaneous overweight as an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.hard_disabled_context.weight_mg, 1100,
+        "independent hard block records the candidate weight")
+    local dual_hard_context = dual_cell.hard_disabled_context
+    dual.remaining = 800
+    presenter:refresh_affordability(dual)
+    gamma_arena_test_assert.is_true(dual_cell.disabled,
+        "budget increase does not enable a cell with an independent hard block")
+    gamma_arena_test_assert.equals(dual_cell.disabled_reason, "GA_CUSTOM_OVERWEIGHT",
+        "budget increase reveals the preserved overweight reason")
+    gamma_arena_test_assert.equals(dual_cell.disabled_context, dual_hard_context,
+        "budget increase preserves the independent hard context identity")
+end
+
+function runtime_custom_presenter_status_failures_preserve_catalog_view()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local function assert_preserved(model, name)
+        local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+        local selected_cells = { { section = "medkit", quantity = 2 } }
+        local readiness = { { id = "outfit", complete = true } }
+        local view = {
+            catalog_cells = catalog_cells,
+            selected_cells = selected_cells,
+            readiness = readiness,
+            filter = "weapon",
+            search = "alpha",
+            sort = "name_desc",
+            catalog_page = 2,
+            catalog_page_count = 5,
+            catalog_item_count = 321,
+            catalog_has_previous = true,
+            catalog_has_next = true,
+            actor_device = "device_torch_nv_1",
+            remaining = 444
+        }
+        local refreshed = presenter:refresh_status(model, view)
+        gamma_arena_test_assert.equals(refreshed, view, name .. " failure retains the existing view")
+        gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells, name .. " failure retains catalog cells")
+        gamma_arena_test_assert.equals(refreshed.selected_cells, selected_cells, name .. " failure retains selected cells")
+        gamma_arena_test_assert.equals(refreshed.readiness, readiness, name .. " failure retains readiness")
+        gamma_arena_test_assert.equals(refreshed.filter, "weapon", name .. " failure retains filter")
+        gamma_arena_test_assert.equals(refreshed.search, "alpha", name .. " failure retains search")
+        gamma_arena_test_assert.equals(refreshed.sort, "name_desc", name .. " failure retains sort")
+        gamma_arena_test_assert.equals(refreshed.catalog_page, 2, name .. " failure retains page")
+        gamma_arena_test_assert.equals(refreshed.catalog_page_count, 5, name .. " failure retains navigation")
+        gamma_arena_test_assert.equals(refreshed.actor_device, "device_torch_nv_1", name .. " failure retains device")
+        gamma_arena_test_assert.equals(refreshed.remaining, 444, name .. " failure retains budget")
+        gamma_arena_test_assert.is_false(refreshed.launch_enabled, name .. " failure disables launch")
+        gamma_arena_test_assert.equals(refreshed.infrastructure_error_code, "GA_CUSTOM_MODEL_INVALID",
+            name .. " failure owns infrastructure status")
+        gamma_arena_test_assert.equals(refreshed.summary_code, "GA_CUSTOM_MODEL_INVALID",
+            name .. " failure owns visible status")
+    end
+
+    assert_preserved({}, "missing status_snapshot")
+    assert_preserved({ status_snapshot = function() error("injected status failure") end }, "thrown status_snapshot")
+    assert_preserved({ status_snapshot = function() return true end }, "malformed status_snapshot")
+end
+
+function runtime_custom_presenter_success_clears_transient_infrastructure_status()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+    local selected_cells = { { section = "medkit", quantity = 1 } }
+    local readiness = { { id = "outfit", complete = true } }
+    local view = {
+        catalog_cells = catalog_cells,
+        selected_cells = selected_cells,
+        readiness = readiness,
+        filter = "weapon",
+        search = "alpha",
+        sort = "name_desc",
+        catalog_page = 2,
+        catalog_page_count = 5,
+        catalog_has_previous = true,
+        catalog_has_next = true
+    }
+    local failed = presenter:refresh_status({}, view)
+    gamma_arena_test_assert.equals(failed.infrastructure_error_code, "GA_CUSTOM_MODEL_INVALID",
+        "failed status refresh owns transient infrastructure status")
+
+    local refreshed = presenter:refresh_status({
+        status_snapshot = function()
+            return {
+                validation = gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction is required"),
+                roster = { { rank = "veteran" } },
+                count = 1,
+                capacity = 10,
+                actor_device = nil,
+                device_options = {},
+                budget = 600,
+                spent = 0,
+                remaining = 600,
+                weight_mg = 0,
+                weight_limit_mg = 50000,
+                can_start = false,
+                last_operation = nil
+            }
+        end
+    }, view)
+    gamma_arena_test_assert.equals(refreshed, view, "successful status refresh retains existing view")
+    gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells,
+        "successful status refresh retains catalog cells")
+    gamma_arena_test_assert.equals(refreshed.selected_cells, selected_cells,
+        "successful status refresh retains selected cells")
+    gamma_arena_test_assert.equals(refreshed.readiness, readiness,
+        "successful status refresh retains readiness")
+    gamma_arena_test_assert.equals(refreshed.filter, "weapon", "successful status refresh retains filter")
+    gamma_arena_test_assert.equals(refreshed.catalog_page, 2, "successful status refresh retains navigation")
+    gamma_arena_test_assert.equals(refreshed.infrastructure_error_code, nil,
+        "successful status refresh clears transient infrastructure status")
+    gamma_arena_test_assert.equals(refreshed.summary_code, "GA_CUSTOM_FACTION_UNKNOWN",
+        "successful status refresh returns validation status")
+end
+
+function runtime_custom_presenter_rejects_malformed_status_snapshots_atomically()
+    local presenter = gamma_arena_custom_setup_presenter.new({
+        translate = function(key) return key end
+    })
+    local function valid_status()
+        return {
+            validation = gamma_arena_result.err("GA_CUSTOM_FACTION_UNKNOWN", "Faction is required"),
+            roster = { { rank = "veteran" } },
+            count = 1,
+            capacity = 10,
+            faction = "stalker",
+            actor_device = nil,
+            device_options = {},
+            budget = 600,
+            spent = 100,
+            remaining = 500,
+            weight_mg = 1000,
+            weight_limit_mg = 50000,
+            can_start = false,
+            last_operation = nil
+        }
+    end
+    local scenarios = {
+        { name = "partial table", mutate = function(status) for key in pairs(status) do status[key] = nil end end },
+        { name = "validation missing ok", mutate = function(status) status.validation = {} end },
+        { name = "validation ok wrong type", mutate = function(status) status.validation.ok = "false" end },
+        { name = "failed validation missing error", mutate = function(status)
+            status.validation = { ok = false }
+        end },
+        { name = "failed validation missing error code", mutate = function(status)
+            status.validation = { ok = false, error = { message = "invalid", context = {} } }
+        end },
+        { name = "failed validation missing error message", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", context = {} } }
+        end },
+        { name = "failed validation missing error context", mutate = function(status)
+            status.validation = { ok = false, error = { code = "GA_CUSTOM_INVALID", message = "invalid" } }
+        end },
+        { name = "failed validation claims start", mutate = function(status) status.can_start = true end },
+        { name = "successful validation denies start", mutate = function(status)
+            status.validation = gamma_arena_result.ok({})
+            status.can_start = false
+        end },
+        { name = "roster row missing rank", mutate = function(status) status.roster = { {} } end },
+        { name = "roster row wrong type", mutate = function(status) status.roster = { false } end },
+        { name = "count exceeds capacity", mutate = function(status)
+            status.roster[2] = { rank = "novice" }
+            status.count = 2
+            status.capacity = 1
+        end },
+        { name = "count exceeds fixed roster controls", mutate = function(status)
+            for index = 2, 11 do status.roster[index] = { rank = "novice" } end
+            status.count = 11
+            status.capacity = 11
+        end },
+        { name = "device options wrong type", mutate = function(status) status.device_options = false end },
+        { name = "device option wrong element", mutate = function(status) status.device_options = { false } end }
+    }
+    for _, scenario in ipairs(scenarios) do
+        local catalog_cells = { { section = "wpn_alpha", disabled = false } }
+        local selected_cells = { { section = "medkit", quantity = 1 } }
+        local readiness = { { id = "outfit", complete = true } }
+        local view = {
+            catalog_cells = catalog_cells,
+            selected_cells = selected_cells,
+            readiness = readiness,
+            filter = "weapon",
+            search = "alpha",
+            sort = "name_desc",
+            catalog_page = 2,
+            catalog_page_count = 5,
+            catalog_has_previous = true,
+            catalog_has_next = true,
+            actor_device = "device_torch_nv_1",
+            remaining = 444
+        }
+        local status = valid_status()
+        scenario.mutate(status)
+        local called, refreshed = pcall(presenter.refresh_status, presenter, {
+            status_snapshot = function() return status end
+        }, view)
+        gamma_arena_test_assert.is_true(called, scenario.name .. " status refresh is crash-safe")
+        gamma_arena_test_assert.equals(refreshed, view, scenario.name .. " retains the existing view")
+        gamma_arena_test_assert.equals(refreshed.catalog_cells, catalog_cells,
+            scenario.name .. " retains catalog cells")
+        gamma_arena_test_assert.equals(refreshed.selected_cells, selected_cells,
+            scenario.name .. " retains selected cells")
+        gamma_arena_test_assert.equals(refreshed.readiness, readiness,
+            scenario.name .. " retains readiness")
+        gamma_arena_test_assert.equals(refreshed.filter, "weapon", scenario.name .. " retains filter")
+        gamma_arena_test_assert.equals(refreshed.catalog_page, 2, scenario.name .. " retains navigation")
+        gamma_arena_test_assert.equals(refreshed.actor_device, "device_torch_nv_1",
+            scenario.name .. " preserves device before shape validation")
+        gamma_arena_test_assert.equals(refreshed.remaining, 444,
+            scenario.name .. " preserves budget before shape validation")
+        gamma_arena_test_assert.is_false(refreshed.launch_enabled, scenario.name .. " disables launch")
+        gamma_arena_test_assert.equals(refreshed.infrastructure_error_code, "GA_CUSTOM_MODEL_INVALID",
+            scenario.name .. " owns infrastructure status")
+    end
+end
+
+function runtime_custom_ui_refresh_helpers_preserve_native_cells()
+    local cells = {
+        { section = "wpn_alpha", effective_price = 500, disabled = false, disabled_reason = nil },
+        { section = "wpn_beta", effective_price = 700, disabled = true,
+            disabled_reason = "GA_CUSTOM_OVERSPEND" }
+    }
+
+    local colors = {}
+    local alpha = {
+        section = "wpn_alpha", flags = {}, IsShown = function() return true end,
+        Colorize = function(_, color) colors.wpn_alpha = color end
+    }
+    local beta = {
+        section = "wpn_beta", flags = {}, IsShown = function() return true end,
+        Colorize = function(_, color) colors.wpn_beta = color end
+    }
+    local container = {
+        cell = { alpha, beta },
+        Reset = function() error("Reset must not run during status refresh") end,
+        AddItem = function() error("AddItem must not run during status refresh") end,
+        Scroll_Reinit = function() error("Scroll_Reinit must not run during status refresh") end
+    }
+    gamma_arena_ui_custom.refresh_inventory_cells(container, cells)
+    gamma_arena_test_assert.equals(container.cell[1], alpha, "status refresh preserves first native cell identity")
+    gamma_arena_test_assert.equals(container.cell[2], beta, "status refresh preserves second native cell identity")
+    gamma_arena_test_assert.is_false(alpha.flags.disabled, "enabled native cell flag updates in place")
+    gamma_arena_test_assert.is_true(beta.flags.disabled, "disabled native cell flag updates in place")
+    gamma_arena_test_assert.equals(colors.wpn_alpha, "def", "enabled native cell receives default color")
+    gamma_arena_test_assert.equals(colors.wpn_beta, "hide", "disabled native cell receives muted color")
+end
+
+function runtime_custom_ui_renders_only_targeted_roster_delta()
+    local count_text = "invalid"
+    local count_sets = 0
+    local rows, combos = {}, {}
+    for index = 1, 10 do
+        rows[index] = {
+            calls = 0,
+            Show = function(self, visible)
+                self.calls = self.calls + 1
+                self.visible = visible
+            end
+        }
+        combos[index] = {
+            calls = 0,
+            enable_id = function(self, selected)
+                self.calls = self.calls + 1
+                self.selected = selected
+            end,
+            SetText = function(self, text) self.text = text end
+        }
+    end
+    local ui = {
+        count_combo = {
+            SetText = function(_, text)
+                count_sets = count_sets + 1
+                count_text = text
+            end
+        },
+        roster_rows = rows,
+        rank_combos = combos
+    }
+    local view = {
+        count = 4,
+        rank_ids = { "novice", "veteran", "master" },
+        roster = {
+            { rank = "novice" }, { rank = "veteran" },
+            { rank = "master" }, { rank = "novice" }
+        }
+    }
+
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 2 })
+    gamma_arena_test_assert.equals(count_text, "4", "accepted count renders the authoritative count")
+    gamma_arena_test_assert.equals(count_sets, 1, "count delta writes the targeted count once")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "count increase leaves prior first row untouched")
+    gamma_arena_test_assert.equals(rows[2].calls, 0, "count increase leaves prior last row untouched")
+    gamma_arena_test_assert.equals(rows[3].calls, 1, "count increase shows first added row once")
+    gamma_arena_test_assert.is_true(rows[3].visible, "count increase shows first added row")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "count increase shows second added row once")
+    gamma_arena_test_assert.is_true(rows[4].visible, "count increase shows second added row")
+    gamma_arena_test_assert.equals(rows[5].calls, 0, "count increase leaves following row untouched")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "count increase leaves prior rank combo untouched")
+    gamma_arena_test_assert.equals(combos[2].calls, 0, "count increase leaves prior last rank combo untouched")
+    gamma_arena_test_assert.equals(combos[3].selected, 3, "count increase restores first added authoritative rank")
+    gamma_arena_test_assert.equals(combos[4].selected, 1, "count increase restores second added authoritative rank")
+
+    view.roster[2].rank = "master"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].calls, 1, "rank delta writes only the targeted combo")
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rank delta renders the authoritative rank")
+    gamma_arena_test_assert.equals(combos[1].calls, 0, "rank delta leaves previous combo untouched")
+    gamma_arena_test_assert.equals(combos[3].calls, 1, "rank delta leaves following combo unchanged")
+    for index = 1, 10 do
+        local expected = (index == 3 or index == 4) and 1 or 0
+        gamma_arena_test_assert.equals(rows[index].calls, expected,
+            "rank delta leaves roster row visibility unchanged at " .. tostring(index))
+    end
+
+    count_text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 4 })
+    gamma_arena_test_assert.equals(count_text, "4", "rejected count restores the authoritative cached value")
+    gamma_arena_test_assert.equals(count_sets, 2, "rejected count restores only the targeted count control")
+    gamma_arena_test_assert.equals(rows[4].calls, 1, "rejected count leaves roster rows untouched")
+
+    combos[2].text = "rejected"
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { rank_index = 2 })
+    gamma_arena_test_assert.equals(combos[2].selected, 3, "rejected rank restores the authoritative cached value")
+    gamma_arena_test_assert.equals(combos[2].calls, 2, "rejected rank restores only the targeted combo")
+
+    for index = 1, 10 do
+        rows[index].calls = 0
+        rows[index].visible = true
+        combos[index].calls = 0
+    end
+    view.count = 1
+    view.roster = { { rank = "novice" } }
+    gamma_arena_ui_custom.render_roster_delta(ui, view, { previous_count = 10 })
+    gamma_arena_test_assert.equals(count_text, "1", "maximum decrease renders authoritative count")
+    gamma_arena_test_assert.equals(rows[1].calls, 0, "maximum decrease leaves retained row untouched")
+    for index = 2, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 1,
+            "maximum decrease hides affected row once at " .. tostring(index))
+        gamma_arena_test_assert.is_false(rows[index].visible,
+            "maximum decrease hides affected row at " .. tostring(index))
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "maximum decrease does not rewrite hidden combo at " .. tostring(index))
+    end
+
+    for index = 1, 10 do rows[index].calls = 0; combos[index].calls = 0 end
+    local count_sets_before_malformed = count_sets
+    view.count = 11
+    for index = 2, 11 do view.roster[index] = { rank = "novice" } end
+    local count_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { previous_count = 0 })
+    gamma_arena_test_assert.is_true(count_called, "malformed count cannot index beyond fixed controls")
+    gamma_arena_test_assert.equals(count_sets, count_sets_before_malformed,
+        "malformed count is rejected before mutating the count control")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(rows[index].calls, 0,
+            "malformed count leaves bounded row untouched at " .. tostring(index))
+    end
+    local rank_called = pcall(gamma_arena_ui_custom.render_roster_delta,
+        ui, view, { rank_index = 11 })
+    gamma_arena_test_assert.is_true(rank_called, "malformed rank index cannot exceed fixed controls")
+    for index = 1, 10 do
+        gamma_arena_test_assert.equals(combos[index].calls, 0,
+            "malformed rank leaves bounded combo untouched at " .. tostring(index))
+    end
+end
+
+function runtime_custom_model_status_snapshot_matches_full_status()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.medkit.price = 200
+    local model = gamma_arena_custom_setup_model.new(catalog,
+        gamma_arena_test_custom_config.make_context(catalog).layout)
+    gamma_arena_test_assert.is_true(model:set_faction("stalker").ok, "status parity fixture selects faction")
+    gamma_arena_test_assert.is_true(model:set_count(2).ok, "status parity fixture selects opponent count")
+    gamma_arena_test_assert.is_true(model:set_rank(2, "legend").ok, "status parity fixture selects high opponent rank")
+    gamma_arena_test_assert.is_true(model:set_device("device_torch_nv_2").ok, "status parity fixture selects device")
+    gamma_arena_test_assert.is_true(model:add_one("outfit_field").ok, "status parity fixture selects outfit")
+    gamma_arena_test_assert.is_true(model:add_one("wpn_alpha").ok, "status parity fixture selects weapon")
+    gamma_arena_test_assert.is_true(model:add_one("ammo_alpha").ok, "status parity fixture selects ammo")
+    gamma_arena_test_assert.is_true(model:add_one("wpn_knife").ok, "status parity fixture selects knife")
+    for _ = 1, 3 do
+        gamma_arena_test_assert.is_true(model:add_one("medkit").ok, "status parity fixture grows medicine stack")
+    end
+    local selected_count = #model:snapshot().actor_items
+    gamma_arena_test_assert.is_true(model:set_rank(2, "novice").ok,
+        "lower rank budget preserves selected gear for repair")
+    model:set_device("missing_device")
+
+    local full = model:snapshot()
+    local status = model:status_snapshot()
+    gamma_arena_test_assert.equals(#full.actor_items, selected_count,
+        "lower rank budget preserves selected gear")
+    gamma_arena_test_assert.equals(full.validation.error.code, "GA_CUSTOM_OVERSPEND",
+        "full snapshot reports preserved overbudget loadout")
+    gamma_arena_test_assert.equals(status.validation.error.code, "GA_CUSTOM_OVERSPEND",
+        "status snapshot reports preserved overbudget loadout")
+    for _, field in ipairs({
+        "faction", "count", "capacity", "actor_device", "budget", "spent", "remaining",
+        "weight_mg", "weight_limit_mg", "can_start"
+    }) do
+        gamma_arena_test_assert.equals(status[field], full[field], "status snapshot matches full snapshot " .. field)
+    end
+    gamma_arena_test_assert.equals(status.categories, nil, "status snapshot omits catalog categories")
+    gamma_arena_test_assert.equals(#status.roster, #full.roster, "status snapshot matches roster length")
+    for index, row in ipairs(full.roster) do
+        gamma_arena_test_assert.equals(status.roster[index].rank, row.rank, "status snapshot matches roster rank")
+    end
+    gamma_arena_test_assert.equals(status.validation.ok, full.validation.ok, "status snapshot matches validation result")
+    gamma_arena_test_assert.equals(status.validation.error.code, full.validation.error.code,
+        "status snapshot matches validation code")
+    gamma_arena_test_assert.equals(status.last_operation.error.code, full.last_operation.error.code,
+        "status snapshot matches operation code")
+    gamma_arena_test_assert.equals(#status.device_options, #full.device_options,
+        "status snapshot matches device option count")
+    for index, option in ipairs(full.device_options) do
+        local current = status.device_options[index]
+        for _, field in ipairs({ "section", "price", "weight_mg", "selected", "affordable", "disabled", "disabled_reason" }) do
+            gamma_arena_test_assert.equals(current[field], option[field],
+                "status snapshot matches device option " .. tostring(index) .. " " .. field)
+        end
+    end
+end
+
+function runtime_custom_ui_grenade_projection_disables_cells_at_limit()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.categories = {
+        weapon = { "wpn_alpha" }, ammo = { "ammo_alpha" }, outfit = { "outfit_field" },
+        helmet = { "helmet_open" }, knife = { "wpn_knife" }, medicine = { "medkit" },
+        grenade = { "grenade_f1", "grenade_rgd5", "grenade_gd05" }
+    }
+    local model = gamma_arena_custom_setup_model.new(catalog, gamma_arena_test_custom_config.make_context(catalog).layout)
+    model:add_item("grenade_f1", 1)
+    local one = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(one.catalog_cells[1].disabled, "selected grenade cell is disabled")
+    gamma_arena_test_assert.equals(one.catalog_cells[2].preview_multiplier, 2, "next grenade previews x2 pricing")
+    model:add_item("grenade_rgd5", 1)
+    local two = gamma_arena_ui_custom.project(model, "grenade")
+    gamma_arena_test_assert.is_true(two.catalog_cells[1].disabled, "first selected grenade stays disabled")
+    gamma_arena_test_assert.is_true(two.catalog_cells[2].disabled, "second selected grenade stays disabled")
+    gamma_arena_test_assert.is_true(two.catalog_cells[3].disabled, "remaining grenades disable at two selections")
+    gamma_arena_test_assert.equals(two.selected_cells[2].price_text, "x2 140", "second selected grenade displays multiplier and effective price")
+end
+
+function runtime_custom_ui_device_projection_round_trips_all_choices()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local model = gamma_arena_custom_setup_model.new(catalog, layout)
+    local snapshot = model:snapshot()
+    gamma_arena_test_assert.equals(#snapshot.device_options, 5, "model owns No device plus four physical choices")
+    gamma_arena_test_assert.equals(snapshot.device_options[1].section, nil, "first choice resolves to nil")
+    gamma_arena_test_assert.is_true(snapshot.device_options[1].selected, "No device is selected by default")
+    gamma_arena_test_assert.equals(snapshot.device_options[1].price, 0, "No device costs zero AP")
+    gamma_arena_test_assert.equals(snapshot.device_options[1].weight_mg, 0, "No device weighs zero")
+    gamma_arena_test_assert.is_true(snapshot.device_options[1].affordable, "No device is always affordable")
+    gamma_arena_test_assert.is_false(snapshot.device_options[1].disabled, "No device is always enabled")
+    local view = gamma_arena_ui_custom.project(model, "weapon")
+    local gen2 = view.device_options[4]
+    gamma_arena_test_assert.equals(gen2.section, "device_torch_nv_2", "Gen2 row remains exact")
+    gamma_arena_test_assert.equals(gamma_arena_ui_custom.resolve_device_option(view.device_options, gen2.display_text).section,
+        "device_torch_nv_2", "Gen2 display text maps back to exact section")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.apply_device_selection(model, view.device_options, gen2.display_text).ok,
+        "Gen2 projected row applies without an engine widget")
+    gamma_arena_test_assert.equals(model:snapshot().actor_device, "device_torch_nv_2", "Gen2 row selects exact section")
+    view = gamma_arena_ui_custom.project(model, "weapon")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_custom.apply_device_selection(model, view.device_options,
+        view.device_options[1].display_text).ok, "No device projected row applies")
+    gamma_arena_test_assert.equals(model:snapshot().actor_device, nil, "No device row clears exact section")
+    catalog = gamma_arena_test_custom_config.make_catalog()
+    catalog.items.device_torch_nv_3.price = 701
+    model = gamma_arena_custom_setup_model.new(catalog, layout)
+    view = gamma_arena_ui_custom.project(model, "weapon")
+    local disabled = view.device_options[5]
+    gamma_arena_test_assert.is_true(disabled.disabled, "unaffordable physical choice is disabled")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_custom.apply_device_selection(model, view.device_options,
+        disabled.display_text).ok, "disabled physical choice rejects application")
+    gamma_arena_test_assert.equals(model:snapshot().actor_device, nil, "disabled physical choice cannot mutate")
+end
+
+function runtime_composed_catalog_supports_first_custom_item_edit()
+    local catalog = catalogs()
+    gamma_arena_test_assert.equals(catalog.base_budget, 600, "composed catalog exposes authoritative custom base budget")
+    gamma_arena_test_assert.equals(catalog.max_entries, 64, "composed catalog exposes authoritative custom entry cap")
+    local layout = catalog.layouts and catalog.layouts.rostok_arena_v1
+    local model = gamma_arena_custom_setup_model.new(catalog, layout)
+    local section = catalog.categories and catalog.categories.outfit and catalog.categories.outfit[1]
+    gamma_arena_test_assert.is_true(type(section) == "string", "composed catalog exposes a selectable outfit")
+    local added = model:add_item(section, 1, "outfit")
+    gamma_arena_test_assert.is_true(added.ok, "composed catalog permits a structurally valid first item edit")
+    gamma_arena_test_assert.equals(model:snapshot().actor_items[1].section, section, "first composed-catalog item edit commits")
+end

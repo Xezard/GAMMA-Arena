@@ -1,0 +1,1521 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+local function valid_session(...)
+    return gamma_arena_test_runtime_part_preflight.valid_session(...)
+end
+
+local function catalogs(...)
+    return gamma_arena_test_runtime_part_preflight.catalogs(...)
+end
+
+function fake_store(intent_state)
+    local store = {
+        intent_state = intent_state or { launch_pending = false, resume_pending = false },
+        consume_launch_count = 0,
+        prepare_resume_count = 0,
+        clear_count = 0,
+        inspect_count = 0,
+        mark_deferred_count = 0,
+        validate_launch_activation_count = 0,
+        validate_launch_ownership_count = 0,
+        launch_deferred = false
+    }
+    function store:inspect_intents()
+        self.inspect_count = self.inspect_count + 1
+        if self.inspect_error then return self.inspect_error end
+        return gamma_arena_result.ok(clone(self.intent_state))
+    end
+    function store:consume_launch()
+        self.consume_launch_count = self.consume_launch_count + 1
+        self.intent_state.launch_pending = false
+        return self.launch_result or gamma_arena_result.ok({ schema_version = 1, mode_id = "skirmish", difficulty_id = "stalker", seed_mode = "manual", session_seed = 42 })
+    end
+    function store:mark_launch_deferred(_, current_level, expected_level)
+        self.mark_deferred_count = self.mark_deferred_count + 1
+        self.launch_deferred = true
+        self.deferred_current_level = current_level
+        self.deferred_expected_level = expected_level
+        return gamma_arena_result.ok(true)
+    end
+    function store:validate_launch_activation(_, context)
+        self.validate_launch_activation_count = self.validate_launch_activation_count + 1
+        if self.activation_result then return self.activation_result end
+        if context.serialized ~= true and context.current_level ~= context.expected_level and context.current_level ~= "fake_start" then
+            return gamma_arena_result.err("GA_LAUNCH_REQUIRES_NEW_GAME", "direct launch is outside the target or fake_start route")
+        end
+        if context.serialized == true and (not self.launch_deferred
+            or self.deferred_current_level ~= "fake_start"
+            or self.deferred_expected_level ~= context.expected_level
+            or context.current_level ~= context.expected_level) then
+            return gamma_arena_result.err("GA_LAUNCH_REQUIRES_NEW_GAME", "serialized launch lacks fake_start handoff proof")
+        end
+        return gamma_arena_result.ok(true)
+    end
+    function store:validate_launch_ownership()
+        self.validate_launch_ownership_count = self.validate_launch_ownership_count + 1
+        return self.launch_validation_result or gamma_arena_result.ok({ schema_version = 1, mode_id = "skirmish", difficulty_id = "stalker", seed_mode = "manual", session_seed = 42 })
+    end
+    function store:prepare_resume(_, expected)
+        self.prepare_resume_count = self.prepare_resume_count + 1
+        return self.resume_result or gamma_arena_result.ok(clone(self.issued_resume or { schema_version = 1, session_id = expected.session_id, session_nonce = expected.session_nonce, next_fight_index = expected.fight_index, checkpoint_name = expected.checkpoint_name }))
+    end
+    function store:issue_resume(_, intent)
+        self.issue_resume_count = (self.issue_resume_count or 0) + 1
+        self.issued_resume = clone(intent)
+        self.intent_state.resume_pending = true
+        return self.issue_resume_result or gamma_arena_result.ok(true)
+    end
+    function store:consume_resume(_, expected, prepared)
+        self.consume_resume_count = (self.consume_resume_count or 0) + 1
+        self.consumed_expected = clone(expected)
+        self.consumed_prepared = clone(prepared)
+        if self.consume_resume_result then return self.consume_resume_result end
+        local current = clone(self.issued_resume)
+        if prepared and (not current or current.schema_version ~= prepared.schema_version
+            or current.session_id ~= prepared.session_id or current.session_nonce ~= prepared.session_nonce
+            or current.next_fight_index ~= prepared.next_fight_index or current.checkpoint_name ~= prepared.checkpoint_name) then
+            return gamma_arena_result.err("GA_CHECKPOINT_RECOVERY_MISMATCH", "injected persisted intent drift")
+        end
+        self.intent_state.resume_pending = false
+        return gamma_arena_result.ok(current)
+    end
+    function store:clear_resume_if_matches(_, expected)
+        self.clear_matching_count = (self.clear_matching_count or 0) + 1
+        self.cleared_expected = clone(expected)
+        self.intent_state.resume_pending = false
+        return self.clear_matching_result or gamma_arena_result.ok(true)
+    end
+    function store:clear_transient()
+        self.clear_count = self.clear_count + 1
+        self.intent_state.launch_pending = false
+        self.intent_state.resume_pending = false
+        return self.clear_result or gamma_arena_result.ok(true)
+    end
+    return store
+end
+
+function fake_orchestrator_deps(store)
+    local save_guard = { installed = false, armed = false, install_calls = 0, arm_attempts = 0, arm_calls = 0, maintain_calls = 0, disarm_calls = 0, breach_calls = 0, call_order = {} }
+    function save_guard:install()
+        self.install_calls = self.install_calls + 1
+        self.call_order[#self.call_order + 1] = "install"
+        if self.install_result then return self.install_result end
+        if self.installed then return gamma_arena_result.ok(false) end
+        self.installed = true
+        return gamma_arena_result.ok(true)
+    end
+    function save_guard:is_armed() return self.armed end
+    function save_guard:arm(context)
+        if not self.installed then return gamma_arena_result.err("GA_SAVE_GUARD_NOT_INSTALLED", "Save guard must be installed before arming") end
+        self.arm_attempts = self.arm_attempts + 1
+        self.call_order[#self.call_order + 1] = "arm"
+        if self.arm_result then return self.arm_result end
+        if self.armed then return gamma_arena_result.ok(false) end
+        self.armed = true
+        self.arm_calls = self.arm_calls + 1
+        self.context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    function save_guard:maintain()
+        self.maintain_calls = self.maintain_calls + 1
+        return gamma_arena_result.ok(self.armed)
+    end
+    function save_guard:disarm(context)
+        if not self.armed then return gamma_arena_result.ok(false) end
+        self.armed = false
+        self.disarm_calls = self.disarm_calls + 1
+        self.disarm_context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    function save_guard:breach(context)
+        self.breach_calls = self.breach_calls + 1
+        self.breach_context = clone(context)
+        return gamma_arena_result.ok(true)
+    end
+    local diagnostics = { checkpoints = {} }
+    function diagnostics:checkpoint(code, context)
+        self.checkpoints[#self.checkpoints + 1] = { code = code, context = clone(context) }
+        return gamma_arena_result.ok(true)
+    end
+    local actor_discard_reasons = {}
+    local actor_adapter = {
+        begin_update = function() return gamma_arena_result.ok(true) end,
+        observe_transient_state = function() return gamma_arena_result.ok(false) end,
+        discard_transient_services = function(_, reason)
+            actor_discard_reasons[#actor_discard_reasons + 1] = reason
+            return gamma_arena_result.ok(true)
+        end,
+        normalize_for_arena = function() return gamma_arena_result.ok(true) end,
+        verify_inventory_empty = function() return gamma_arena_result.ok(true) end,
+        enforce_boundary = function() return gamma_arena_result.ok({ breach = false, zone = "bar_arena_sr" }) end,
+        release_input = function() return gamma_arena_result.ok(true) end,
+        cleanup = function() return gamma_arena_result.ok(true) end
+    }
+    local checkpoint_adapter = { current = "READY" }
+    function checkpoint_adapter:create() self.current = "READY"; return gamma_arena_result.ok(true) end
+    function checkpoint_adapter:update()
+        if self.current == "REHIDING" then
+            self.rehide_updates = (self.rehide_updates or 0) + 1
+            if self.rehide_updates >= 2 then self.current = "READY" end
+        end
+        return gamma_arena_result.ok({ state = self.current })
+    end
+    function checkpoint_adapter:state() return self.current end
+    function checkpoint_adapter:on_game_load() return gamma_arena_result.ok(false) end
+    function checkpoint_adapter:begin_resume_recovery(session, prepared)
+        self.bound_session = clone(session)
+        self.prepared_resume = clone(prepared)
+        self.current = "REHIDING"
+        self.rehide_updates = 0
+        return gamma_arena_result.ok(true)
+    end
+    function checkpoint_adapter:take_resume()
+        local value = store.resume_result and store.resume_result.value or {
+            schema_version = 1,
+            session_id = self.bound_session and self.bound_session.session_id,
+            session_nonce = self.bound_session and self.bound_session.session_nonce,
+            next_fight_index = self.bound_session and self.bound_session.fight_index,
+            checkpoint_name = "_gamma_arena_checkpoint"
+        }
+        return gamma_arena_result.ok(clone(value))
+    end
+    function checkpoint_adapter:restore() self.current = "LOADING"; return gamma_arena_result.ok(true) end
+    function checkpoint_adapter:cleanup() self.current = "NONE"; return gamma_arena_result.ok(true) end
+    local deps = {
+        store = store,
+        config = {},
+        current_level = function() return gamma_arena_result.ok("l05_bar") end,
+        reconcile = function() return gamma_arena_result.ok({ events = {} }) end,
+        preflight = function() return gamma_arena_result.ok(true) end,
+        identity = function() return gamma_arena_result.ok({ session_id = "ga_test_session", session_nonce = "ga_test_nonce" }) end,
+        ui = { show_fatal = function(errors, callback) return { errors = errors, callback = callback } end },
+        notify = function() end,
+        disconnect = function() end,
+        teardown = function()
+            checkpoint_adapter:cleanup()
+            return checkpoint_adapter:update()
+        end,
+        actor = actor_adapter,
+        save_guard = save_guard,
+        diagnostics = diagnostics,
+        _save_guard = save_guard,
+        _diagnostics = diagnostics,
+        _actor_transient_discards = actor_discard_reasons,
+        checkpoint = checkpoint_adapter,
+        layout = function() return gamma_arena_result.ok({ id = "rostok_arena_v1", level = "l05_bar", actor_spawn_path = "actor_spawn", actor_look_path = "actor_look", actor_boundary_zone = "bar_arena_sr" }) end,
+        catalogs = function()
+            return gamma_arena_result.ok({
+                schema_version = 10,
+                generator_version = 11,
+                revision = 11,
+                fingerprint = "ga-catalog-v10-runtime-test",
+                layouts = { rostok_arena_v1 = { id = "rostok_arena_v1" } },
+                items = {
+                    wpn_test = { category = "weapon", ammo_sections = { "ammo_test" } },
+                    ammo_test = { category = "ammo" }
+                }
+            })
+        end,
+        generator = function(_, fight_index) return gamma_arena_result.ok({ fight_index = fight_index }) end,
+        validator = function(spec)
+            local fight_id = "ga-preflight-" .. tostring(spec.fight_index)
+            return gamma_arena_result.ok({
+                session_seed = function() return 42 end,
+                fight_index = function() return spec.fight_index end,
+                fight_id = function() return fight_id end,
+                actor = function()
+                    return { items = {
+                        { section = "wpn_test", quantity = 1, equipped_slot = "weapon_2" },
+                        { section = "ammo_test", quantity = 1 }
+                    } }
+                end,
+                opponents = function() return {} end,
+                stable_encode = function() return "stable:" .. fight_id end
+            })
+        end,
+        weapon_diagnostics = function(context) return gamma_arena_result.ok(clone(context)) end,
+        log = { info = function() return gamma_arena_result.ok(true) end }
+    }
+    return deps
+end
+
+function runtime_game_load_discards_actor_bound_booster_debt()
+    local deps = fake_orchestrator_deps(fake_store())
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    local loaded = orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(loaded.ok, "game-load boundary remains valid")
+    gamma_arena_test_assert.equals(#deps._actor_transient_discards, 1, "game load discards one actor-bound transient generation")
+    gamma_arena_test_assert.equals(deps._actor_transient_discards[1], "game_load", "game-load discard reason is exact")
+end
+
+function runtime_actor_destroy_discards_actor_bound_booster_debt()
+    local deps = fake_orchestrator_deps(fake_store())
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator.active = true
+    orchestrator.session = valid_session()
+    orchestrator.runtime_stage = "ACTIVE"
+    local destroyed = orchestrator:actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "actor-destroy boundary remains valid")
+    gamma_arena_test_assert.equals(#deps._actor_transient_discards, 2, "actor destroy discards the live actor-bound generation")
+    gamma_arena_test_assert.equals(deps._actor_transient_discards[2], "actor_destroyed", "actor-destroy discard reason is exact")
+end
+
+function launch_consumes_before_preflight_once()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    deps.preflight = function()
+        gamma_arena_test_assert.equals(store.consume_launch_count, 1, "launch intent must be consumed before preflight")
+        return gamma_arena_result.ok(true)
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(store.consume_launch_count, 1, "first and regular update must not activate twice")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "successful launch must activate")
+end
+
+function runtime_orchestrator_forwards_preflight_npc_medical_owner()
+    local cases = {
+        {
+            label = "metadata",
+            preflight = gamma_arena_result.ok({
+                npc_medical_owner = "external",
+                npc_medical_policy = {
+                    owner = "external",
+                    enable = true,
+                    in_combat = true,
+                    medkit_overlap = true,
+                    bandage_overlap = false,
+                    ignored = "must not escape preflight"
+                }
+            }),
+            owner = "external"
+        },
+        { label = "legacy boolean", preflight = gamma_arena_result.ok(true), owner = "arena" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        local deps = fake_orchestrator_deps(store)
+        local starts, ownership_logs = {}, {}
+        deps.preflight = function() return case.preflight end
+        deps.npc_medical = {
+            start = function(_, fight)
+                starts[#starts + 1] = clone(fight)
+                return gamma_arena_result.ok(true)
+            end,
+            stop = function() return gamma_arena_result.ok(false) end
+        }
+        deps.log.info = function(code, message, context)
+            if code == "GA_NPC_MEDICAL_OWNERSHIP" then ownership_logs[#ownership_logs + 1] = clone(context) end
+            return gamma_arena_result.ok(true)
+        end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, case.label .. " preflight activates")
+        gamma_arena_test_assert.is_true(orchestrator:start_npc_medical().ok, case.label .. " starts NPC medical")
+        gamma_arena_test_assert.equals(starts[1].npc_medical_owner, case.owner, case.label .. " owner reaches npc_medical:start")
+        gamma_arena_test_assert.equals(#ownership_logs, 1, case.label .. " emits one ownership diagnostic")
+        gamma_arena_test_assert.equals(ownership_logs[1].owner, case.owner, case.label .. " diagnostic records owner")
+        if case.label == "metadata" then
+            local fields = 0
+            for _ in pairs(ownership_logs[1]) do fields = fields + 1 end
+            gamma_arena_test_assert.equals(fields, 5, "ownership diagnostic is bounded to five policy fields")
+            gamma_arena_test_assert.equals(ownership_logs[1].enable, true, "ownership diagnostic stores enable")
+            gamma_arena_test_assert.equals(ownership_logs[1].in_combat, true, "ownership diagnostic stores in-combat")
+            gamma_arena_test_assert.equals(ownership_logs[1].medkit_overlap, true, "ownership diagnostic stores medkit overlap")
+            gamma_arena_test_assert.equals(ownership_logs[1].bandage_overlap, false, "ownership diagnostic stores bandage overlap")
+        end
+    end
+end
+
+function runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local identities, normalizations = 0, 0
+    deps.preflight = function() return gamma_arena_result.ok({ npc_medical_owner = "shared" }) end
+    deps.identity = function() identities = identities + 1; return gamma_arena_result.ok({ session_id = "forbidden", session_nonce = "forbidden" }) end
+    deps.actor.normalize_for_arena = function() normalizations = normalizations + 1; return gamma_arena_result.ok(true) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "invalid medical owner fails closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_NPC_MEDICAL_AI_CONFIG_INVALID", "invalid medical owner has a stable code")
+    gamma_arena_test_assert.equals(identities, 0, "invalid medical owner fails before session creation")
+    gamma_arena_test_assert.equals(normalizations, 0, "invalid medical owner fails before actor mutation")
+end
+
+function activation_requires_game_load_boundary()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    local before_load = orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(before_load.ok, "pre-load update must remain a no-op")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 0, "launch cannot activate before on_game_load")
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "pre-load update cannot activate Arena")
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.equals(store.consume_launch_count, 1, "load generation may consume launch exactly once")
+end
+
+function launch_defers_on_fake_start_then_activates_on_rostok()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local fake_start_deps = fake_orchestrator_deps(store)
+    fake_start_deps.current_level = function() return gamma_arena_result.ok("fake_start") end
+    local fake_start_vm = gamma_arena_orchestrator.new(fake_start_deps)
+    fake_start_vm:on_game_load()
+
+    local deferred = fake_start_vm:actor_on_first_update()
+    gamma_arena_test_assert.is_true(deferred.ok, "fake_start defers safely")
+    gamma_arena_test_assert.equals(deferred.value, false, "first-update callback performs no active runtime work while launch is deferred")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 0, "fake_start cannot consume launch")
+    gamma_arena_test_assert.equals(store.mark_deferred_count, 1, "fake_start persists one cross-VM phase proof")
+    gamma_arena_test_assert.is_false(fake_start_vm.activation_attempted, "fake_start cannot latch activation")
+    gamma_arena_test_assert.is_true(fake_start_vm.awaiting_activation, "fake_start retains activation ownership")
+    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 1, "fake_start validates its direct new-game route before suppression")
+    gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "fake_start validates complete launch ownership before suppression")
+    gamma_arena_test_assert.is_true(fake_start_deps._save_guard.armed, "fake_start owns save suppression before GAMMA autosave fires")
+    gamma_arena_test_assert.equals(fake_start_deps._save_guard.install_calls, 1, "deferred launch installs suppression only after launch ownership")
+    gamma_arena_test_assert.equals(fake_start_deps._save_guard.arm_calls, 1, "deferred launch arms its VM exactly once")
+    gamma_arena_test_assert.is_true(fake_start_deps._save_guard.maintain_calls >= 1, "deferred launch immediately maintains timer cancellation")
+
+    local rostok_deps = fake_orchestrator_deps(store)
+    rostok_deps.current_level = function() return gamma_arena_result.ok("l05_bar") end
+    local rostok_vm = gamma_arena_orchestrator.new(rostok_deps)
+    rostok_vm:load_state({})
+    rostok_vm:on_game_load()
+    gamma_arena_test_assert.is_true(rostok_vm:actor_on_first_update().ok, "serialized target-level VM activates")
+    gamma_arena_test_assert.equals(store.validate_launch_activation_count, 2, "target VM validates persisted fake_start phase proof after the direct fake_start route")
+    gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 2, "each launch VM validates complete launch ownership before suppression")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 1, "target level consumes exactly once")
+    gamma_arena_test_assert.is_true(rostok_vm:is_active(), "target level owns Arena session")
+    gamma_arena_test_assert.is_true(rostok_deps._save_guard.armed, "target Arena VM keeps save suppression armed")
+end
+
+function launch_transition_diagnostics_are_event_based()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local current = "fake_start"
+    local events = {}
+    deps.current_level = function() return gamma_arena_result.ok(current) end
+    deps.log = { info = function(code, message, context)
+        events[#events + 1] = { code = code, message = message, context = context }
+        return gamma_arena_result.ok(true)
+    end }
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    orchestrator:actor_on_update()
+    local function count(code)
+        local value = 0
+        for _, event in ipairs(events) do if event.code == code then value = value + 1 end end
+        return value
+    end
+    gamma_arena_test_assert.equals(count("GA_LAUNCH_DEFERRED"), 1, "fake_start diagnostic must be emitted once per level")
+    current = "l05_bar"
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(count("GA_LAUNCH_HANDOFF_ACCEPTED"), 1, "target-level handoff must be observable once")
+    gamma_arena_test_assert.equals(count("GA_ACTOR_POSITIONED"), 1, "successful normalization must expose the selected patrol paths")
+    gamma_arena_test_assert.is_true(count("GA_RUNTIME_STAGE_CHANGED") >= 2, "meaningful runtime stages must be observable")
+end
+
+function ordinary_no_intent_activation_latches_once()
+    local store = fake_store({ launch_pending = false, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "ordinary game first update is inert")
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_update().ok, "ordinary game later update is inert")
+    gamma_arena_test_assert.equals(store.inspect_count, 1, "ordinary game inspects intents once")
+    gamma_arena_test_assert.is_true(orchestrator.activation_attempted, "ordinary game latches completed activation probe")
+    gamma_arena_test_assert.is_false(orchestrator.awaiting_activation, "ordinary game clears activation wait")
+    gamma_arena_test_assert.equals(deps._save_guard.install_calls, 0, "ordinary campaign VM never installs Arena save suppression")
+    gamma_arena_test_assert.equals(deps._save_guard.arm_calls, 0, "ordinary campaign VM never arms Arena save suppression")
+end
+
+function runtime_save_guard_installs_only_after_launch_ownership()
+    local overrides = fake_orchestrator_deps(fake_store({ launch_pending = false, resume_pending = false }))
+    gamma_arena_bootstrap.compose(overrides)
+    gamma_arena_test_assert.equals(overrides._save_guard.install_calls, 0, "bootstrap cannot intercept the MCM new-game command")
+
+    local launch_store = fake_store({ launch_pending = true, resume_pending = false })
+    local launch_deps = fake_orchestrator_deps(launch_store)
+    local orchestrator = gamma_arena_orchestrator.new(launch_deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "accepted launch installs and arms suppression")
+    gamma_arena_test_assert.equals(launch_store.validate_launch_ownership_count, 1, "complete launch ownership is validated once")
+    gamma_arena_test_assert.equals(launch_deps._save_guard.install_calls, 1, "accepted launch installs suppression once")
+    gamma_arena_test_assert.equals(launch_deps._save_guard.arm_calls, 1, "accepted launch arms suppression once")
+    gamma_arena_test_assert.equals(table.concat(launch_deps._save_guard.call_order, ","), "install,arm", "save guard ordering is deterministic")
+end
+
+function runtime_save_guard_failures_block_launch_mutation()
+    local cases = {
+        { field = "install_result", code = "GA_TEST_SAVE_GUARD_INSTALL_FAILED", arm_attempts = 0 },
+        { field = "arm_result", code = "GA_TEST_SAVE_GUARD_ARM_FAILED", arm_attempts = 1 }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        local deps = fake_orchestrator_deps(store)
+        deps._save_guard[case.field] = gamma_arena_result.err(case.code, "injected save-guard failure")
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.field .. " blocks Arena activation")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.field .. " preserves its structured error")
+        gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.field .. " enters fatal ERROR")
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, case.field .. " occurs only after launch ownership validation")
+        gamma_arena_test_assert.equals(store.mark_deferred_count, 0, case.field .. " cannot persist launch deferral")
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0, case.field .. " cannot consume launch")
+        gamma_arena_test_assert.equals(deps._save_guard.arm_attempts, case.arm_attempts, case.field .. " preserves install-before-arm short circuiting")
+        gamma_arena_test_assert.is_false(deps._save_guard.armed, case.field .. " leaves save suppression unarmed")
+        gamma_arena_test_assert.is_false(orchestrator:is_active(), case.field .. " cannot create an Arena session")
+    end
+end
+
+function bootstrap_default_store_exposes_complete_launch_contract()
+    local overrides = fake_orchestrator_deps(fake_store())
+    overrides.store = nil
+    local orchestrator = gamma_arena_bootstrap.compose(overrides)
+    local store = orchestrator.deps.store
+    gamma_arena_test_assert.is_true(type(store.mark_launch_deferred) == 'function', 'production store exposes launch deferral')
+    gamma_arena_test_assert.is_true(type(store.validate_launch_activation) == 'function', 'production store exposes launch validation')
+    gamma_arena_test_assert.is_true(type(store.validate_launch_ownership) == 'function', 'production store exposes non-mutating launch ownership validation')
+end
+
+function missing_dependency_method_routes_fatal_once()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    store.validate_launch_activation = nil
+    local deps = fake_orchestrator_deps(store)
+    local fatal_count = 0
+    deps.ui.show_fatal = function()
+        fatal_count = fatal_count + 1
+        return {}
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local first = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(first.ok, 'missing dependency method must fail activation')
+    gamma_arena_test_assert.equals(first.error.code, 'GA_DEPENDENCY_METHOD_UNAVAILABLE', 'dependency wiring uses dedicated code')
+    gamma_arena_test_assert.equals(first.error.context.requested_code, 'GA_LAUNCH_REQUIRES_NEW_GAME', 'requested operation code is preserved')
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(store.inspect_count, 1, 'fatal activation never retries intent inspection')
+    gamma_arena_test_assert.equals(fatal_count, 1, 'fatal UI is shown once')
+end
+
+function first_activation_failure_routes_fatal()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    deps.actor.normalize_for_arena = function()
+        return gamma_arena_result.err("GA_TEST_FIRST_ACTIVATION", "injected first activation failure")
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local was_active = orchestrator:is_active()
+    local failed = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(failed.ok, "first activation failure remains observable")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "session became active before runtime failure")
+    local routed = orchestrator:on_callback_result_error("actor_on_first_update", failed, was_active)
+    gamma_arena_test_assert.is_false(routed.ok, "first activation failure remains a Result")
+    gamma_arena_test_assert.equals(orchestrator:runtime_stage_snapshot(), "ERROR", "newly-active callback failure enters fatal")
+end
+
+function activation_reconciles_before_intent_inspection_once()
+    local events = {}
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local base_inspect = store.inspect_intents
+    function store:inspect_intents(...)
+        events[#events + 1] = "inspect"
+        return base_inspect(self, ...)
+    end
+    local deps = fake_orchestrator_deps(store)
+    local reconcile_count = 0
+    deps.reconcile = function()
+        reconcile_count = reconcile_count + 1
+        events[#events + 1] = "reconcile"
+        return gamma_arena_result.ok({ events = {} })
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_true(orchestrator:actor_on_first_update().ok, "current-version first activation remains valid")
+    gamma_arena_test_assert.equals(table.concat(events, ","), "reconcile,inspect", "reconciliation precedes intent inspection")
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.equals(reconcile_count, 1, "one activation boundary reconciles exactly once")
+    gamma_arena_test_assert.equals(store.inspect_count, 1, "one activation boundary inspects exactly once")
+end
+
+function activation_version_changes_clear_resume_before_checkpoint_routing()
+    local cases = {
+        { label = "upgrade_visible", previous = "0.0.9", layout = "visible" },
+        { label = "upgrade_hidden", previous = "0.0.9", layout = "hidden" },
+        { label = "rollback_visible", previous = "9.0.0", layout = "visible" },
+        { label = "rollback_hidden", previous = "9.0.0", layout = "hidden" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = false, resume_pending = true })
+        local deps = fake_orchestrator_deps(store)
+        deps.reconcile = function()
+            store.intent_state.resume_pending = false
+            return gamma_arena_result.ok({ events = { { code = "GA_ADDON_VERSION_CHANGED", previous = case.previous, checkpoint_layout = case.layout } } })
+        end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:load_state({ gamma_arena_session = valid_session() })
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " loaded session fails closed after reconciliation clears resume")
+        gamma_arena_test_assert.equals(result.error.code, "GA_EMBEDDED_SESSION_UNSUPPORTED", case.label .. " cannot revive an embedded session after legacy resume invalidation")
+        gamma_arena_test_assert.equals(store.prepare_resume_count, 0, case.label .. " never enters checkpoint routing")
+    end
+end
+
+function activation_reconciliation_failures_are_fatal_before_inspection()
+    local cases = {
+        { code = "GA_SETTINGS_SCHEMA_NEWER", label = "future schema" },
+        { code = "GA_SETTINGS_READ_FAILED", label = "migration read" },
+        { code = "GA_SETTINGS_WRITE_FAILED", label = "migration write" }
+    }
+    for _, case in ipairs(cases) do
+        local store = fake_store({ launch_pending = false, resume_pending = true })
+        local deps = fake_orchestrator_deps(store)
+        deps.reconcile = function() return gamma_arena_result.err(case.code, "injected " .. case.label) end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, case.label .. " remains observable")
+        gamma_arena_test_assert.equals(result.error.code, case.code, case.label .. " preserves structured code")
+        gamma_arena_test_assert.equals(store.inspect_count, 0, case.label .. " fails before intent inspection")
+        gamma_arena_test_assert.equals(store.clear_count, 1, case.label .. " clears transient and bridge state at common fatal cleanup")
+        gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, case.label .. " enters ERROR")
+    end
+end
+
+function invalid_or_expired_launch_never_reaches_preflight()
+    for _, code in ipairs({ "GA_LAUNCH_TOKEN_INVALID", "GA_LAUNCH_TOKEN_EXPIRED" }) do
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        store.launch_validation_result = gamma_arena_result.err(code, "rejected launch")
+        local preflight_calls = 0
+        local deps = fake_orchestrator_deps(store)
+        deps.preflight = function() preflight_calls = preflight_calls + 1; return gamma_arena_result.ok(true) end
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        orchestrator:on_game_load()
+        local result = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(result.ok, "invalid/expired launch must fail")
+        gamma_arena_test_assert.equals(result.error.code, code, "launch rejection code")
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "invalid one-shot is validated once")
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0, "invalid one-shot is rejected before consumption")
+        gamma_arena_test_assert.equals(store.clear_count, 1, "fatal routing clears rejected launch ownership once")
+        gamma_arena_test_assert.equals(deps._save_guard.install_calls, 0, "invalid launch cannot install save suppression")
+        gamma_arena_test_assert.equals(preflight_calls, 0, "invalid launch cannot reach preflight")
+        orchestrator:actor_on_update()
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 1, "rejected launch cannot be reused")
+    end
+
+    local route_store = fake_store({ launch_pending = true, resume_pending = false })
+    local route_deps = fake_orchestrator_deps(route_store)
+    route_deps.current_level = function() return gamma_arena_result.ok("l01_escape") end
+    local route_orchestrator = gamma_arena_orchestrator.new(route_deps)
+    route_orchestrator:on_game_load()
+    local route_result = route_orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.equals(route_result.error.code, "GA_LAUNCH_REQUIRES_NEW_GAME", "invalid route proof preserves its code")
+    gamma_arena_test_assert.equals(route_store.clear_count, 1, "invalid route proof clears launch and bridge state immediately")
+    gamma_arena_test_assert.equals(route_store.validate_launch_ownership_count, 0, "invalid route cannot reach full ownership validation")
+    gamma_arena_test_assert.equals(route_deps._save_guard.install_calls, 0, "invalid route cannot install save suppression")
+    gamma_arena_test_assert.equals(route_store.consume_launch_count, 0, "invalid route cannot consume launch")
+end
+
+function inactive_callbacks_are_inert()
+    local store = fake_store()
+    local teardown_calls = 0
+    local deps = fake_orchestrator_deps(store)
+    deps.teardown = function() teardown_calls = teardown_calls + 1; return gamma_arena_result.ok(true) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:actor_on_before_death()
+    orchestrator:npc_on_net_spawn({})
+    orchestrator:npc_on_death_callback()
+    orchestrator:actor_on_net_destroy()
+    orchestrator:on_before_level_changing()
+    local mdata = {}
+    orchestrator:save_state(mdata)
+    gamma_arena_test_assert.equals(teardown_calls, 0, "ordinary inactive callbacks must not mutate runtime")
+    gamma_arena_test_assert.equals(mdata.gamma_arena_session, nil, "ordinary saves must have no Arena payload")
+end
+
+function runtime_orchestrator_npc_net_spawn_is_active_only()
+    local calls = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.entities = {
+        on_npc_net_spawn = function(_, npc)
+            calls = calls + 1
+            return gamma_arena_result.ok(npc.marker == "owned")
+        end
+    }
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    local inactive = orchestrator:npc_on_net_spawn({ marker = "owned" })
+    gamma_arena_test_assert.is_true(inactive.ok, "inactive spawn callback is benign")
+    gamma_arena_test_assert.is_false(inactive.value, "inactive spawn callback is ignored")
+    gamma_arena_test_assert.equals(calls, 0, "inactive spawn callback cannot reach the entity adapter")
+
+    orchestrator.active = true
+    orchestrator:set_runtime_stage("ACTIVATING")
+    local active = orchestrator:npc_on_net_spawn({ marker = "owned" })
+    gamma_arena_test_assert.is_true(active.ok and active.value, "active spawn callback delegates to the entity adapter")
+    gamma_arena_test_assert.equals(calls, 1, "active spawn callback delegates exactly once")
+end
+
+function runtime_npc_net_spawn_errors_defer_fatal_ui_to_update()
+    local teardown_calls, fatal_shown = 0, 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.entities = {
+        on_npc_net_spawn = function()
+            return gamma_arena_result.err("GA_TEST_NET_SPAWN", "injected net-spawn isolation failure")
+        end
+    }
+    deps.teardown = function()
+        teardown_calls = teardown_calls + 1
+        return gamma_arena_result.ok(true)
+    end
+    deps.ui.show_fatal = function()
+        fatal_shown = fatal_shown + 1
+        return {}
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.active = true
+    orchestrator:set_runtime_stage("ACTIVATING")
+    local callbacks = gamma_arena_bootstrap.make_callbacks(orchestrator)
+    local failed = callbacks.npc_on_net_spawn({})
+    gamma_arena_test_assert.is_false(failed.ok, "net-spawn isolation failure remains structured")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_NET_SPAWN", "net-spawn failure identity is preserved")
+    gamma_arena_test_assert.equals(teardown_calls, 0, "net-spawn callback cannot release entities synchronously")
+    gamma_arena_test_assert.equals(fatal_shown, 0, "net-spawn callback cannot open fatal UI synchronously")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "net-spawn callback defers its fatal transition")
+    callbacks.actor_on_update()
+    gamma_arena_test_assert.equals(teardown_calls, 1, "next actor update owns deferred teardown")
+    gamma_arena_test_assert.equals(fatal_shown, 1, "next actor update opens fatal UI once")
+    gamma_arena_test_assert.equals(orchestrator.machine_state, gamma_arena_state_machine.states.ERROR, "deferred net-spawn failure enters ERROR")
+end
+
+function ordinary_loaded_save_rejects_stray_launch()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({})
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "loaded ordinary save must reject a launch intent")
+    gamma_arena_test_assert.equals(store.clear_count, 1, "stray intent must be cleared")
+    gamma_arena_test_assert.equals(store.consume_launch_count, 0, "loaded save must not consume launch as a new game")
+end
+
+function ordinary_loaded_save_rejects_stray_resume()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({})
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "loaded ordinary save must reject a resume intent")
+    gamma_arena_test_assert.equals(result.error.code, "GA_RESUME_UNSUPPORTED", "checkpoint-free runtime rejects stray legacy resume")
+    gamma_arena_test_assert.equals(store.clear_count, 1, "stray resume must be cleared")
+end
+
+function new_game_does_not_reuse_prior_load_state_latch()
+    local store = fake_store({ launch_pending = false, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({})
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    store.intent_state.launch_pending = true
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(result.ok and orchestrator:is_active(), "a later distinct new game must not inherit the prior save-load latch")
+end
+
+function game_load_boundary_drops_prior_runtime_generation()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "first generation must activate")
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "a new load generation cannot retain active runtime state")
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot(), nil, "a new load generation drops the prior session copy")
+end
+
+function launch_with_embedded_payload_is_rejected()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({ gamma_arena_session = valid_session() })
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "launch plus embedded ArenaSession must fail")
+    gamma_arena_test_assert.equals(store.clear_count, 1, "conflicting route must clear external intents")
+end
+
+function simultaneous_intents_clear_transactionally()
+    local store = fake_store({ launch_pending = true, resume_pending = true })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "simultaneous routes must fail")
+    gamma_arena_test_assert.equals(result.error.code, "GA_INTENT_CONFLICT", "route conflict code")
+    gamma_arena_test_assert.equals(store.clear_count, 1, "both intents must clear in one store operation")
+end
+
+function config_quarantine_propagates_to_fatal()
+    local store = fake_store()
+    store.inspect_error = gamma_arena_result.err("GA_CONFIG_QUARANTINED", "poisoned config")
+    local fatal_errors
+    local deps = fake_orchestrator_deps(store)
+    deps.ui.show_fatal = function(errors) fatal_errors = errors; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "quarantine must fail activation")
+    gamma_arena_test_assert.equals(result.error.code, "GA_CONFIG_QUARANTINED", "quarantine code must propagate")
+    gamma_arena_test_assert.equals(fatal_errors[1].error.code, "GA_CONFIG_QUARANTINED", "fatal UI receives quarantine")
+end
+
+function save_payload_is_plain_deep_copy()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    local mdata = {}
+    local saved = orchestrator:save_state(mdata)
+    gamma_arena_test_assert.is_true(saved.ok and saved.value == false, "armed Arena save callback is observed without serialization")
+    gamma_arena_test_assert.equals(mdata.gamma_arena_session, nil, "Arena session is never written into game-save metadata")
+    gamma_arena_test_assert.equals(deps._save_guard.breach_calls, 1, "native save callback emits one guard breach")
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot().fight_index, 0, "breach observation does not mutate runtime")
+end
+
+function load_rejects_unknown_session_keys_and_userdata()
+    local unknown = valid_session()
+    unknown.future_field = true
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(fake_store({ resume_pending = true, launch_pending = false })))
+    local result = orchestrator:load_state({ gamma_arena_session = unknown })
+    gamma_arena_test_assert.is_false(result.ok, "unknown ArenaSession fields must fail closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_SESSION_UNKNOWN_FIELD", "unknown key code")
+    local bad = valid_session()
+    bad.session_id = coroutine.create(function() end)
+    result = orchestrator:load_state({ gamma_arena_session = bad })
+    gamma_arena_test_assert.is_false(result.ok, "non-plain values must fail")
+    local hostile = setmetatable({}, { __index = function() error("hostile save metadata") end })
+    local call_ok, hostile_result = pcall(orchestrator.load_state, orchestrator, hostile)
+    gamma_arena_test_assert.is_true(call_ok, "load_state must be total for hostile metadata")
+    gamma_arena_test_assert.is_false(hostile_result.ok, "hostile metadata must return a Result error")
+end
+
+function resume_is_validated_but_override_is_not_applied_early()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.ok({ schema_version = 1, session_id = "ga_test_session", session_nonce = "ga_test_nonce", next_fight_index = 3, checkpoint_name = "_gamma_arena_checkpoint" })
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({ gamma_arena_session = valid_session() })
+    orchestrator:on_game_load()
+    local result = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(result.ok, "matching legacy resume cannot activate checkpoint-free Arena")
+    gamma_arena_test_assert.equals(result.error.code, "GA_RESUME_UNSUPPORTED", "legacy resume rejection precedes any override")
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "legacy resume never acquires an Arena session")
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot(), nil, "legacy fight index is never applied")
+    gamma_arena_test_assert.is_false(store.intent_state.resume_pending, "rejected legacy resume is cleared rather than retained")
+    gamma_arena_test_assert.equals(store.clear_count, 1, "legacy resume rejection clears transient ownership once")
+    gamma_arena_test_assert.equals(store.prepare_resume_count, 0, "legacy resume never reaches checkpoint preparation")
+end
+
+function manual_save_and_load_flags_are_blocked()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local notifications = 0
+    local deps = fake_orchestrator_deps(store)
+    deps.notify = function(id) gamma_arena_test_assert.equals(id, "st_gamma_arena_manual_save_disabled", "localized block id"); notifications = notifications + 1 end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    local save_flags_last = { ret = false }
+    local load_flags_first = { ret = false }
+    local load_flags_last = { ret = false }
+    local unrelated = { marker = "must remain untouched" }
+    orchestrator:on_before_save_input(11, 22, save_flags_last)
+    orchestrator:on_before_load_input(load_flags_first, 11, 22)
+    orchestrator:on_before_load_input(11, 22, unrelated, load_flags_last)
+    gamma_arena_test_assert.is_true(save_flags_last.ret, "real flags-last manual Save signature must be blocked")
+    gamma_arena_test_assert.is_true(load_flags_first.ret, "flags-first compatibility signature must be blocked")
+    gamma_arena_test_assert.is_true(load_flags_last.ret, "flags-last manual Load signature must be blocked")
+    gamma_arena_test_assert.equals(unrelated.ret, nil, "manual input scanning must not mutate unrelated tables")
+    gamma_arena_test_assert.equals(unrelated.marker, "must remain untouched", "unrelated callback data must remain intact")
+    gamma_arena_test_assert.equals(notifications, 3, "every blocked UI operation shows the localized message")
+end
+
+function fatal_main_menu_retries_throw_then_becomes_idempotent()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local disconnects, callback_results = 0, {}
+    local action
+    local deps = fake_orchestrator_deps(store)
+    deps.preflight = function() return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "failed") end
+    deps.ui.show_fatal = function(_, callback) action = callback; return {} end
+    deps.disconnect = function()
+        disconnects = disconnects + 1
+        if disconnects == 1 then error("injected disconnect failure") end
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI must receive one main-menu action")
+    callback_results[1] = action()
+    callback_results[2] = action()
+    callback_results[3] = action()
+    gamma_arena_test_assert.is_false(callback_results[1].ok, "throwing disconnect must return an observable structured failure")
+    gamma_arena_test_assert.is_true(callback_results[2].ok, "the same UI action must retry after disconnect failure")
+    gamma_arena_test_assert.is_true(callback_results[3].ok, "successful disconnect makes later clicks benign")
+    gamma_arena_test_assert.equals(disconnects, 2, "disconnect must retry once then become idempotent")
+end
+
+function fatal_main_menu_retries_explicit_false()
+    local attempts = 0
+    local action
+    local deps = fake_orchestrator_deps(fake_store({ launch_pending = true, resume_pending = false }))
+    deps.preflight = function() return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "failed") end
+    deps.ui.show_fatal = function(_, callback) action = callback; return {} end
+    deps.disconnect = function()
+        attempts = attempts + 1
+        if attempts == 1 then return false end
+        return true
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI must receive one main-menu action")
+    local first = action()
+    local second = action()
+    local third = action()
+    gamma_arena_test_assert.is_false(first.ok, "explicit false disconnect must be an observable failure")
+    gamma_arena_test_assert.is_true(second.ok and third.ok, "explicit false disconnect must remain retryable then idempotent")
+    gamma_arena_test_assert.equals(attempts, 2, "explicit false must not latch main-menu completion")
+end
+
+function fatal_main_menu_bypasses_terminal_cleanup_error()
+    local action, disconnects, fatal_clears = nil, 0, 0
+    local deps = fake_orchestrator_deps(fake_store({ launch_pending = true }))
+    deps.preflight = function()
+        return gamma_arena_result.err("GA_ENTITY_CLEANUP_FAILED", "injected terminal cleanup")
+    end
+    deps.teardown = function()
+        return gamma_arena_result.err("GA_ENTITY_CLEANUP_FAILED", "injected terminal cleanup")
+    end
+    deps.entities = {
+        registry_snapshot = function()
+            return { state = "ERROR", npcs = { { id = 100 } }, items = {}, error = { code = "GA_ENTITY_CLEANUP_FAILED" } }
+        end
+    }
+    deps.ui.show_fatal = function(errors, callback)
+        gamma_arena_test_assert.equals(#errors, 1, "duplicate fatal aggregates are displayed once")
+        action = callback
+        return {}
+    end
+    deps.ui.clear_fatal = function()
+        fatal_clears = fatal_clears + 1
+        return gamma_arena_result.ok(true)
+    end
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    gamma_arena_test_assert.is_false(orchestrator:actor_on_first_update().ok, "fixture enters fatal state")
+    gamma_arena_test_assert.is_true(type(action) == "function", "fatal UI receives emergency action")
+    gamma_arena_test_assert.is_true(action().ok, "terminal cleanup cannot block fatal disconnect")
+    gamma_arena_test_assert.is_true(action().ok, "accepted fatal disconnect is idempotent")
+    gamma_arena_test_assert.equals(disconnects, 1, "fatal disconnect is submitted exactly once")
+    gamma_arena_test_assert.equals(fatal_clears, 1, "accepted fatal disconnect clears fatal UI exactly once across repeated clicks")
+end
+
+function ordinary_main_menu_still_rejects_terminal_cleanup_error()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.entities = {
+        registry_snapshot = function() return { state = "ERROR", npcs = { { id = 100 } }, items = {} } end
+    }
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.cleanup_required = true
+    orchestrator.teardown_done = true
+    local result = orchestrator:main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "ordinary exit keeps exact cleanup gate")
+    gamma_arena_test_assert.equals(disconnects, 0, "ordinary exit never bypasses terminal cleanup")
+end
+
+function fatal_display_deduplicates_ui_cleanup_error()
+    local displayed
+    local duplicate = gamma_arena_result.err("GA_RUNTIME_UI_CLEAR_FAILED", "Arena runtime UI could not be removed safely")
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.result_ui = {
+        clear_countdown = function() return gamma_arena_result.err("GA_TEST_UI_CLEAR", "injected UI clear failure") end,
+        clear_result = function() return gamma_arena_result.err("GA_TEST_UI_CLEAR", "injected UI clear failure") end
+    }
+    deps.ui.show_fatal = function(errors) displayed = errors; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:enter_fatal(duplicate)
+    gamma_arena_test_assert.equals(#displayed, 1, "fatal display deduplicates the matching UI cleanup aggregate")
+    gamma_arena_test_assert.equals(displayed[1].error.code, duplicate.error.code, "fatal display retains the UI cleanup error code")
+    gamma_arena_test_assert.equals(displayed[1].error.message, duplicate.error.message, "fatal display retains the UI cleanup error message")
+end
+
+function fatal_display_deduplicates_transient_clear_error()
+    local displayed
+    local duplicate = gamma_arena_result.err("GA_TRANSIENT_CLEAR_FAILED", "injected transient clear failure")
+    local store = fake_store()
+    store.clear_result = duplicate
+    local deps = fake_orchestrator_deps(store)
+    deps.ui.show_fatal = function(errors) displayed = errors; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:enter_fatal(duplicate)
+    gamma_arena_test_assert.equals(#displayed, 1, "fatal display deduplicates the matching transient clear aggregate")
+    gamma_arena_test_assert.equals(displayed[1].error.code, duplicate.error.code, "fatal display retains the transient clear error code")
+    gamma_arena_test_assert.equals(displayed[1].error.message, duplicate.error.message, "fatal display retains the transient clear error message")
+end
+
+function fatal_main_menu_rejects_idle_state()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local result = gamma_arena_orchestrator.new(deps):fatal_main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "IDLE cannot use the fatal main-menu action")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FATAL_ACTION_INVALID", "IDLE rejection has the fatal action code")
+    gamma_arena_test_assert.equals(disconnects, 0, "IDLE rejection never attempts disconnect")
+end
+
+function fatal_main_menu_rejects_unshown_fatal_state()
+    local disconnects = 0
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator.machine_state = gamma_arena_state_machine.states.ERROR
+    local result = orchestrator:fatal_main_menu_action()
+    gamma_arena_test_assert.is_false(result.ok, "unshown ERROR cannot use the fatal main-menu action")
+    gamma_arena_test_assert.equals(result.error.code, "GA_FATAL_ACTION_INVALID", "unshown ERROR rejection has the fatal action code")
+    gamma_arena_test_assert.equals(disconnects, 0, "unshown ERROR rejection never attempts disconnect")
+end
+
+local callback_names = {
+    "on_game_load", "actor_on_first_update", "actor_on_update", "actor_on_before_death",
+    "npc_on_net_spawn", "npc_on_before_hit", "npc_on_hit_callback", "npc_on_death_callback", "save_state", "load_state", "on_before_save_input",
+    "on_before_load_input", "actor_on_net_destroy", "on_before_level_changing"
+}
+
+function callback_boundary_routes_exceptions_once()
+    for _, callback_name in ipairs(callback_names) do
+        local errors = 0
+        local throwing = {
+            save_guard_armed = function() return true end,
+            is_active = function() return true end,
+            on_callback_error = function(_, name, reason)
+                gamma_arena_test_assert.equals(name, callback_name, "exception callback name")
+                gamma_arena_test_assert.is_true(type(reason) == "string", "exception reason must be observable")
+                errors = errors + 1
+                return gamma_arena_result.err("GA_CALLBACK_FAILED", "routed exception")
+            end,
+            on_callback_result_error = function() error("exception path must not use false-Result routing") end
+        }
+        throwing[callback_name] = function() error("injected callback exception") end
+        local callback = gamma_arena_bootstrap.make_callbacks(throwing)[callback_name]
+        local call_ok, result = pcall(callback, 11, 22, { ret = false })
+        gamma_arena_test_assert.is_true(call_ok, callback_name .. " boundary must contain exceptions")
+        gamma_arena_test_assert.is_false(result.ok, callback_name .. " exception must return structured failure")
+        gamma_arena_test_assert.equals(errors, 1, callback_name .. " exception must route exactly once")
+    end
+end
+
+function callback_boundary_routes_false_results_once()
+    for _, callback_name in ipairs(callback_names) do
+        local routes, callback_errors = 0, 0
+        local expected = gamma_arena_result.err("GA_TEST_CALLBACK_RESULT", "injected Result failure", { callback = callback_name })
+        local failing = {
+            save_guard_armed = function() return true end,
+            is_active = function() return true end,
+            on_callback_error = function() callback_errors = callback_errors + 1 end,
+            on_callback_result_error = function(_, name, result, was_active)
+                gamma_arena_test_assert.equals(name, callback_name, "false-Result callback name")
+                gamma_arena_test_assert.is_true(result == expected, "false-Result identity must be preserved")
+                gamma_arena_test_assert.is_true(was_active, "critical callback must preserve prior active state")
+                routes = routes + 1
+                return result
+            end
+        }
+        failing[callback_name] = function() return expected, "secondary-return" end
+        local callback = gamma_arena_bootstrap.make_callbacks(failing)[callback_name]
+        local call_ok, result, secondary = pcall(callback, 11, 22, { ret = false })
+        gamma_arena_test_assert.is_true(call_ok, callback_name .. " false Result boundary must not throw")
+        gamma_arena_test_assert.is_true(result == expected, callback_name .. " must preserve the original Result")
+        gamma_arena_test_assert.equals(secondary, "secondary-return", callback_name .. " must preserve additional return values")
+        gamma_arena_test_assert.equals(routes, 1, callback_name .. " false Result must route exactly once")
+        gamma_arena_test_assert.equals(callback_errors, 0, callback_name .. " false Result must not use exception routing")
+    end
+end
+
+function inactive_callback_results_remain_benign()
+    local calls, routes = 0, 0
+    local inactive = {
+        is_active = function() return false end,
+        save_state = function() calls = calls + 1; return gamma_arena_result.ok(false) end,
+        on_callback_error = function() routes = routes + 1 end,
+        on_callback_result_error = function() routes = routes + 1 end
+    }
+    local result = gamma_arena_bootstrap.make_callbacks(inactive).save_state({})
+    gamma_arena_test_assert.equals(result, nil, "inactive campaign save callback preserves its historical nil return")
+    gamma_arena_test_assert.equals(calls, 1, "save callback reaches guard-aware campaign boundary")
+    gamma_arena_test_assert.equals(routes, 0, "inactive no-op must not enter error routing")
+end
+
+function active_save_failure_enters_fatal_once()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local fatal_count = 0
+    deps.ui.show_fatal = function() fatal_count = fatal_count + 1; return {} end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    local result = gamma_arena_bootstrap.make_callbacks(orchestrator).save_state({})
+    gamma_arena_test_assert.is_true(result.ok and result.value == false, "active Arena save is suppressed without serialization")
+    gamma_arena_test_assert.is_true(orchestrator:is_active(), "save breach diagnostics do not terminate combat")
+    gamma_arena_test_assert.equals(deps._save_guard.breach_calls, 1, "active save callback records one breach")
+    gamma_arena_test_assert.equals(fatal_count, 0, "save breach observation is diagnostic rather than fatal")
+end
+
+function fatal_ui_helper_propagates_callback_results()
+    local attempts = 0
+    local failure = gamma_arena_result.err("GA_DISCONNECT_FAILED", "retry")
+    local function callback()
+        attempts = attempts + 1
+        if attempts == 1 then return failure end
+        return gamma_arena_result.ok(true)
+    end
+    local first = gamma_arena_ui_start.invoke_fatal_main_menu(callback, nil, {})
+    local second = gamma_arena_ui_start.invoke_fatal_main_menu(callback, nil, {})
+    gamma_arena_test_assert.is_true(first == failure, "Task 4 fatal UI must return disconnect failure unchanged")
+    gamma_arena_test_assert.is_true(second.ok, "Task 4 fatal UI must return retry success")
+end
+
+function bootstrap_registration_rolls_back_every_position()
+    for failure_position = 1, #callback_names do
+        local active, rollback_order, compose_count, register_count = {}, {}, 0, 0
+        local fail_at = failure_position
+        local registrar = gamma_arena_bootstrap.new_registrar({
+            compose = function()
+                compose_count = compose_count + 1
+                local instance = { is_active = function() return false end }
+                for _, name in ipairs(callback_names) do instance[name] = function() return gamma_arena_result.ok(false) end end
+                return instance
+            end,
+            register = function(name, callback)
+                register_count = register_count + 1
+                if register_count == fail_at then error("injected registration failure") end
+                gamma_arena_test_assert.equals(active[name], nil, "callback must never be registered twice: " .. name)
+                active[name] = callback
+            end,
+            unregister = function(name, callback)
+                gamma_arena_test_assert.is_true(active[name] == callback, "rollback must use the exact registered callback reference")
+                active[name] = nil
+                rollback_order[#rollback_order + 1] = name
+            end
+        })
+        local failed = registrar:register_all()
+        gamma_arena_test_assert.is_false(failed.ok, "registration position " .. failure_position .. " must fail")
+        gamma_arena_test_assert.equals(registrar:status(), "idle", "clean rollback must permit a later retry")
+        for index = 1, failure_position - 1 do
+            gamma_arena_test_assert.equals(rollback_order[index], callback_names[failure_position - index], "rollback must be reverse ordered")
+        end
+        register_count = 0
+        fail_at = nil
+        local retried = registrar:register_all()
+        gamma_arena_test_assert.is_true(retried.ok, "clean rollback must allow a fresh registration attempt")
+        gamma_arena_test_assert.equals(compose_count, 2, "retry composes exactly one new orchestrator after clean rollback")
+        local active_count = 0
+        for _ in pairs(active) do active_count = active_count + 1 end
+        gamma_arena_test_assert.equals(active_count, #callback_names, "retry must leave exactly one copy of every callback")
+    end
+end
+
+function bootstrap_registration_poison_blocks_retry()
+    local compose_count, register_count, unregister_count = 0, 0, 0
+    local registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function()
+            compose_count = compose_count + 1
+            local instance = { is_active = function() return false end }
+            for _, name in ipairs(callback_names) do instance[name] = function() return gamma_arena_result.ok(false) end end
+            return instance
+        end,
+        register = function()
+            register_count = register_count + 1
+            if register_count == 4 then error("injected registration failure") end
+        end,
+        unregister = function()
+            unregister_count = unregister_count + 1
+            if unregister_count == 2 then return false end
+        end
+    })
+    local first = registrar:register_all()
+    local second = registrar:register_all()
+    gamma_arena_test_assert.is_false(first.ok and second.ok, "rollback failure must remain failed closed")
+    gamma_arena_test_assert.equals(registrar:status(), "poisoned", "rollback failure must poison bootstrap registration")
+    gamma_arena_test_assert.equals(compose_count, 1, "poisoned registration cannot create a second orchestrator")
+    gamma_arena_test_assert.equals(register_count, 4, "poisoned registration cannot retry callbacks")
+    gamma_arena_test_assert.equals(unregister_count, 3, "rollback continues in reverse after one unregister failure")
+end
+
+function bootstrap_requires_unregister_before_composition()
+    local compose_count = 0
+    local registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function() compose_count = compose_count + 1; return {} end,
+        register = function() end
+    })
+    local result = registrar:register_all()
+    gamma_arena_test_assert.is_false(result.ok, "missing UnregisterScriptCallback must fail closed")
+    gamma_arena_test_assert.equals(result.error.code, "GA_BOOTSTRAP_REGISTRATION_POISONED", "missing unregister code")
+    gamma_arena_test_assert.equals(registrar:status(), "poisoned", "missing unregister must poison process registration")
+    gamma_arena_test_assert.equals(compose_count, 0, "feature probe must run before orchestrator/router composition")
+end
+
+function runtime_bootstrap_status_preserves_initialization_result()
+    local module_before_registration = gamma_arena_bootstrap.runtime_status()
+    gamma_arena_test_assert.is_false(module_before_registration.ok, "module readiness must report not ready before bootstrap creates a registrar")
+    gamma_arena_test_assert.equals(module_before_registration.error.code, "GA_BOOTSTRAP_NOT_READY", "module readiness code before bootstrap creation")
+
+    local unregistered = gamma_arena_bootstrap.new_registrar({
+        compose = function() return {} end,
+        register = function() end,
+        unregister = function() end
+    })
+    local before_registration = unregistered:runtime_status()
+    gamma_arena_test_assert.is_false(before_registration.ok, "new registrar must report not ready before registration")
+    gamma_arena_test_assert.equals(before_registration.error.code, "GA_BOOTSTRAP_NOT_READY", "unregistered readiness code")
+    gamma_arena_test_assert.equals(before_registration.error.context.registration_state, "idle", "unregistered readiness state")
+
+    local failed_registrar = gamma_arena_bootstrap.new_registrar({
+        compose = function() error("injected composition failure") end,
+        register = function() end,
+        unregister = function() end
+    })
+    local failed = failed_registrar:register_all()
+    local failed_status = failed_registrar:runtime_status()
+    gamma_arena_test_assert.is_false(failed.ok, "injected composition failure must fail registration")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_BOOTSTRAP_COMPOSE_FAILED", "composition failure code")
+    gamma_arena_test_assert.is_true(failed.error.context ~= nil, "composition failure must retain context")
+    gamma_arena_test_assert.is_true(failed_status == failed, "readiness must return the original failed registration Result")
+    gamma_arena_test_assert.is_true(failed_status.error.context == failed.error.context, "readiness must preserve failed Result context identity")
+
+    local malformed_registrar = gamma_arena_bootstrap.new_registrar({})
+    malformed_registrar.register_all_impl = function() return { ok = false } end
+    local malformed = malformed_registrar:register_all()
+    gamma_arena_test_assert.is_true(type(malformed.error) == "table" and malformed.error.code == "GA_BOOTSTRAP_REGISTRATION_FAILED" and type(malformed.error.message) == "string", "malformed failed Result must normalize to a complete registration failure")
+    gamma_arena_test_assert.is_true(malformed_registrar:runtime_status() == malformed, "readiness must preserve the normalized malformed failure Result")
+
+    local compose_count, register_count, unregister_count = 0, 0, 0
+    local registered = gamma_arena_bootstrap.new_registrar({
+        compose = function()
+            compose_count = compose_count + 1
+            return {}
+        end,
+        make_callbacks = function()
+            local callbacks = {}
+            for _, name in ipairs(callback_names) do callbacks[name] = function() return gamma_arena_result.ok(true) end end
+            return callbacks
+        end,
+        register = function() register_count = register_count + 1 end,
+        unregister = function() unregister_count = unregister_count + 1 end
+    })
+    local registration = registered:register_all()
+    gamma_arena_test_assert.is_true(registration.ok, "complete callback registration must succeed")
+    local registration_state, instance, callbacks, registered_entries, last_result = registered.registration_state, registered.instance, registered.callbacks, registered.registered, registered.last_result
+    local first_status = registered:runtime_status()
+    local second_status = registered:runtime_status()
+    gamma_arena_test_assert.is_true(first_status.ok and second_status.ok, "readiness succeeds only after registration state, instance, and callbacks are ready")
+    gamma_arena_test_assert.equals(compose_count, 1, "readiness must not recompose")
+    gamma_arena_test_assert.equals(register_count, #callback_names, "readiness must not register callbacks")
+    gamma_arena_test_assert.equals(unregister_count, 0, "readiness must not unregister callbacks")
+    gamma_arena_test_assert.equals(registered.registration_state, registration_state, "readiness must not change registration state")
+    gamma_arena_test_assert.is_true(registered.instance == instance and registered.callbacks == callbacks and registered.registered == registered_entries and registered.last_result == last_result, "readiness must not change registrar fields")
+end
+
+function runtime_bootstrap_restart_without_registered_runtime_is_inert()
+    local result = gamma_arena_bootstrap.request_restart()
+    gamma_arena_test_assert.is_true(result.ok and result.value == false, "restart without a registered runtime is inert")
+end
+
+function runtime_ordinary_start_preflight_precedes_mutation()
+    local request = {
+        schema_version = 1,
+        mode_id = "skirmish",
+        difficulty_id = "master",
+        seed_mode = "random",
+        session_seed = 123
+    }
+    local function begin_with(status)
+        local calls = {}
+        local owner = {}
+        function owner:StartGame()
+            calls[#calls + 1] = "StartGame"
+            return true
+        end
+        local ports = {
+            runtime_status = function()
+                calls[#calls + 1] = "runtime preflight"
+                return status()
+            end,
+            save_preferences = function()
+                calls[#calls + 1] = "save preferences"
+                return gamma_arena_result.ok(true)
+            end,
+            issue_launch = function()
+                calls[#calls + 1] = "issue launch"
+                return gamma_arena_result.ok(true)
+            end,
+            write_character_creation = function()
+                calls[#calls + 1] = "write bridge"
+                return gamma_arena_result.ok(true)
+            end
+        }
+        return gamma_arena_ui_start.begin_start(owner, {}, request, ports), calls
+    end
+    local function assert_blocked(label, status, expected_code)
+        local result, calls = begin_with(status)
+        gamma_arena_test_assert.is_false(result.ok, label .. " must fail safely")
+        gamma_arena_test_assert.equals(result.error.code, expected_code, label .. " code")
+        gamma_arena_test_assert.equals(#calls, 1, label .. " must not save, launch, bridge, or hand off")
+        gamma_arena_test_assert.equals(calls[1], "runtime preflight", label .. " only invokes runtime readiness")
+    end
+
+    local function assert_missing_runtime(label, bootstrap)
+        local calls = {}
+        local owner = {}
+        function owner:StartGame()
+            calls[#calls + 1] = "StartGame"
+            return true
+        end
+        local ports = {
+            save_preferences = function()
+                calls[#calls + 1] = "save preferences"
+                return gamma_arena_result.ok(true)
+            end,
+            issue_launch = function()
+                calls[#calls + 1] = "issue launch"
+                return gamma_arena_result.ok(true)
+            end,
+            write_character_creation = function()
+                calls[#calls + 1] = "write bridge"
+                return gamma_arena_result.ok(true)
+            end
+        }
+        local preflight = gamma_arena_ui_start.preflight_runtime
+        local original_environment = getfenv(preflight)
+        setfenv(preflight, setmetatable({}, { __index = function(_, name)
+            if name == "gamma_arena_bootstrap" then return bootstrap end
+            return original_environment[name]
+        end }))
+        local began, result = pcall(function()
+            return gamma_arena_ui_start.begin_start(owner, {}, request, ports)
+        end)
+        setfenv(preflight, original_environment)
+        gamma_arena_test_assert.is_true(began, label .. " must become a Result")
+        gamma_arena_test_assert.is_false(result.ok, label .. " blocks start")
+        gamma_arena_test_assert.equals(result.error.code, "GA_START_RUNTIME_UNAVAILABLE", label .. " code")
+        gamma_arena_test_assert.equals(#calls, 0, label .. " has zero downstream side effects")
+    end
+
+    assert_missing_runtime("missing bootstrap namespace", nil)
+    assert_missing_runtime("missing initializer", {})
+    assert_missing_runtime("missing runtime_status", { ensure_initialized = function() return gamma_arena_result.ok(true) end })
+
+    assert_blocked("thrown runtime_status", function() error("injected readiness throw") end, "GA_START_RUNTIME_STATUS_FAILED")
+    assert_blocked("malformed runtime_status", function() return "not a Result" end, "GA_START_RUNTIME_STATUS_INVALID")
+
+    local original_failure = gamma_arena_result.err("GA_BOOTSTRAP_COMPOSE_FAILED", "original bootstrap failure", { registration_state = "poisoned" })
+    local failed, failed_calls = begin_with(function() return original_failure end)
+    gamma_arena_test_assert.is_true(failed == original_failure, "failed runtime Result reaches the UI-facing start failure unchanged")
+    gamma_arena_test_assert.equals(failed.error.context.registration_state, "poisoned", "failed runtime Result retains context")
+    gamma_arena_test_assert.equals(#failed_calls, 1, "failed runtime Result has zero downstream side effects")
+
+    local success, calls = begin_with(function() return gamma_arena_result.ok(true) end)
+    gamma_arena_test_assert.is_true(success.ok, "ready runtime begins Arena start")
+    gamma_arena_test_assert.equals(table.concat(calls, " -> "), "runtime preflight -> save preferences -> issue launch -> write bridge -> StartGame", "ordinary start performs runtime preflight before every launch mutation")
+end
+
+function runtime_custom_start_validates_before_launch_mutation()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local request = {
+        schema_version = 2,
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        seed_mode = "manual",
+        session_seed = 123,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+    local calls = {}
+    local captured = nil
+    local ports = {
+        runtime_status = function() calls[#calls + 1] = "preflight"; return gamma_arena_result.ok(true) end,
+        catalogs = function() calls[#calls + 1] = "catalog"; return gamma_arena_result.ok(catalog) end,
+        issue_launch = function(_, value)
+            calls[#calls + 1] = "launch"
+            captured = value
+            return gamma_arena_result.ok({ token = "ga1:1000:custom" })
+        end,
+        write_character_creation = function() calls[#calls + 1] = "bridge"; return gamma_arena_result.ok(true) end,
+        handoff_start_game = function() calls[#calls + 1] = "handoff"; return gamma_arena_result.ok(true) end
+    }
+    local started = gamma_arena_ui_start.begin_start({}, {}, request, ports)
+    gamma_arena_test_assert.is_true(started.ok, "valid custom start proceeds")
+    gamma_arena_test_assert.equals(table.concat(calls, ","), "preflight,catalog,launch,bridge,handoff", "custom validation precedes every launch mutation")
+    gamma_arena_test_assert.equals(captured.generator_version, catalog.generator_version, "generator identity derives from catalog")
+    gamma_arena_test_assert.equals(captured.catalog_revision, catalog.revision, "catalog revision derives from catalog")
+    gamma_arena_test_assert.equals(captured.catalog_fingerprint, catalog.fingerprint, "fingerprint derives from catalog")
+    gamma_arena_test_assert.is_true(captured.custom_config ~= request.custom_config, "validated custom config is copied")
+
+    calls = {}
+    local invalid = clone(request)
+    invalid.custom_config.actor_items[5].section = "unknown"
+    local rejected = gamma_arena_ui_start.begin_start({}, {}, invalid, ports)
+    gamma_arena_test_assert.is_false(rejected.ok, "invalid custom config rejects")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_CUSTOM_ITEM_UNKNOWN", "validation failure is exact")
+    gamma_arena_test_assert.equals(table.concat(calls, ","), "preflight,catalog", "invalid custom config cannot persist or hand off")
+end
+
+function net_destroy_teardown_honors_checkpoint_latch()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local reasons = {}
+    local deps = fake_orchestrator_deps(store)
+    deps.teardown = function(reason, preserve) reasons[#reasons + 1] = reason .. ":" .. tostring(preserve); return gamma_arena_result.ok(true) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    orchestrator:expect_checkpoint_reload()
+    orchestrator:actor_on_net_destroy()
+    orchestrator:actor_on_net_destroy()
+    gamma_arena_test_assert.equals(reasons[1], "checkpoint_reload:true", "expected reload preserves session route")
+    gamma_arena_test_assert.equals(#reasons, 1, "net-destroy teardown must be idempotent")
+end
+
+function unexpected_net_destroy_clears_external_route()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local teardown_calls = 0
+    local deps = fake_orchestrator_deps(store)
+    deps.teardown = function(reason, preserve)
+        teardown_calls = teardown_calls + 1
+        gamma_arena_test_assert.equals(reason, "actor_destroyed", "ordinary actor destroy retains its teardown reason")
+        gamma_arena_test_assert.is_false(preserve, "ordinary actor destroy does not preserve the Arena session")
+        return gamma_arena_result.ok(true)
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    orchestrator:actor_on_first_update()
+    local callbacks = gamma_arena_bootstrap.make_callbacks(orchestrator)
+    local destroyed = callbacks.actor_on_net_destroy()
+    local duplicate = callbacks.actor_on_net_destroy()
+    gamma_arena_test_assert.is_true(destroyed.ok, "ordinary actor destruction succeeds through the real callback router")
+    gamma_arena_test_assert.equals(duplicate, nil, "inactive duplicate ordinary actor destruction is guarded")
+    gamma_arena_test_assert.equals(teardown_calls, 1, "ordinary actor destruction retains one teardown")
+    gamma_arena_test_assert.equals(store.clear_matching_count, 1, "unexpected actor destruction clears only this Arena session's resume route")
+    gamma_arena_test_assert.is_true(orchestrator.cleanup_required, "ordinary actor destruction retains cleanup ownership")
+    gamma_arena_test_assert.is_false(orchestrator:is_active(), "ordinary actor destruction deactivates Arena")
+    gamma_arena_test_assert.equals(orchestrator.runtime_stage, "CLEANING", "ordinary actor destruction retains CLEANING stage")
+end
+
+function runtime_fatal_recovery_waits_for_cleanup_before_disconnect()
+    local session = valid_session()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.ok({
+        schema_version = 1,
+        session_id = session.session_id,
+        session_nonce = session.session_nonce,
+        next_fight_index = session.fight_index,
+        checkpoint_name = session.checkpoint_name
+    })
+    local deps = fake_orchestrator_deps(store)
+    local checkpoint = deps.checkpoint
+    function checkpoint:begin_resume_recovery()
+        return gamma_arena_result.err("GA_CHECKPOINT_RECOVERY_MISSING", "injected missing checkpoint")
+    end
+    function checkpoint:cleanup()
+        self.current = "CLEANING"
+        self.cleanup_updates_remaining = 3
+        return gamma_arena_result.ok(true)
+    end
+    function checkpoint:update()
+        if self.current == "CLEANING" then
+            self.cleanup_updates_remaining = self.cleanup_updates_remaining - 1
+            if self.cleanup_updates_remaining <= 0 then self.current = "NONE" end
+        end
+        return gamma_arena_result.ok({ state = self.current })
+    end
+    local disconnects, cleanup_session = 0, nil
+    local orchestrator = nil
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    deps.teardown = function()
+        cleanup_session = orchestrator:session_snapshot()
+        checkpoint:cleanup(cleanup_session)
+        return checkpoint:update()
+    end
+    orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:load_state({ gamma_arena_session = session })
+    orchestrator:on_game_load()
+    local failed = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(failed.ok, "fresh recovery failure enters fatal routing")
+    gamma_arena_test_assert.is_true(cleanup_session ~= nil, "fatal teardown retains the loaded ArenaSession for matching cleanup")
+    local pending = orchestrator:main_menu_action()
+    gamma_arena_test_assert.is_false(pending.ok, "main menu waits while exact cleanup is pending")
+    gamma_arena_test_assert.equals(pending.error.code, "GA_RUNTIME_CLEANUP_PENDING", "pending cleanup has a retryable result")
+    gamma_arena_test_assert.equals(disconnects, 0, "disconnect cannot bypass exact cleanup")
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(orchestrator:main_menu_action().ok, "main menu succeeds after cleanup reaches NONE")
+    gamma_arena_test_assert.equals(disconnects, 1, "disconnect executes exactly once after cleanup")
+end
+
+function runtime_pre_session_fatal_waits_for_cleanup_before_disconnect()
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    local deps = fake_orchestrator_deps(store)
+    local checkpoint = deps.checkpoint
+    function checkpoint:cleanup()
+        if not self.cleanup_started then
+            self.cleanup_started = true
+            self.current = "CLEANING"
+            self.cleanup_updates_remaining = 3
+        end
+        return gamma_arena_result.ok(true)
+    end
+    function checkpoint:update()
+        if self.current == "CLEANING" then
+            self.cleanup_updates_remaining = self.cleanup_updates_remaining - 1
+            if self.cleanup_updates_remaining <= 0 then self.current = "NONE" end
+        end
+        return gamma_arena_result.ok({ state = self.current, pending = self.current ~= "NONE" })
+    end
+    local disconnects = 0
+    deps.preflight = function() return gamma_arena_result.err("GA_PREFLIGHT_FAILED", "injected pre-session failure") end
+    deps.disconnect = function() disconnects = disconnects + 1; return true end
+    deps.teardown = function()
+        checkpoint:cleanup(nil)
+        return checkpoint:update()
+    end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    orchestrator:on_game_load()
+    local failed = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(failed.ok, "launch preflight failure enters fatal before session assignment")
+    gamma_arena_test_assert.equals(orchestrator:session_snapshot(), nil, "preflight fatal has no ArenaSession")
+    local pending = orchestrator:main_menu_action()
+    gamma_arena_test_assert.is_false(pending.ok, "pre-session fatal still waits for exact checkpoint cleanup")
+    gamma_arena_test_assert.equals(pending.error.code, "GA_RUNTIME_CLEANUP_PENDING", "pre-session cleanup exposes retryable pending result")
+    gamma_arena_test_assert.equals(disconnects, 0, "pre-session fatal cannot disconnect while cleanup is pending")
+    orchestrator:actor_on_update()
+    gamma_arena_test_assert.is_true(orchestrator:main_menu_action().ok, "pre-session fatal disconnects after checkpoint reaches NONE")
+    gamma_arena_test_assert.equals(disconnects, 1, "pre-session fatal disconnect executes once")
+end
+
+function runtime_prepare_resume_legacy_mismatch_is_normalized()
+    local session = valid_session()
+    local store = fake_store({ launch_pending = false, resume_pending = true })
+    store.resume_result = gamma_arena_result.err("GA_RESUME_NONCE_MISMATCH", "injected legacy store mismatch")
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(store))
+    orchestrator:load_state({ gamma_arena_session = session })
+    orchestrator:on_game_load()
+    local failed = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(failed.ok, "legacy preparation mismatch enters fatal routing")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_CHECKPOINT_RESTORE_FAILED", "orchestrator exposes one restore-failure contract at the recovery boundary")
+    gamma_arena_test_assert.equals(failed.error.context.cause.code, "GA_RESUME_NONCE_MISMATCH", "normalized restore failure preserves the legacy mismatch cause")
+end

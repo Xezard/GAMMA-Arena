@@ -122,6 +122,21 @@ local function random_catalog_view(catalog)
     local view = {}
     for key, value in pairs(catalog) do view[key] = value end
 
+    if catalog.selection_mode == "staged" then
+        view.faction_ids = {}
+        local pools = type(catalog.profiles_by_faction) == "table" and catalog.profiles_by_faction or {}
+        for _, faction_id in ipairs(type(catalog.faction_ids) == "table" and catalog.faction_ids or {}) do
+            local profiles = pools[faction_id]
+            if type(faction_id) == "string" and type(profiles) == "table" and #profiles > 0 then
+                view.faction_ids[#view.faction_ids + 1] = faction_id
+            end
+        end
+        table.sort(view.faction_ids)
+        if #view.faction_ids == 0 then
+            return gamma_arena_result.err("GA_RANDOM_CATALOG_INVALID", "Random fight catalog has no nonempty faction profile pools", {})
+        end
+    end
+
     local weapon_by_section = {}
     view.weapon_list = {}
     for _, weapon in ipairs(catalog.weapon_list or {}) do
@@ -137,6 +152,7 @@ local function random_catalog_view(catalog)
             end
         end
         if type(weapon) == "table" and physical and physical.category == "weapon"
+            and gamma_arena_weapon_safety.allowed(catalog, weapon.section)
             and (physical.ltx_slot == 1 or physical.ltx_slot == 2)
             and variants[1] and variants[1].section == weapon.ammo then
             local copied = effective_weapon(weapon, physical)
@@ -379,7 +395,8 @@ local function player_pair_has_completion(catalogs, budget, weapon_class, armor_
     if type(bandage) ~= "table" then return false end
     for _, weapon in ipairs(catalogs.weapon_list or {}) do
         local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
-        if weapon.kind == weapon_class and type(ammo) == "table" then
+        if weapon.kind == weapon_class and type(ammo) == "table"
+            and gamma_arena_weapon_safety.allowed(catalogs, weapon.section) then
             for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
                 for _, outfit in ipairs(catalogs.outfit_list or {}) do
                     if outfit.armor_class == armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= budget then return true end
@@ -448,7 +465,8 @@ function player_loadout(request, fight_index, catalogs, difficulty)
     for _, weapon in ipairs(sorted_by_section(catalogs.weapon_list)) do
         local ammo = catalogs.ammo and catalogs.ammo[weapon.ammo]
         local available = false
-        if weapon.kind == pair.weapon_class and type(ammo) == "table" then
+        if weapon.kind == pair.weapon_class and type(ammo) == "table"
+            and gamma_arena_weapon_safety.allowed(catalogs, weapon.section) then
             for boxes = weapon.ammo_box_min, weapon.ammo_box_max do
                 for _, outfit in ipairs(catalogs.outfit_list or {}) do
                     if outfit.armor_class == pair.armor_class and weapon.cost + ammo.cost * boxes + outfit.cost + bandage.cost <= equipment_budget then available = true; break end
@@ -892,7 +910,7 @@ local function generate_draft_internal(session, fight_index, catalog, layout)
     local profile_pool = catalog.profile_list
     if catalog.selection_mode == "staged" and type(catalog.faction_ids) == "table" and #catalog.faction_ids > 0 then
         local enemy_faction = stream(normalized_request, fight_index, catalog, "enemy_faction"):pick(catalog.faction_ids)
-        profile_pool = catalog.profiles_by_faction[enemy_faction] or profile_pool
+        profile_pool = catalog.profiles_by_faction[enemy_faction]
     end
     local ranked_profiles = bind_profile_pool(catalog, profile_pool); if not ranked_profiles.ok then return ranked_profiles end
     profile_pool = ranked_profiles.value

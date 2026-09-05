@@ -1,0 +1,1074 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+local function entity_catalog(...)
+    return gamma_arena_test_runtime_part_loadout.entity_catalog(...)
+end
+
+local function entity_spec(...)
+    return gamma_arena_test_runtime_part_loadout.entity_spec(...)
+end
+
+local function fake_entity_environment(...)
+    return gamma_arena_test_runtime_part_loadout.fake_entity_environment(...)
+end
+
+local function pump_entity(...)
+    return gamma_arena_test_runtime_part_loadout.pump_entity(...)
+end
+
+local function begin_entity_apply(...)
+    return gamma_arena_test_runtime_part_loadout.begin_entity_apply(...)
+end
+
+function active_medical_entity_fixture()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    gamma_arena_test_assert.is_true(begin_entity_apply(adapter, env, entity_spec(1), "session-medical").ok, "medical fixture begins")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "medical fixture reaches ACTIVE")
+    return env, adapter, snapshot
+end
+
+function registered_medical(snapshot, npc_id, section)
+    for _, record in ipairs(snapshot.items) do
+        if record.parent_id == npc_id and record.role == "medicine" and record.section == section then return record end
+    end
+    return nil
+end
+
+function runtime_entity_consumes_owned_medical_item_once()
+    local env, adapter, snapshot = active_medical_entity_fixture()
+    local npc = snapshot.npcs[1]
+    local medkit = registered_medical(snapshot, npc.id, "medkit")
+    local bandage = registered_medical(snapshot, npc.id, "bandage")
+    gamma_arena_test_assert.is_true(medkit ~= nil and bandage ~= nil and medkit.id ~= bandage.id, "each generated medical entry has a distinct registered entity")
+
+    local consumed = adapter:consume_medical_item("ga9-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(consumed.ok and type(consumed.value) == "table" and consumed.value.item_id == medkit.id, "owned physical medkit is consumed")
+    gamma_arena_test_assert.equals(consumed.value.section, "medkit", "consumption returns the proved section")
+    gamma_arena_test_assert.equals(env.release_requests[#env.release_requests], medkit.id, "consumption uses the safe release port")
+
+    local release_count = #env.release_requests
+    local duplicate = adapter:consume_medical_item("ga9-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(duplicate.ok and duplicate.value == false, "duplicate consumption is idempotent")
+    gamma_arena_test_assert.equals(#env.release_requests, release_count, "duplicate consumption never releases twice")
+
+    gamma_arena_test_assert.is_true(adapter:cleanup().ok, "teardown accepts a consumed child")
+    pump_entity(adapter, env)
+    local medkit_releases = 0
+    for _, id in ipairs(env.release_requests) do if id == medkit.id then medkit_releases = medkit_releases + 1 end end
+    gamma_arena_test_assert.equals(medkit_releases, 1, "teardown ignores the consumed child")
+end
+
+function runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items()
+    local env, adapter, snapshot = active_medical_entity_fixture()
+    local npc = snapshot.npcs[1]
+    local stale = adapter:consume_medical_item("ga-stale-fight", npc.id, "medkit")
+    gamma_arena_test_assert.is_false(stale.ok, "stale fight identity is rejected")
+    gamma_arena_test_assert.equals(stale.error.code, "GA_ENTITY_MEDICAL_FIGHT_STALE", "stale fight uses a stable error")
+
+    local medkit = registered_medical(snapshot, npc.id, "medkit")
+    env.objects[medkit.id].parent_id = 9999
+    local transferred = adapter:consume_medical_item("ga9-entity-test", npc.id, "medkit")
+    gamma_arena_test_assert.is_true(transferred.ok and transferred.value == false, "transferred medicine cancels without an effect token")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "foreign medicine is never released")
+
+    local bandage = registered_medical(snapshot, npc.id, "bandage")
+    env:remove_entity(bandage.id)
+    local absent = adapter:consume_medical_item("ga9-entity-test", npc.id, "bandage")
+    gamma_arena_test_assert.is_true(absent.ok and absent.value == false, "looted or absent medicine cancels without an effect token")
+    gamma_arena_test_assert.equals(#env.release_requests, 0, "absent medicine is never released")
+end
+
+function runtime_npc_medical_consumes_materialized_registry_items()
+    local env, adapter, snapshot = active_medical_entity_fixture()
+    local opponent = snapshot.npcs[1]
+    local medkit = registered_medical(snapshot, opponent.id, "medkit")
+    local health, pulses, consumes = 0.4, 0, 0
+    local release_count = #env.release_requests
+    local controller = gamma_arena_npc_medical.new({
+        clock = function() return env.now end,
+        registry_snapshot = function() return adapter:registry_snapshot() end,
+        clear_hidden_charge = function() return gamma_arena_result.ok(true) end,
+        status = function(id)
+            return { npc = env.online[id], health = health, bleeding = 0, alive = true, combat_capable = true }
+        end,
+        consume_medical_item = function(fight_id, id, section)
+            consumes = consumes + 1
+            return adapter:consume_medical_item(fight_id, id, section)
+        end,
+        change_health = function(npc, delta)
+            gamma_arena_test_assert.equals(npc, env.online[opponent.id], "healing targets the registered online opponent")
+            health = math.min(1, health + delta)
+            pulses = pulses + 1
+            return true
+        end,
+        cap_bleeding = function() return true end
+    })
+    gamma_arena_test_assert.is_true(medkit ~= nil, "materializer registers an owned medicine entry")
+    gamma_arena_test_assert.is_true(controller:start({ fight_id = "ga9-entity-test", npc_medical_owner = "arena" }).ok, "controller binds the real entity fight")
+    gamma_arena_test_assert.is_true(controller:update().ok, "real registry schedules medicine")
+    gamma_arena_test_assert.equals(consumes, 0, "scheduling does not consume before the delay")
+    env:advance(2500)
+    gamma_arena_test_assert.is_true(controller:update().ok, "scheduled medicine reaches the entity adapter")
+    gamma_arena_test_assert.equals(consumes, 1, "controller consumes the materialized medkit exactly once")
+    gamma_arena_test_assert.equals(env.release_requests[#env.release_requests], medkit.id, "entity adapter releases the exact registered medicine")
+    for pulse = 1, 12 do
+        env:advance(250)
+        gamma_arena_test_assert.is_true(controller:update().ok, "registered medicine continues bounded healing")
+    end
+    gamma_arena_test_assert.equals(pulses, 13, "real registry/controller integration applies thirteen healing pulses")
+    gamma_arena_test_assert.equals(#env.release_requests, release_count + 1, "healing never releases a second physical item")
+end
+
+function npc_medical_fixture(values)
+    values = values or {}
+    local env = {
+        now = 0, health = values.health or 0.5, bleeding = values.bleeding or 0.3,
+        alive = true, combat_capable = true, consumed = {}, health_pulses = 0,
+        bleeding_caps = {}, hidden_clears = 0, logs = {},
+        registry_reads = 0, charge_clears = 0, status_reads = 0,
+        consumes = 0, health_changes = 0
+    }
+    env.npc = { runtime_id = 301 }
+    local registry = {
+        state = "ACTIVE",
+        npcs = { { id = 301, slot = 1, section = values.profile or "gamma_arena_bandit_veteran", terminal_state = "ALIVE", released = false } },
+        items = {
+            { id = 401, parent_id = 301, section = "medkit", role = "medicine", source = "assigned", released = false },
+            { id = 402, parent_id = 301, section = "bandage", role = "medicine", source = "assigned", released = false }
+        }
+    }
+    local controller = gamma_arena_npc_medical.new({
+        clock = function() return env.now end,
+        registry_snapshot = function() env.registry_reads = env.registry_reads + 1; return clone(registry) end,
+        clear_hidden_charge = function()
+            env.charge_clears = env.charge_clears + 1
+            env.hidden_clears = env.hidden_clears + 1
+            return gamma_arena_result.ok(true)
+        end,
+        status = function()
+            env.status_reads = env.status_reads + 1
+            return gamma_arena_result.ok({ npc = env.npc, health = env.health, bleeding = env.bleeding, alive = env.alive, combat_capable = env.combat_capable })
+        end,
+        consume_medical_item = function(fight_id, npc_id, section)
+            env.consumes = env.consumes + 1
+            if values.consume_false then return gamma_arena_result.ok(false) end
+            env.consumed[#env.consumed + 1] = section
+            for _, item in ipairs(registry.items) do if item.parent_id == npc_id and item.section == section then item.released = true end end
+            return gamma_arena_result.ok({ npc = env.npc, item_id = section == "medkit" and 401 or 402, section = section })
+        end,
+        change_health = function(npc, delta)
+            env.health_changes = env.health_changes + 1
+            env.health_pulses = env.health_pulses + 1
+            env.health = math.min(1, env.health + delta)
+            return gamma_arena_result.ok(true)
+        end,
+        cap_bleeding = function(npc, maximum)
+            env.bleeding = math.min(env.bleeding, maximum)
+            env.bleeding_caps[#env.bleeding_caps + 1] = maximum
+            return gamma_arena_result.ok(true)
+        end,
+        log = function(code) env.logs[#env.logs + 1] = code; return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(controller:start({
+        fight_id = "ga-medical-test",
+        npc_medical_owner = values.npc_medical_owner or "arena"
+    }).ok, "medical controller starts")
+    function env:advance(delta) self.now = (self.now + delta) % 4294967296 end
+    return env, controller, registry
+end
+
+function runtime_npc_medical_external_owner_is_dependency_free()
+    local env, controller = npc_medical_fixture({ npc_medical_owner = "external", health = 0.1, bleeding = 1 })
+    gamma_arena_test_assert.is_true(controller.active, "delegated medical controller retains active lifecycle ownership")
+    gamma_arena_test_assert.is_true(controller:update().ok, "delegated update is a successful no-op")
+    env:advance(5000)
+    gamma_arena_test_assert.is_true(controller:update().ok, "delegated updates remain no-ops across time")
+    gamma_arena_test_assert.is_true(controller:stop("teardown").ok, "delegated controller stops symmetrically")
+    gamma_arena_test_assert.equals(env.registry_reads, 0, "delegated mode does not read registry")
+    gamma_arena_test_assert.equals(env.charge_clears, 0, "delegated mode never clears healing_charge")
+    gamma_arena_test_assert.equals(env.status_reads, 0, "delegated mode does not inspect NPC medicine")
+    gamma_arena_test_assert.equals(env.consumes, 0, "delegated mode does not consume physical items")
+    gamma_arena_test_assert.equals(env.health_changes, 0, "delegated mode does not apply healing")
+    gamma_arena_test_assert.equals(controller.owner, "arena", "stop resets delegated ownership without dependencies")
+    local delegated_logs = 0
+    for _, code in ipairs(env.logs) do if code == "GA_NPC_MEDICAL_DELEGATED" then delegated_logs = delegated_logs + 1 end end
+    gamma_arena_test_assert.equals(delegated_logs, 1, "delegated ownership is logged once")
+end
+
+function runtime_npc_medical_prioritizes_health_and_applies_thirteen_bounded_pulses()
+    local env, controller = npc_medical_fixture({ health = 0.4, bleeding = 0.8 })
+    gamma_arena_test_assert.is_true(controller:update().ok, "low health schedules medicine")
+    env:advance(1000)
+    gamma_arena_test_assert.is_true(controller:update().ok, "veteran delay expires deterministically")
+    gamma_arena_test_assert.equals(env.consumed[1], "medkit", "health has priority over bleeding")
+    for _ = 1, 12 do env:advance(250); gamma_arena_test_assert.is_true(controller:update().ok, "medkit pulse advances") end
+    gamma_arena_test_assert.equals(env.health_pulses, 13, "medkit applies exactly thirteen pulses")
+    gamma_arena_test_assert.is_true(env.health <= 1, "medkit pulses never exceed full health")
+    gamma_arena_test_assert.is_true(env.bleeding <= 0.01, "medkit caps bleeding")
+    gamma_arena_test_assert.is_true(env.hidden_clears >= 13, "hidden healing charge is cleared on every reconciliation")
+end
+
+function runtime_npc_medical_bandage_threshold_and_cancellation_are_fail_closed()
+    local env, controller = npc_medical_fixture({ health = 0.6, bleeding = 0.15 })
+    gamma_arena_test_assert.is_true(controller:update().ok, "exact thresholds do not schedule")
+    env:advance(1000); controller:update()
+    gamma_arena_test_assert.equals(#env.consumed, 0, "exact health and bleeding thresholds are strict")
+    env.bleeding = 0.16
+    env:advance(250); controller:update()
+    env:advance(1000); controller:update()
+    gamma_arena_test_assert.equals(env.consumed[1], "bandage", "bleeding above threshold consumes bandage")
+    gamma_arena_test_assert.equals(env.bleeding, 0.07, "bandage caps bleeding without adding health")
+    gamma_arena_test_assert.equals(env.health_pulses, 0, "bandage never heals health")
+
+    local cancelled, stopped = npc_medical_fixture({ health = 0.4, bleeding = 0.8 })
+    stopped:update()
+    cancelled.alive = false
+    cancelled:advance(1000); stopped:update()
+    gamma_arena_test_assert.equals(#cancelled.consumed, 0, "death cancels a pending action before consumption")
+    gamma_arena_test_assert.is_true(stopped:stop("teardown").ok, "teardown stops medical controller")
+    cancelled.alive = true; cancelled:advance(1000); stopped:update()
+    gamma_arena_test_assert.equals(#cancelled.consumed, 0, "stopped controller cannot consume or pulse")
+end
+
+function runtime_save_guard_suppresses_only_owned_save_commands()
+    local env = { calls = {}, checkpoints = {}, removed = {}, now = 100 }
+    local function original(command, ...)
+        env.calls[#env.calls + 1] = { command = command, args = { ... } }
+        return "delegated", select("#", ...)
+    end
+    env.execute = original
+    local guard = gamma_arena_save_guard.new({
+        get_execute = function() return env.execute end,
+        set_execute = function(value) env.execute = value; return true end,
+        remove_time_event = function(kind, name) env.removed[#env.removed + 1] = { kind = kind, name = name }; return true end,
+        clock = function() return env.now end,
+        checkpoint = function(code, context) env.checkpoints[#env.checkpoints + 1] = { code = code, context = context }; return gamma_arena_result.ok(true) end
+    })
+    gamma_arena_test_assert.is_true(guard:install().ok, "save guard installs")
+    gamma_arena_test_assert.is_true(guard:install().ok, "save guard installation is idempotent")
+    gamma_arena_test_assert.is_true(guard:arm({ level = "fake_start", launch = "owned" }).ok, "Arena launch arms guard")
+    local blocked = { env.execute("  SaVe player - autosave", "sentinel") }
+    gamma_arena_test_assert.equals(#env.calls, 0, "armed Arena save never reaches original console executor")
+    gamma_arena_test_assert.equals(#blocked, 0, "suppressed save has no fabricated engine result")
+    local first, second = env.execute("cfg_save", "one", "two")
+    gamma_arena_test_assert.equals(first, "delegated", "non-save command preserves first result")
+    gamma_arena_test_assert.equals(second, 2, "non-save command preserves exact varargs")
+    gamma_arena_test_assert.equals(env.calls[1].command, "cfg_save", "cfg_save is not misclassified as a game save")
+    gamma_arena_test_assert.is_true(guard:maintain().ok, "known GAMMA timer cancellation succeeds")
+    gamma_arena_test_assert.equals(env.removed[1].kind, 0, "known GAMMA timer uses event type zero")
+    gamma_arena_test_assert.equals(env.removed[1].name, "delay_new_game_autosave", "known GAMMA autosave event is cancelled")
+    gamma_arena_test_assert.is_true(guard:disarm({ reason = "test" }).ok, "guard disarms")
+    env.execute("save campaign")
+    gamma_arena_test_assert.equals(env.calls[2].command, "save campaign", "disarmed campaign save delegates unchanged")
+    gamma_arena_test_assert.equals(env.checkpoints[2].code, "GA_SAVE_COMMAND_SUPPRESSED", "blocked save emits compact evidence")
+end
+
+function runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed()
+    local env = { writes = {}, flushes = 0, closes = 0 }
+    local handle = {}
+    function handle:write(value) env.writes[#env.writes + 1] = value; return true end
+    function handle:flush() env.flushes = env.flushes + 1; return true end
+    function handle:close() env.closes = env.closes + 1; return true end
+    local journal = gamma_arena_diagnostics.new({
+        path = "gamma_arena_diagnostics.log",
+        open = function(path, mode)
+            gamma_arena_test_assert.equals(path, "gamma_arena_diagnostics.log", "journal uses injected path")
+            gamma_arena_test_assert.equals(mode, "a", "journal is append-only")
+            return handle
+        end,
+        clock = function() return 123 end,
+        level = function() return "l05_bar" end,
+        fallback_log = function() end
+    })
+    local written = journal:checkpoint("GA_TEST_CHECKPOINT", { aaa_noise = string.rep("x", 1500), weapon_section = "wpn_exact_evidence", nested = { forbidden = true } })
+    gamma_arena_test_assert.is_true(written.ok, "checkpoint succeeds")
+    gamma_arena_test_assert.is_true(#env.writes[1] <= 1024, "checkpoint line stays within native-safe bound")
+    gamma_arena_test_assert.equals(env.flushes, 1, "checkpoint flushes immediately")
+    gamma_arena_test_assert.equals(env.closes, 1, "checkpoint closes immediately")
+    gamma_arena_test_assert.is_true(not env.writes[1]:find("forbidden", 1, true), "nested fields are excluded")
+    gamma_arena_test_assert.is_true(env.writes[1]:find("weapon_section=wpn_exact_evidence", 1, true) ~= nil, "critical weapon identity survives bounded truncation")
+end
+
+function runtime_diagnostics_checkpoint_rejects_nil_io_results()
+    for _, failed_method in ipairs({ "write", "flush", "close" }) do
+        local handle = {}
+        function handle:write() if failed_method == "write" then return nil, "disk full" end; return true end
+        function handle:flush() if failed_method == "flush" then return nil, "flush failed" end; return true end
+        function handle:close() if failed_method == "close" then return nil, "close failed" end; return true end
+        local fallbacks = 0
+        local journal = gamma_arena_diagnostics.new({
+            path = "gamma_arena_diagnostics.log",
+            open = function() return handle end,
+            fallback_log = function() fallbacks = fallbacks + 1 end
+        })
+        local result = journal:checkpoint("GA_TEST_IO_FAILURE", { weapon_section = "wpn_test" })
+        gamma_arena_test_assert.is_false(result.ok, failed_method .. " nil result rejects the durable checkpoint")
+        gamma_arena_test_assert.equals(result.error.code, "GA_DIAGNOSTICS_WRITE_FAILED", failed_method .. " failure code is stable")
+        gamma_arena_test_assert.equals(fallbacks, 1, failed_method .. " failure reaches fallback logging once")
+    end
+end
+
+function runtime_diagnostics_checkpoint_rejects_oversized_required_metadata()
+    local opens, fallbacks = 0, 0
+    local journal = gamma_arena_diagnostics.new({
+        path = "gamma_arena_diagnostics.log",
+        open = function()
+            opens = opens + 1
+            return nil
+        end,
+        fallback_log = function() fallbacks = fallbacks + 1 end
+    })
+    local result = journal:checkpoint("GA_ACTOR_WEAPON_PRE_ACTIVATE", {
+        weapon_section = "wpn_test",
+        hud_item_visual = string.rep("x", 1500)
+    })
+    gamma_arena_test_assert.is_false(result.ok, "oversized required metadata rejects the durable checkpoint")
+    gamma_arena_test_assert.equals(result.error.code, "GA_DIAGNOSTICS_RECORD_TOO_LARGE", "oversized metadata failure code is stable")
+    gamma_arena_test_assert.equals(opens, 0, "oversized required metadata is rejected before opening the journal")
+    gamma_arena_test_assert.equals(fallbacks, 1, "oversized required metadata reaches fallback logging once")
+end
+
+function runtime_weapon_diagnostics_reads_effective_hud_metadata()
+    local sections = {
+        wpn_test = {
+            kind="w_rifle", slot="2", ammo_class="ammo_test, ammo_test_ap", parent_section="wpn_test",
+            visual="dynamics\\weapons\\wpn_test\\wpn_test_world.ogf", hud="wpn_test_hud"
+        },
+        wpn_test_hud = {
+            item_visual="dynamics\\weapons\\wpn_test\\wpn_test_hud.ogf",
+            anm_show="test_draw", anm_idle="test_idle", anm_idle_empty="test_idle_empty", anm_hide="test_holster"
+        }
+    }
+    local result = gamma_arena_weapon_diagnostics.snapshot({
+        read_string = function(section, key)
+            local values = sections[section]
+            return values and values[key] or nil
+        end,
+        object_id = function(object) return object:id() end
+    }, {
+        session_id="ga-metadata-session", fight_index=7, fight_id="ga-metadata-fight", phase="pre_activate",
+        weapon_section="wpn_test", ammo_section="ammo_test", actor={ id=function() return 77 end }, item={ id=function() return 991 end }
+    })
+    gamma_arena_test_assert.is_true(result.ok, "effective weapon metadata snapshot succeeds")
+    local fields = result.value
+    gamma_arena_test_assert.equals(fields.actor_id, 77, "metadata includes actor identity")
+    gamma_arena_test_assert.equals(fields.item_id, 991, "metadata includes item identity")
+    gamma_arena_test_assert.equals(fields.weapon_kind, "w_rifle", "metadata includes effective weapon kind")
+    gamma_arena_test_assert.equals(fields.weapon_slot, "2", "metadata includes effective weapon slot")
+    gamma_arena_test_assert.equals(fields.ammo_section, "ammo_test", "metadata includes selected ammo section")
+    gamma_arena_test_assert.equals(fields.ammo_class, "ammo_test, ammo_test_ap", "metadata includes effective ammo class")
+    gamma_arena_test_assert.equals(fields.parent_section, "wpn_test", "metadata includes effective parent section")
+    gamma_arena_test_assert.equals(fields.world_visual, "dynamics\\weapons\\wpn_test\\wpn_test_world.ogf", "metadata includes world visual")
+    gamma_arena_test_assert.equals(fields.hud_section, "wpn_test_hud", "metadata includes effective HUD section")
+    gamma_arena_test_assert.equals(fields.hud_item_visual, "dynamics\\weapons\\wpn_test\\wpn_test_hud.ogf", "metadata includes HUD visual")
+    gamma_arena_test_assert.equals(fields.hud_anm_show, "test_draw", "metadata includes show animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_idle, "test_idle", "metadata includes idle animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_idle_empty, "test_idle_empty", "metadata includes empty-idle animation")
+    gamma_arena_test_assert.equals(fields.hud_anm_hide, "test_holster", "metadata includes hide animation")
+end
+
+function runtime_weapon_diagnostics_missing_reads_are_unavailable()
+    local result = gamma_arena_weapon_diagnostics.snapshot({
+        read_string = function() error("injected effective INI read failure") end,
+        object_id = function() error("injected object id failure") end
+    }, {
+        session_id="ga-metadata-session", fight_index=8, fight_id="ga-metadata-missing", phase="selected",
+        weapon_section="wpn_missing", ammo_section="ammo_missing", actor={}
+    })
+    gamma_arena_test_assert.is_true(result.ok, "metadata read failures never reject an otherwise valid weapon")
+    for _, key in ipairs({ "actor_id", "item_id", "weapon_kind", "weapon_slot", "ammo_class", "parent_section", "world_visual", "hud_section", "hud_item_visual", "hud_anm_show", "hud_anm_idle", "hud_anm_idle_empty", "hud_anm_hide" }) do
+        gamma_arena_test_assert.equals(result.value[key], "unavailable", "missing metadata is explicit: " .. key)
+    end
+end
+
+function runtime_entity_forensics_are_bounded_non_mutating_and_classified()
+    local env = { now = 1000, tags = { [7] = "ga_forensic_session" } }
+    local npc = {
+        health = 1,
+        bleeding = 0,
+        id = function() return 7 end,
+        alive = function() return true end,
+        critically_wounded = function() return false end
+    }
+    local source = { id = function() return 7 end }
+    local adapter = gamma_arena_entity_adapter.new({
+        clock = function() return env.now end,
+        load_tag = function(id) return env.tags[id] end,
+        object_health = function(object) return object.health end,
+        object_bleeding = function(object) return object.bleeding end,
+        object_position = function() return { x = 0, y = 0, z = 0 } end,
+        last_hitter_name = function() return nil end,
+        last_hitter_section = function() return nil end,
+        entity_section = function(object) return object == source and "self_source" or "arena_victim" end,
+        is_critically_wounded = function(object) return object:critically_wounded() end
+    })
+    adapter.state_value = "ACTIVE"
+    adapter.session_id = "ga_forensic_session"
+    adapter.active_started_at = 1000
+    local record = {
+        kind = "npc", id = 7, slot = 1, tagged = true, released = false,
+        terminal_state = "ALIVE", spawn_position = { x = 0, y = 0, z = 0 },
+        forensic_hits = {}, forensic_samples = {}
+    }
+    adapter.npc_by_id[7] = record
+    adapter.registry.npcs = { record }
+    local hit = { draftsman = source, power = 0.75, impulse = 2, type = 3, weapon_id = 9 }
+    local flags = { ret = false }
+    gamma_arena_test_assert.is_true(adapter:on_npc_before_hit(npc, hit, 4, flags).ok, "owned before-hit evidence is captured")
+    gamma_arena_test_assert.equals(hit.power, 0.75, "forensics never mutates hit power")
+    gamma_arena_test_assert.equals(hit.impulse, 2, "forensics never mutates hit impulse")
+    gamma_arena_test_assert.is_false(flags.ret, "forensics never mutates callback flags")
+    gamma_arena_test_assert.equals(record.forensic_hits[1].source_id, 7, "before-hit source identity is copied")
+    for index = 1, 20 do
+        env.now = env.now + 10
+        adapter:on_npc_hit(npc, index / 100, { x = 1, y = 0, z = 0 }, source, 4)
+    end
+    gamma_arena_test_assert.equals(#record.forensic_hits, 12, "hit ring retains only the newest twelve entries")
+    for index = 1, 20 do adapter:sample_forensics(record, npc, 1000 + index * 250) end
+    gamma_arena_test_assert.equals(#record.forensic_samples, 12, "state ring retains only the newest twelve entries")
+    gamma_arena_test_assert.is_false(adapter:sample_forensics(record, npc, 22000), "periodic sampling stops after twenty seconds")
+    gamma_arena_test_assert.equals(adapter:classify_forensics(record), "self_hit_observed", "proved self hit has diagnostic priority")
+
+    local function classified(hits, baseline, samples)
+        local candidate = { id = 7, forensic_hits = hits or {}, forensic_baseline = baseline, forensic_samples = samples or {} }
+        return adapter:classify_forensics(candidate)
+    end
+    gamma_arena_test_assert.equals(classified({ { source_id = 8 } }), "external_hit_observed", "different hit source is external")
+    gamma_arena_test_assert.equals(classified({}, { health = 1, bleeding = 0 }, { { health = 0.8, bleeding = 0, displacement = 0 } }), "health_decay_without_hit", "health decay without hit is distinguished")
+    gamma_arena_test_assert.equals(classified({}, { health = 1, bleeding = 0 }, { { health = 0.8, bleeding = 0, displacement = 3 } }), "position_or_collision_candidate", "movement plus health loss is a collision candidate")
+    gamma_arena_test_assert.equals(classified({}, nil, {}), "unresolved", "missing evidence remains unresolved")
+    gamma_arena_test_assert.equals(classified({ { source_id = nil } }, { health = 1 }, { { health = 0.5 } }), "unresolved", "captured hit with unreadable source is not mislabeled as hit-free decay")
+    gamma_arena_test_assert.is_true(adapter:on_npc_before_hit({ id = function() return 99 end }, hit, 4, flags).value == false, "foreign NPCs are ignored")
+end
+
+function universal_item_fixture(options)
+    options = options or {}
+    local env = {
+        events = {}, created = {}, released = {}, rollback_attempts = {}, stage_counts = {},
+        slots = {}, active = nil, magazine = {}, failed_at = nil
+    }
+    local function step(stage, event)
+        env.events[#env.events + 1] = event
+        env.stage_counts[stage] = (env.stage_counts[stage] or 0) + 1
+        if options.fail_stage == stage and env.stage_counts[stage] == (options.fail_occurrence or 1) then
+            env.failed_at = #env.events
+            return gamma_arena_result.err("GA_TEST_MATERIALIZE", "injected " .. stage .. " failure", { stage = stage })
+        end
+        return gamma_arena_result.ok(true)
+    end
+    local next_id = 900
+    local port = gamma_arena_item_materializer.new({
+        create_item = function(section, owner, options)
+            local accepted = step("create_item", "create:" .. section)
+            if not accepted.ok then return accepted end
+            local entity = { runtime_id = next_id, section = section, parent = owner.runtime_id, options = clone(options) }
+            next_id = next_id + 1
+            env.created[#env.created + 1] = entity
+            return gamma_arena_result.ok(entity)
+        end,
+        entity_id = function(entity)
+            local accepted = step("entity_id", "entity_id:" .. tostring(entity and entity.runtime_id))
+            if not accepted.ok then return accepted end
+            return entity.runtime_id
+        end,
+        register = function(entity, descriptor)
+            local accepted = step("register", "register:" .. descriptor.section)
+            if not accepted.ok then return accepted end
+            return gamma_arena_result.ok({ id = entity.runtime_id, section = descriptor.section })
+        end,
+        verify_ownership = function(entity) return step("verify_ownership", "ownership:" .. entity.section) end,
+        clock = options.clock,
+        timeout_ms = options.timeout_ms,
+        resolve_item = function(entity)
+            if options.resolve_pending == true and entity.section == 'device_torch_dummy' then return nil end
+            local accepted = step("resolve_item", "resolve:" .. entity.section)
+            if not accepted.ok then return accepted end
+            return entity
+        end,
+        move_to_slot = function(owner, entity, slot)
+            local accepted = step("move_to_slot", "equip:" .. slot .. ":" .. entity.section)
+            if not accepted.ok then return accepted end
+            env.slots[slot] = entity
+            return gamma_arena_result.ok(true)
+        end,
+        item_in_slot = function(owner, slot)
+            local accepted = step("item_in_slot", "slot_proof:" .. slot)
+            if not accepted.ok then return accepted end
+            return env.slots[slot]
+        end,
+        set_item_condition = function(item, value)
+            local accepted = step('set_item_condition', 'condition_write:' .. item.section)
+            if not accepted.ok then return accepted end
+            item.condition_value = value
+            return gamma_arena_result.ok(true)
+        end,
+        item_condition = function(item)
+            local accepted = step('item_condition', 'condition_read:' .. item.section)
+            if not accepted.ok then return accepted end
+            if options.device_condition ~= nil then return options.device_condition end
+            return item.condition_value
+        end,
+        fill_magazine = function(weapon, ammo_section)
+            local accepted = step("fill_magazine", "fill:" .. weapon.section .. ":" .. ammo_section)
+            if not accepted.ok then return accepted end
+            env.magazine[weapon.runtime_id] = ammo_section
+            return gamma_arena_result.ok(true)
+        end,
+        magazine_ammo = function(weapon)
+            local accepted = step("magazine_ammo", "magazine_proof:" .. weapon.section)
+            if not accepted.ok then return accepted end
+            return env.magazine[weapon.runtime_id]
+        end,
+        activate_slot = function(owner, slot)
+            local accepted = step("activate_slot", "activate:" .. slot)
+            if not accepted.ok then return accepted end
+            env.active = slot
+            return gamma_arena_result.ok(true)
+        end,
+        prepare_rollback = function() return gamma_arena_result.ok(true) end,
+        rollback = function(entity)
+            env.events[#env.events + 1] = "rollback:" .. tostring(entity.runtime_id)
+            env.rollback_attempts[#env.rollback_attempts + 1] = entity.runtime_id
+            if options.rollback_fails == true then
+                return gamma_arena_result.err("GA_TEST_ROLLBACK", "injected rollback failure", { id = entity.runtime_id })
+            end
+            env.released[#env.released + 1] = entity.runtime_id
+            for slot, current in pairs(env.slots) do
+                if current == entity then env.slots[slot] = nil end
+            end
+            env.magazine[entity.runtime_id] = nil
+            if env.active ~= nil and env.slots[env.active] == nil then env.active = nil end
+            return gamma_arena_result.ok(true)
+        end
+    })
+    return env, port
+end
+
+function universal_items()
+    return {
+        { section = "outfit", quantity = 1, equipped_slot = "outfit" },
+        { section = "helmet", quantity = 1, equipped_slot = "helmet" },
+        { section = "knife", quantity = 1, equipped_slot = "knife" },
+        { section = "pistol", quantity = 1, equipped_slot = "weapon_1" },
+        { section = "rifle", quantity = 1, equipped_slot = "weapon_2" },
+        { section = "carried", quantity = 1 },
+        { section = "ammo_a", quantity = 2 },
+        { section = "ammo_b", quantity = 1 },
+        { section = "medkit", quantity = 3 }
+    }
+end
+
+function universal_catalog()
+    return gamma_arena_test_weapon_safety.audited_catalog({ max_physical_items_per_participant = 256, items = {
+        outfit = { category = "outfit", ltx_slot = 6 }, helmet = { category = "helmet", ltx_slot = 12 },
+        knife = { category = "knife", ltx_slot = 0 },
+        pistol = { category = "weapon", ltx_slot = 1, ammo_sections = { "ammo_b" } },
+        rifle = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_a", "ammo_b" } },
+        carried = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_a" } },
+        ammo_a = { category = "ammo", box_size = 30 }, ammo_b = { category = "ammo", box_size = 20 },
+        medkit = { category = "medicine", healing = true }
+    } })
+end
+
+function runtime_universal_items_preflight_enforces_physical_item_cap()
+    local catalog = universal_catalog()
+    local accepted = gamma_arena_item_materializer.descriptors({
+        { section = "medkit", quantity = 256 }
+    }, catalog)
+    gamma_arena_test_assert.is_true(accepted.ok, "exactly 256 physical items pass pure preflight")
+    gamma_arena_test_assert.equals(#accepted.value, 256, "exactly 256 descriptors expand in the bounded fixture")
+
+    local large_box_catalog = universal_catalog()
+    large_box_catalog.items.ammo_a.box_size = 4294967296
+    local large_box = gamma_arena_item_materializer.descriptors({
+        { section = "ammo_a", quantity = 1 }
+    }, large_box_catalog)
+    gamma_arena_test_assert.is_true(large_box.ok, "box_size keeps the Task 2 positive-integer contract")
+    gamma_arena_test_assert.equals(large_box.value[1].box_size, 4294967296, "entity cap is not a rounds-per-box cap")
+
+    for _, quantity in ipairs({ 257, 4294967296 }) do
+        local env, port = universal_item_fixture()
+        local called, result = pcall(function()
+            return port:apply({ runtime_id = 1 }, { { section = "medkit", quantity = quantity } }, universal_catalog())
+        end)
+        gamma_arena_test_assert.is_true(called, "over-cap quantity returns safely: " .. tostring(quantity))
+        gamma_arena_test_assert.is_false(result.ok, "over-cap quantity is rejected: " .. tostring(quantity))
+        gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_MATERIALIZE_LIMIT", "over-cap quantity uses participant cap error")
+        gamma_arena_test_assert.equals(#env.events, 0, "over-cap quantity has no mutation events")
+        gamma_arena_test_assert.equals(#env.created, 0, "over-cap quantity creates nothing")
+        gamma_arena_test_assert.equals(env.stage_counts.register, nil, "over-cap quantity registers nothing")
+        gamma_arena_test_assert.equals(env.stage_counts.move_to_slot, nil, "over-cap quantity equips nothing")
+        gamma_arena_test_assert.equals(#env.rollback_attempts, 0, "over-cap quantity needs no rollback")
+    end
+end
+
+function runtime_universal_items_materialize_exact_entities_and_slot_order()
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "universal items materialize")
+    gamma_arena_test_assert.equals(#env.created, 12, "quantity is physical entity count")
+    local ammo_entities, medicines = 0, 0
+    for _, entity in ipairs(env.created) do
+        if entity.section == "ammo_a" or entity.section == "ammo_b" then
+            ammo_entities = ammo_entities + 1
+            gamma_arena_test_assert.equals(entity.options.ammo, entity.section == "ammo_a" and 30 or 20, "one full server ammo box")
+        elseif entity.section == "medkit" then medicines = medicines + 1 end
+    end
+    gamma_arena_test_assert.equals(ammo_entities, 3, "two selected ammo calibers remain physical boxes")
+    gamma_arena_test_assert.equals(medicines, 3, "medicine quantity remains physical entities")
+    local mutation_order = {}
+    for _, event in ipairs(env.events) do
+        if string.find(event, "^create:") or string.find(event, "^register:") then mutation_order[#mutation_order + 1] = event end
+    end
+    for index = 1, #mutation_order, 2 do
+        gamma_arena_test_assert.is_true(string.find(mutation_order[index], "^create:") ~= nil, "physical mutation pair starts with create")
+        gamma_arena_test_assert.is_true(string.find(mutation_order[index + 1], "^register:") ~= nil, "every create registers before the next create")
+        gamma_arena_test_assert.equals(string.match(mutation_order[index], "^create:(.+)$"), string.match(mutation_order[index + 1], "^register:(.+)$"), "create/register section pair")
+    end
+    local first_equip, last_ownership = nil, nil
+    for index, event in ipairs(env.events) do
+        if string.find(event, "^ownership:") then last_ownership = index end
+        if first_equip == nil and string.find(event, "^equip:") then first_equip = index end
+    end
+    gamma_arena_test_assert.is_true(last_ownership < first_equip, "all ownership proofs precede equip")
+    local equipped = {}
+    for _, event in ipairs(env.events) do if string.find(event, "^equip:") then equipped[#equipped + 1] = event end end
+    gamma_arena_test_assert.equals(table.concat(equipped, "|"), "equip:outfit:outfit|equip:helmet:helmet|equip:knife:knife|equip:weapon_1:pistol|equip:weapon_2:rifle", "logical slot order")
+    gamma_arena_test_assert.equals(env.magazine[904], "ammo_a", "weapon_2 uses first selected compatible ammo in catalog order")
+    gamma_arena_test_assert.equals(env.active, "weapon_2", "weapon_2 activates when selected")
+end
+
+function runtime_universal_items_rollback_every_failure_in_reverse()
+    local stages = {
+        "create_item", "entity_id", "register", "verify_ownership", "resolve_item",
+        "move_to_slot", "item_in_slot", "fill_magazine", "magazine_ammo", "activate_slot"
+    }
+    local successful_env, successful_port = universal_item_fixture()
+    local successful_result = successful_port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_true(successful_result.ok, "fault matrix control materialization succeeds")
+    for _, stage in ipairs(stages) do
+        local occurrence_count = successful_env.stage_counts[stage] or 0
+        gamma_arena_test_assert.is_true(occurrence_count > 0, "fault matrix control reaches dependency: " .. stage)
+        for occurrence = 1, occurrence_count do
+            local label = stage .. "#" .. tostring(occurrence)
+            local env, port = universal_item_fixture({ fail_stage = stage, fail_occurrence = occurrence })
+            local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+            gamma_arena_test_assert.is_false(result.ok, "dependency failure is surfaced: " .. label)
+            gamma_arena_test_assert.equals(result.error.code, "GA_TEST_MATERIALIZE", "original dependency failure is retained: " .. label)
+            gamma_arena_test_assert.equals(result.error.context.stage, stage, "original dependency failure context is retained: " .. label)
+            gamma_arena_test_assert.equals(env.stage_counts[stage], occurrence, "requested dependency occurrence is reached: " .. label)
+            gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "every created entity is rolled back: " .. label)
+            for index, id in ipairs(env.rollback_attempts) do
+                gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "rollback is reverse creation order: " .. label)
+            end
+            for index = (env.failed_at or #env.events) + 1, #env.events do
+                gamma_arena_test_assert.is_true(string.find(env.events[index], "^rollback:") ~= nil, "no unsafe stage follows failure: " .. label)
+            end
+        end
+    end
+end
+
+function runtime_universal_items_preflight_rejects_malformed_nested_inputs_without_mutation()
+    local base_items, base_catalog = universal_items(), universal_catalog()
+    local cases = {
+        { name = "non-table item", items = { "bad" } },
+        { name = "sparse items", items = { [1] = base_items[1], [3] = base_items[2] } },
+        { name = "non-array item key", mutate_items = function(items) items.future = items[1] end },
+        { name = "empty section", mutate_items = function(items) items[1].section = "" end },
+        { name = "unsafe quantity", mutate_items = function(items) items[1].quantity = 9007199254740992 end },
+        { name = "unknown slot", mutate_items = function(items) items[1].equipped_slot = "belt" end },
+        { name = "slot category mismatch", mutate_items = function(items) items[9].equipped_slot = "weapon_1" end },
+        { name = "weapon slot metadata mismatch", mutate_items = function(items) items[4].equipped_slot = "weapon_2" end },
+        { name = "outfit slot metadata mismatch", mutate_catalog = function(catalog) catalog.items.outfit.ltx_slot = 5 end },
+        { name = "invalid ammo box", mutate_catalog = function(catalog) catalog.items.ammo_a.box_size = 0 end },
+        { name = "non-table weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = "ammo_a" end },
+        { name = "sparse weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { [1] = "ammo_a", [3] = "ammo_b" } end },
+        { name = "duplicate weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { "ammo_a", "ammo_a" } end },
+        { name = "empty weapon ammo", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = {} end },
+        { name = "invalid weapon ammo reference", mutate_catalog = function(catalog) catalog.items.rifle.ammo_sections = { "medkit" } end },
+        { name = "non-table weapon ammo reference", mutate_catalog = function(catalog) catalog.items.ammo_a = false end }
+    }
+    for _, case in ipairs(cases) do
+        local items = case.items or clone(base_items)
+        local catalog = clone(base_catalog)
+        if case.mutate_items then case.mutate_items(items) end
+        if case.mutate_catalog then case.mutate_catalog(catalog) end
+        local env, port = universal_item_fixture()
+        local called, result = pcall(function() return port:apply({ runtime_id = 1 }, items, catalog) end)
+        gamma_arena_test_assert.is_true(called, "malformed preflight never throws: " .. case.name)
+        gamma_arena_test_assert.is_true(called and result.ok == false, "malformed preflight returns Result failure: " .. case.name)
+        gamma_arena_test_assert.equals(#env.created, 0, "malformed preflight creates nothing: " .. case.name)
+        gamma_arena_test_assert.equals(env.stage_counts.register, nil, "malformed preflight registers nothing: " .. case.name)
+        gamma_arena_test_assert.equals(env.stage_counts.move_to_slot, nil, "malformed preflight equips nothing: " .. case.name)
+        gamma_arena_test_assert.equals(#env.rollback_attempts, 0, "malformed preflight needs no rollback: " .. case.name)
+    end
+end
+
+function runtime_universal_items_rollback_failure_aggregates_original_cause()
+    local env, port = universal_item_fixture({ fail_stage = "activate_slot", rollback_fails = true })
+    local result = port:apply({ runtime_id = 1 }, universal_items(), universal_catalog())
+    gamma_arena_test_assert.is_false(result.ok, "rollback failure is surfaced")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ITEM_MATERIALIZE_ROLLBACK_FAILED", "rollback aggregation code")
+    gamma_arena_test_assert.equals(result.error.context.cause.code, "GA_TEST_MATERIALIZE", "rollback aggregation retains original cause")
+    gamma_arena_test_assert.equals(#result.error.context.rollback, #env.created, "every rollback failure is aggregated")
+    gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, "rollback continues after each rollback failure")
+    for index, id in ipairs(env.rollback_attempts) do
+        gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, "failed rollback attempts remain reverse ordered")
+    end
+end
+
+function runtime_universal_items_weapon1_activation_fallback()
+    local items = universal_items()
+    table.remove(items, 5)
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, items, universal_catalog())
+    gamma_arena_test_assert.is_true(result.ok, "weapon_1-only materialization succeeds")
+    gamma_arena_test_assert.equals(result.value.active_slot, "weapon_1", "result reports weapon_1 fallback")
+    gamma_arena_test_assert.equals(env.active, "weapon_1", "weapon_1 activates when weapon_2 is absent")
+end
+
+function runtime_universal_actor_device_is_exact_equipped_charged_and_ready()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local items = universal_items()
+    items[#items + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local env, port = universal_item_fixture()
+    local result = port:apply({ runtime_id = 1 }, items, catalog)
+    gamma_arena_test_assert.is_true(result.ok, 'universal actor device materializes')
+    gamma_arena_test_assert.equals(env.slots.device.section, 'device_torch_dummy', 'exact actor device occupies the logical device slot')
+    gamma_arena_test_assert.equals(env.slots.device.condition_value, 0.9999, 'actor device condition write is exact')
+    gamma_arena_test_assert.equals(result.value.device.section, 'device_torch_dummy', 'READY diagnostics retain the exact device section')
+    gamma_arena_test_assert.equals(result.value.device.id, env.slots.device.runtime_id, 'READY diagnostics retain the exact owned device id')
+    gamma_arena_test_assert.equals(result.value.device.slot, 10, 'READY diagnostics retain Lua actor slot 10')
+    gamma_arena_test_assert.is_true(result.value.device.condition >= 0.999, 'READY diagnostics retain finite full charge')
+end
+
+function runtime_universal_actor_device_timeout_boundary_and_wrap()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = { { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' } }
+    local function verify(started_at, before_deadline, deadline, label)
+        local now = started_at
+        local env, port = universal_item_fixture({ clock = function() return now end, timeout_ms = 5000, resolve_pending = true })
+        local pending = port:apply({ runtime_id = 1 }, selected, catalog)
+        gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'timeout boundary fixture starts pending: ' .. label)
+        now = before_deadline
+        local before = port:update()
+        gamma_arena_test_assert.is_true(before.ok and before.value.pending == true, '4999 ms remains pending: ' .. label)
+        gamma_arena_test_assert.equals(#env.released, 0, '4999 ms never rolls back: ' .. label)
+        now = deadline
+        local timed_out = port:update()
+        gamma_arena_test_assert.is_false(timed_out.ok, 'exactly 5000 ms times out: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.code, 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT', 'deadline code is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.elapsed_ms, 5000, 'deadline elapsed diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 5000, 'deadline limit diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.section, 'device_torch_dummy', 'deadline section diagnostic is exact: ' .. label)
+        gamma_arena_test_assert.equals(timed_out.error.context.slot, 10, 'deadline Lua slot diagnostic is exact: ' .. label)
+    end
+    verify(100, 5099, 5100, 'linear')
+    verify(4294965296, 2999, 3000, 'uint32-wrap')
+end
+
+function runtime_universal_actor_device_timeout_is_bounded_and_rolls_back()
+    local now = 100
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = {
+        { section = 'medkit', quantity = 1 },
+        { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    }
+    local env, port = universal_item_fixture({
+        clock = function() return now end,
+        timeout_ms = 5000,
+        resolve_pending = true
+    })
+    local pending = port:apply({ runtime_id = 1 }, selected, catalog)
+    gamma_arena_test_assert.is_true(pending.ok and pending.value.pending == true, 'unresolved device remains pending while ownership is retained')
+    gamma_arena_test_assert.equals(#env.released, 0, 'pending device is never released before its deadline')
+    now = 5101
+    local timed_out = port:update()
+    gamma_arena_test_assert.is_false(timed_out.ok, 'unresolved device fails after the bounded no-progress deadline')
+    gamma_arena_test_assert.equals(timed_out.error.code, 'GA_ACTOR_DEVICE_EQUIP_TIMEOUT', 'device timeout diagnostic is stable')
+    gamma_arena_test_assert.equals(timed_out.error.context.section, 'device_torch_dummy', 'timeout diagnostic retains exact section')
+    gamma_arena_test_assert.equals(timed_out.error.context.logical_slot, 'device', 'timeout diagnostic retains logical slot')
+    gamma_arena_test_assert.equals(timed_out.error.context.slot, 10, 'timeout diagnostic retains Lua actor slot 10')
+    gamma_arena_test_assert.equals(timed_out.error.context.timeout_ms, 5000, 'timeout diagnostic retains bounded deadline')
+    gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, 'device timeout rolls back the entire actor transaction')
+    for index, id in ipairs(env.rollback_attempts) do
+        gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, 'timeout rollback is reverse creation order')
+    end
+    gamma_arena_test_assert.equals(next(env.slots), nil, 'timeout leaves no Arena equipment slot state')
+end
+
+function runtime_universal_actor_device_faults_rollback_all_actor_state()
+    local catalog = universal_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local selected = universal_items()
+    selected[#selected + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local cases = {
+        { name = 'write', options = { fail_stage = 'set_item_condition' }, code = 'GA_TEST_MATERIALIZE' },
+        { name = 'read', options = { fail_stage = 'item_condition' }, code = 'GA_TEST_MATERIALIZE' },
+        { name = 'low', options = { device_condition = 0.998 }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'nan', options = { device_condition = 0 / 0 }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'positive-infinity', options = { device_condition = math.huge }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' },
+        { name = 'negative-infinity', options = { device_condition = -math.huge }, code = 'GA_ACTOR_DEVICE_CHARGE_VERIFY_FAILED' }
+    }
+    for _, case in ipairs(cases) do
+        local env, port = universal_item_fixture(case.options)
+        local result = port:apply({ runtime_id = 1 }, selected, catalog)
+        gamma_arena_test_assert.is_false(result.ok, 'device fault is fail-closed: ' .. case.name)
+        gamma_arena_test_assert.equals(result.error.code, case.code, 'device fault diagnostic is stable: ' .. case.name)
+        gamma_arena_test_assert.equals(#env.rollback_attempts, #env.created, 'device fault rolls back every Arena-created actor item: ' .. case.name)
+        gamma_arena_test_assert.equals(#env.released, #env.created, 'device fault releases every Arena-created actor item: ' .. case.name)
+        for index, id in ipairs(env.rollback_attempts) do
+            gamma_arena_test_assert.equals(id, env.created[#env.created - index + 1].runtime_id, 'device rollback is reverse creation order: ' .. case.name)
+        end
+        gamma_arena_test_assert.equals(next(env.slots), nil, 'device fault clears every actor equipment slot: ' .. case.name)
+        gamma_arena_test_assert.equals(next(env.magazine), nil, 'device fault clears Arena weapon state: ' .. case.name)
+        gamma_arena_test_assert.equals(env.active, nil, 'device fault clears Arena active-slot state: ' .. case.name)
+    end
+    local invalid_catalog = clone(catalog)
+    invalid_catalog.items.device_torch_dummy.ltx_slot = 10
+    local env, port = universal_item_fixture()
+    local rejected = port:apply({ runtime_id = 1 }, selected, invalid_catalog)
+    gamma_arena_test_assert.is_false(rejected.ok, 'wrong device LTX slot is rejected')
+    gamma_arena_test_assert.equals(rejected.error.code, 'GA_ITEM_MATERIALIZE_DEFINITION_INVALID', 'wrong device LTX slot diagnostic is stable')
+    gamma_arena_test_assert.equals(#env.created, 0, 'wrong device LTX slot rejects before actor mutation')
+end
+
+function exact_rank_spec()
+    local spec = entity_spec(2)
+    local opponents = spec.opponents()
+    opponents[1].faction = "stalker"
+    opponents[1].rank = { id = "trainee", value = 120 }
+    opponents[2].faction = "stalker"
+    opponents[2].rank = { id = "novice", value = 50 }
+    return spec
+end
+
+function first_event(events, pattern)
+    for index, event in ipairs(events) do if string.find(event, pattern) then return index end end
+    return nil
+end
+
+function runtime_entity_rejects_opponent_device_before_actor_mutation()
+    local env, deps = fake_entity_environment()
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    local spec = entity_spec(1)
+    local opponents = spec.opponents()
+    opponents[1].items[#opponents[1].items + 1] = { section = 'device_torch_dummy', quantity = 1, equipped_slot = 'device' }
+    local catalog = entity_catalog()
+    catalog.items.device_torch_dummy = { category = 'device', ltx_slot = 9 }
+    local result = adapter:begin_apply(spec, 'session-opponent-device', catalog)
+    gamma_arena_test_assert.is_false(result.ok, 'runtime refuses every opponent device')
+    gamma_arena_test_assert.equals(result.error.code, 'GA_ENTITY_OPPONENT_DEVICE_FORBIDDEN', 'opponent device rejection code is stable')
+    gamma_arena_test_assert.equals(#env.events, 0, 'opponent device rejection precedes actor and world mutation')
+end
+
+function runtime_entity_exact_rank_precedes_friend_tactical_and_hostility()
+    local env, deps = fake_entity_environment({ exact_rank = true })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, exact_rank_spec(), "session-exact-rank")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_true(result.ok and snapshot.state == "ACTIVE", "exact rank transaction activates")
+    local previous = 0
+    for index, pattern in ipairs({
+        "^online_proof:", "^alive_proof:", "^hidden_charge:", "^hold_friendly:",
+        "^set_rank:", "^read_rank:", "^friend:", "^tactical_begin$", "^hostile:"
+    }) do
+        local position = first_event(env.events, pattern)
+        gamma_arena_test_assert.is_true(position ~= nil and position > previous, "exact NPC activation stage order " .. tostring(index))
+        previous = position or previous
+    end
+end
+
+function runtime_entity_adjacent_rank_readback_blocks_hostility()
+    local env, deps = fake_entity_environment({ exact_rank = true, rank_readback = 99 })
+    local adapter = gamma_arena_entity_adapter.new(deps)
+    begin_entity_apply(adapter, env, exact_rank_spec(), "session-rank-mismatch")
+    local result, snapshot = pump_entity(adapter, env)
+    gamma_arena_test_assert.is_false(result.ok, "adjacent rank readback fails")
+    gamma_arena_test_assert.equals(result.error.code, "GA_ENTITY_RANK_MISMATCH", "adjacent rank mismatch code")
+    gamma_arena_test_assert.equals(snapshot.state, "ERROR", "rank mismatch completes rollback")
+    gamma_arena_test_assert.equals(env.hostile_calls, 0, "rank mismatch never activates hostility")
+end
+
+function runtime_battle_identity_formatter_is_exact()
+    local translated = function(key)
+        return ({
+            st_gamma_arena_battle_seed = "Seed",
+            st_gamma_arena_battle_fight = "Fight"
+        })[key]
+    end
+    local first = gamma_arena_ui_battle.format_identity({ session_seed = 0, fight_index = 0 }, translated)
+    gamma_arena_test_assert.is_true(first.ok, "minimum battle identity formats")
+    gamma_arena_test_assert.equals(first.value, "Fight: 1 | Seed: 0", "first fight is one-based and fight-first")
+    local maximum = gamma_arena_ui_battle.format_identity({
+        session_seed = 4294967295,
+        fight_index = 4294967295
+    }, translated)
+    gamma_arena_test_assert.is_true(maximum.ok, "maximum battle identity formats")
+    gamma_arena_test_assert.equals(maximum.value, "Fight: 4294967296 | Seed: 4294967295", "maximum identity stays exact")
+    for _, model in ipairs({
+        {},
+        { session_seed = -1, fight_index = 0 },
+        { session_seed = 4294967296, fight_index = 0 },
+        { session_seed = 1.5, fight_index = 0 },
+        { session_seed = 1, fight_index = -1 },
+        { session_seed = 1, fight_index = 4294967296 }
+    }) do
+        gamma_arena_test_assert.is_false(gamma_arena_ui_battle.format_identity(model, translated).ok, "invalid battle identity rejects")
+    end
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.format_identity({ session_seed = 1, fight_index = 0 }, function() error("translate") end).ok, "translation exception is structured")
+end
+
+function runtime_battle_identity_adapter_owns_one_window()
+    local env = { adds = 0, removes = 0, created = 0 }
+    local hud = {
+        AddDialogToRender = function(_, window) env.adds = env.adds + 1; env.added = window end,
+        RemoveDialogToRender = function(_, window) env.removes = env.removes + 1; env.removed = window end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function(text)
+            env.created = env.created + 1
+            return {
+                text = text,
+                SetIdentity = function(self, value) self.text = value end
+            }
+        end
+    })
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 0 }).ok, "battle identity shows")
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 1 }).ok, "battle identity refreshes")
+    gamma_arena_test_assert.equals(env.created, 1, "one battle identity window is owned")
+    gamma_arena_test_assert.equals(env.adds, 1, "battle identity window is registered once")
+    gamma_arena_test_assert.equals(env.added.text, "Fight: 2 | Seed: 42", "existing battle identity window refreshes")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "battle identity clears")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "duplicate battle identity clear is idempotent")
+    gamma_arena_test_assert.equals(env.removes, 1, "owned battle identity window is removed once")
+    gamma_arena_test_assert.equals(env.removed, env.added, "battle identity removes the exact owned window")
+end
+
+function runtime_battle_identity_removal_failure_is_retryable()
+    local attempts = 0
+    local window = { SetIdentity = function() end }
+    local hud = {
+        AddDialogToRender = function() end,
+        RemoveDialogToRender = function()
+            attempts = attempts + 1
+            if attempts == 1 then error("remove") end
+        end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function() return window end
+    })
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 0 }).ok, "retry fixture shows")
+    gamma_arena_test_assert.is_false(ui:clear_identity().ok, "first battle identity removal failure is structured")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "second battle identity removal retries")
+    gamma_arena_test_assert.equals(attempts, 2, "failed battle identity removal retains ownership")
+end
+
+function runtime_battle_identity_initialization_failure_prevents_registration()
+    local adds = 0
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function()
+            return { AddDialogToRender = function() adds = adds + 1 end }
+        end,
+        create_window = function()
+            return {
+                initialization_result = gamma_arena_result.err(
+                    "GA_TEST_BATTLE_UI_TEXT_FAILED",
+                    "injected SetIdentity failure"
+                ),
+                SetIdentity = function() end
+            }
+        end
+    })
+    local shown = ui:show_identity({ session_seed = 42, fight_index = 0 })
+    gamma_arena_test_assert.is_false(shown.ok, "failed battle identity initialization is structured")
+    gamma_arena_test_assert.equals(shown.error.code, "GA_TEST_BATTLE_UI_TEXT_FAILED", "SetIdentity failure is preserved")
+    gamma_arena_test_assert.equals(adds, 0, "uninitialized battle identity is never registered")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "failed initialization owns no window")
+end
+
+function runtime_battle_identity_partial_add_is_rolled_back_or_retryable()
+    local env = { adds = 0, removes = 0, fail_add = true, fail_remove = true }
+    local window = { SetIdentity = function() end }
+    local hud = {
+        AddDialogToRender = function(_, added)
+            env.adds = env.adds + 1
+            env.registered = added
+            if env.fail_add then error("after add") end
+        end,
+        RemoveDialogToRender = function(_, removed)
+            env.removes = env.removes + 1
+            gamma_arena_test_assert.equals(removed, window, "rollback removes the exact pending window")
+            if env.fail_remove then error("remove") end
+            env.registered = nil
+        end
+    }
+    local ui = gamma_arena_ui_battle.new({
+        translate = function(key) return key == "st_gamma_arena_battle_seed" and "Seed" or "Fight" end,
+        hud = function() return hud end,
+        create_window = function() return window end
+    })
+    local shown = ui:show_identity({ session_seed = 42, fight_index = 0 })
+    gamma_arena_test_assert.is_false(shown.ok, "throw-after-add remains a structured show failure")
+    gamma_arena_test_assert.equals(env.adds, 1, "partial add is attempted once")
+    gamma_arena_test_assert.equals(env.removes, 1, "partial add triggers immediate rollback")
+    gamma_arena_test_assert.equals(env.registered, window, "failed rollback retains pending ownership")
+    env.fail_add = false
+    env.fail_remove = false
+    gamma_arena_test_assert.is_true(ui:show_identity({ session_seed = 42, fight_index = 1 }).ok, "later show cleans pending registration and retries add")
+    gamma_arena_test_assert.equals(env.adds, 2, "show retry performs a fresh native add")
+    gamma_arena_test_assert.equals(env.removes, 2, "show retry first resolves the failed rollback")
+    gamma_arena_test_assert.equals(env.registered, window, "show retry confirms the newly registered window")
+    gamma_arena_test_assert.is_true(ui:clear_identity().ok, "confirmed retry remains removable")
+    gamma_arena_test_assert.equals(env.removes, 3, "confirmed retry is removed once")
+    gamma_arena_test_assert.equals(env.registered, nil, "retry removes the pending window")
+end
+
+function runtime_battle_identity_main_hud_visibility_is_safe()
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.main_hud_visible(function() return true end), "visible main HUD shows battle identity")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() return false end), "hidden main HUD hides battle identity")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(function() error("hud") end), "HUD visibility exception hides safely")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.main_hud_visible(nil), "missing HUD visibility port hides safely")
+end
+
+function runtime_battle_identity_visibility_sync_is_structured()
+    local root = {
+        Show = function(self, visible)
+            self.visible = visible
+            self.transitions = (self.transitions or 0) + 1
+        end
+    }
+    local visible = gamma_arena_ui_battle.sync_visibility(root, function() return true end)
+    gamma_arena_test_assert.is_true(visible.ok, "visible HUD visibility sync succeeds")
+    gamma_arena_test_assert.is_true(root.visible, "visible main HUD shows battle identity")
+    local failed = gamma_arena_ui_battle.sync_visibility(root, function() error("hud") end)
+    gamma_arena_test_assert.is_false(failed.ok, "visibility port error is structured")
+    gamma_arena_test_assert.is_false(root.visible, "visibility port error hides an already visible identity")
+    gamma_arena_test_assert.equals(root.transitions, 2, "visibility failure performs an explicit fail-closed transition")
+    gamma_arena_test_assert.is_false(gamma_arena_ui_battle.sync_visibility({}, function() return true end).ok, "missing root Show is structured")
+end
+
+function runtime_battle_identity_visibility_failure_reporting_is_bounded()
+    local owner = {}
+    local reports = {}
+    local reporter = function(result) reports[#reports + 1] = result.error.code end
+    local failed = gamma_arena_result.err("GA_TEST_VISIBILITY", "injected visibility failure")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "first visibility error is reportable")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "duplicate visibility error is bounded")
+    gamma_arena_test_assert.equals(#reports, 1, "contiguous visibility error is reported once")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, gamma_arena_result.ok(false), reporter).ok, "visibility recovery resets the bound")
+    gamma_arena_test_assert.is_true(gamma_arena_ui_battle.report_visibility_failure_once(owner, failed, reporter).ok, "post-recovery visibility error is reportable")
+    gamma_arena_test_assert.equals(#reports, 2, "post-recovery visibility error reports once again")
+end

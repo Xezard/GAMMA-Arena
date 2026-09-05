@@ -1,0 +1,568 @@
+function clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local copy = {}
+    seen[value] = copy
+    for key, item in pairs(value) do copy[clone(key, seen)] = clone(item, seen) end
+    return copy
+end
+
+function valid_session()
+    return {
+        schema_version = 2,
+        session_id = "ga_test_session",
+        session_nonce = "ga_test_nonce",
+        mode_id = "skirmish",
+        difficulty_id = "stalker",
+        generation_recipe = "random",
+        session_seed = 42,
+        fight_index = 0,
+        generator_version = 11,
+        catalog_revision = 11,
+        catalog_fingerprint = "ga-catalog-v10-runtime-test",
+        layout_id = "rostok_arena_v1",
+        checkpoint_name = "_gamma_arena_checkpoint",
+        phase = "CHECKPOINTING"
+    }
+end
+
+function catalogs()
+    local loaded = gamma_arena_catalog.load(gamma_arena_test_generator.fixture_factory())
+    gamma_arena_test_assert.is_true(loaded.ok, "runtime tests require the v1 catalog fixture")
+    return loaded.value
+end
+
+function all_sections(snapshot)
+    local sections = {}
+    for _, profile in ipairs(snapshot.profile_list) do sections[profile.section] = { class = "AI_STL_S", community = profile.runtime_community } end
+    for _, weapon in ipairs(snapshot.weapon_list) do sections[weapon.section] = { slot = weapon.slot, ammo_mag_size = 30 } end
+    for _, ammo in pairs(snapshot.ammo) do sections[ammo.section] = { box_size = 20 } end
+    for _, outfit in ipairs(snapshot.outfit_list) do sections[outfit.section] = { slot = 6 } end
+    for _, knife in ipairs(snapshot.knife_list) do sections[knife.section] = { slot = 0 } end
+    for _, device in ipairs(snapshot.device_list or {}) do sections[device.section] = { class = "TORCH_S", slot = 9, nv_effect = device.nv_effect } end
+    for _, consumable in pairs(snapshot.consumables) do sections[consumable.section] = {} end
+    for _, medical in pairs(snapshot.medical_items or {}) do sections[medical.section] = {} end
+    return sections
+end
+
+function callable_object(fn)
+    return setmetatable({}, {
+        __call = function(_, ...)
+            return fn(...)
+        end
+    })
+end
+
+function valid_preflight_probes()
+    local snapshot = catalogs()
+    local sections = all_sections(snapshot)
+    local positions = {}
+    local paths = {
+        snapshot.layouts.rostok_arena_v1.actor_spawn_path,
+        snapshot.layouts.rostok_arena_v1.actor_look_path,
+        "bar_arena_walk_attack"
+    }
+    for _, path in ipairs(snapshot.layouts.rostok_arena_v1.opponent_spawn_paths) do paths[#paths + 1] = path end
+    for index, path in ipairs(paths) do
+        local point = { x = index * 10, y = 0, z = index * 20 }
+        function point:sub(other)
+            local result = { x = self.x - other.x, y = self.y - other.y, z = self.z - other.z }
+            function result:getH() return 0 end
+            function result:sub(value) return self end
+            return result
+        end
+        function point:getH() return 0 end
+        positions[path] = point
+    end
+
+    local system = {}
+    function system:section_exist(section) return sections[section] ~= nil end
+    function system:line_exist(section, key) return sections[section] and sections[section][key] ~= nil end
+    function system:r_string_ex(section, key) return sections[section] and sections[section][key] or nil end
+    function system:r_u32(section, key) return sections[section] and sections[section][key] or nil end
+
+    local config = {}
+    function config:r_value() return nil end
+    function config:r_string_ex() return nil end
+    function config:line_exist() return false end
+    function config:w_value() return true end
+    function config:remove_line() return true end
+    function config:save() return true end
+
+    local tactical_values = {
+        observation_interval_ms = 500,
+        report_delay_min_ms = 1000,
+        report_delay_max_ms = 3000,
+        assignment_dwell_ms = 5000,
+        visual_aging_ms = 20000,
+        evidence_expiry_ms = 60000,
+        hint_delay_ms = 60000,
+        hint_cooldown_ms = 60000,
+        look_path = "bar_arena_walk_attack"
+    }
+    local tactical_sections = { meta = true, director = true }
+    for _, path in ipairs(snapshot.layouts.rostok_arena_v1.opponent_spawn_paths) do
+        tactical_sections["logic@ga_" .. path] = true
+        tactical_sections["walker@ga_" .. path] = true
+    end
+    local tactical_ini = {}
+    function tactical_ini:section_exist(section) return tactical_sections[section] == true end
+    function tactical_ini:line_exist(section, key) return section == "director" and tactical_values[key] ~= nil end
+    function tactical_ini:r_u32(section, key) return section == "director" and tactical_values[key] or nil end
+    function tactical_ini:r_string_ex(section, key) return section == "director" and tactical_values[key] or nil end
+
+    local npc_medical_values = {
+        enable = "false",
+        in_combat = "false",
+        medkits = "",
+        bandages = ""
+    }
+    local npc_medical_ini = {}
+    function npc_medical_ini:section_exist(section) return section == "plugin" end
+    function npc_medical_ini:line_exist(section, key) return section == "plugin" and npc_medical_values[key] ~= nil end
+    function npc_medical_ini:r_string_ex(section, key) return section == "plugin" and npc_medical_values[key] or nil end
+
+    local fs = {}
+    function fs:update_path() return "C:\\fake\\appdata\\savedgames\\" end
+    function fs:exist() return false end
+    function fs:file_rename() return true end
+    function fs:file_delete() return true end
+
+    local actor = {}
+    function actor:iterate_inventory() end
+    function actor:id() return 1 end
+    function actor:money() return 0 end
+    function actor:give_money() return true end
+    function actor:set_health_ex() return true end
+    actor.power = 0.25
+    actor.radiation = 0.5
+    actor.bleeding = 0.75
+    actor.psy_health = 0.5
+    function actor:set_actor_position() return true end
+    function actor:set_actor_direction() return true end
+    function actor:set_invulnerable() return true end
+    function actor:position() return positions[snapshot.layouts.rostok_arena_v1.actor_spawn_path] end
+    function actor:move_to_slot() return true end
+    function actor:item_in_slot() return nil end
+    function actor:make_item_active() return true end
+    function actor:active_item() return nil end
+    function actor:activate_slot() return true end
+    function actor:active_slot() return 0 end
+    local arena_zone = {}
+    function arena_zone:inside() return true end
+
+    local probes = {
+        vector = function() return gamma_arena_test_runtime_part_actor.fake_vector(0, 0, 0) end,
+        RegisterScriptCallback = function() end,
+        UnregisterScriptCallback = function() end,
+        ini_file = function() return {} end,
+        system_ini = function() return system end,
+        alife = function() return { get_children = function() return {} end, object = function() return nil end, set_switch_online = function() return true end, set_switch_offline = function() return true end } end,
+        alife_create = function() return {} end,
+        alife_create_item = function() return {} end,
+        alife_release_id = function() return true end,
+        getFS = function() return fs end,
+        exec_console_cmd = function() return true end,
+        time_global = function() return 0 end,
+        se_save_var = function() return true end,
+        se_load_var = function() return true end,
+        patrol = function(path)
+            local patrol_object = {}
+            function patrol_object:point() return clone(positions[path]) end
+            function patrol_object:level_vertex_id() return 100 + #path end
+            function patrol_object:game_vertex_id() return 200 + #path end
+            return patrol_object
+        end,
+        level = {
+            vertex_in_direction = function(vertex_id) return vertex_id end,
+            vertex_position = function() return { x = 1, y = 0, z = 2 } end,
+            name = function() return "l05_bar" end,
+            patrol_path_exists = function(path) return positions[path] ~= nil end,
+            object_by_id = function() return nil end,
+            disable_input = function() return true end,
+            enable_input = function() return true end
+        },
+        db = { actor = actor, zone_by_name = { bar_arena_sr = arena_zone } },
+        game_object = {
+            friend = 1,
+            enemy = 2,
+            set_ammo_elapsed = function() return true end,
+            get_ammo_in_magazine = function() return 0 end,
+            set_ammo_type = function() return true end,
+            get_ammo_type = function() return 0 end,
+            condition = function() return 1 end,
+            set_condition = function() return true end,
+            enable_torch = function() return true end,
+            critically_wounded = function() return false end,
+            name = function() return "test_npc" end,
+            change_health = function() return true end
+        },
+        xr_logic = {
+            configure_schemes = function() return true end,
+            activate_by_section = function() return true end,
+            switch_to_section = function() return true end
+        },
+        modules = { stype_stalker = 1 },
+        tactical_ini = function() return tactical_ini end,
+        npc_medical_ini = function() return npc_medical_ini end,
+        relation_registry = { set_goodwill = function() return true end },
+        axr_main = { config = config },
+        safe_release_manager = { release = function() return true end },
+        item_device = { is_nv_active=function() return false end, set_nightvision=function() end, is_torch_active=function() return false end, toggle_torch=function() end },
+        catalogs = snapshot,
+        _sections = sections,
+        _positions = positions,
+        _tactical_values = tactical_values,
+        _tactical_sections = tactical_sections,
+        _npc_medical_values = npc_medical_values
+    }
+    return probes
+end
+
+function error_codes(result)
+    local values = {}
+    local errors = result.error and result.error.context and result.error.context.errors or {}
+    for index = 1, #errors do values[#values + 1] = errors[index].code end
+    return table.concat(values, ",")
+end
+
+function preflight_accepts_complete_environment()
+    local result = gamma_arena_compat.preflight(valid_preflight_probes())
+    gamma_arena_test_assert.is_true(result.ok, "complete injected environment must pass preflight")
+end
+
+function preflight_accepts_natural_death_without_invulnerability()
+    local probes = valid_preflight_probes()
+    probes.db.actor.set_invulnerable = nil
+    probes.db.actor.invulnerable = nil
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_true(result.ok, "natural actor death must not require an invulnerability port")
+end
+
+function preflight_accepts_callable_engine_objects()
+    local probes = valid_preflight_probes()
+    probes.ini_file = callable_object(probes.ini_file)
+    probes.patrol = callable_object(probes.patrol)
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_true(result.ok, "callable engine objects must pass preflight even when Lua type is not function")
+end
+
+function preflight_accepts_actor_condition_properties()
+    local probes = valid_preflight_probes()
+    probes.db.actor.set_power = nil
+    probes.db.actor.set_radiation = nil
+    probes.db.actor.set_bleeding = nil
+    probes.db.actor.set_psy_health = nil
+    probes.db.actor.power = 0.25
+    probes.db.actor.radiation = 0.5
+    probes.db.actor.bleeding = 0.75
+    probes.db.actor.psy_health = 0.5
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_true(result.ok, "real Anomaly actor condition properties must satisfy preflight")
+end
+
+function preflight_requires_tactical_director_apis()
+    local cases = {
+        { label = "configure", mutate = function(p) p.xr_logic.configure_schemes = nil end },
+        { label = "activate", mutate = function(p) p.xr_logic.activate_by_section = nil end },
+        { label = "switch", mutate = function(p) p.xr_logic.switch_to_section = nil end },
+        { label = "stalker type", mutate = function(p) p.modules.stype_stalker = nil end },
+        { label = "tactical ini", mutate = function(p) p.tactical_ini = nil end }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "missing tactical API fails: " .. case.label)
+        gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_DIRECTOR_API_MISSING", 1, true) ~= nil, "stable tactical API code: " .. case.label)
+    end
+end
+
+function preflight_requires_tactical_director_config()
+    local cases = {
+        {
+            label = "invalid observation interval",
+            code = "GA_PREFLIGHT_DIRECTOR_CONFIG_INVALID",
+            mutate = function(p) p._tactical_values.observation_interval_ms = 0 end
+        },
+        {
+            label = "missing route section",
+            code = "GA_PREFLIGHT_DIRECTOR_SECTION_MISSING",
+            mutate = function(p) p._tactical_sections["walker@ga_bar_arena_walk_3_1"] = nil end
+        },
+        {
+            label = "missing look path",
+            code = "GA_PREFLIGHT_DIRECTOR_LOOK_PATH_MISSING",
+            mutate = function(p)
+                local original = p.level.patrol_path_exists
+                p.level.patrol_path_exists = function(path)
+                    if path == "bar_arena_walk_attack" then return false end
+                    return original(path)
+                end
+            end
+        }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "invalid tactical config fails: " .. case.label)
+        gamma_arena_test_assert.is_true(string.find(error_codes(result), case.code, 1, true) ~= nil, "stable tactical config code: " .. case.label)
+    end
+end
+
+function preflight_publishes_npc_medical_ownership()
+    local cases = {
+        { label = "active medkit overlap", enable = "true", in_combat = "true", key = "medkits", value = "medkit", owner = "external" },
+        { label = "active bandage overlap", enable = "true", in_combat = "true", key = "bandages", value = "bandage", owner = "external" },
+        { label = "disabled overlap", enable = "false", in_combat = "true", key = "medkits", value = "medkit", owner = "arena" },
+        { label = "out-of-combat overlap", enable = "true", in_combat = "false", key = "bandages", value = "bandage", owner = "arena" }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        probes._npc_medical_values.enable = case.enable
+        probes._npc_medical_values.in_combat = case.in_combat
+        probes._npc_medical_values[case.key] = case.value
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_true(result.ok, "valid NPC medical ownership passes preflight: " .. case.label)
+        gamma_arena_test_assert.equals(result.value.npc_medical_owner, case.owner, "preflight publishes NPC medical owner: " .. case.label)
+        gamma_arena_test_assert.equals(result.value.npc_medical_policy.owner, case.owner, "preflight publishes parsed NPC medical policy: " .. case.label)
+    end
+end
+
+function preflight_rejects_invalid_npc_medical_config()
+    local probes = valid_preflight_probes()
+    probes._npc_medical_values.enable = "sometimes"
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "malformed NPC medical boolean fails preflight")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_MEDICAL_AI_CONFIG_INVALID", 1, true) ~= nil, "malformed NPC medical boolean has a stable compatibility code")
+end
+
+function preflight_aggregates_in_stable_order()
+    local probes = valid_preflight_probes()
+    probes.RegisterScriptCallback = nil
+    probes.UnregisterScriptCallback = nil
+    probes.ini_file = nil
+    probes.safe_release_manager = nil
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "missing independent APIs must fail")
+    gamma_arena_test_assert.equals(error_codes(result), "GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING,GA_PREFLIGHT_API_MISSING", "API failures must be stably ordered")
+    local errors = result.error.context.errors
+    gamma_arena_test_assert.equals(errors[1].context.capability, "RegisterScriptCallback", "first required API")
+    gamma_arena_test_assert.equals(errors[2].context.capability, "UnregisterScriptCallback", "rollback API order")
+    gamma_arena_test_assert.equals(errors[3].context.capability, "ini_file", "third required API")
+    gamma_arena_test_assert.equals(errors[4].context.capability, "safe_release_manager.release", "safe release API order")
+end
+
+function preflight_requires_actor_ports_without_checkpoint_apis()
+    local cases = {
+        { capability = "level.disable_input", mutate = function(probes) probes.level.disable_input = nil end },
+        { capability = "db.actor.iterate_inventory", mutate = function(probes) probes.db.actor.iterate_inventory = nil end },
+        { capability = "db.actor.activate_slot", mutate = function(probes) probes.db.actor.activate_slot = nil end },
+        { capability = "db.actor.active_slot", mutate = function(probes) probes.db.actor.active_slot = nil end }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "missing Task 6 port must fail: " .. case.capability)
+        local found = false
+        for _, item in ipairs(result.error.context.errors or {}) do
+            if item.context and item.context.capability == case.capability then found = true end
+        end
+        gamma_arena_test_assert.is_true(found, "preflight identifies missing Task 6 capability: " .. case.capability)
+    end
+    local without_checkpoint = valid_preflight_probes()
+    without_checkpoint.exec_console_cmd = nil
+    without_checkpoint.getFS = nil
+    gamma_arena_test_assert.is_true(gamma_arena_compat.preflight(without_checkpoint).ok, "dedicated Arena preflight does not require obsolete checkpoint file operations")
+end
+
+function preflight_requires_task7_entity_ports_and_ammo_metadata()
+    local cases = {
+        { capability = "alife().get_children", mutate = function(probes) probes.alife = function() return { object = function() end, set_switch_online = function() end, set_switch_offline = function() end } end end },
+        { capability = "alife().object", mutate = function(probes) probes.alife = function() return { get_children = function() end, set_switch_online = function() end, set_switch_offline = function() end } end end },
+        { capability = "alife().set_switch_online", mutate = function(probes) probes.alife = function() return { get_children = function() end, object = function() end, set_switch_offline = function() end } end end },
+        { capability = "alife().set_switch_offline", mutate = function(probes) probes.alife = function() return { get_children = function() end, object = function() end, set_switch_online = function() end } end end },
+        { capability = "se_load_var", mutate = function(probes) probes.se_load_var = nil end },
+        { capability = "level.object_by_id", mutate = function(probes) probes.level.object_by_id = nil end },
+        { capability = "game_object.friend", mutate = function(probes) probes.game_object.friend = nil end },
+        { capability = "game_object.enemy", mutate = function(probes) probes.game_object.enemy = nil end },
+        { capability = "game_object.set_ammo_type", mutate = function(probes) probes.game_object.set_ammo_type = nil end },
+        { capability = "game_object.get_ammo_type", mutate = function(probes) probes.game_object.get_ammo_type = nil end },
+        { capability = "system_ini.r_u32", mutate = function(probes) probes.system_ini().r_u32 = nil end }
+    }
+    for _, case in ipairs(cases) do
+        local probes = valid_preflight_probes()
+        case.mutate(probes)
+        local result = gamma_arena_compat.preflight(probes)
+        gamma_arena_test_assert.is_false(result.ok, "missing Task 7 port must fail: " .. case.capability)
+        local found = false
+        for _, item in ipairs(result.error.context.errors or {}) do
+            if item.context and item.context.capability == case.capability then found = true end
+        end
+        gamma_arena_test_assert.is_true(found, "preflight identifies missing Task 7 capability: " .. case.capability)
+    end
+
+    local invalid = valid_preflight_probes()
+    for _, ammo in pairs(invalid.catalogs.ammo) do invalid._sections[ammo.section].box_size = 0 end
+    local result = gamma_arena_compat.preflight(invalid)
+    gamma_arena_test_assert.is_false(result.ok, "nonpositive effective ammo box_size fails preflight")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_AMMO_BOX_SIZE_INVALID", 1, true) ~= nil, "invalid effective ammo box_size has a deterministic code")
+end
+
+function wrong_level_skips_patrol_resolution()
+    local probes = valid_preflight_probes()
+    local patrol_calls = 0
+    probes.level.name = function() return "l01_escape" end
+    probes.level.patrol_path_exists = function() patrol_calls = patrol_calls + 1; return true end
+    probes.patrol = function() patrol_calls = patrol_calls + 1; error("must not resolve on wrong level") end
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "wrong level must fail")
+    gamma_arena_test_assert.equals(result.error.context.errors[1].code, "GA_PREFLIGHT_LEVEL_INVALID", "wrong-level error")
+    gamma_arena_test_assert.equals(patrol_calls, 0, "dependent patrol probes must be skipped")
+end
+
+function preflight_accepts_missing_legacy_boundary_restrictor()
+    local missing = valid_preflight_probes()
+    missing.db.zone_by_name.bar_arena_sr = nil
+    gamma_arena_test_assert.is_true(gamma_arena_compat.preflight(missing).ok, "current resolved-layout preflight does not depend on the legacy restrictor")
+
+    local invalid = valid_preflight_probes()
+    invalid.db.zone_by_name.bar_arena_sr.inside = function() error("legacy boundary must not be queried") end
+    gamma_arena_test_assert.is_true(gamma_arena_compat.preflight(invalid).ok, "legacy boundary APIs are not queried")
+end
+
+function preflight_rejects_missing_patrol()
+    local probes = valid_preflight_probes()
+    probes.level.patrol_path_exists = function(path) return path ~= "bar_arena_walk_6_3" end
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "missing patrol must fail")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_PATROL_MISSING", 1, true) ~= nil, "missing patrol code")
+end
+
+function preflight_rejects_invalid_patrol_resolution()
+    local probes = valid_preflight_probes()
+    probes._positions.bar_arena_walk_3_1.x = 0 / 0
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "non-finite patrol point must fail")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_PATROL_INVALID", 1, true) ~= nil, "invalid patrol code")
+
+    probes = valid_preflight_probes()
+    local base_patrol = probes.patrol
+    probes.patrol = function(path)
+        local object = base_patrol(path)
+        if path == "bar_arena_walk_3_1" then function object:level_vertex_id() return 4294967295 end end
+        return object
+    end
+    result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "invalid X-Ray vertex sentinel must fail")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_PATROL_INVALID", 1, true) ~= nil, "vertex sentinel code")
+end
+
+function preflight_rejects_missing_catalog_section()
+    local probes = valid_preflight_probes()
+    probes._sections.wpn_pm = nil
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "missing effective catalog section must fail")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_PREFLIGHT_SECTION_MISSING", 1, true) ~= nil, "missing section code")
+end
+
+function preflight_rejects_effective_mutant_class()
+    local probes = valid_preflight_probes()
+    probes._sections.gamma_arena_bandit_novice.class = "SM_POLTER"
+    local result = gamma_arena_compat.preflight(probes)
+    gamma_arena_test_assert.is_false(result.ok, "effective mutant class must fail")
+    gamma_arena_test_assert.is_true(string.find(error_codes(result), "GA_NPC_CLASS_INVALID", 1, true) ~= nil, "human-only error")
+end
+
+function has_profile_error(result, code, section)
+    local errors = result.error and result.error.context and result.error.context.errors or {}
+    for index = 1, #errors do
+        local item = errors[index]
+        if item.code == code and item.context and item.context.section == section then return true end
+    end
+    return false
+end
+
+function preflight_requires_community_for_every_custom_profile()
+    for _, profile in ipairs(catalogs().profile_list) do
+        local section = profile.section
+
+        local missing = valid_preflight_probes()
+        missing._sections[section].community = nil
+        local missing_result = gamma_arena_compat.preflight(missing)
+        gamma_arena_test_assert.is_false(missing_result.ok, "missing effective community must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(missing_result, "GA_NPC_COMMUNITY_MISSING", section), "missing community code for " .. section)
+
+        local wrong = valid_preflight_probes()
+        wrong._sections[section].community = "dolg"
+        local wrong_result = gamma_arena_compat.preflight(wrong)
+        gamma_arena_test_assert.is_false(wrong_result.ok, "wrong effective community must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(wrong_result, "GA_NPC_COMMUNITY_INVALID", section), "wrong community code for " .. section)
+
+        local throwing = valid_preflight_probes()
+        local throwing_system = throwing.system_ini()
+        local base_read = throwing_system.r_string_ex
+        function throwing_system:r_string_ex(candidate, key)
+            if candidate == section and key == "community" then error("injected community read failure") end
+            return base_read(self, candidate, key)
+        end
+        local throw_result = gamma_arena_compat.preflight(throwing)
+        gamma_arena_test_assert.is_false(throw_result.ok, "throwing effective community read must fail for " .. section)
+        gamma_arena_test_assert.is_true(has_profile_error(throw_result, "GA_NPC_COMMUNITY_READ_FAILED", section), "community read failure code for " .. section)
+    end
+end
+
+function preflight_requires_human_class_for_every_custom_profile()
+    for _, profile in ipairs(catalogs().profile_list) do
+        local section = profile.section
+
+        local missing = valid_preflight_probes()
+        missing._sections[section].class = nil
+        local missing_result = gamma_arena_compat.preflight(missing)
+        gamma_arena_test_assert.is_true(has_profile_error(missing_result, "GA_NPC_CLASS_MISSING", section), "missing class code for " .. section)
+
+        local wrong = valid_preflight_probes()
+        wrong._sections[section].class = "SM_POLTER"
+        local wrong_result = gamma_arena_compat.preflight(wrong)
+        gamma_arena_test_assert.is_true(has_profile_error(wrong_result, "GA_NPC_CLASS_INVALID", section), "invalid class code for " .. section)
+
+        local throwing = valid_preflight_probes()
+        local throwing_system = throwing.system_ini()
+        local base_read = throwing_system.r_string_ex
+        function throwing_system:r_string_ex(candidate, key)
+            if candidate == section and key == "class" then error("injected class read failure") end
+            return base_read(self, candidate, key)
+        end
+        local throw_result = gamma_arena_compat.preflight(throwing)
+        gamma_arena_test_assert.is_true(has_profile_error(throw_result, "GA_NPC_CLASS_READ_FAILED", section), "class read failure code for " .. section)
+    end
+end
+
+function preflight_rejects_missing_profile_value_apis()
+    local no_line_exist = valid_preflight_probes()
+    no_line_exist.system_ini().line_exist = nil
+    local line_result = gamma_arena_compat.preflight(no_line_exist)
+    gamma_arena_test_assert.is_false(line_result.ok, "missing effective line_exist must fail")
+    for _, profile in ipairs(no_line_exist.catalogs.profile_list) do
+        gamma_arena_test_assert.is_true(has_profile_error(line_result, "GA_NPC_CLASS_API_MISSING", profile.section), "class API error for " .. profile.section)
+        gamma_arena_test_assert.is_true(has_profile_error(line_result, "GA_NPC_COMMUNITY_API_MISSING", profile.section), "community API error for " .. profile.section)
+    end
+
+    local no_reader = valid_preflight_probes()
+    no_reader.system_ini().r_string_ex = nil
+    local reader_result = gamma_arena_compat.preflight(no_reader)
+    gamma_arena_test_assert.is_false(reader_result.ok, "missing effective r_string_ex must fail")
+    for _, profile in ipairs(no_reader.catalogs.profile_list) do
+        gamma_arena_test_assert.is_true(has_profile_error(reader_result, "GA_NPC_CLASS_API_MISSING", profile.section), "class reader error for " .. profile.section)
+        gamma_arena_test_assert.is_true(has_profile_error(reader_result, "GA_NPC_COMMUNITY_API_MISSING", profile.section), "community reader error for " .. profile.section)
+    end
+end
+
+function preflight_normalizes_effective_arena_enemy_community()
+    local probes = valid_preflight_probes()
+    for _, profile in ipairs(probes.catalogs.profile_list) do probes._sections[profile.section].community = "  ARENA_ENEMY\t" end
+    gamma_arena_test_assert.is_true(gamma_arena_compat.preflight(probes).ok, "normalized effective arena_enemy community must pass")
+end

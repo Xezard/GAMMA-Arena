@@ -9,12 +9,62 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 }
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 $script:Failures = New-Object System.Collections.Generic.List[string]
+. (Join-Path $PSScriptRoot 'Runtime-TestSource.ps1')
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
         $script:Failures.Add($Message)
     }
 }
+
+$RuntimeSourceFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamma-arena-runtime-source-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $RuntimeSourceFixtureRoot | Out-Null
+    $RuntimeSourceFixturePath = Join-Path $RuntimeSourceFixtureRoot 'gamma_arena_test_runtime.script'
+    $RuntimeSourcePartPath = Join-Path $RuntimeSourceFixtureRoot 'gamma_arena_test_runtime_part_first.script'
+    $RuntimeSourcePart = "function runtime_expected()`nend`n"
+    $RuntimeSourceMain = @'
+local first = gamma_arena_test_runtime_part_first
+local second = gamma_arena_test_runtime_part_second
+local cases = {
+    { name = "runtime_expected", fn = first.runtime_expected }
+}
+'@
+    [IO.File]::WriteAllText($RuntimeSourceFixturePath, $RuntimeSourceMain)
+    [IO.File]::WriteAllText($RuntimeSourcePartPath, $RuntimeSourcePart)
+    [IO.File]::WriteAllText((Join-Path $RuntimeSourceFixtureRoot 'gamma_arena_test_runtime_part_second.script'), "function runtime_other()`nend`n")
+    [IO.File]::WriteAllText((Join-Path $RuntimeSourceFixtureRoot 'gamma_arena_test_runtime_part_orphan.script'), 'UNREFERENCED_RUNTIME_PART')
+    $RuntimeSourceCombined = Get-RuntimeTestSource $RuntimeSourceFixturePath
+    Assert-True ($RuntimeSourceCombined.Contains($RuntimeSourceMain) -and $RuntimeSourceCombined.Contains($RuntimeSourcePart)) 'Runtime source aggregation must preserve original registrations and referenced function bodies.'
+    Assert-True (-not $RuntimeSourceCombined.Contains('UNREFERENCED_RUNTIME_PART')) 'Runtime source aggregation must not read orphan part scripts.'
+    foreach ($Mutation in @(
+        [PSCustomObject]@{ Name = 'wrong function'; Main = $RuntimeSourceMain.Replace('fn = first.runtime_expected', 'fn = second.runtime_other'); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'wrong module'; Main = $RuntimeSourceMain.Replace('fn = first.', 'fn = second.'); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'unknown alias'; Main = $RuntimeSourceMain.Replace('fn = first.', 'fn = unknown.'); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'case-sensitive alias'; Main = $RuntimeSourceMain.Replace('fn = first.', 'fn = FIRST.'); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'unqualified registration'; Main = $RuntimeSourceMain.Replace('fn = first.', 'fn = '); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'missing export'; Main = $RuntimeSourceMain; Part = $RuntimeSourcePart.Replace('function ', 'local function ') },
+        [PSCustomObject]@{ Name = 'duplicate binding'; Main = $RuntimeSourceMain + "`nlocal first = gamma_arena_test_runtime_part_second"; Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'duplicate export'; Main = $RuntimeSourceMain; Part = $RuntimeSourcePart + $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'duplicate registration'; Main = $RuntimeSourceMain + "`n{ name = 'runtime_expected', fn = first.runtime_expected }"; Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'missing referenced part'; Main = $RuntimeSourceMain.Replace('gamma_arena_test_runtime_part_first', 'gamma_arena_test_runtime_part_missing'); Part = $RuntimeSourcePart },
+        [PSCustomObject]@{ Name = 'direct call wrong function'; Main = $RuntimeSourceMain + "`nrun_case_fn('runtime_missing', second.runtime_other)"; Part = $RuntimeSourcePart }
+    )) {
+        [IO.File]::WriteAllText($RuntimeSourceFixturePath, $Mutation.Main)
+        [IO.File]::WriteAllText($RuntimeSourcePartPath, $Mutation.Part)
+        $Rejected = $false
+        try { Get-RuntimeTestSource $RuntimeSourceFixturePath | Out-Null } catch { $Rejected = $true }
+        Assert-True $Rejected "Runtime source mutation must be rejected: $($Mutation.Name)"
+    }
+}
+finally {
+    $ResolvedRuntimeFixtureRoot = [IO.Path]::GetFullPath($RuntimeSourceFixtureRoot)
+    if ((Split-Path -Parent $ResolvedRuntimeFixtureRoot) -ne [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')) {
+        throw 'Runtime source fixture cleanup escaped the temporary directory.'
+    }
+    if (Test-Path -LiteralPath $ResolvedRuntimeFixtureRoot) { Remove-Item -LiteralPath $ResolvedRuntimeFixtureRoot -Recurse -Force }
+}
+$RuntimeTestSource = Get-RuntimeTestSource (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script')
 
 function Get-RelativeRepoPath([string]$Path) {
     return $Path.Substring($RepoRoot.Length).TrimStart('\', '/').Replace('/', '\')
@@ -247,6 +297,8 @@ $Task3ScriptContracts = @(
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog.script'; Namespace = 'gamma_arena_catalog'; Required = @('(?m)^function\s+load\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_catalog_discovery.script'; Namespace = 'gamma_arena_catalog_discovery'; Required = @('(?m)^function\s+discover\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_weapon_diagnostics.script'; Namespace = 'gamma_arena_weapon_diagnostics'; Required = @('(?m)^function\s+snapshot\s*\(') },
+    [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_weapon_safety.script'; Namespace = 'gamma_arena_weapon_safety'; Required = @('(?m)^function\s+audit\s*\(', '(?m)^function\s+check\s*\(', '(?m)^function\s+allowed\s*\(', '(?m)^function\s+manual_blacklist\s*\(', '(?m)^function\s+runtime_file_exists\s*\(', '(?m)^function\s+log_report\s*\(') },
+    [PSCustomObject]@{ Path = 'dev\gamedata\scripts\gamma_arena_test_weapon_safety.script'; Namespace = 'gamma_arena_test_weapon_safety'; Required = @('(?m)^function\s+run\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_mode_skirmish.script'; Namespace = 'gamma_arena_mode_skirmish'; Required = @('(?m)^function\s+id\s*\(', '(?m)^function\s+difficulty_envelope\s*\(', '(?m)^function\s+next_fight_index\s*\(', '(?m)^function\s+validate_session\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_generator.script'; Namespace = 'gamma_arena_generator'; Required = @('(?m)^function\s+generate\s*\(', '(?m)^function\s+stable_encode\s*\(') },
     [PSCustomObject]@{ Path = 'src\gamedata\scripts\gamma_arena_device_generator.script'; Namespace = 'gamma_arena_device_generator'; Required = @('(?m)^function\s+select\s*\(', '(?m)^function\s+generate\s*\(') },
@@ -286,7 +338,7 @@ $Task4CurrentGeneratorContracts = @(
     [PSCustomObject]@{
         Protection = 'Task 4 current generator RNG isolation protection'
         Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
-        Required = @('random_numeric_rank_stream_is_isolated', 'player_ammo_scaling_is_stream_isolated', 'medical_tuning_does_not_reroll_core_fight', 'longer rosters preserve every indexed prefix draw', 'low_without_actor_ammo')
+        Required = @('random_numeric_rank_stream_is_isolated', 'player_ammo_scaling_is_stream_isolated', 'medical_tuning_does_not_reroll_core_fight', 'longer rosters preserve every indexed prefix draw', 'scaling preserves all other canonical content')
     },
     [PSCustomObject]@{
         Protection = 'Task 4 current ammo scaling protection'
@@ -321,12 +373,12 @@ $Task4CurrentGeneratorContracts = @(
     [PSCustomObject]@{
         Protection = 'Task 4 current actor quarantine protection'
         Path = 'src\gamedata\scripts\gamma_arena_catalog.script'
-        Required = @('ACTOR_WEAPON_QUARANTINE', 'wpn_dtmdr\s*=\s*true', 'wpn_eft_mts_255_uh2\s*=\s*true', 'wpn_vssk_ekp8_18\s*=\s*true', 'actor_weapon_quarantine_v2', 'snapshot\.actor_weapon_list')
+        Required = @('ACTOR_WEAPON_QUARANTINE', 'gamma_arena_weapon_safety\.manual_blacklist', 'actor_weapon_quarantine_v2', 'snapshot\.actor_weapon_list')
     },
     [PSCustomObject]@{
         Protection = 'Task 4 current actor quarantine protection'
         Path = 'dev\gamedata\scripts\gamma_arena_test_generator.script'
-        Required = @('actor_weapon_quarantine_is_exact_and_actor_only', 'GA_ACTOR_WEAPON_QUARANTINED', 'actor generation never selects quarantined MTS-255 UH2', 'actor generation never selects quarantined VSSK EKP8-18', 'broken VSSK remains NPC-eligible', 'sibling VSSK optic remains actor eligible')
+        Required = @('weapon_quarantine_is_exact_and_global', 'GA_WEAPON_UNSAFE', 'exact manual blacklist is global', 'actor and NPC shared materialization rejects manual blacklist', 'healthy sibling variants remain eligible')
     },
     [PSCustomObject]@{
         Protection = 'Task 4 current affordability and diversity protection'
@@ -363,7 +415,7 @@ foreach ($Contract in $Task4CurrentGeneratorContracts) {
     $ContractPath = Join-Path $RepoRoot $Contract.Path
     Assert-True (Test-Path -LiteralPath $ContractPath) "$($Contract.Protection): current contract file is missing: $($Contract.Path)"
     if (Test-Path -LiteralPath $ContractPath) {
-        $ContractContent = Get-Content -LiteralPath $ContractPath -Raw
+        $ContractContent = if ($Contract.Path -eq 'dev\gamedata\scripts\gamma_arena_test_runtime.script') { $RuntimeTestSource } else { Get-Content -LiteralPath $ContractPath -Raw }
         foreach ($Pattern in $Contract.Required) {
             Assert-True ($ContractContent -match $Pattern) "$($Contract.Protection): missing $Pattern in $($Contract.Path)"
         }
@@ -418,9 +470,19 @@ if ($Task6ArtifactsPresent) {
     Assert-True ($Task6CatalogLoader -match 'pcall\(factory\.enumerate_system_sections\)') 'Catalog loader must memoize failed effective-system enumeration attempts.'
     Assert-True ($Task6CatalogLoader -match 'if\s+not\s+succeeded\s+then\s+error') 'Catalog loader must replay a memoized effective-system enumeration failure.'
     Assert-True ($Task6CatalogLoader -match 'shared_system_sections') 'Catalog loader must share the memoized system enumeration with the physical item catalog.'
-    $Task7RandomPipelineFixture = [regex]::Match($Task6GeneratorTests, '(?s)local function random_draft_catalogs\(\).*?local function random_draft_semantics').Value
-    Assert-True ($Task7RandomPipelineFixture.Contains('snapshot.fingerprint = "ga-catalog-v10-random-pipeline"')) 'Task 7 positive random pipeline fixture must use the exact v10 catalog fingerprint.'
+    $Task7RandomPipelineFixture = [regex]::Match($Task6GeneratorTests, '(?ms)^local function random_draft_catalogs\(\).*?^end\s*$').Value
+    $Task7CatalogFixture = [regex]::Match($Task6GeneratorTests, '(?ms)^local function catalogs\(\).*?^end\s*$').Value
+    Assert-True ($Task7RandomPipelineFixture -match 'return\s+catalogs\(\)' -and
+        $Task7CatalogFixture.Contains('gamma_arena_catalog.load(fixture_factory())') -and
+        $Task7CatalogFixture.Contains('return result.value')) 'Task 7 positive random pipeline fixture must preserve the real loaded catalog identity.'
+    Assert-True (($Task7RandomPipelineFixture + $Task7CatalogFixture) -notmatch '\.fingerprint\s*=') 'Task 7 positive random pipeline fixture must not forge its catalog fingerprint.'
     Assert-True ($Task7RandomPipelineFixture -notmatch 'ga-catalog-v[1-9]-') 'Task 7 positive random pipeline fixture must not use a retired catalog fingerprint.'
+    $Task4AmmoIsolationBody = [regex]::Match($Task6GeneratorTests, '(?ms)^local function player_ammo_scaling_is_stream_isolated\(\).*?^end\s*$').Value
+    foreach ($Marker in @('gamma_arena_result.ok(1)', 'gamma_arena_result.ok(4)', 'high_ammo.quantity, low_ammo.quantity + 3',
+        'high_ammo.quantity = low_ammo.quantity', 'high.value.identity.fight_id = low.value.identity.fight_id',
+        'gamma_arena_generator.stable_encode(low.value), gamma_arena_generator.stable_encode(high.value)')) {
+        Assert-True ($Task4AmmoIsolationBody.Contains($Marker)) "Ammo scaling isolation must preserve the full canonical comparison: $Marker"
+    }
     $ActiveGenerator = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_generator.script') -Raw
     Assert-True ($ActiveGenerator -match 'gamma_arena_fight_builder\.generate' -and $ActiveGenerator -match 'gamma_arena_fight_spec\.stable_encode') 'Task 7 must retain the thin universal generator facade.'
 }
@@ -519,7 +581,7 @@ foreach ($Marker in @('launch_schema_version', 'launch_generator_version', 'laun
 }
 $Task8MigrationContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_migrations.script') -Raw
 Assert-True ($Task8MigrationContent -match 'gamma_arena_custom_codec\.keys\s*\(\s*"launch_custom_"\s*\)') 'Task 8 migration cleanup must include every bounded custom launch key.'
-$Task8RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task8RuntimeTests = $RuntimeTestSource
 Assert-True ($Task8RuntimeTests -match 'runtime_custom_start_validates_before_launch_mutation') 'Task 8 runtime tests must prove validation precedes launch mutation.'
 $Task8MigrationTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_migrations.script') -Raw
 foreach ($Marker in @('custom_launch_round_trip_is_bounded_ordered_and_catalog_bound', 'custom_launch_rejects_mixed_schema_and_recipe_keys', 'custom_launch_faults_cover_indexed_key_range')) {
@@ -560,7 +622,8 @@ foreach ($Marker in @(
     Assert-True ($Task9UiDiagnostic -match [regex]::Escape($Marker)) `
         "Task 9 bounded catalog UI is missing: $Marker"
 }
-$Task9PaginationCase = [regex]::Match($Task8RuntimeTests, 'local\s+function\s+runtime_custom_ui_catalog_projection_is_bounded_and_complete\(\)[\s\S]*?\r?\nend').Value
+
+$Task9PaginationCase = [regex]::Match($Task8RuntimeTests, 'function\s+runtime_custom_ui_catalog_projection_is_bounded_and_complete\(\)[\s\S]*?\r?\nend').Value
 Assert-True ($Task9PaginationCase -match 'for\s+offset,\s*cell\s+in\s+ipairs\(view\.catalog_cells\)' -and
     $Task9PaginationCase -match 'catalog\.categories\.weapon\s*\[\s*\(page\s*-\s*1\)\s*\*\s*80\s*\+\s*offset\s*\]') 'Bounded Custom catalog regression must assert exact source order at every page and cell offset.'
 $Task9StartXmlPath = Join-Path $RepoRoot 'src\gamedata\configs\ui\gamma_arena_start.xml'
@@ -648,9 +711,9 @@ $DerivedStateCase = 'custom_setup_model_snapshots_reuse_committed_derived_state'
 $DerivedStateRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($DerivedStateCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($DerivedStateCase) + '\s*\}'
 Assert-True (([regex]::Matches($Task9CustomTests, $DerivedStateRegistration)).Count -eq 1) `
     'Custom derived-state cache regression must be registered exactly once.'
-$Task9RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task9RuntimeTests = $RuntimeTestSource
 foreach ($Name in @('runtime_custom_ui_launch_projection_is_authoritative','runtime_custom_ui_grenade_projection_disables_cells_at_limit','runtime_custom_ui_projects_rejected_operation_until_success','runtime_custom_ui_rebuilds_catalog_left_and_selected_right','runtime_custom_presenter_filters_sorts_and_pages_deterministically','runtime_custom_presenter_preview_and_readiness_are_authoritative','runtime_composed_catalog_supports_first_custom_item_edit')) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) "Task 9 runtime case must be registered exactly: $Name"
 }
 $PresenterPath = Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script'
@@ -660,7 +723,7 @@ Assert-True ($PresenterLessBlock -match [regex]::Escape('if descending then retu
     'Custom descending sort must use an explicit branch so the false comparison cannot fall through to ascending.'
 Assert-True ($PresenterLessBlock -notmatch 'return\s+descending\s+and') `
     'Custom descending sort must not use Lua and/or as a ternary comparator.'
-$PresenterSortCase = [regex]::Match($Task9RuntimeTests, '(?ms)^local\s+function\s+runtime_custom_presenter_filters_sorts_and_pages_deterministically\(\).*?^end\s*$').Value
+$PresenterSortCase = [regex]::Match($Task9RuntimeTests, '(?ms)^function\s+runtime_custom_presenter_filters_sorts_and_pages_deterministically\(\).*?^end\s*$').Value
 foreach ($SortId in @('price_desc','name_desc')) {
     Assert-True ($PresenterSortCase -match ('sort\s*=\s*"' + [regex]::Escape($SortId) + '"')) `
         "Custom presenter regression must execute $SortId through the real project path."
@@ -675,16 +738,16 @@ $ReadableCustomCases = @(
     'runtime_custom_ui_readiness_guidance_tracks_launch_state'
 )
 foreach ($Name in $ReadableCustomCases) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task9RuntimeTests, $Registration)).Count -eq 1) `
         "Readable Custom runtime case must be registered exactly: $Name"
 }
 $HoverCase = 'runtime_custom_ui_formats_ap_and_routes_native_hover'
-$HoverRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($HoverCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($HoverCase) + '\s*\}'
+$HoverRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($HoverCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($HoverCase) + '\s*\}'
 Assert-True (([regex]::Matches($Task9RuntimeTests, $HoverRegistration)).Count -eq 1) `
     "Readable Custom runtime case must be registered exactly: $HoverCase"
 $TransferCase = 'runtime_custom_ui_click_and_drag_dispatch_identical_commands'
-$TransferRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($TransferCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($TransferCase) + '\s*\}'
+$TransferRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($TransferCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($TransferCase) + '\s*\}'
 Assert-True (([regex]::Matches($Task9RuntimeTests, $TransferRegistration)).Count -eq 1) `
     "Readable Custom runtime case must be registered exactly: $TransferCase"
 $ReadableCustomUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
@@ -859,9 +922,9 @@ foreach ($Name in @('custom_config_devices_are_optional_budgeted_and_bounded','c
 foreach ($Marker in @('device is distinct entry 65','device is physical entity 257','GA_CUSTOM_OVERSPEND','GA_CUSTOM_OVERWEIGHT','preserves snapshot','208')) {
     Assert-True ($Task3DeviceTests -match [regex]::Escape($Marker)) "Task 3 device tests are missing $Marker"
 }
-$Task3DeviceRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task3DeviceRuntime = $RuntimeTestSource
 $Task3DeviceRuntimeName = 'runtime_custom_ui_device_projection_round_trips_all_choices'
-$Task3DeviceRuntimeRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task3DeviceRuntimeName) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Task3DeviceRuntimeName) + '\s*\}'
+$Task3DeviceRuntimeRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($Task3DeviceRuntimeName) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Task3DeviceRuntimeName) + '\s*\}'
 Assert-True (([regex]::Matches($Task3DeviceRuntime, $Task3DeviceRuntimeRegistration)).Count -eq 1) "Task 3 runtime device projection case must be registered exactly: $Task3DeviceRuntimeName"
 foreach ($Marker in @('emitted request preserves dedicated device','Task 3 does not materialize actor_device into FightSpec items','Task 3 emits no separate FightSpec device field')) {
     Assert-True ($Task3DeviceRuntime -match [regex]::Escape($Marker)) "Task 3 runtime boundary test is missing: $Marker"
@@ -971,7 +1034,7 @@ foreach ($Forbidden in @('mode_id=','difficulty_id=','budget=','price=','custom_
 }
 }
 
-$Task11Runtime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task11Runtime = $RuntimeTestSource
 foreach ($Name in @(
     'runtime_custom_session_creation_copies_validated_recipe',
     'runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership',
@@ -983,7 +1046,7 @@ foreach ($Name in @(
     'runtime_composed_default_actor_materializes_universal_inventory_and_restores_template',
     'runtime_custom_defeat_opens_fresh_default_setup_without_loadout'
 )) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($Task11Runtime, $Registration)).Count -eq 1) "Task 11 runtime case must be registered exactly: $Name"
 }
 $Task11Session = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
@@ -1039,8 +1102,8 @@ if ($Task11ActivateStart -ge 0 -and $Task11ActivateEnd -gt $Task11ActivateStart)
     Assert-True ($Task11Activate -match 'merge_launch_options\s*\(\s*self\.deps\.launch_options\s*,\s*activation_catalog\s*,\s*activation_layout\s*\)' -and $Task11Activate -match 'activation_launch_options\s*=\s*launch_options\.value') 'Task 11 activation must create one non-mutating launch-options snapshot.'
     Assert-True (([regex]::Matches($Task11Activate, 'self\.deps\.config\s*,\s*activation_launch_options')).Count -eq 2) 'Task 11 Store ownership validation and consumption must share the exact activation options object.'
 }
-$Task11DefeatStart = $Task11Runtime.IndexOf('local function runtime_custom_defeat_opens_fresh_default_setup_without_loadout')
-$Task11DefeatEnd = if ($Task11DefeatStart -ge 0) { $Task11Runtime.IndexOf('local function task11_item_signature', $Task11DefeatStart) } else { -1 }
+$Task11DefeatStart = $Task11Runtime.IndexOf('function runtime_custom_defeat_opens_fresh_default_setup_without_loadout')
+$Task11DefeatEnd = if ($Task11DefeatStart -ge 0) { $Task11Runtime.IndexOf("`nend", $Task11DefeatStart) + 4 } else { -1 }
 Assert-True ($Task11DefeatStart -ge 0 -and $Task11DefeatEnd -gt $Task11DefeatStart) 'Task 11 custom defeat regression must remain structurally testable.'
 if ($Task11DefeatStart -ge 0 -and $Task11DefeatEnd -gt $Task11DefeatStart) {
     $Task11Defeat = $Task11Runtime.Substring($Task11DefeatStart, $Task11DefeatEnd - $Task11DefeatStart)
@@ -1057,7 +1120,7 @@ $Task11Bootstrap = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\s
 Assert-True ($Task11Bootstrap -match 'local\s+layout_port\s*=\s*overrides\.layout\s+or\s+function\s*\(\s*layout_id\s*,\s*catalog_snapshot\s*\)' -and $Task11Bootstrap -match 'catalog_snapshot\s+and\s+gamma_arena_result\.ok\(catalog_snapshot\)') 'Task 11 bootstrap layout resolution must reuse the supplied universal catalog snapshot.'
 Assert-True ($Task11Bootstrap -match 'local\s+preflight_port\s*=\s*overrides\.preflight\s+or\s+function\s*\(\s*catalog_snapshot\s*\)' -and $Task11Bootstrap -match 'runtime_probes\(catalog_snapshot\)') 'Task 11 bootstrap compatibility preflight must reuse the supplied universal catalog snapshot.'
 Assert-True ($Task11Bootstrap -match 'gamma_arena_fight_builder\.generate\(session,\s*fight_index,\s*catalog_snapshot,\s*resolved_layout\)') 'Task 11 bootstrap must dispatch both recipes through the universal fight builder.'
-$Task11RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task11RuntimeTests = $RuntimeTestSource
 foreach ($Marker in @(
     'runtime_custom_first_fight_preserves_shared_roster_actor_hud_and_audio',
     'runtime_custom_victory_rerolls_enemy_only_with_immutable_template',
@@ -1100,14 +1163,14 @@ $Task7CatalogMetadata = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamed
 Assert-True ($Task7CatalogMetadata -match '(?ms)\[meta\].*?schema_version\s*=\s*10\s*.*?revision\s*=\s*11\s*.*?generator_version\s*=\s*11') 'Task 7 catalog identity must be 10/11/11.'
 $Task7OrchestratorIdentity = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_orchestrator.script') -Raw
 $Task7SessionStoreIdentity = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_session_store.script') -Raw
-$Task7RuntimeSessionFixtures = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task7RuntimeSessionFixtures = $RuntimeTestSource
 foreach ($Pattern in @('catalog\.schema_version\s*~=\s*10', 'catalog\.revision\s*~=\s*11', 'catalog\.generator_version\s*~=\s*11')) {
     Assert-True ($Task7OrchestratorIdentity -match $Pattern) "Task 7 orchestrator catalog guard must enforce current identity: $Pattern"
 }
 foreach ($Pattern in @('session\.generator_version\s*~=\s*11', 'session\.catalog_revision\s*~=\s*11')) {
     Assert-True ($Task7SessionStoreIdentity -match $Pattern) "Task 7 ArenaSession guard must enforce current identity: $Pattern"
 }
-Assert-True ($Task7RuntimeSessionFixtures -match '(?ms)local function valid_session\(\).*?generator_version\s*=\s*11.*?catalog_revision\s*=\s*11.*?ga-catalog-v10-') 'Task 7 current resume fixture must bind catalog identity 10/11/11.'
+Assert-True ($Task7RuntimeSessionFixtures -match '(?ms)function valid_session\(\).*?generator_version\s*=\s*11.*?catalog_revision\s*=\s*11.*?ga-catalog-v10-') 'Task 7 current resume fixture must bind catalog identity 10/11/11.'
 foreach ($CaseName in @('runtime_custom_session_creation_copies_validated_recipe','runtime_random_recipe_session_remains_difficulty_only','resume_is_validated_but_override_is_not_applied_early')) {
     Assert-True ($Task7RuntimeSessionFixtures -match [regex]::Escape($CaseName)) "Task 7 current session behavioral fixture is missing: $CaseName"
 }
@@ -1164,7 +1227,7 @@ if (Test-Path -LiteralPath $AggregateRunnerPath -PathType Leaf) {
 }
 Assert-True ($Task5MaterializerContent -notmatch 'UINT32_MOD') 'Task 5 materializer must not narrow physical quantities or box_size to uint32.'
 
-$Task5UniversalRuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task5UniversalRuntimeTests = $RuntimeTestSource
 foreach ($Marker in @(
     'runtime_universal_items_materialize_exact_entities_and_slot_order',
     'runtime_universal_items_preflight_enforces_physical_item_cap',
@@ -1770,11 +1833,11 @@ if (Test-Path -LiteralPath $Task5StorePath) {
 
 $Task5DevTestPath = Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script'
 if (Test-Path -LiteralPath $Task5DevTestPath) {
-    $Task5DevTestContent = Get-Content -LiteralPath $Task5DevTestPath -Raw
+    $Task5DevTestContent = $RuntimeTestSource
     $RuntimeBootstrapStatusRegistration = [PSCustomObject]@{ Name = 'runtime_bootstrap_status_preserves_initialization_result'; Function = 'runtime_bootstrap_status_preserves_initialization_result' }
-    $RuntimeBootstrapStatusPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeBootstrapStatusRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeBootstrapStatusRegistration.Function) + '\s*\}'
+    $RuntimeBootstrapStatusPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeBootstrapStatusRegistration.Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RuntimeBootstrapStatusRegistration.Function) + '\s*\}'
     Assert-True ($Task5DevTestContent -match $RuntimeBootstrapStatusPattern) "Regression case must be registered exactly: $($RuntimeBootstrapStatusRegistration.Name) -> $($RuntimeBootstrapStatusRegistration.Function)."
-    foreach ($Marker in @('runtime_preflight_accepts_natural_death_without_invulnerability','runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_task6_actor_checkpoint_ports','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_arena_enemy_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_launch_defers_on_fake_start_then_activates_on_rostok','runtime_ordinary_no_intent_activation_latches_once','runtime_first_activation_failure_routes_fatal','runtime_activation_reconciles_before_intent_inspection_once','runtime_activation_version_changes_clear_resume_before_checkpoint_routing','runtime_activation_reconciliation_failures_are_fatal_before_inspection','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_unexpected_net_destroy_clears_external_route','runtime_orchestrator_npc_net_spawn_is_active_only','runtime_npc_net_spawn_errors_defer_fatal_ui_to_update','runtime_entity_net_spawn_isolates_only_owned_npcs','runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults','runtime_entity_activation_rejects_runtime_community_drift')) {
+    foreach ($Marker in @('runtime_preflight_accepts_natural_death_without_invulnerability','runtime_preflight_aggregates_in_stable_order','runtime_preflight_requires_actor_ports_without_checkpoint_apis','runtime_preflight_requires_community_for_every_custom_profile','runtime_preflight_requires_human_class_for_every_custom_profile','runtime_preflight_rejects_missing_profile_value_apis','runtime_preflight_normalizes_effective_arena_enemy_community','runtime_wrong_level_skips_patrol_resolution','runtime_launch_consumes_before_preflight_once','runtime_activation_requires_game_load_boundary','runtime_launch_defers_on_fake_start_then_activates_on_rostok','runtime_ordinary_no_intent_activation_latches_once','runtime_first_activation_failure_routes_fatal','runtime_activation_reconciles_before_intent_inspection_once','runtime_activation_version_changes_clear_resume_before_checkpoint_routing','runtime_activation_reconciliation_failures_are_fatal_before_inspection','runtime_invalid_or_expired_launch_never_reaches_preflight','runtime_ordinary_loaded_save_rejects_stray_launch','runtime_ordinary_loaded_save_rejects_stray_resume','runtime_new_game_does_not_reuse_prior_load_state_latch','runtime_game_load_boundary_drops_prior_runtime_generation','runtime_config_quarantine_propagates_to_fatal','runtime_save_payload_is_plain_deep_copy','runtime_manual_save_and_load_flags_are_blocked','runtime_callback_boundary_routes_exceptions_once','runtime_callback_boundary_routes_false_results_once','runtime_inactive_callback_results_remain_benign','runtime_active_save_failure_enters_fatal_once','runtime_fatal_main_menu_retries_throw_then_becomes_idempotent','runtime_fatal_main_menu_retries_explicit_false','runtime_fatal_ui_helper_propagates_callback_results','runtime_bootstrap_registration_rolls_back_every_position','runtime_bootstrap_registration_poison_blocks_retry','runtime_bootstrap_requires_unregister_before_composition','runtime_unexpected_net_destroy_clears_external_route','runtime_orchestrator_npc_net_spawn_is_active_only','runtime_npc_net_spawn_errors_defer_fatal_ui_to_update','runtime_entity_net_spawn_isolates_only_owned_npcs','runtime_entity_net_spawn_fails_closed_on_owner_and_community_faults','runtime_entity_activation_rejects_runtime_community_drift')) {
         Assert-True ($Task5DevTestContent -match $Marker) "Task 5 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_cancelled_death_arm_aborts_on_next_update','runtime_cancelled_death_arm_aborts_before_net_destroy','runtime_already_cancelled_death_never_arms','runtime_cancelled_death_clear_failure_routes_fatal','runtime_cancelled_death_fatal_retry_durably_clears_real_store','runtime_cancelled_death_fatal_menu_cleanup_is_durable','runtime_cancelled_death_game_load_cleanup_is_durable')) {
@@ -1867,7 +1930,7 @@ foreach ($TextPath in @($BattleUiEngPath, $BattleUiRusPath)) {
         }
     }
 }
-$BattleRuntimeTests = Get-Content -LiteralPath $Task5DevTestPath -Raw
+$BattleRuntimeTests = $RuntimeTestSource
 foreach ($Marker in @('runtime_battle_identity_formatter_is_exact','runtime_battle_identity_adapter_owns_one_window','runtime_battle_identity_removal_failure_is_retryable','runtime_battle_identity_initialization_failure_prevents_registration','runtime_battle_identity_partial_add_is_rolled_back_or_retryable','runtime_battle_identity_main_hud_visibility_is_safe','runtime_battle_identity_visibility_sync_is_structured','runtime_battle_identity_visibility_failure_reporting_is_bounded')) {
     Assert-True ($BattleRuntimeTests -match [regex]::Escape($Marker)) "Battle identity runtime tests must cover $Marker"
 }
@@ -1974,10 +2037,10 @@ if (Test-Path -LiteralPath $Task3UiStartPath) {
     $Task3OnStart = [regex]::Match($Task3UiStartContent, '(?ms)^function\s+UIStart:OnStart\s*\(\)(.*?)^end\s*$').Value
     Assert-True ($Task3OnStart -match 'begin_start\s*\(\s*self\.owner\s*,\s*axr_main\.config\s*,\s*request\.value\s*,\s*self\.ports\s*\)') 'OnStart must delegate ordinary handoff through the preflight-gated start seam.'
 }
-$Task3RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
-$Task3Registration = '\{\s*name\s*=\s*"runtime_ordinary_start_preflight_precedes_mutation"\s*,\s*fn\s*=\s*runtime_ordinary_start_preflight_precedes_mutation\s*\}'
+$Task3RuntimeTests = $RuntimeTestSource
+$Task3Registration = '\{\s*name\s*=\s*"runtime_ordinary_start_preflight_precedes_mutation"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.runtime_ordinary_start_preflight_precedes_mutation\s*\}'
 Assert-True ($Task3RuntimeTests -match $Task3Registration) 'Regression case must be registered exactly: runtime_ordinary_start_preflight_precedes_mutation -> runtime_ordinary_start_preflight_precedes_mutation.'
-$FatalOnlyRegistration = '\{\s*name\s*=\s*"runtime_defeat_menu_default_fatal_path_skips_start_settings"\s*,\s*fn\s*=\s*runtime_defeat_menu_default_fatal_path_skips_start_settings\s*\}'
+$FatalOnlyRegistration = '\{\s*name\s*=\s*"runtime_defeat_menu_default_fatal_path_skips_start_settings"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.runtime_defeat_menu_default_fatal_path_skips_start_settings\s*\}'
 Assert-True ($Task3RuntimeTests -match $FatalOnlyRegistration) 'Regression case must be registered exactly: runtime_defeat_menu_default_fatal_path_skips_start_settings -> runtime_defeat_menu_default_fatal_path_skips_start_settings.'
 if (Test-Path -LiteralPath $Task6TextPath) {
     [xml]$Task6Text = Get-Content -LiteralPath $Task6TextPath -Raw
@@ -1990,10 +2053,10 @@ if (Test-Path -LiteralPath $Task4DevTestPath) {
 }
 if (Test-Path -LiteralPath $Task5DevTestPath) {
     $RuntimeDefeatPreflightRegistration = [PSCustomObject]@{ Name = 'runtime_defeat_menu_fresh_failures_are_bounded'; Function = 'runtime_defeat_menu_fresh_failures_are_bounded' }
-    $RuntimeDefeatPreflightPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Function) + '\s*\}'
+    $RuntimeDefeatPreflightPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RuntimeDefeatPreflightRegistration.Function) + '\s*\}'
     Assert-True ($Task5DevTestContent -match $RuntimeDefeatPreflightPattern) "Regression case must be registered exactly: $($RuntimeDefeatPreflightRegistration.Name) -> $($RuntimeDefeatPreflightRegistration.Function)."
     $RuntimeDefeatPreflightIdentityRegistration = [PSCustomObject]@{ Name = 'runtime_defeat_menu_preflight_failure_identity_is_preserved'; Function = 'runtime_defeat_menu_preflight_failure_identity_is_preserved' }
-    $RuntimeDefeatPreflightIdentityPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeDefeatPreflightIdentityRegistration.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeDefeatPreflightIdentityRegistration.Function) + '\s*\}'
+    $RuntimeDefeatPreflightIdentityPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeDefeatPreflightIdentityRegistration.Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RuntimeDefeatPreflightIdentityRegistration.Function) + '\s*\}'
     Assert-True ($Task5DevTestContent -match $RuntimeDefeatPreflightIdentityPattern) "Regression case must be registered exactly: $($RuntimeDefeatPreflightIdentityRegistration.Name) -> $($RuntimeDefeatPreflightIdentityRegistration.Function)."
     foreach ($Marker in @('GA_BOOTSTRAP_COMPOSE_FAILED','use_default','result_type','preflight failure generates no seed','preflight failure does not clear transient state')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Confirmed-defeat preflight identity test must cover $Marker"
@@ -2111,7 +2174,7 @@ foreach ($Marker in @('gamma_arena_actor_diagnostics.new','pre_transient_reset',
 }
 Assert-True ($Task6BootstrapContent -match 'if\s+wound_count\s*~=\s*0\s+then') 'Native wound readback must remain a strict reset postcondition'
 Assert-True ($Task6BootstrapContent -notmatch 'wound_count\s*~=\s*0\s+or\s+booster_count\s*~=\s*0') 'Contradictory MT-TEST booster enumeration must not share the fatal wound postcondition'
-$RoundTransitionRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$RoundTransitionRuntimeContent = $RuntimeTestSource
 foreach ($Name in @('runtime_actor_rematch_boundary_aborts_before_input_lock','runtime_actor_rematch_boundary_failure_never_acquires_input','runtime_actor_preowned_input_survives_normalize_failure','runtime_actor_rematch_transients_clear_once_before_loadout_cleanup','runtime_actor_transient_failure_prevents_loadout_cleanup','runtime_bootstrap_engine_transients_clear_and_verify','runtime_bootstrap_engine_booster_readback_is_nonfatal','runtime_bootstrap_missing_alcohol_mutator_fails_closed','runtime_bootstrap_gamma_transient_integrations_are_exact','runtime_entity_ready_revalidates_items_before_hostility')) {
     Assert-True ($RoundTransitionRuntimeContent.Contains($Name)) "Round transition runtime regression must cover $Name"
 }
@@ -2379,9 +2442,9 @@ if (Test-Path -LiteralPath $Task5BootstrapPath) {
         Assert-True ($Task5BootstrapContent -match [regex]::Escape($Marker)) "Mags Redux production binding must cover $Marker"
     }
     $MagsReduxOrphanNamespaceCase = 'runtime_mags_redux_orphan_patch_namespace_is_absent'
-    $MagsReduxOrphanNamespaceRegistration = '\{\s*name\s*=\s*["'']' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '["'']\s*,\s*fn\s*=\s*' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\s*\}'
+    $MagsReduxOrphanNamespaceRegistration = '\{\s*name\s*=\s*["'']' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '["'']\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\s*\}'
     Assert-True (([regex]::Matches($Task5DevTestContent, $MagsReduxOrphanNamespaceRegistration)).Count -eq 1) "Mags Redux orphan-namespace regression must be registered exactly: $MagsReduxOrphanNamespaceCase -> $MagsReduxOrphanNamespaceCase."
-    $MagsReduxOrphanNamespaceBody = [regex]::Match($Task5DevTestContent, 'local\s+function\s+' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\(\)[\s\S]*?\r?\nend').Value
+    $MagsReduxOrphanNamespaceBody = [regex]::Match($Task5DevTestContent, 'function\s+' + [regex]::Escape($MagsReduxOrphanNamespaceCase) + '\(\)[\s\S]*?\r?\nend').Value
     Assert-True ($MagsReduxOrphanNamespaceBody -match 'gamma_arena_bootstrap\.resolve_mags_redux_vendor_api\(nil,\s*\{' -and $MagsReduxOrphanNamespaceBody -match 'orphan patches namespace is not a Mags Redux core') 'Mags Redux orphan-namespace regression must classify an orphan patches table as absent.'
     Assert-True ($Task5BootstrapContent -match '(?m)^function\s+resolve_mags_redux_vendor_api\s*\(') 'Bootstrap must export the Mags Redux vendor API classifier.'
     Assert-True ($Task5BootstrapContent -match 'type\(binder\)\s*~=\s*"table"\s+or\s+type\(binder\.is_supported_weapon\)\s*~=\s*"function"') 'Mags Redux classifier must require the magazine_binder.is_supported_weapon core sentinel.'
@@ -2487,10 +2550,10 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Task 7 Dev tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_fightspec_preflight_failure_precedes_actor_normalization','runtime_fightspec_preflight_caches_before_normalization_and_applies_after_purge')) {
-        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Marker) + '\s*\}'
+        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Marker) + '\s*\}'
         Assert-True (([regex]::Matches($Task5DevTestContent, $Registration)).Count -eq 1) "FightSpec lifecycle case must be registered exactly: $Marker -> $Marker"
     }
-    $Task7ContinuationRegistration = '\{\s*name\s*=\s*"runtime_victory_continuation_preflights_before_actor_reset"\s*,\s*fn\s*=\s*runtime_victory_continuation_preflights_before_actor_reset\s*\}'
+    $Task7ContinuationRegistration = '\{\s*name\s*=\s*"runtime_victory_continuation_preflights_before_actor_reset"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.runtime_victory_continuation_preflights_before_actor_reset\s*\}'
     Assert-True (([regex]::Matches($Task5DevTestContent, $Task7ContinuationRegistration)).Count -eq 1) 'FightSpec continuation lifecycle case must be registered exactly.'
     foreach ($Marker in @('runtime_entity_consumes_owned_medical_item_once','runtime_entity_medical_consumption_rejects_stale_foreign_and_absent_items')) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "Physical medicine Dev tests must cover $Marker"
@@ -2499,7 +2562,7 @@ if (Test-Path -LiteralPath $Task5DevTestPath) {
         Assert-True ($Task5DevTestContent -match [regex]::Escape($Marker)) "NPC medical Dev tests must cover $Marker"
     }
     foreach ($Marker in @('runtime_orchestrator_forwards_preflight_npc_medical_owner','runtime_orchestrator_rejects_invalid_npc_medical_owner_before_world_mutation','runtime_npc_medical_external_owner_is_dependency_free','runtime_orchestrator_passes_frozen_medical_owner_to_entity_activation','runtime_entity_external_medical_owner_delegates_hidden_charge','runtime_entity_medical_owner_defaults_and_rejects_invalid_before_mutation')) {
-        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Marker) + '\s*\}'
+        $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Marker) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Marker) + '\s*\}'
         Assert-True (([regex]::Matches($Task5DevTestContent, $Registration)).Count -eq 1) "Delegated NPC medical case must be registered exactly: $Marker"
     }
 }
@@ -2596,9 +2659,10 @@ if (Test-Path -LiteralPath $Task3CatalogScriptPath) {
     Assert-True ($Task3CatalogScriptContent -match 'layout_manifest_v2') 'Catalog loader must bind exact ordered v2 layout semantics'
     Assert-True ($Task3CatalogScriptContent -match 'gamma_arena_number\.is_integer') 'Catalog numeric parsing must use the finite integer contract'
     Assert-True ($Task3CatalogScriptContent -match 'ACTOR_WEAPON_QUARANTINE') 'Catalog must declare an explicit actor-only weapon quarantine.'
-    Assert-True ($Task3CatalogScriptContent -match 'wpn_dtmdr\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_dtmdr section.'
-Assert-True ($Task3CatalogScriptContent -match 'wpn_eft_mts_255_uh2\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_eft_mts_255_uh2 section.'
-Assert-True ($Task3CatalogScriptContent -match 'wpn_vssk_ekp8_18\s*=\s*true') 'Actor quarantine must contain the exact confirmed wpn_vssk_ekp8_18 section.'
+    $WeaponSafetySource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_weapon_safety.script') -Raw
+    foreach ($Section in @('wpn_dtmdr', 'wpn_eft_mts_255_uh2', 'wpn_vssk_ekp8_18')) {
+        Assert-True ($WeaponSafetySource -match ($Section + '\s*=\s*true')) "Shared blacklist must retain exact confirmed section: $Section"
+    }
 Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v2') 'Actor quarantine policy identity must advance after the VSSK exclusion.'
     Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_list') 'Catalog must expose a deterministic actor weapon list.'
     Assert-True ($Task3CatalogScriptContent -match 'actor_weapon_quarantine_v2') 'Catalog revision identity must include the current actor quarantine policy.'
@@ -2641,9 +2705,9 @@ if (Test-Path -LiteralPath $SkipPath) {
     Assert-True (([regex]::Matches($SkipContent, '(?m)^gamma_arena_(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)_(novice|trainee|experienced|veteran)\s*=\s*(army|bandit|csky|dolg|ecolog|freedom|killer|monolith|stalker)\s*$')).Count -eq 36) 'Loadout patch must add all 36 Arena human aliases to skip_npcs'
 }
 $Task5BootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-$Task5RuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task5RuntimeContent = $RuntimeTestSource
 $UniversalDeviceLifecycleCase = 'runtime_universal_actor_items_shutdown_precedes_cleanup_and_rollback'
-$UniversalDeviceLifecycleRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($UniversalDeviceLifecycleCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($UniversalDeviceLifecycleCase) + '\s*\}'
+$UniversalDeviceLifecycleRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($UniversalDeviceLifecycleCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($UniversalDeviceLifecycleCase) + '\s*\}'
 Assert-True (([regex]::Matches($Task5RuntimeContent, $UniversalDeviceLifecycleRegistration)).Count -eq 1) "Universal actor-device lifecycle case must be registered exactly: $UniversalDeviceLifecycleCase -> $UniversalDeviceLifecycleCase"
 Assert-True ($Task5BootstrapContent -match '(?s)function\s+new_actor_item_port\(ports\).*?shutdown_device.*?ports\.release_item') 'Universal actor-item cleanup/rollback must shut down global actor-device state before owned release.'
 Assert-True (([regex]::Matches($Task5BootstrapContent, 'shutdown_device\s*=\s*shutdown_actor_device')).Count -ge 2) 'Legacy and universal actor-item ports must share the production actor-device shutdown seam.'
@@ -3109,7 +3173,7 @@ foreach ($IntegrityMarker in @('MAX_INTEGRITY_RETRIES', 'integrity_retry', 'reco
 }
 Assert-True ($Task12OrchestratorContent -match 'reconcile_active_integrity\s*\([\s\S]{0,500}reconcile_active_victory\s*\(') 'Integrity recovery must be reconciled before victory'
 Assert-True ($Task12BootstrapContent.Contains('object_position')) 'Bootstrap must bind guarded opponent position evidence'
-$Task13RuntimeTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$Task13RuntimeTests = $RuntimeTestSource
 foreach ($RuntimeRegression in @(
     [PSCustomObject]@{ Name = 'runtime_fatal_main_menu_bypasses_terminal_cleanup_error'; Function = 'fatal_main_menu_bypasses_terminal_cleanup_error' },
     [PSCustomObject]@{ Name = 'runtime_ordinary_main_menu_still_rejects_terminal_cleanup_error'; Function = 'ordinary_main_menu_still_rejects_terminal_cleanup_error' },
@@ -3121,7 +3185,7 @@ foreach ($RuntimeRegression in @(
     [PSCustomObject]@{ Name = 'runtime_entity_dead_cleanup_bypasses_offline_hold'; Function = 'runtime_entity_dead_cleanup_bypasses_offline_hold' },
     [PSCustomObject]@{ Name = 'runtime_entity_authoritative_absence_cleanup_bypasses_offline_hold'; Function = 'runtime_entity_authoritative_absence_cleanup_bypasses_offline_hold' }
 )) {
-    $RuntimeRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeRegression.Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RuntimeRegression.Function) + '\s*\}'
+    $RuntimeRegistrationPattern = '\{\s*name\s*=\s*"' + [regex]::Escape($RuntimeRegression.Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RuntimeRegression.Function) + '\s*\}'
     Assert-True ($Task13RuntimeTests -match $RuntimeRegistrationPattern) "Regression case must be registered exactly: $($RuntimeRegression.Name) -> $($RuntimeRegression.Function)."
 }
 foreach ($IntegrityTest in @('runtime_entity_vertical_escape_requires_grace', 'runtime_entity_missing_is_integrity_not_victory', 'runtime_entity_early_self_death_is_integrity', 'runtime_entity_early_self_death_diagnostic_failures_do_not_suppress_integrity', 'runtime_orchestrator_integrity_retries_same_spec_twice', 'runtime_orchestrator_integrity_retry_exhaustion_fails', 'runtime_entity_cleanup_retires_vanished_owned_child')) {
@@ -3298,7 +3362,7 @@ Assert-True ($FatalExitOrchestratorContent -match 'function\s+Orchestrator:drive
 
 $BonusAmmoEntityContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script') -Raw
 $BonusAmmoBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-$BonusAmmoRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$BonusAmmoRuntimeContent = $RuntimeTestSource
 Assert-True ($BonusAmmoEntityContent -match 'gamma_arena_item_materializer\.descriptors\(actor_spec\.items, catalog\)') 'Entity adapter must preflight universal actor items before mutation.'
 $BonusPreflightStart = $BonusAmmoEntityContent.IndexOf('function EntityAdapter:begin_apply')
 $BonusPreflightMutation = if ($BonusPreflightStart -ge 0) { $BonusAmmoEntityContent.IndexOf('self:__init(self.deps)', $BonusPreflightStart) } else { -1 }
@@ -3317,7 +3381,7 @@ foreach ($Name in @('runtime_actor_loadout_creates_exact_bonus_ammo_box','runtim
 
 $InventoryDrainActorContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_actor_adapter.script') -Raw
 $InventoryDrainBootstrapContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_bootstrap.script') -Raw
-$InventoryDrainRuntimeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$InventoryDrainRuntimeContent = $RuntimeTestSource
 foreach ($Marker in @('inventory_drain','last_progress_at','submitted_ids','remaining_ids','poll_count','last_count = 0','inventory_drain_timeout_ms','elapsed_since_progress_ms','total_elapsed_ms','item_section','snapshot_inventory','parent_id_matches_actor','owned_actor_id','requested_actor_id')) {
     Assert-True ($InventoryDrainActorContent -match [regex]::Escape($Marker)) "Actor inventory drain must cover $Marker"
 }
@@ -3346,13 +3410,13 @@ foreach ($UnsafeEquality in @(
 foreach ($Marker in @('function actor_ownership_matches','runtime_game_object_id','type(method) ~= "function"','id == math.huge','id == -math.huge','return actor_ownership_matches')) {
     Assert-True ($InventoryDrainBootstrapContent -match [regex]::Escape($Marker)) "Bootstrap actor ownership must use strict protected game_object IDs: $Marker"
 }
-$NativeIdentityRegistration = '\{\s*name\s*=\s*"runtime_actor_inventory_native_identity_uses_ids"\s*,\s*fn\s*=\s*runtime_actor_inventory_native_identity_uses_ids\s*\}'
+$NativeIdentityRegistration = '\{\s*name\s*=\s*"runtime_actor_inventory_native_identity_uses_ids"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.runtime_actor_inventory_native_identity_uses_ids\s*\}'
 Assert-True (([regex]::Matches($InventoryDrainRuntimeContent, $NativeIdentityRegistration)).Count -eq 1) 'Regression case must be registered exactly: runtime_actor_inventory_native_identity_uses_ids -> runtime_actor_inventory_native_identity_uses_ids.'
-$BootstrapIdentityRegistration = '\{\s*name\s*=\s*"runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed"\s*,\s*fn\s*=\s*runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed\s*\}'
+$BootstrapIdentityRegistration = '\{\s*name\s*=\s*"runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed\s*\}'
 Assert-True (([regex]::Matches($InventoryDrainRuntimeContent, $BootstrapIdentityRegistration)).Count -eq 1) 'Regression case must be registered exactly: runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed -> runtime_bootstrap_actor_ownership_is_id_only_and_fail_closed.'
 
 $RuntimeChildEntityContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_entity_adapter.script') -Raw
-$RuntimeChildTestContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$RuntimeChildTestContent = $RuntimeTestSource
 foreach ($Marker in @('MAX_RUNTIME_CHILDREN','runtime_child_count','adopt_runtime_children','runtime_child','GA_ENTITY_RUNTIME_CHILD_LIMIT','GA_ENTITY_RUNTIME_CHILD_TAG_FAILED','runtime_children')) {
     Assert-True ($RuntimeChildEntityContent -match [regex]::Escape($Marker)) "Runtime NPC child cleanup must cover $Marker"
 }
@@ -3367,7 +3431,7 @@ if ($RuntimeChildDriveStart -ge 0 -and $RuntimeChildDriveEnd -gt $RuntimeChildDr
 }
 Assert-True $RuntimeChildAdoptionOrdered 'Entity cleanup must adopt current runtime children before NPC release.'
 foreach ($Name in @('runtime_entity_cleanup_adopts_unloaded_weapon_child','runtime_entity_cleanup_adopts_late_child_before_parent','runtime_entity_runtime_child_tag_failure_is_terminal','runtime_entity_runtime_child_limit_is_terminal')) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($RuntimeChildTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }
 
@@ -3407,7 +3471,7 @@ if (Test-Path -LiteralPath $ArenaWeaponDiagnosticsPath) {
 $ArenaBootstrapContent = Get-Content -LiteralPath $ArenaBootstrapPath -Raw
 $ArenaOrchestratorContent = Get-Content -LiteralPath $ArenaOrchestratorPath -Raw
 $ArenaEntityContent = Get-Content -LiteralPath $ArenaEntityPath -Raw
-$ArenaRuntimeTestContent = Get-Content -LiteralPath $ArenaRuntimeTestPath -Raw
+$ArenaRuntimeTestContent = $RuntimeTestSource
 $ArenaDefaultDiagnosticsStart = $ArenaBootstrapContent.IndexOf('local function default_diagnostics()')
 $ArenaDefaultDiagnosticsEnd = if ($ArenaDefaultDiagnosticsStart -ge 0) { $ArenaBootstrapContent.IndexOf('local function default_save_guard', $ArenaDefaultDiagnosticsStart) } else { -1 }
 Assert-True ($ArenaDefaultDiagnosticsStart -ge 0 -and $ArenaDefaultDiagnosticsEnd -gt $ArenaDefaultDiagnosticsStart) 'Arena default diagnostics boundary must remain structurally testable.'
@@ -3513,15 +3577,15 @@ if ($ArenaPrepareFightStart -ge 0 -and $ArenaPrepareFightEnd -gt $ArenaPrepareFi
     Assert-True ($ArenaPrepareFightBlock -match 'safe_value_call\s*\(\s*"GA_ENTITY_SPEC_INVALID"\s*,\s*spec\.actor\s*\)') 'FightSpec actor accessor must accept its plain participant value.'
     Assert-True ($ArenaPrepareFightBlock -notmatch 'safe_result_call\s*\(\s*"GA_ENTITY_SPEC_INVALID"\s*,\s*spec\.actor\s*\)') 'FightSpec actor accessor must not require a Result wrapper.'
 }
-$Task8ValidatedSpecStart = $ArenaRuntimeTestContent.IndexOf('local function task8_validated_spec')
-$Task8ValidatedSpecEnd = if ($Task8ValidatedSpecStart -ge 0) { $ArenaRuntimeTestContent.IndexOf('local function task8_environment', $Task8ValidatedSpecStart) } else { -1 }
+$Task8ValidatedSpecStart = $ArenaRuntimeTestContent.IndexOf('function task8_validated_spec')
+$Task8ValidatedSpecEnd = if ($Task8ValidatedSpecStart -ge 0) { $ArenaRuntimeTestContent.IndexOf('function task8_environment', $Task8ValidatedSpecStart) } else { -1 }
 Assert-True ($Task8ValidatedSpecStart -ge 0 -and $Task8ValidatedSpecEnd -gt $Task8ValidatedSpecStart) 'Task 8 FightSpec fixture must remain structurally testable.'
 if ($Task8ValidatedSpecStart -ge 0 -and $Task8ValidatedSpecEnd -gt $Task8ValidatedSpecStart) {
     $Task8ValidatedSpecBlock = $ArenaRuntimeTestContent.Substring($Task8ValidatedSpecStart, $Task8ValidatedSpecEnd - $Task8ValidatedSpecStart)
     Assert-True ($Task8ValidatedSpecBlock -match 'actor\s*=\s*function\s*\(\s*\)\s*return\s+clone\s*\(\s*private\.actor\s*\)\s*end') 'Selected-weapon diagnostic regression must exercise a plain FightSpec actor table accessor.'
 }
 foreach ($Name in @('runtime_save_guard_installs_only_after_launch_ownership','runtime_save_guard_failures_block_launch_mutation','runtime_save_guard_suppresses_only_owned_save_commands','runtime_diagnostics_checkpoint_is_bounded_flushed_and_closed','runtime_diagnostics_checkpoint_rejects_nil_io_results','runtime_diagnostics_checkpoint_rejects_oversized_required_metadata','runtime_weapon_diagnostics_reads_effective_hud_metadata','runtime_weapon_diagnostics_missing_reads_are_unavailable','runtime_actor_weapon_checkpoint_precedes_native_activation','runtime_actor_weapon_checkpoint_failure_blocks_and_rolls_back','runtime_actor_weapon_selected_diagnostic_precedes_entity_mutation','runtime_entity_forensics_are_bounded_non_mutating_and_classified')) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Regression case must be registered exactly: $Name -> $Name."
 }
 
@@ -3640,7 +3704,7 @@ foreach ($Marker in @('function Orchestrator:audio_event','"begin_fight"','"upda
     Assert-True ($ArenaOrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator Arena audio lifecycle must cover: $Marker"
 }
 foreach ($Name in @('runtime_audio_events_follow_owned_lifecycle','runtime_audio_manual_restart_stops_channels','runtime_audio_cleanup_covers_exit_boundaries','runtime_audio_failures_are_diagnostic_only','runtime_audio_defeat_failure_never_cancels_death')) {
-    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($Name) + '\s*\}'
+    $Registration = '\{\s*name\s*=\s*"' + [regex]::Escape($Name) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($Name) + '\s*\}'
     Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $Registration)).Count -eq 1) "Arena audio runtime case must be registered exactly: $Name -> $Name"
 }
 $ArenaRestartStart = $ArenaOrchestratorContent.IndexOf('function Orchestrator:restart_arena_action')
@@ -3654,7 +3718,7 @@ if ($ArenaRestartStart -ge 0 -and $ArenaRestartEnd -gt $ArenaRestartStart) {
 $RosterRefreshModel = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_model.script') -Raw
 $RosterRefreshPresenter = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_custom_setup_presenter.script') -Raw
 $RosterRefreshUi = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_ui_custom.script') -Raw
-$RosterRefreshRuntime = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_runtime.script') -Raw
+$RosterRefreshRuntime = $RuntimeTestSource
 Assert-True ($RosterRefreshModel -match 'function\s+Model:status_snapshot') 'Custom roster refresh model must expose status_snapshot.'
 $DerivedStatusBlock = [regex]::Match($RosterRefreshModel, '(?ms)^function\s+Model:status_snapshot\(\).*?^end\s*$').Value
 $DerivedSnapshotBlock = [regex]::Match($RosterRefreshModel, '(?ms)^function\s+Model:snapshot\(\).*?^end\s*$').Value
@@ -3667,7 +3731,7 @@ foreach ($Block in @($DerivedStatusBlock, $DerivedSnapshotBlock)) {
         'Custom snapshots must not repeat public validation, budget, or totals work.'
 }
 $DerivedRuntimeCase = [regex]::Match($RosterRefreshRuntime,
-    '(?ms)^local\s+function\s+runtime_custom_model_status_snapshot_matches_full_status\(\).*?^end\s*$').Value
+    '(?ms)^function\s+runtime_custom_model_status_snapshot_matches_full_status\(\).*?^end\s*$').Value
 Assert-True ($DerivedRuntimeCase -match 'set_rank\s*\(\s*2\s*,\s*"novice"\s*\)' -and
     ([regex]::Matches($DerivedRuntimeCase, 'GA_CUSTOM_OVERSPEND')).Count -ge 2) `
     'Custom runtime parity must preserve an overbudget loadout after lowering rank.'
@@ -3724,13 +3788,13 @@ Assert-True ($CatalogProjectionBlock -match 'snapshot_has_outfit\s*\(\s*snapshot
     $CatalogProjectionBlock -match 'projected_weight_hard_block\s*\(\s*snapshot\s*,\s*cell\s*,\s*has_outfit\s*\)') `
     'Full projection must apply candidate effective carry limits from one outfit-state scan.'
 $AffordabilityRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
-    '(?ms)^local\s+function\s+runtime_custom_presenter_refreshes_affordability_without_model_preview\(\).*?^end\s*$').Value
+    '(?ms)^function\s+runtime_custom_presenter_refreshes_affordability_without_model_preview\(\).*?^end\s*$').Value
 foreach ($Marker in @('weight_mg\s*=\s*49000', 'weight_limit_mg\s*=\s*50000', 'weight_mg\s*=\s*5000',
     'carry_bonus_mg\s*=\s*10000', '54000/60000')) {
     Assert-True ($AffordabilityRuntimeBlock -match $Marker) "Carry-bonus projection regression is missing: $Marker"
 }
 $MalformedStatusRuntimeBlock = [regex]::Match($RosterRefreshRuntime,
-    '(?ms)^local\s+function\s+runtime_custom_presenter_rejects_malformed_status_snapshots_atomically\(\).*?^end\s*$').Value
+    '(?ms)^function\s+runtime_custom_presenter_rejects_malformed_status_snapshots_atomically\(\).*?^end\s*$').Value
 foreach ($Marker in @('validation missing ok', 'failed validation missing error', 'failed validation missing error code',
     'failed validation missing error message', 'failed validation missing error context', 'failed validation claims start',
     'successful validation denies start')) {
@@ -3804,16 +3868,16 @@ if ($PrepareViewStart -ge 0 -and $PrepareViewEnd -gt $PrepareViewStart) {
     Assert-True ($PrepareViewBlock -match 'view\.submission_error_code\s*=\s*nil') 'Custom view preparation must clear stale submission error codes.'
 }
 $RosterRefreshCase = 'runtime_custom_presenter_refreshes_status_without_catalog_snapshot'
-$RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
-Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
+$RosterRefreshRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterRefreshCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RosterRefreshCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('function\s+' + [regex]::Escape($RosterRefreshCase))) 'Custom roster refresh runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterRefreshRegistration)).Count -eq 1) 'Custom roster refresh runtime regression must be registered exactly once.'
 $AffordabilityCase = 'runtime_custom_presenter_refreshes_affordability_without_model_preview'
-$AffordabilityRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($AffordabilityCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($AffordabilityCase) + '\s*\}'
-Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($AffordabilityCase))) 'Custom arithmetic affordability runtime regression is missing.'
+$AffordabilityRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($AffordabilityCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($AffordabilityCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('function\s+' + [regex]::Escape($AffordabilityCase))) 'Custom arithmetic affordability runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $AffordabilityRegistration)).Count -eq 1) 'Custom arithmetic affordability runtime regression must be registered exactly once.'
 $RosterDeltaCase = 'runtime_custom_ui_renders_only_targeted_roster_delta'
-$RosterDeltaRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterDeltaCase) + '"\s*,\s*fn\s*=\s*' + [regex]::Escape($RosterDeltaCase) + '\s*\}'
-Assert-True ($RosterRefreshRuntime -match ('local\s+function\s+' + [regex]::Escape($RosterDeltaCase))) 'Custom targeted roster runtime regression is missing.'
+$RosterDeltaRegistration = '\{\s*name\s*=\s*"' + [regex]::Escape($RosterDeltaCase) + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + [regex]::Escape($RosterDeltaCase) + '\s*\}'
+Assert-True ($RosterRefreshRuntime -match ('function\s+' + [regex]::Escape($RosterDeltaCase))) 'Custom targeted roster runtime regression is missing.'
 Assert-True (([regex]::Matches($RosterRefreshRuntime, $RosterDeltaRegistration)).Count -eq 1) 'Custom targeted roster runtime regression must be registered exactly once.'
 
 $CatalogCacheSource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_catalog.script') -Raw
@@ -3821,7 +3885,7 @@ Assert-True ($CatalogCacheSource -match 'local\s+runtime_catalog_result\s*=\s*ni
 Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+runtime_catalog_result\s*~=\s*nil') 'Only the default runtime source may read the cache.'
 Assert-True ($CatalogCacheSource -match 'ini_factory\s*==\s*nil\s+and\s+result\.ok') 'Only a successful default runtime Result may populate the cache.'
 $CatalogCacheCase = 'runtime_catalog_default_success_is_reused_only_for_default_source'
-$CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*' + $CatalogCacheCase + '\s*\}'
+$CatalogCacheRegistration = '\{\s*name\s*=\s*"' + $CatalogCacheCase + '"\s*,\s*fn\s*=\s*[A-Za-z_][A-Za-z0-9_]*\.' + $CatalogCacheCase + '\s*\}'
 Assert-True (([regex]::Matches($ArenaRuntimeTestContent, $CatalogCacheRegistration)).Count -eq 1) 'Runtime catalog cache case must be registered exactly once.'
 
 $MedicalPolicyContracts = @(
@@ -3862,6 +3926,30 @@ if (Test-Path -LiteralPath $SmokeHarnessPath) {
         Assert-True ($SmokeSuccessTail -match 'if\s*\(\s*\$global:LASTEXITCODE\s*-ne\s*0\s*\)\s*\{\s*throw') 'Smoke harness must assert the successful same-host LASTEXITCODE postcondition.'
     }
 }
+
+$WeaponSafetySource = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_weapon_safety.script') -Raw
+$WeaponSafetyTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_weapon_safety.script') -Raw
+$WeaponSafetyItems = Get-Content -LiteralPath (Join-Path $RepoRoot 'src\gamedata\scripts\gamma_arena_item_catalog.script') -Raw
+foreach ($Marker in @('weapon_resource_safety_v1', 'missing_world_model', 'missing_hud_section', 'missing_hud_model', 'manual_blacklist', 'GA_WEAPON_AUDIT_FAILED', 'GA_WEAPON_UNSAFE', 'GA_WEAPON_REJECTED', 'GA_WEAPON_AUDIT', 'path_exist', 'file_exists', 'string.lower')) {
+    Assert-True ($WeaponSafetySource.Contains($Marker)) "Weapon safety contract is missing: $Marker"
+}
+Assert-True ($WeaponSafetySource -match 'if report == nil then return false end') 'A missing audit report must never approve an unchecked weapon.'
+Assert-True ($WeaponSafetySource -notmatch 'model_Create|Instance_Load|alife\s*\(|r_open|io\.open') 'Weapon resource audit must not load native models, spawn probes, or bypass engine VFS.'
+foreach ($Marker in @('gamma_arena_weapon_safety.audit', 'candidates[section] = nil', 'catalog.weapon_safety = audited.value', 'weapon_safety_policy', 'hud_item_visual', 'report_weapon_audit')) {
+    Assert-True ($WeaponSafetyItems.Contains($Marker)) "Universal catalog must integrate weapon safety: $Marker"
+}
+$AuditPosition = $WeaponSafetyItems.IndexOf('local audited = gamma_arena_weapon_safety.audit')
+$PricePosition = $WeaponSafetyItems.IndexOf('local items, pricing_error = price_candidates')
+Assert-True ($AuditPosition -ge 0 -and $PricePosition -gt $AuditPosition) 'Resource audit must prune candidates before pricing and rank reconciliation.'
+foreach ($ScriptName in @('gamma_arena_custom_config', 'gamma_arena_fight_validator_v9', 'gamma_arena_item_materializer')) {
+    $Consumer = Get-Content -LiteralPath (Join-Path $RepoRoot ('src\gamedata\scripts\' + $ScriptName + '.script')) -Raw
+    Assert-True ($Consumer.Contains('gamma_arena_weapon_safety.check')) "Weapon safety must guard $ScriptName"
+}
+foreach ($CaseName in @('weapon_safety_missing_hud_exact_cached', 'weapon_safety_native_resolution', 'weapon_safety_metadata_manual_blacklist', 'weapon_safety_api_failures', 'weapon_safety_materializer_guard', 'weapon_safety_custom_config_guard', 'weapon_safety_random_player_guard', 'weapon_safety_report_metadata_api_values', 'weapon_safety_runtime_filesystem', 'weapon_safety_direct_suffix_rejected', 'weapon_safety_missing_audit_denied')) {
+    Assert-True (([regex]::Matches($WeaponSafetyTests, ('name\s*=\s*"' + $CaseName + '"'))).Count -eq 1) "Weapon safety regression must be registered exactly once: $CaseName"
+}
+$SafetyDomain = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_domain.script') -Raw
+Assert-True ($SafetyDomain.Contains('gamma_arena_test_weapon_safety.run(run_case_fn)')) 'Weapon safety regression suite must run in the Dev domain suite.'
 
 if ($script:Failures.Count -gt 0) {
     foreach ($Failure in $script:Failures) {

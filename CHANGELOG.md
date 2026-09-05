@@ -4,6 +4,12 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+- Fixed stale Lua test fixtures and namespace-scoped spies, split the runtime test suite to stay within Lua 5.1 compiler limits, and made executable Lua tests mandatory in local checks and release builds.
+- Fixed provisional device rollback indexing a boolean ownership result and NPC medicine scheduling/consumption looking for the obsolete consumable role instead of the materialized medicine category; added registry-to-controller healing coverage.
+- Fixed Random fights selecting absent faction pools from the wider Custom rank manifest and silently falling back to mixed-faction opponents.
+- Added a cached, non-spawning weapon resource audit using effective game configs and the engine filesystem, with per-section rejection diagnostics.
+- Applied the shared manual and automatic weapon blacklist to player selection, Custom setups, NPC pools, fight validation, and pre-spawn materialization; resource changes now affect catalog identity.
+
 ## 0.5.2 - 2026-09-04
 
 - Fixed Modded Exes MT-TEST booster cleanup so active medicine effects are removed between fights without leaving permanent negative restoration rates when stale native timers later expire.

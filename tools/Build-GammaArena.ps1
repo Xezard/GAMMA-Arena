@@ -18,7 +18,7 @@ if ($Configuration -eq 'Release' -and -not [string]::Equals($OutputDirectory, $R
 
 & (Join-Path $RepoRoot 'tools\Test-GammaArena.ps1')
 if ($LASTEXITCODE -ne 0) {
-    throw 'Static project checks failed; build aborted.'
+    throw 'Project checks failed; build aborted.'
 }
 
 $Version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()

@@ -1,0 +1,476 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+local function catalogs(...)
+    return gamma_arena_test_runtime_part_preflight.catalogs(...)
+end
+
+local function fake_store(...)
+    return gamma_arena_test_runtime_part_lifecycle.fake_store(...)
+end
+
+local function fake_orchestrator_deps(...)
+    return gamma_arena_test_runtime_part_lifecycle.fake_orchestrator_deps(...)
+end
+
+local function task8_environment(...)
+    return gamma_arena_test_runtime_part_fights.task8_environment(...)
+end
+
+local function task8_pump_to_active(...)
+    return gamma_arena_test_runtime_part_fights.task8_pump_to_active(...)
+end
+
+function task11_custom_request(catalog)
+    return {
+        schema_version = 2,
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        seed_mode = "manual",
+        session_seed = 77,
+        generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision,
+        catalog_fingerprint = catalog.fingerprint,
+        custom_config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    }
+end
+
+function task11_resolved_layout(logical_layout)
+    local tactical_routes = {
+        "arena_route_1",
+        "arena_route_2",
+        "arena_route_3",
+        "arena_route_4",
+        "arena_route_5",
+        "arena_route_6"
+    }
+    local opponent_spawn_slots = {}
+    for index, route in ipairs(tactical_routes) do
+        opponent_spawn_slots[index] = {
+            id = "native:" .. route,
+            base_route = route,
+            native = true,
+            position = { x = index * 4, y = 0, z = index * 3 },
+            level_vertex_id = 1000 + index,
+            game_vertex_id = 77
+        }
+    end
+    return {
+        id = logical_layout.id,
+        version = 2,
+        level = "l05_bar",
+        actor_spawn_path = "t_way",
+        actor_look_path = "t_look",
+        capacity = 6,
+        opponent_spawn_slots = opponent_spawn_slots,
+        tactical_routes = tactical_routes
+    }
+end
+
+function task11_memory_config()
+    local values = {}
+    local config = {
+        cache = {},
+        gamma_arena_boolean_returns = true
+    }
+    function config:line_exist(section, key)
+        return (section == "gamma_arena" or section == "character_creation") and values[key] ~= nil
+    end
+    function config:r_string_ex(section, key)
+        if section ~= "gamma_arena" and section ~= "character_creation" then return nil end
+        return values[key]
+    end
+    function config:r_value(section, key, _, default)
+        local value = values[key]
+        if value == nil then return default end
+        return value
+    end
+    function config:w_value(section, key, value)
+        values[key] = tostring(value)
+        return true
+    end
+    function config:remove_line(section, key)
+        values[key] = nil
+        return true
+    end
+    function config:save() return true end
+    config.ini = {
+        gamma_arena_boolean_returns = true,
+        w_string = function(_, section, key, value) values[key] = tostring(value); return true end,
+        remove_line = function(_, section, key) values[key] = nil; return true end
+    }
+    config.values = values
+    return config
+end
+
+function task11_persisted_defeat_key_count(config)
+    local count = 0
+    for key in pairs(config.values) do
+        if type(key) == "string" and string.match(key, "^defeat_") then count = count + 1 end
+    end
+    return count
+end
+
+function task11_retained_cancelled_death_with_real_store()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local production_clear_defeat = store.clear_defeat
+    local production_clear_transient = store.clear_transient
+    local fixture = {
+        env = env,
+        config = config,
+        store = store,
+        clear_attempts = 0,
+        transient_attempts = 0,
+        allow_defeat_clear = false,
+        allow_transient_clear = false
+    }
+    function store:clear_defeat(active_config)
+        fixture.clear_attempts = fixture.clear_attempts + 1
+        if not fixture.allow_defeat_clear then
+            return gamma_arena_result.err("GA_TEST_PERSISTENT_DEFEAT_CLEAR", "injected persistent clear failure")
+        end
+        return production_clear_defeat(self, active_config)
+    end
+    function store:clear_transient(active_config)
+        fixture.transient_attempts = fixture.transient_attempts + 1
+        if not fixture.allow_transient_clear then
+            return gamma_arena_result.err("GA_TEST_TRANSIENT_CLEAR", "injected transient clear failure")
+        end
+        return production_clear_transient(self, active_config)
+    end
+    env.orchestrator.deps.config = config
+    env.orchestrator.deps.store = store
+    fixture.callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    fixture.flags = { ret_value = true }
+    gamma_arena_test_assert.is_true(fixture.callbacks.actor_on_before_death(77, fixture.flags).ok,
+        "real Store arms the retained cancellation fixture")
+    fixture.token = env.orchestrator.defeat_token
+    fixture.flags.ret_value = false
+    gamma_arena_test_assert.is_false(fixture.callbacks.actor_on_update().ok,
+        "persistent clear failure enters fatal routing")
+    gamma_arena_test_assert.equals(fixture.clear_attempts, 2,
+        "retained cancellation fixture exhausts only the normal attempt and one fatal retry")
+    gamma_arena_test_assert.equals(config.values.defeat_stage, "armed",
+        "persistent failure leaves the real Store armed for the recovery boundary")
+    return fixture
+end
+
+function runtime_cancelled_death_fatal_retry_durably_clears_real_store()
+    local env = task8_environment()
+    task8_pump_to_active(env)
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local production_clear_defeat = store.clear_defeat
+    local clear_attempts = 0
+    function store:clear_defeat(active_config)
+        clear_attempts = clear_attempts + 1
+        if clear_attempts == 1 then
+            return gamma_arena_result.err("GA_TEST_TRANSIENT_DEFEAT_CLEAR", "injected one-shot clear failure")
+        end
+        return production_clear_defeat(self, active_config)
+    end
+    env.orchestrator.deps.config = config
+    env.orchestrator.deps.store = store
+
+    local callbacks = gamma_arena_bootstrap.make_callbacks(env.orchestrator)
+    local flags = { ret_value = true }
+    local armed = callbacks.actor_on_before_death(77, flags)
+    gamma_arena_test_assert.is_true(armed.ok, "real Store arms the cancellable defeat")
+    gamma_arena_test_assert.equals(config.values.defeat_stage, "armed", "real Store persists the armed stage before cancellation")
+    flags.ret_value = false
+
+    local failed = callbacks.actor_on_update()
+    gamma_arena_test_assert.is_false(failed.ok, "one-shot clear failure remains observable after fatal cleanup")
+    gamma_arena_test_assert.equals(failed.error.code, "GA_TEST_TRANSIENT_DEFEAT_CLEAR", "fatal cleanup preserves the triggering clear error")
+    gamma_arena_test_assert.equals(clear_attempts, 2, "fatal routing performs exactly one bounded clear retry")
+    local inspected = store:inspect_intents(config)
+    gamma_arena_test_assert.is_true(inspected.ok and inspected.value.defeat_pending == false,
+        "real Store reports no defeat intent after the successful fatal retry")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(config), 0,
+        "fatal reset releases the latch only after every persisted defeat key is absent")
+    gamma_arena_test_assert.is_false(env.orchestrator.death_latched, "successful durable retry releases the death latch")
+    gamma_arena_test_assert.equals(env.orchestrator.defeat_token, nil, "successful durable retry drops the defeat token")
+    gamma_arena_test_assert.equals(env.orchestrator.death_flags, nil, "successful durable retry drops the shared flags reference")
+end
+
+function runtime_cancelled_death_fatal_menu_cleanup_is_durable()
+    local recovered = task11_retained_cancelled_death_with_real_store()
+    recovered.allow_transient_clear = true
+    gamma_arena_test_assert.is_true(recovered.env.orchestrator:fatal_main_menu_action().ok,
+        "fatal main-menu cleanup succeeds after storage recovery")
+    gamma_arena_test_assert.equals(recovered.transient_attempts, 1,
+        "fatal main-menu boundary makes one bounded transient cleanup attempt")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(recovered.config), 0,
+        "fatal main-menu cleanup removes every persisted defeat key")
+    gamma_arena_test_assert.is_false(recovered.env.orchestrator.death_latched,
+        "fatal main-menu cleanup releases the latch only after persistence succeeds")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.defeat_token, nil,
+        "fatal main-menu cleanup releases the token")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.death_flags, nil,
+        "fatal main-menu cleanup releases the shared flags reference")
+
+    local retained = task11_retained_cancelled_death_with_real_store()
+    gamma_arena_test_assert.is_true(retained.env.orchestrator:fatal_main_menu_action().ok,
+        "fatal main-menu disconnect remains bounded when transient cleanup fails")
+    gamma_arena_test_assert.equals(retained.transient_attempts, 1,
+        "failed fatal main-menu cleanup is attempted once")
+    gamma_arena_test_assert.equals(retained.config.values.defeat_stage, "armed",
+        "failed fatal main-menu cleanup leaves the real Store armed")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_latched,
+        "failed fatal main-menu cleanup retains the latch")
+    gamma_arena_test_assert.equals(retained.env.orchestrator.defeat_token, retained.token,
+        "failed fatal main-menu cleanup retains the token")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_flags == retained.flags,
+        "failed fatal main-menu cleanup retains the exact shared flags reference")
+end
+
+function runtime_cancelled_death_game_load_cleanup_is_durable()
+    local recovered = task11_retained_cancelled_death_with_real_store()
+    recovered.allow_defeat_clear = true
+    gamma_arena_test_assert.is_true(recovered.env.orchestrator:on_game_load().ok,
+        "game-load reset succeeds after durable defeat cleanup")
+    gamma_arena_test_assert.equals(recovered.clear_attempts, 3,
+        "game-load boundary makes one bounded recovery attempt")
+    gamma_arena_test_assert.equals(task11_persisted_defeat_key_count(recovered.config), 0,
+        "game-load reset removes every persisted defeat key")
+    gamma_arena_test_assert.is_false(recovered.env.orchestrator.death_latched,
+        "game-load reset releases the latch only after persistence succeeds")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.defeat_token, nil,
+        "game-load reset releases the token")
+    gamma_arena_test_assert.equals(recovered.env.orchestrator.death_flags, nil,
+        "game-load reset releases the shared flags reference")
+
+    local retained = task11_retained_cancelled_death_with_real_store()
+    local failed = retained.env.orchestrator:on_game_load()
+    gamma_arena_test_assert.is_false(failed.ok, "game-load cleanup failure remains structured")
+    gamma_arena_test_assert.equals(retained.clear_attempts, 4,
+        "failed game-load cleanup and fatal routing each make one bounded attempt")
+    gamma_arena_test_assert.equals(retained.config.values.defeat_stage, "armed",
+        "failed game-load cleanup leaves the real Store armed")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_latched,
+        "failed game-load cleanup retains the latch")
+    gamma_arena_test_assert.equals(retained.env.orchestrator.defeat_token, retained.token,
+        "failed game-load cleanup retains the token")
+    gamma_arena_test_assert.is_true(retained.env.orchestrator.death_flags == retained.flags,
+        "failed game-load cleanup retains the exact shared flags reference")
+end
+
+function runtime_custom_session_creation_copies_validated_recipe()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local logical_layout = catalog.layouts.rostok_arena_v1
+    local resolved_layout = task11_resolved_layout(logical_layout)
+    local request = task11_custom_request(catalog)
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(fake_store()))
+    gamma_arena_test_assert.equals(resolved_layout.virtual_capacity, nil,
+        "resolved layout intentionally has no virtual_capacity")
+    local created = orchestrator:create_session(request, catalog, resolved_layout)
+    gamma_arena_test_assert.is_true(created.ok, "custom launch creates a validated ArenaSession")
+    gamma_arena_test_assert.equals(created.value.schema_version, 2, "current ArenaSession schema is v2")
+    gamma_arena_test_assert.equals(created.value.generation_recipe, "custom", "custom recipe lives in ArenaSession")
+    gamma_arena_test_assert.equals(created.value.difficulty_id, nil, "custom ArenaSession has no random difficulty")
+    gamma_arena_test_assert.equals(created.value.generator_version, 11, "ArenaSession binds generator v11")
+    gamma_arena_test_assert.equals(created.value.catalog_revision, 11, "ArenaSession binds catalog revision 11")
+    gamma_arena_test_assert.equals(created.value.catalog_fingerprint, catalog.fingerprint, "ArenaSession binds exact catalog fingerprint")
+    gamma_arena_test_assert.is_true(created.value.custom_config ~= request.custom_config, "ArenaSession owns a deep copied custom config")
+    request.custom_config.roster[1].rank = "legend"
+    request.custom_config.actor_items[1].section = "forged_after_creation"
+    gamma_arena_test_assert.equals(created.value.custom_config.roster[1].rank, "novice", "later roster edits cannot change active session")
+    gamma_arena_test_assert.equals(created.value.custom_config.actor_items[1].section, "outfit_field", "later item edits cannot change active session")
+end
+
+function runtime_custom_session_snapshot_preserves_dense_arrays_for_composed_actor_ownership()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local deps = fake_orchestrator_deps(fake_store())
+    deps.actor = nil
+    local orchestrator = gamma_arena_bootstrap.compose(deps)
+    local created = orchestrator:create_session(task11_custom_request(catalog), catalog, layout)
+    gamma_arena_test_assert.is_true(created.ok, "composed snapshot fixture creates a validated custom session")
+    orchestrator.session = created.value
+
+    local snapshot = orchestrator:session_snapshot()
+    gamma_arena_test_assert.is_true(type(snapshot) == "table", "custom ArenaSession with arrays remains snapshot-readable")
+    gamma_arena_test_assert.equals(#snapshot.custom_config.roster, #created.value.custom_config.roster, "dense roster survives snapshot copy")
+    gamma_arena_test_assert.equals(#snapshot.custom_config.actor_items, #created.value.custom_config.actor_items, "dense actor items survive snapshot copy")
+    snapshot.custom_config.roster[1].rank = "legend"
+    gamma_arena_test_assert.equals(orchestrator.session.custom_config.roster[1].rank, "novice", "snapshot arrays are deep copies")
+
+    local ownership_probe = orchestrator.deps.actor.deps.loadout.apply({ id = function() return 700 end }, {})
+    gamma_arena_test_assert.is_false(ownership_probe.ok, "malformed loadout remains rejected after composed ownership lookup")
+    gamma_arena_test_assert.equals(ownership_probe.error.code, "GA_ACTOR_LOADOUT_INVALID", "composed default actor resolves custom session ownership before loadout validation")
+
+    local hostile = {
+        { label = "sparse", value = { [1] = "a", [3] = "b" } },
+        { label = "mixed", value = { [1] = "a", future = "b" } },
+        { label = "zero index", value = { [0] = "a" } },
+        { label = "fractional index", value = { [1.5] = "a" } },
+        { label = "table key", value = { [{}] = "a" } },
+        { label = "function value", value = { future = function() end } }
+    }
+    local cyclic = {}; cyclic.self = cyclic
+    hostile[#hostile + 1] = { label = "cycle", value = cyclic }
+    for _, case in ipairs(hostile) do
+        orchestrator.session = { schema_version = 2, payload = case.value }
+        gamma_arena_test_assert.equals(orchestrator:session_snapshot(), nil, "hostile snapshot shape is rejected: " .. case.label)
+    end
+end
+
+function runtime_custom_stale_catalog_rejects_before_actor_mutation()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local request = task11_custom_request(catalog)
+    request.catalog_fingerprint = "ga-catalog-v9-stale"
+    request.custom_config.catalog_fingerprint = request.catalog_fingerprint
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    store.launch_result = gamma_arena_result.ok(clone(request))
+    store.launch_validation_result = gamma_arena_result.ok(clone(request))
+    local deps = fake_orchestrator_deps(store)
+    local generated = 0
+    local normalized = 0
+    deps.catalogs = function() return gamma_arena_result.ok(catalog) end
+    deps.layout = function() return gamma_arena_result.ok(task11_resolved_layout(gamma_arena_test_custom_config.make_context(catalog).layout)) end
+    deps.generator = function() generated = generated + 1; return gamma_arena_result.err("GA_TEST_UNREACHABLE", "generation must remain unreachable") end
+    deps.actor.normalize_for_arena = function() normalized = normalized + 1; return gamma_arena_result.ok(true) end
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok, "custom launch observes game-load boundary")
+    local rejected = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(rejected.ok, "stale custom launch is rejected")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_START_CATALOG_STALE", "stale catalog identity remains exact")
+    gamma_arena_test_assert.equals(generated, 0, "catalog drift rejects before fight generation")
+    gamma_arena_test_assert.equals(normalized, 0, "catalog drift rejects before actor normalization")
+end
+
+function runtime_custom_launch_uses_one_catalog_layout_snapshot_for_real_store()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local logical_layout = catalog.layouts.rostok_arena_v1
+    local resolved_layout = task11_resolved_layout(logical_layout)
+    local config = task11_memory_config()
+    local store = gamma_arena_session_store.new_store()
+    local issue_options = {
+        clock = function() return 1000 end,
+        nonce = function() return "task11_launch" end,
+        custom_context = { catalog = catalog, layout = logical_layout }
+    }
+    local issued = store:issue_launch(config, task11_custom_request(catalog), issue_options)
+    gamma_arena_test_assert.is_true(issued.ok, "real Store persists the custom launch fixture")
+
+    local validated_options, consumed_options = nil, nil
+    local validate_launch_ownership = store.validate_launch_ownership
+    local consume_launch = store.consume_launch
+    function store:validate_launch_ownership(active_config, options)
+        validated_options = options
+        return validate_launch_ownership(self, active_config, options)
+    end
+    function store:consume_launch(active_config, options)
+        consumed_options = options
+        return consume_launch(self, active_config, options)
+    end
+
+    local deps = fake_orchestrator_deps(store)
+    local catalog_loads, actor_mutations = 0, 0
+    local generated_layout, validated_layout = nil, nil
+    local sentinel = {}
+    local injected_options = { clock = function() return 1001 end, sentinel = sentinel }
+    deps.config = config
+    deps.launch_options = injected_options
+    deps.catalogs = function()
+        catalog_loads = catalog_loads + 1
+        return gamma_arena_result.ok(catalog)
+    end
+    deps.layout = function(layout_id, received_catalog)
+        gamma_arena_test_assert.equals(layout_id, "rostok_arena_v1", "activation resolves the exact Arena layout")
+        gamma_arena_test_assert.is_true(received_catalog == catalog, "layout receives the activation catalog object")
+        return gamma_arena_result.ok(resolved_layout)
+    end
+    local generate = deps.generator
+    deps.generator = function(session, fight_index, active_catalog, physical_layout)
+        generated_layout = physical_layout
+        return generate(session, fight_index, active_catalog, physical_layout)
+    end
+    deps.validator = function(_, _, physical_layout)
+        validated_layout = physical_layout
+        return gamma_arena_result.err("GA_TEST_AFTER_STORE_SNAPSHOT", "stop after real Store consume")
+    end
+    deps.actor.normalize_for_arena = function()
+        actor_mutations = actor_mutations + 1
+        return gamma_arena_result.ok(true)
+    end
+
+    local orchestrator = gamma_arena_orchestrator.new(deps)
+    gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok, "real Store launch observes game-load boundary")
+    local stopped = orchestrator:actor_on_first_update()
+    gamma_arena_test_assert.is_false(stopped.ok, "fixture stops after Store ownership and consumption")
+    gamma_arena_test_assert.equals(stopped.error.code, "GA_TEST_AFTER_STORE_SNAPSHOT", "post-Store stop proves both real operations succeeded")
+    gamma_arena_test_assert.equals(catalog_loads, 1, "activation catalog is loaded exactly once")
+    gamma_arena_test_assert.is_true(validated_options == consumed_options, "Store ownership and consume receive the same merged options object")
+    gamma_arena_test_assert.is_true(validated_options ~= injected_options, "merged launch options do not alias the injected table")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.catalog == catalog, "real Store validates against the activation catalog object")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.layout == logical_layout,
+        "real Store validates Custom config against the catalog logical layout")
+    gamma_arena_test_assert.is_true(validated_options.custom_context.layout ~= resolved_layout,
+        "real Store never validates Custom config against the physical resolved layout")
+    gamma_arena_test_assert.equals(injected_options.custom_context, nil, "injected launch options are not mutated")
+    gamma_arena_test_assert.is_true(injected_options.sentinel == sentinel and validated_options.sentinel == sentinel, "unrelated injected option identity is preserved")
+    gamma_arena_test_assert.is_true(generated_layout == resolved_layout,
+        "fight generator receives the physical resolved layout")
+    gamma_arena_test_assert.is_true(validated_layout == resolved_layout,
+        "fight validator receives the physical resolved layout")
+    gamma_arena_test_assert.equals(actor_mutations, 0, "Store snapshot verification and later failure precede actor mutation")
+end
+
+function runtime_custom_rejects_unbound_resolved_layout_before_store_ownership()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local cases = {
+        { label = "missing layout table", layout = nil },
+        { label = "missing layout id", layout = { level = "l05_bar" } },
+        { label = "non-string layout id", layout = { id = 42, level = "l05_bar" } },
+        { label = "unknown layout id", layout = { id = "forged_arena", level = "l05_bar" } }
+    }
+
+    for _, case in ipairs(cases) do
+        local direct_deps = fake_orchestrator_deps(fake_store())
+        local direct = gamma_arena_orchestrator.new(direct_deps):create_session(
+            task11_custom_request(catalog), catalog, case.layout)
+        gamma_arena_test_assert.is_false(direct.ok,
+            "session creation rejects an unbound physical layout: " .. case.label)
+        gamma_arena_test_assert.equals(direct.error.code, "GA_ACTOR_LAYOUT_INVALID",
+            "session creation reports exact layout identity failure: " .. case.label)
+
+        local request = task11_custom_request(catalog)
+        local store = fake_store({ launch_pending = true, resume_pending = false })
+        store.launch_result = gamma_arena_result.ok(clone(request))
+        store.launch_validation_result = gamma_arena_result.ok(clone(request))
+        local deps = fake_orchestrator_deps(store)
+        local generated, actor_mutations = 0, 0
+        deps.catalogs = function() return gamma_arena_result.ok(catalog) end
+        deps.layout = function() return gamma_arena_result.ok(case.layout) end
+        deps.generator = function()
+            generated = generated + 1
+            return gamma_arena_result.err("GA_TEST_UNREACHABLE", "generation must remain unreachable")
+        end
+        deps.actor.normalize_for_arena = function()
+            actor_mutations = actor_mutations + 1
+            return gamma_arena_result.ok(true)
+        end
+
+        local orchestrator = gamma_arena_orchestrator.new(deps)
+        gamma_arena_test_assert.is_true(orchestrator:on_game_load().ok,
+            "unbound layout fixture observes game-load boundary: " .. case.label)
+        local rejected = orchestrator:actor_on_first_update()
+        gamma_arena_test_assert.is_false(rejected.ok,
+            "activation rejects an unbound physical layout: " .. case.label)
+        gamma_arena_test_assert.equals(rejected.error.code, "GA_ACTOR_LAYOUT_INVALID",
+            "activation reports exact layout identity failure: " .. case.label)
+        gamma_arena_test_assert.equals(store.validate_launch_ownership_count, 0,
+            "layout identity rejects before Store ownership: " .. case.label)
+        gamma_arena_test_assert.equals(store.consume_launch_count, 0,
+            "layout identity rejects before launch consumption: " .. case.label)
+        gamma_arena_test_assert.equals(generated, 0,
+            "layout identity rejects before fight generation: " .. case.label)
+        gamma_arena_test_assert.equals(actor_mutations, 0,
+            "layout identity rejects before actor mutation: " .. case.label)
+    end
+end

@@ -36,7 +36,8 @@ $Materializer = Get-Content -Raw -LiteralPath $MaterializerPath
 $Bootstrap = Get-Content -Raw -LiteralPath $BootstrapPath
 $Compat = Get-Content -Raw -LiteralPath $CompatPath
 $GeneratorTests = Get-Content -Raw -LiteralPath $GeneratorTestsPath
-$RuntimeTests = Get-Content -Raw -LiteralPath $RuntimeTestsPath
+. (Join-Path $PSScriptRoot 'Runtime-TestSource.ps1')
+$RuntimeTests = Get-RuntimeTestSource $RuntimeTestsPath
 $ControlledFailures = New-Object System.Collections.Generic.List[string]
 
 function Test-ExactDevicePrices([string]$Text) {

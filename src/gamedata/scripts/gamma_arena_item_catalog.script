@@ -119,6 +119,9 @@ local function runtime_source(shared_system_sections)
             return sections
         end,
         read_system_string = function(section, key) return base:r_string_ex(section, key) end,
+        section_exists = function(section) return base:section_exist(section) end,
+        file_exists = gamma_arena_weapon_safety.runtime_file_exists,
+        report_weapon_audit = gamma_arena_weapon_safety.log_report,
         read_system_number = function(section, key) return tonumber(base:r_string_ex(section, key)) end,
         section_spawnable = function(section)
             if not base:section_exist(section) then return false end
@@ -767,12 +770,22 @@ local function lower_hex_u32(value)
     return table.concat(encoded)
 end
 
-local function fingerprint(item_ids, items, rank_catalog, base_carry_weight)
+local function fingerprint(item_ids, items, rank_catalog, base_carry_weight, weapon_safety)
     local parts = {}
     canonical_add(parts, "domain", "ga-catalog-v10")
     canonical_add(parts, "base_carry_weight", base_carry_weight)
     canonical_item_parts(parts, item_ids, items)
     canonical_rank_parts(parts, rank_catalog)
+    canonical_add(parts, "weapon_safety_policy", weapon_safety.policy)
+    for _, section in ipairs(item_ids) do
+        local record = weapon_safety.verified[section]
+        if record then
+            canonical_add(parts, "weapon_resource_section", section)
+            canonical_add(parts, "world_visual", record.world_visual)
+            canonical_add(parts, "hud_section", record.hud_section)
+            canonical_add(parts, "hud_item_visual", record.hud_item_visual)
+        end
+    end
     return "ga-catalog-v10-" .. lower_hex_u32(hash32(table.concat(parts, "|")))
 end
 
@@ -817,6 +830,17 @@ local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sec
     if accepted_devices == nil then return failure('GA_ITEM_CATALOG_DEVICE_INVALID', 'Semantic device allowlist is invalid') end
     local candidates, candidate_error = enumerate_physical_candidates(source, medical_policy(legacy_catalog), accepted_grenades, accepted_devices)
     if candidates == nil then return candidate_error end
+    local weapon_sections = {}
+    for section, item in pairs(candidates) do
+        if item.category == "weapon" or item.category == "knife" then weapon_sections[#weapon_sections + 1] = section end
+    end
+    local audited = gamma_arena_weapon_safety.audit(source, weapon_sections)
+    if not audited.ok then return audited end
+    for section in pairs(audited.value.blocked) do candidates[section] = nil end
+    if source.report_weapon_audit ~= nil then
+        local reported, reason = guarded(source, "report_weapon_audit", audited.value)
+        if not reported then return failure("GA_WEAPON_AUDIT_FAILED", "Weapon audit report failed", { reason = tostring(reason) }) end
+    end
     for section in pairs(accepted_devices) do
         if candidates[section] == nil then return failure('GA_ITEM_CATALOG_DEVICE_INVALID', 'Exact physical device is invalid', { section=section }) end
     end
@@ -860,7 +884,8 @@ local function load_impl(source, legacy_catalog, rank_catalog, shared_system_sec
     catalog.revision = 11
     catalog.generator_version = 11
     catalog.base_carry_weight = base_carry_weight
-    catalog.fingerprint = fingerprint(item_ids, items, reconciled_ranks.value, base_carry_weight)
+    catalog.weapon_safety = audited.value
+    catalog.fingerprint = fingerprint(item_ids, items, reconciled_ranks.value, base_carry_weight, audited.value)
     reconciled_pool_records_by_catalog[catalog] = reconciled_pool_records_by_rank_catalog[reconciled_ranks.value]
     return gamma_arena_result.ok(catalog)
 end

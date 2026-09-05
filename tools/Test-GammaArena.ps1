@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([string]$Python = 'python')
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -14,4 +14,6 @@ if (-not $?) { exit 1 }
 if (-not $?) { exit 1 }
 & (Join-Path $RepoRoot 'tests\static\Test-ReleaseWorkflow.ps1') -RepoRoot $RepoRoot
 if (-not $?) { exit 1 }
+& (Join-Path $RepoRoot 'tools\Test-GammaArenaLua.ps1') -Python $Python
+if ($LASTEXITCODE -ne 0) { exit 1 }
 exit 0

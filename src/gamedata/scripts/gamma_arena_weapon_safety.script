@@ -1,0 +1,150 @@
+local POLICY = "weapon_resource_safety_v1"
+local MANUAL_BLACKLIST = {
+    wpn_dtmdr = true,
+    wpn_eft_mts_255_uh2 = true,
+    wpn_vssk_ekp8_18 = true
+}
+
+local function normalized(value)
+    if value == nil then return nil end
+    if type(value) ~= "string" then error("Weapon resource metadata must be a string") end
+    local result = string.gsub(value, "^%s*(.-)%s*$", "%1")
+    if result == "" then return nil end
+    return result
+end
+
+local function model_path(value)
+    local path = normalized(value)
+    return path and string.gsub(path, "/", "\\") or nil
+end
+
+local function sorted_keys(values)
+    local keys = {}
+    for key in pairs(values) do keys[#keys + 1] = key end
+    table.sort(keys)
+    return keys
+end
+
+function manual_blacklist()
+    local copied = {}
+    for section in pairs(MANUAL_BLACKLIST) do copied[section] = true end
+    return copied
+end
+
+function runtime_file_exists(alias, path)
+    if type(getFS) ~= "function" then error("Engine filesystem is unavailable") end
+    local filesystem = getFS()
+    if filesystem == nil then error("Engine filesystem is unavailable") end
+    if not filesystem:path_exist("$game_meshes$") then error("Engine meshes alias is unavailable") end
+    if alias == nil then return filesystem:exist(path) end
+    if alias == "$level$" and not filesystem:path_exist(alias) then return nil end
+    return filesystem:exist(alias, path)
+end
+
+local function audit_impl(source, sections)
+    if type(source) ~= "table" or type(source.read_system_string) ~= "function"
+        or type(source.section_exists) ~= "function" or type(source.file_exists) ~= "function"
+        or type(sections) ~= "table" then error("Weapon audit dependencies are unavailable") end
+    local unique = {}
+    for _, section in ipairs(sections) do
+        local name = normalized(section)
+        if name == nil then error("Weapon audit section is empty") end
+        unique[name] = true
+    end
+    local report = { policy = POLICY, checked = 0, verified = {}, blocked = {}, rejected = {} }
+    local models = {}
+    local function model_exists(path)
+        local name = string.lower(path)
+        name = string.match(name, "^(.*)%.") or name
+        if models[name] ~= nil then return models[name] end
+        local filename = string.find(name, ".", 1, true) and name or name .. ".ogf"
+        local function exists(alias, name)
+            local value = source.file_exists(alias, name)
+            local kind = type(value)
+            if value ~= nil and kind ~= "boolean" and kind ~= "userdata" and kind ~= "table" then
+                error("Engine filesystem returned an invalid file result")
+            end
+            return not not value
+        end
+        local found = exists(nil, name) or exists("$level$", filename) or exists("$game_meshes$", filename)
+        models[name] = found
+        return found
+    end
+    local function section_exists(section)
+        local value = source.section_exists(section)
+        if type(value) ~= "boolean" then error("Engine section lookup returned an invalid result") end
+        return value
+    end
+    for _, section in ipairs(sorted_keys(unique)) do
+        report.checked = report.checked + 1
+        local record = { section = section }
+        local function reject(reason, path)
+            record.reason = reason
+            record.path = path
+            report.blocked[section] = record
+            report.rejected[#report.rejected + 1] = record
+        end
+        if MANUAL_BLACKLIST[section] then
+            reject("manual_blacklist")
+        elseif not section_exists(section) then
+            reject("missing_weapon_section")
+        else
+            record.world_visual = model_path(source.read_system_string(section, "visual"))
+            if record.world_visual == nil then
+                reject("missing_world_visual")
+            elseif not model_exists(record.world_visual) then
+                reject("missing_world_model", record.world_visual)
+            else
+                record.hud_section = normalized(source.read_system_string(section, "hud"))
+                if record.hud_section == nil or not section_exists(record.hud_section) then
+                    reject("missing_hud_section")
+                else
+                    record.hud_item_visual = model_path(source.read_system_string(record.hud_section, "item_visual"))
+                    if record.hud_item_visual == nil then
+                        reject("missing_hud_visual")
+                    elseif not model_exists(record.hud_item_visual) then
+                        reject("missing_hud_model", record.hud_item_visual)
+                    else
+                        report.verified[section] = record
+                    end
+                end
+            end
+        end
+    end
+    return report
+end
+
+function audit(source, sections)
+    local called, report = pcall(audit_impl, source, sections)
+    if not called then
+        return gamma_arena_result.err("GA_WEAPON_AUDIT_FAILED", "Weapon resource audit could not be completed", { reason = tostring(report) })
+    end
+    return gamma_arena_result.ok(report)
+end
+
+function allowed(catalog, section)
+    if MANUAL_BLACKLIST[section] then return false end
+    local report = type(catalog) == "table" and catalog.weapon_safety or nil
+    if report == nil then return false end
+    return type(report) == "table" and report.policy == POLICY and type(report.blocked) == "table"
+        and type(report.verified) == "table" and report.blocked[section] == nil
+        and type(report.verified[section]) == "table"
+end
+
+function check(catalog, section)
+    if allowed(catalog, section) then return gamma_arena_result.ok(true) end
+    local report = type(catalog) == "table" and catalog.weapon_safety or nil
+    local record = type(report) == "table" and type(report.blocked) == "table" and report.blocked[section] or nil
+    return gamma_arena_result.err("GA_WEAPON_UNSAFE", "Weapon is not approved for Arena materialization", {
+        section = section,
+        reason = MANUAL_BLACKLIST[section] and "manual_blacklist" or type(record) == "table" and record.reason or "not_verified"
+    })
+end
+
+function log_report(report)
+    printf("[GammaArena][GA_WEAPON_AUDIT] policy=%s checked=%s rejected=%s", report.policy, tostring(report.checked), tostring(#report.rejected))
+    for _, record in ipairs(report.rejected) do
+        printf("[GammaArena][GA_WEAPON_REJECTED] section=%s reason=%s hud=%s path=%s",
+            record.section, record.reason, record.hud_section or "-", record.path or "-")
+    end
+end

@@ -166,6 +166,17 @@ local function fixture_source(options)
     if options.localized_name ~= nil then sections.wpn_alpha.inv_name = options.localized_name end
     if options.spawn_path ~= nil then sections.wpn_alpha["$spawn"] = options.spawn_path end
     if type(options.mutate_device) == 'function' then options.mutate_device(sections) end
+    local visuals = {}
+    for section, values in pairs(sections) do
+        if string.sub(values.kind or "", 1, 2) == "w_" and values.kind ~= "w_ammo" then
+            values.visual = section .. "_world.ogf"
+            values.hud = section .. "_hud"
+            visuals[values.hud] = { item_visual = section .. "_hud.ogf" }
+        end
+    end
+    for section, values in pairs(visuals) do sections[section] = values end
+    if options.world_model then sections.wpn_alpha.visual = options.world_model end
+    if options.hud_model then sections.wpn_alpha_hud.item_visual = options.hud_model end
     local order = {}
     for section in pairs(sections) do order[#order + 1] = section end
     table.sort(order)
@@ -197,6 +208,10 @@ local function fixture_source(options)
         section_spawnable = function(section)
             local values = sections[section]
             return values ~= nil and type(values["$spawn"]) == "string" and values["$spawn"] ~= ""
+        end,
+        section_exists = function(section) return sections[section] ~= nil end,
+        file_exists = function(alias, path)
+            return alias == "$game_meshes$" and path ~= options.missing_model
         end,
         open_loadouts = function() return loadouts end,
         enumerate_loadout_sections = function()
@@ -477,7 +492,27 @@ local function item_catalog_reconciles_rank_pools_with_physical_items()
     end, "faction rank id mismatch fails closed")
 end
 
+local function resource_audit_filters_universal_items_and_rank_pools()
+    local baseline = assert_item_catalog()
+    local catalog = assert_item_catalog({ missing_model = "wpn_alpha_hud.ogf" })
+    gamma_arena_test_assert.equals(catalog.items.wpn_alpha, nil, "unsafe weapon is absent from universal UI and custom selections")
+    gamma_arena_test_assert.equals(catalog.weapon_safety.blocked.wpn_alpha.reason, "missing_hud_model", "catalog retains audit findings")
+    gamma_arena_test_assert.equals(#catalog.factions.stalker.ranks.novice.primary_weapons, 0, "NPC primary pool is pruned")
+    gamma_arena_test_assert.is_true(catalog.items.wpn_beta ~= nil, "safe alternative remains")
+    gamma_arena_test_assert.is_true(catalog.fingerprint ~= baseline.fingerprint, "resource rejection changes catalog identity")
+    for _, options in ipairs({ { world_model = "alternate_world.ogf" }, { hud_model = "alternate_hud.ogf" } }) do
+        local changed = assert_item_catalog(options)
+        gamma_arena_test_assert.is_true(changed.items.wpn_alpha ~= nil, "changed model still exists")
+        gamma_arena_test_assert.is_true(changed.fingerprint ~= baseline.fingerprint, "accepted resource changes alter identity")
+    end
+    local source = fixture_source()
+    source.file_exists = nil
+    local unavailable = gamma_arena_item_catalog.load(source, legacy_catalog(), rank_catalog())
+    gamma_arena_test_assert.equals(unavailable.error.code, "GA_WEAPON_AUDIT_FAILED", "catalog refuses unavailable audit API")
+end
+
 local cases = {
+    { name = "item_catalog_resource_audit_filters_all_consumers", fn = resource_audit_filters_universal_items_and_rank_pools },
     { name = "item_catalog_prices_and_classifies_installed_items", fn = prices_and_classifies_installed_items },
     { name = "item_catalog_exposes_physical_metadata_and_legacy_fields", fn = exposes_physical_metadata_and_legacy_fields },
     { name = "item_catalog_retains_zero_grants_and_rejects_invalid_candidates", fn = retains_zero_grants_and_rejects_invalid_candidates },

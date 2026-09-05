@@ -26,6 +26,7 @@ $RequiredPatterns = @(
     '(?m)^\s+shell:\s*pwsh\s*$',
     '\$PSVersionTable',
     'gh --version',
+    'python -m pip install[^\r\n]+tests\\lua\\requirements\.txt',
     'Get-GammaArenaReleaseNotes\.ps1',
     'Build-GammaArena\.ps1[^\r\n]+-Configuration Release',
     'Gamma-Arena-v\$env:RELEASE_VERSION-MO2\.zip',
@@ -65,7 +66,7 @@ foreach ($Forbidden in @('softprops/', 'action-gh-release', 'upload-artifact')) 
 
 $StandardSuitePath = Join-Path $RepoRoot 'tools\Test-GammaArena.ps1'
 $StandardSuite = [IO.File]::ReadAllText($StandardSuitePath)
-foreach ($RequiredTest in @('Test-ReleaseAutomation.ps1', 'Test-ReleaseWorkflow.ps1')) {
+foreach ($RequiredTest in @('Test-ReleaseAutomation.ps1', 'Test-ReleaseWorkflow.ps1', 'Test-GammaArenaLua.ps1')) {
     if (-not $StandardSuite.Contains($RequiredTest)) {
         throw "Standard suite does not run release automation check: $RequiredTest"
     }

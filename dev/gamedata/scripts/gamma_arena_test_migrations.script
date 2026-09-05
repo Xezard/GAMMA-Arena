@@ -166,15 +166,17 @@ end
 
 local function valid_session(fight_index)
     return {
-        schema_version = 1,
+        schema_version = 2,
         session_id = "session-1",
         session_nonce = "session_nonce_1",
         mode_id = "skirmish",
         difficulty_id = "stalker",
         session_seed = 42,
         fight_index = fight_index or 3,
-        generator_version = 1,
-        catalog_revision = 1,
+        generation_recipe = "random",
+        generator_version = 11,
+        catalog_revision = 11,
+        catalog_fingerprint = "ga-catalog-v11-migrations",
         layout_id = "rostok_arena_v1",
         checkpoint_name = "_gamma_arena_checkpoint",
         phase = "CHECKPOINT_READY"
@@ -329,6 +331,7 @@ local function defeat_promotion_is_atomic_and_conflict_safe()
     gamma_arena_test_assert.is_true(store:confirm_defeat(config, token, { clock = function() return 1001 end }).ok, "promotion fixture confirms")
     local request = valid_request(123)
     request.seed_mode = "random"
+    request.difficulty_id = context.difficulty_id
     local promoted = store:issue_launch_from_defeat(config, token, request, { clock = function() return 1002 end, nonce = function() return "launch_from_death" end })
     gamma_arena_test_assert.is_true(promoted.ok, "confirmed defeat promotes to launch")
     gamma_arena_test_assert.equals(promoted.value.token, "ga1:1002:launch_from_death", "promotion issues distinct launch token")
@@ -362,10 +365,11 @@ local function defeat_promotion_is_atomic_and_conflict_safe()
         gamma_arena_test_assert.is_true(fault_store:confirm_defeat(faulted, fault_token, { clock = function() return 1001 end }).ok, "fault promotion fixture confirms")
         faulted:arm_fault(fault_at)
         local result = fault_store:issue_launch_from_defeat(faulted, fault_token, request, { clock = function() return 1002 end, nonce = function() return "retry_" .. tostring(fault_at) end })
-        if not result.ok then
-            assert_keys_absent(faulted, launch_keys, "failed promotion leaves no launch fragment")
-            gamma_arena_test_assert.is_true(faulted.data.defeat_pending == nil or faulted.data.defeat_pending == "true", "failed promotion has no torn defeat marker")
-        end
+        gamma_arena_test_assert.is_false(result.ok, "promotion injected mutation fails")
+        gamma_arena_test_assert.is_true(faulted.faults.primary.used, "promotion reaches the injected mutation")
+        gamma_arena_test_assert.equals(result.error.code, "GA_DEFEAT_PROMOTION_FAILED", "promotion reports the transaction failure")
+        assert_keys_absent(faulted, launch_keys, "failed promotion leaves no launch fragment")
+        gamma_arena_test_assert.is_true(faulted.data.defeat_pending == nil or faulted.data.defeat_pending == "true", "failed promotion has no torn defeat marker")
     end
 end
 
@@ -390,6 +394,13 @@ local function migrations_cover_absent_v0_v1_and_future()
     gamma_arena_test_assert.equals(future.save_count, 0, "future settings remain untouched")
 end
 
+local function current_addon_version()
+    local config = fake_config()
+    gamma_arena_test_assert.is_true(gamma_arena_migrations.migrate(config).ok, "current-version fixture initializes")
+    gamma_arena_test_assert.is_true(type(config.data.addon_version) == "string" and config.data.addon_version ~= "", "current addon version is present")
+    return config.data.addon_version
+end
+
 local function versioned_v1_config(addon_version)
     local initial = {
         settings_schema_version = "1",
@@ -406,7 +417,7 @@ local function schema_v1_without_addon_version_is_incompatible()
     local config = versioned_v1_config(nil)
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "unversioned v1 settings are adopted fail-closed")
-    gamma_arena_test_assert.equals(config.data.addon_version, "0.4.0", "unversioned v1 records current addon")
+    gamma_arena_test_assert.equals(config.data.addon_version, current_addon_version(), "unversioned v1 records current addon")
     gamma_arena_test_assert.equals(config.save_count, 1, "unversioned v1 writes exactly once")
     assert_keys_absent(config, launch_keys, "unversioned v1 clears launch intent")
     assert_keys_absent(config, resume_keys, "unversioned v1 clears resume intent")
@@ -415,7 +426,7 @@ local function schema_v1_without_addon_version_is_incompatible()
 end
 
 local function schema_v1_current_addon_preserves_transient_intents()
-    local config = versioned_v1_config("0.4.0")
+    local config = versioned_v1_config(current_addon_version())
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "current v1 settings are idempotent")
     gamma_arena_test_assert.equals(config.save_count, 0, "current v1 does not save")
@@ -428,7 +439,7 @@ local function schema_v1_different_addon_clears_transient_intents()
     local config = versioned_v1_config("0.0.9")
     local result = gamma_arena_migrations.migrate(config)
     gamma_arena_test_assert.is_true(result.ok, "different addon version migrates")
-    gamma_arena_test_assert.equals(config.data.addon_version, "0.4.0", "different addon records current version")
+    gamma_arena_test_assert.equals(config.data.addon_version, current_addon_version(), "different addon records current version")
     gamma_arena_test_assert.equals(config.save_count, 1, "different addon writes exactly once")
     assert_keys_absent(config, launch_keys, "different addon clears launch intent")
     assert_keys_absent(config, resume_keys, "different addon clears resume intent")
@@ -890,7 +901,7 @@ local function resume_rejects_tampered_expected_session()
     }
     for _, mutation in ipairs({
         function(session) session.checkpoint_name = "_gamma_arena_other" end,
-        function(session) session.schema_version = 2 end,
+        function(session) session.schema_version = 1 end,
         function(session) session.generator_version = 2 end,
         function(session) session.catalog_revision = 2 end,
         function(session) session.fight_index = 4 end,
@@ -994,16 +1005,28 @@ local function mutation_failure_matrix_is_crash_safe()
         gamma_arena_test_assert.is_true(store:issue_resume(config, intent).ok, "new resume succeeds after failed consume")
     end
 
-    for fault_at = 1, 22 do
+    local function pending_bridge_config()
         local baseline = {}
         for _, key in ipairs(character_keys) do baseline[key] = "old_" .. key end
         local config = fake_config(baseline)
+        local store = gamma_arena_session_store.new_store()
+        gamma_arena_test_assert.is_true(store:issue_launch(config, valid_request(), {
+            clock = function() return 100 end, nonce = function() return "bridge_matrix" end
+        }).ok, "character bridge fixture has a pending launch")
+        config:clear_fault()
+        return config, store, baseline
+    end
+    local probe_config, probe_store = pending_bridge_config()
+    gamma_arena_test_assert.is_true(probe_store:write_character_creation(probe_config).ok, "bridge mutation-count probe succeeds")
+    for fault_at = 1, probe_config.faults.primary.index do
+        local config, store, baseline = pending_bridge_config()
         config:arm_fault(fault_at)
-        gamma_arena_test_assert.is_false(gamma_arena_session_store.write_character_creation(config).ok, "character bridge injected fault")
+        gamma_arena_test_assert.is_false(store:write_character_creation(config).ok, "character bridge injected fault")
+        gamma_arena_test_assert.is_true(config.faults.primary.used, "character bridge reaches the injected mutation")
         assert_table_equals(config.data, baseline, character_keys, "character bridge rollback")
         assert_table_equals(config.persisted, baseline, character_keys, "character bridge persisted rollback")
         config:clear_fault()
-        gamma_arena_test_assert.is_true(gamma_arena_session_store.write_character_creation(config).ok, "character bridge retry succeeds")
+        gamma_arena_test_assert.is_true(store:write_character_creation(config).ok, "character bridge retry succeeds")
     end
 end
 
@@ -1055,12 +1078,21 @@ local function recovery_failure_quarantines_transaction()
 
     local marker_config = fake_config()
     local marker_store = gamma_arena_session_store.new_store()
-    marker_config:arm_fault(7)
+    local marker_save = marker_config.save
+    local primary_save_failed = false
+    function marker_config:save()
+        if not self.recovery_active and not primary_save_failed then
+            primary_save_failed = true
+            error("injected primary marker save failure")
+        end
+        return marker_save(self)
+    end
     marker_config:arm_recovery_fault(1)
     local marker_failure = marker_store:issue_launch(marker_config, valid_request(5), {
         clock = function() return 100 end,
         nonce = function() return "quarantined_marker" end
     })
+    gamma_arena_test_assert.is_true(primary_save_failed, "marker fault reaches primary save")
     gamma_arena_test_assert.is_false(marker_failure.ok, "primary save plus marker rollback failure rejects")
     gamma_arena_test_assert.is_true(marker_failure.error.context.persisted_state_may_be_unknown, "primary save failure reports persisted-state uncertainty")
     gamma_arena_test_assert.equals(marker_store:consume_launch(marker_config, { clock = function() return 101 end }).error.code, "GA_CONFIG_QUARANTINED", "working marker is never consumable while quarantined")
@@ -1287,11 +1319,20 @@ local function dxml_registers_both_arena_menu_clicks()
     function menu:AddCallback(name, event, callback, owner)
         bound[name] = { event = event, callback = callback, owner = owner }
     end
-    callbacks.main_menu_on_init(menu)
+    local previous_events = rawget(gamma_arena_main_menu, "ui_events")
+    local click_event = {}
+    gamma_arena_main_menu.ui_events = { BUTTON_CLICKED = click_event }
+    local called, reason = pcall(callbacks.main_menu_on_init, menu)
+    gamma_arena_main_menu.ui_events = previous_events
+    gamma_arena_test_assert.is_true(called, "main-menu callback completes: " .. tostring(reason))
+    gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena) == "table", "first main menu registers Arena button")
+    gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena_restart) == "table", "first main menu registers restart button")
     gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena.callback) == "function", "first main menu binds Arena click")
     gamma_arena_test_assert.is_true(type(bound.btn_gamma_arena_restart.callback) == "function", "first in-game menu binds Arena restart click")
     gamma_arena_test_assert.equals(bound.btn_gamma_arena.owner, menu, "Arena click retains the menu owner")
     gamma_arena_test_assert.equals(bound.btn_gamma_arena_restart.owner, menu, "Arena restart retains the menu owner")
+    gamma_arena_test_assert.equals(bound.btn_gamma_arena.event, click_event, "Arena binds the button-click event")
+    gamma_arena_test_assert.equals(bound.btn_gamma_arena_restart.event, click_event, "Arena restart binds the button-click event")
 end
 
 local function main_menu_restart_is_acceptance_gated()
@@ -1507,8 +1548,10 @@ local function character_creation_bridge_restores_on_every_launch_terminal_route
     assert_character_snapshot(expired_config, expired_expected, "expired launch")
 
     local rejected_config, _, rejected_expected = bridge_fixture("rejected_bridge")
+    rejected_config:corrupt("gamma_arena", "bridge_launch_token", "ga1:100:other_launch")
     local rejected = gamma_arena_session_store.new_store():consume_launch(rejected_config, { clock = function() return 100 end })
-    gamma_arena_test_assert.is_false(rejected.ok, "fresh Store rejects a process-orphaned launch")
+    gamma_arena_test_assert.is_false(rejected.ok, "fresh Store rejects a mismatched cross-VM bridge lease")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_LAUNCH_HANDOFF_INVALID", "rejected bridge preserves the ownership mismatch reason")
     assert_character_snapshot(rejected_config, rejected_expected, "rejected launch")
 
     local stale_config, _, stale_expected = bridge_fixture("stale_bridge")
@@ -1587,6 +1630,7 @@ local function defeat_main_menu_fresh_fight_promotes_once()
     local promoted_request
     local promoted_token
     local bridge_calls = 0
+    local preflight_calls = 0
     local start_game_calls = 0
     local menu = { hidden = 0, shown = 0, dialog_shown = 0 }
     function menu:HideDialog() self.hidden = self.hidden + 1 end
@@ -1607,7 +1651,14 @@ local function defeat_main_menu_fresh_fight_promotes_once()
             })
         end,
         show_result = function(model) shown_model = model; return gamma_arena_result.ok(true) end,
-        random_session_seed = function() return gamma_arena_result.ok(987654321) end,
+        runtime_preflight = function()
+            preflight_calls = preflight_calls + 1
+            return gamma_arena_result.ok(true)
+        end,
+        random_session_seed = function()
+            gamma_arena_test_assert.equals(preflight_calls, 1, "fresh fight checks runtime before generating a seed")
+            return gamma_arena_result.ok(987654321)
+        end,
         issue_launch_from_defeat = function(candidate, token, request)
             gamma_arena_test_assert.equals(candidate, config, "defeat promotion receives injected config")
             promoted_token = token
@@ -1642,6 +1693,7 @@ local function defeat_main_menu_fresh_fight_promotes_once()
     gamma_arena_test_assert.equals(promoted_request.seed_mode, "random", "fresh fight always rerolls")
     gamma_arena_test_assert.equals(promoted_request.session_seed, 987654321, "fresh fight uses new seed")
     gamma_arena_test_assert.equals(bridge_calls, 1, "fresh fight writes one character-creation bridge")
+    gamma_arena_test_assert.equals(preflight_calls, 1, "fresh fight checks runtime once")
     gamma_arena_test_assert.equals(start_game_calls, 1, "fresh fight invokes engine StartGame once")
 end
 

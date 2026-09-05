@@ -71,6 +71,18 @@ Mags Redux is optional: without it, and for unsupported weapons, ammunition beha
 
 ## Troubleshooting and bug reports
 
+### Weapon resource checks
+
+On the first successful Arena catalog load in each game process, Gamma Arena audits eligible firearms and knives without spawning them or loading their models. It reads the effective `system_ini()` world `visual`, `hud` section, and HUD `item_visual`, then checks model availability through the engine filesystem (including resources exposed by the active MO2 profile and mounted archives).
+
+Missing resources and the exact manual blacklist exclude weapons from Random player selection, Custom inventory selection, and NPC rank pools. Fight validation and item materialization also reject unverified weapons. Missing audit APIs stop catalog loading rather than approving unchecked weapons. Resource paths and the filtered catalog contribute to the catalog fingerprint; an outdated Custom configuration must be reviewed against the new catalog, not silently substituted.
+
+Look for `[GA_WEAPON_AUDIT]` in the X-Ray log for the checked/rejected totals and `[GA_WEAPON_REJECTED]` for each rejected section, reason, HUD section, and missing path. The automatic blacklist is local to the current process: fully restart the game after changing the MO2 profile or repairing resources. A new audit can restore repaired variants; the manual blacklist remains in `gamma_arena_weapon_safety.script` for known failures not detectable by file existence.
+
+These checks do not validate OGF/OMF contents, animation names, skeleton compatibility, or every script-driven weapon state. A present but broken model can still fail in the engine. No mass-spawn probe or native crash recovery is performed.
+
+### Reporting a problem
+
 If the Arena entry is missing or a fight fails to start:
 
 - confirm that **Gamma Arena** is enabled in the active G.A.M.M.A. MO2 profile;
@@ -93,11 +105,21 @@ Review logs before uploading them and remove unrelated personal paths or private
 <details>
 <summary>Local checks and release build</summary>
 
+Local checks require Python 3.10+ and the pinned Lua 5.1 test runtime. Install the development dependency once (it is not included in game packages):
+
+```powershell
+python -m pip install -r .\tests\lua\requirements.txt
+```
+
 From Windows PowerShell, enter the repository and run the complete local suite:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-GammaArena.ps1
 ```
+
+The suite now compiles every production and dev script with Lua 5.1 and executes the full `gamma_arena_test_domain` suite, including all split runtime modules, in addition to static and golden-reference checks. A missing Lua dependency, compilation error, failing test, or empty suite fails the build. Release automation installs the pinned dependency before building.
+
+To run only selected Lua suites, use `python -B tests/lua/run_tests.py gamma_arena_test_weapon_safety gamma_arena_test_item_catalog`. The PowerShell test entry points accept `-Python` for an explicit interpreter path. The offline loader supplies script namespaces and UI class declarations only: it does not simulate model loading, native UI construction, spawning, or the game filesystem. Engine-facing tests use explicit test ports; in-game smoke tests remain necessary.
 
 `VERSION` is the sole source of the Gamma Arena release version. The build stamps that value into the staged runtime migration script; do not replace its `@GAMMA_ARENA_VERSION@` marker in source control.
 

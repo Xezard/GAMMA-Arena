@@ -1,0 +1,233 @@
+local function clone(...)
+    return gamma_arena_test_runtime_part_preflight.clone(...)
+end
+
+local function catalogs(...)
+    return gamma_arena_test_runtime_part_preflight.catalogs(...)
+end
+
+local function fake_store(...)
+    return gamma_arena_test_runtime_part_lifecycle.fake_store(...)
+end
+
+local function fake_orchestrator_deps(...)
+    return gamma_arena_test_runtime_part_lifecycle.fake_orchestrator_deps(...)
+end
+
+local function task8_environment(...)
+    return gamma_arena_test_runtime_part_fights.task8_environment(...)
+end
+
+local function task8_pump_to_active(...)
+    return gamma_arena_test_runtime_part_fights.task8_pump_to_active(...)
+end
+
+local function task8_pump_integrity_retry_to_active(...)
+    return gamma_arena_test_runtime_part_fights.task8_pump_integrity_retry_to_active(...)
+end
+
+local function task11_custom_request(...)
+    return gamma_arena_test_runtime_part_custom.task11_custom_request(...)
+end
+
+function task11_item_signature(items)
+    local values = {}
+    for index, item in ipairs(items or {}) do
+        values[index] = table.concat({ tostring(item.section), tostring(item.quantity), tostring(item.equipped_slot or "") }, ":")
+    end
+    return table.concat(values, "|")
+end
+
+function task11_custom_spec(config, fight_index, session_seed)
+    local actor_items = clone(config.actor_items)
+    local opponents = {}
+    for slot, roster_entry in ipairs(config.roster) do
+        opponents[slot] = {
+            slot = slot,
+            profile = "gamma_arena_" .. config.faction .. "_" .. roster_entry.rank,
+            community = config.faction,
+            rank_id = roster_entry.rank,
+            items = { { section = "enemy_gear_" .. tostring(fight_index) .. "_" .. tostring(slot), quantity = 1, equipped_slot = "weapon_2" } }
+        }
+    end
+    local fight_id = "ga-task11-custom-" .. tostring(fight_index)
+    return {
+        session_seed = function() return session_seed end,
+        fight_index = function() return fight_index end,
+        fight_id = function() return fight_id end,
+        actor = function() return { items = clone(actor_items) } end,
+        opponents = function() return clone(opponents) end,
+        stable_encode = function() return "stable:" .. fight_id end
+    }
+end
+
+function task11_custom_environment()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    config.actor_device = "device_torch_nv_2"
+    config.roster[2] = { rank = "legend" }
+    local session = gamma_arena_session_store.validate_arena_session({
+        schema_version = 2,
+        session_id = "ga_task11_custom_session",
+        session_nonce = "ga_task11_custom_nonce",
+        mode_id = "skirmish",
+        generation_recipe = "custom",
+        session_seed = 77,
+        fight_index = 0,
+        generator_version = catalog.generator_version,
+        catalog_revision = catalog.revision,
+        catalog_fingerprint = catalog.fingerprint,
+        custom_config = config,
+        layout_id = layout.id,
+        checkpoint_name = "_gamma_arena_checkpoint",
+        phase = "PREPARING"
+    }, { catalog = catalog, layout = layout })
+    gamma_arena_test_assert.is_true(session.ok, "custom lifecycle fixture owns a validated ArenaSession")
+    local env = task8_environment({
+        catalog = catalog,
+        layout = layout,
+        generator = function(active_session, fight_index)
+            gamma_arena_test_assert.equals(active_session.generation_recipe, "custom", "builder receives custom recipe only from ArenaSession")
+            return gamma_arena_result.ok({ session = active_session, fight_index = fight_index })
+        end,
+        validator = function(draft)
+            return gamma_arena_result.ok(task11_custom_spec(draft.session.custom_config, draft.fight_index, draft.session.session_seed))
+        end
+    })
+    env.orchestrator.session = session.value
+    return env, catalog, layout
+end
+
+function task11_finish_current_fight(env)
+    local ids = {}
+    for index, record in ipairs(env.registry.npcs) do ids[index] = record.id end
+    for _, id in ipairs(ids) do
+        gamma_arena_test_assert.is_true(env.orchestrator:npc_on_death_callback({ id = function() return id end }).ok, "owned custom opponent death is accepted")
+    end
+    gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "queued custom victory reaches result")
+    gamma_arena_test_assert.equals(#env.victory_dialogs, 1, "custom victory result is shown once")
+end
+
+function runtime_custom_first_fight_preserves_shared_roster_actor_hud_and_audio()
+    local env = task11_custom_environment()
+    local template = clone(env.orchestrator.session.custom_config)
+    task8_pump_to_active(env)
+    local actor = env.orchestrator.fight_spec:actor()
+    local opponents = env.orchestrator.fight_spec:opponents()
+    gamma_arena_test_assert.equals(task11_item_signature(actor.items), task11_item_signature(template.actor_items), "first custom fight installs the exact ordered actor template")
+    gamma_arena_test_assert.equals(template.actor_device, "device_torch_nv_2", "session preserves selected custom device")
+    for _, entry in ipairs(actor.items) do
+        gamma_arena_test_assert.is_false(entry.section == template.actor_device,
+            "Task 3 does not materialize actor_device into FightSpec items")
+    end
+    gamma_arena_test_assert.equals(actor.device, nil, "Task 3 emits no separate FightSpec device field")
+    gamma_arena_test_assert.equals(#opponents, 2, "custom roster count becomes exact opponent count")
+    gamma_arena_test_assert.equals(opponents[1].community, template.faction, "first opponent uses the shared faction")
+    gamma_arena_test_assert.equals(opponents[2].community, template.faction, "second opponent uses the shared faction")
+    gamma_arena_test_assert.equals(opponents[1].rank_id, template.roster[1].rank, "first selector rank reaches the first opponent")
+    gamma_arena_test_assert.equals(opponents[2].rank_id, template.roster[2].rank, "second selector rank reaches the second opponent")
+    gamma_arena_test_assert.equals(env.orchestrator.fight_spec.generation_recipe, nil, "FightSpec erases recipe provenance")
+    gamma_arena_test_assert.equals(env.battle_identity_models[1].generation_recipe, nil, "battle HUD remains recipe-neutral")
+    gamma_arena_test_assert.equals(env.battle_identity_models[1].custom_config, nil, "battle HUD exposes no custom loadout")
+    for _, call in ipairs(env.audio_calls) do
+        gamma_arena_test_assert.equals(call.context.generation_recipe, nil, "audio transitions remain recipe-neutral")
+        gamma_arena_test_assert.equals(call.context.custom_config, nil, "audio transitions expose no custom loadout")
+    end
+end
+
+function runtime_custom_victory_rerolls_enemy_only_with_immutable_template()
+    local env = task11_custom_environment()
+    task8_pump_to_active(env)
+    local first_actor = task11_item_signature(env.orchestrator.fight_spec:actor().items)
+    local first_enemy = task11_item_signature(env.orchestrator.fight_spec:opponents()[1].items)
+    local template = task11_item_signature(env.orchestrator.session.custom_config.actor_items)
+    task11_finish_current_fight(env)
+    gamma_arena_test_assert.is_true(env.victory_dialogs[1].on_next().ok, "custom victory accepts next fight")
+    for _ = 1, 5 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "custom victory continuation remains frame-driven") end
+    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, 1, "custom victory advances one fight index")
+    gamma_arena_test_assert.equals(env.orchestrator.session.generation_recipe, "custom", "custom victory preserves recipe provenance")
+    gamma_arena_test_assert.equals(task11_item_signature(env.orchestrator.session.custom_config.actor_items), template, "custom victory preserves the immutable session template")
+    gamma_arena_test_assert.equals(task11_item_signature(env.orchestrator.fight_spec:actor().items), first_actor, "custom victory restores the exact actor equipment")
+    gamma_arena_test_assert.is_true(task11_item_signature(env.orchestrator.fight_spec:opponents()[1].items) ~= first_enemy, "new fight index rerolls Arena-controlled enemy gear")
+    gamma_arena_test_assert.equals(env.generated_sessions[1].custom_config.roster[2].rank, "legend", "first generation receives the selected rank template")
+    gamma_arena_test_assert.equals(env.generated_sessions[2].custom_config.roster[2].rank, "legend", "next generation receives the unchanged selected rank template")
+end
+
+function runtime_custom_integrity_retry_is_object_identical_and_restart_preserves_policy()
+    local env = task11_custom_environment()
+    task8_pump_to_active(env)
+    local first_spec = env.orchestrator.fight_spec
+    local template = task11_item_signature(env.orchestrator.session.custom_config.actor_items)
+    local generated = env.generated
+    env.integrity_fault = { cause = "vertical_escape", opponent_id = env.registry.npcs[1].id }
+    task8_pump_integrity_retry_to_active(env)
+    gamma_arena_test_assert.is_true(env.orchestrator.fight_spec == first_spec, "integrity retry retains the exact FightSpec object")
+    gamma_arena_test_assert.is_true(env.applied_specs[1] == env.applied_specs[2], "integrity retry reapplies the object-identical FightSpec")
+    gamma_arena_test_assert.equals(env.generated, generated, "integrity retry performs no regeneration")
+    gamma_arena_test_assert.is_true(env.orchestrator:restart_arena_action().ok, "custom in-game restart follows the existing restart policy")
+    for _ = 1, 5 do gamma_arena_test_assert.is_true(env.orchestrator:actor_on_update().ok, "custom restart continuation remains frame-driven") end
+    gamma_arena_test_assert.equals(env.orchestrator.session.fight_index, 1, "custom restart advances using the current mode policy")
+    gamma_arena_test_assert.equals(env.orchestrator.session.generation_recipe, "custom", "custom restart preserves recipe")
+    gamma_arena_test_assert.equals(task11_item_signature(env.orchestrator.session.custom_config.actor_items), template, "custom restart preserves the actor template")
+end
+
+function runtime_custom_recipe_failures_are_exact_before_world_mutation()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local orchestrator = gamma_arena_orchestrator.new(fake_orchestrator_deps(fake_store()))
+    local cases = {
+        { code = "GA_CUSTOM_ITEM_UNKNOWN", mutate = function(request) request.custom_config.actor_items[1].section = "unknown_item" end },
+        { code = "GA_CUSTOM_RANK_UNKNOWN", mutate = function(request) request.custom_config.roster[1].rank = "unknown_rank" end }
+    }
+    for _, case in ipairs(cases) do
+        local request = task11_custom_request(catalog)
+        case.mutate(request)
+        local rejected = orchestrator:create_session(request, catalog, layout)
+        gamma_arena_test_assert.is_false(rejected.ok, case.code .. " rejects the custom session")
+        gamma_arena_test_assert.equals(rejected.error.code, case.code, case.code .. " remains exact")
+    end
+
+    local request = task11_custom_request(catalog)
+    local store = fake_store({ launch_pending = true, resume_pending = false })
+    store.launch_result = gamma_arena_result.ok(clone(request))
+    store.launch_validation_result = gamma_arena_result.ok(clone(request))
+    local deps = fake_orchestrator_deps(store)
+    local normalized = 0
+    deps.catalogs = function() return gamma_arena_result.ok(catalog) end
+    deps.layout = function() return gamma_arena_result.ok(gamma_arena_test_runtime_part_custom.task11_resolved_layout(layout)) end
+    deps.validator = function() return gamma_arena_result.err("GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "injected custom community mismatch") end
+    deps.actor.normalize_for_arena = function() normalized = normalized + 1; return gamma_arena_result.ok(true) end
+    local runtime = gamma_arena_orchestrator.new(deps)
+    runtime:on_game_load()
+    local rejected = runtime:actor_on_first_update()
+    gamma_arena_test_assert.is_false(rejected.ok, "custom runtime community mismatch rejects activation")
+    gamma_arena_test_assert.equals(rejected.error.code, "GA_ENEMY_EFFECTIVE_COMMUNITY_INVALID", "custom community failure remains exact")
+    gamma_arena_test_assert.equals(normalized, 0, "custom community failure precedes actor mutation")
+end
+
+function runtime_random_recipe_session_remains_difficulty_only()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local layout = gamma_arena_test_custom_config.make_context(catalog).layout
+    local created = gamma_arena_orchestrator.new(fake_orchestrator_deps(fake_store())):create_session({
+        schema_version = 1, mode_id = "skirmish", difficulty_id = "master", seed_mode = "manual", session_seed = 91
+    }, catalog, layout)
+    gamma_arena_test_assert.is_true(created.ok, "legacy random start creates the current ArenaSession")
+    gamma_arena_test_assert.equals(created.value.generation_recipe, "random", "random recipe remains explicit in ArenaSession")
+    gamma_arena_test_assert.equals(created.value.difficulty_id, "master", "random difficulty is preserved")
+    gamma_arena_test_assert.equals(created.value.custom_config, nil, "random session never gains custom provenance")
+end
+
+function runtime_mags_redux_orphan_patch_namespace_is_absent()
+    local orphan = gamma_arena_bootstrap.resolve_mags_redux_vendor_api(nil, {
+        fill_mag = function() return true end
+    })
+    gamma_arena_test_assert.equals(orphan, nil,
+        "orphan patches namespace is not a Mags Redux core")
+
+    local partial_core = gamma_arena_bootstrap.resolve_mags_redux_vendor_api({
+        is_supported_weapon = function() return true end
+    }, {})
+    gamma_arena_test_assert.is_true(type(partial_core) == "table",
+        "detected core remains subject to adapter validation")
+end

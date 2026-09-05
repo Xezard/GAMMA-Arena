@@ -1,0 +1,273 @@
+function audited_catalog(catalog)
+    local sections, seen = {}, {}
+    local function add(section)
+        if not seen[section] then sections[#sections + 1] = section; seen[section] = true end
+    end
+    for section, item in pairs(catalog.items or {}) do
+        if item.category == "weapon" or item.category == "knife" then add(section) end
+    end
+    for _, item in ipairs(catalog.weapon_list or {}) do add(item.section) end
+    for _, item in ipairs(catalog.knife_list or {}) do add(item.section) end
+    local result = gamma_arena_weapon_safety.audit({
+        section_exists = function() return true end,
+        read_system_string = function(section, key)
+            if key == "hud" then return section .. "_hud" end
+            if key == "visual" or key == "item_visual" then return "fixture\\" .. section .. ".ogf" end
+        end,
+        file_exists = function(alias) return alias == "$game_meshes$" end
+    }, sections)
+    gamma_arena_test_assert.is_true(result.ok, "explicit fixture resource audit completes")
+    catalog.weapon_safety = result.value
+    return catalog
+end
+
+local function fixture()
+    local sections = {
+        wpn_good = { visual = "models\\world", hud = "good_hud" },
+        wpn_good_scope = { visual = "models\\world", hud = "scope_hud" },
+        good_hud = { item_visual = "models\\hud.ogf" },
+        scope_hud = { item_visual = "models\\missing.ogf" }
+    }
+    local files = { ["models\\world.ogf"] = true, ["models\\hud.ogf"] = true }
+    local reads = {}
+    local source = {
+        read_system_string = function(section, key) return sections[section] and sections[section][key] end,
+        section_exists = function(section) return sections[section] ~= nil end,
+        file_exists = function(alias, path)
+            local key = (alias or "direct") .. ":" .. path
+            reads[key] = (reads[key] or 0) + 1
+            if alias == "$game_meshes$" and files[path] then return { name = path } end
+            return nil
+        end
+    }
+    return source, sections, files, reads
+end
+
+local function missing_hud_is_exact_and_shared_files_are_cached()
+    local source, sections, files, reads = fixture()
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good_scope", "wpn_good", "wpn_good" })
+    gamma_arena_test_assert.is_true(result.ok, "missing files are audit findings, not audit failure")
+    gamma_arena_test_assert.equals(result.value.checked, 2, "sections are deduplicated")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good, nil, "base weapon stays eligible")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good_scope.reason, "missing_hud_model", "exact optic variant rejected")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good_scope.hud_section, "scope_hud", "HUD provenance retained")
+    gamma_arena_test_assert.equals(result.value.rejected[1].section, "wpn_good_scope", "stable report")
+    gamma_arena_test_assert.equals(reads["$game_meshes$:models\\world.ogf"], 1, "shared model is checked once")
+    files["models\\missing.ogf"] = true
+    local repaired = gamma_arena_weapon_safety.audit(source, { "wpn_good", "wpn_good_scope" })
+    gamma_arena_test_assert.is_true(repaired.ok and repaired.value.blocked.wpn_good_scope == nil, "new audit restores repaired weapon")
+end
+
+local function native_model_resolution_and_normalization()
+    local source, sections = fixture()
+    local calls = {}
+    sections.wpn_good.visual = "  models/world  "
+    source.file_exists = function(alias, path)
+        calls[#calls + 1] = (alias or "direct") .. ":" .. path
+        return alias == "$level$" and path == "models\\world.ogf"
+            or alias == nil and path == "models\\hud"
+    end
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.is_true(result.ok and result.value.blocked.wpn_good == nil, "direct and level resources are valid")
+    gamma_arena_test_assert.equals(calls[1], "direct:models\\world", "native lookup starts with extensionless lowercase path")
+    gamma_arena_test_assert.equals(calls[2], "$level$:models\\world.ogf", "level checked before meshes")
+    gamma_arena_test_assert.equals(#calls, 3, "successful resolution short circuits")
+end
+
+local function direct_suffixed_file_does_not_bypass_native_resolution()
+    local source, sections = fixture()
+    sections.wpn_good.visual = "MODELS\\world.ogf"
+    source.file_exists = function(alias, path) return alias == nil and path == "MODELS\\world.ogf" end
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_world_model", "suffixed direct path is not native Create lookup")
+end
+
+local function missing_audit_blocks_materialization()
+    local catalog = { max_physical_items_per_participant = 256, items = {
+        wpn_good = { category = "weapon", ltx_slot = 2, ammo_sections = { "ammo_test" } },
+        ammo_test = { category = "ammo", box_size = 20 }
+    } }
+    local calls = 0
+    local materializer = gamma_arena_item_materializer.new({ create_item = function() calls = calls + 1 end })
+    local result = materializer:apply({}, { { section = "wpn_good", quantity = 1 } }, catalog)
+    gamma_arena_test_assert.is_true(not result.ok, "catalog without audit is not approved")
+    gamma_arena_test_assert.equals(result.error.code, "GA_WEAPON_UNSAFE", "missing report is an explicit denial")
+    gamma_arena_test_assert.equals(calls, 0, "no creation without audit")
+end
+
+local function multidot_model_names_follow_native_second_extension_check()
+    local source, sections, files = fixture()
+    sections.wpn_good.visual = "models\\world.v2.ogf"
+    files["models\\world.v2.ogf"] = true
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_world_model", "native does not append ogf while an extension remains")
+    files["models\\world.v2"] = true
+    result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.is_true(result.ok and result.value.blocked.wpn_good == nil, "remaining native extension is resolved unchanged")
+end
+
+local function missing_metadata_and_manual_blacklist()
+    local source, sections = fixture()
+    sections.wpn_good.hud = "absent_hud"
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good", "wpn_dtmdr", "wpn_vssk_ekp8_18" })
+    gamma_arena_test_assert.is_true(result.ok, "manual blacklist requires no missing weapon reads")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_hud_section", "HUD section existence checked")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_dtmdr.reason, "manual_blacklist", "manual entries retained")
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_vssk_ekp8_18.reason, "manual_blacklist", "exact VSSK entry retained")
+    sections.wpn_good.visual = nil
+    result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_world_visual", "empty visual rejected")
+    sections.wpn_good.visual = "absent"
+    result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_world_model", "world model rejected before spawning")
+end
+
+local function api_failures_are_not_blacklist_findings()
+    for _, name in ipairs({ "file_exists", "section_exists", "read_system_string" }) do
+        for _, mode in ipairs({ "missing", "throw" }) do
+            local source = fixture()
+            source[name] = mode == "throw" and function() error("unavailable engine API") end or nil
+            local result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+            gamma_arena_test_assert.is_true(not result.ok, name .. " " .. mode .. " blocks audit")
+            gamma_arena_test_assert.equals(result.error.code, "GA_WEAPON_AUDIT_FAILED", "API errors are not missing models")
+        end
+    end
+end
+
+local function materializer_rejects_blacklisted_weapon_before_creation()
+    local created = 0
+    local materializer = gamma_arena_item_materializer.new({
+        create_item = function() created = created + 1 end
+    })
+    local catalog = {
+        max_physical_items_per_participant = 256,
+        items = { wpn_dtmdr = { category = "weapon", ltx_slot = 2, ammo_sections = {} } }
+    }
+    local result = materializer:apply({}, { { section = "wpn_dtmdr", quantity = 1 } }, catalog)
+    gamma_arena_test_assert.is_true(not result.ok, "forged universal catalog cannot bypass manual blacklist")
+    gamma_arena_test_assert.equals(result.error.code, "GA_WEAPON_UNSAFE", "explicit rejection precedes dependency use")
+    gamma_arena_test_assert.equals(created, 0, "no native creation")
+end
+
+local function custom_config_rejects_reintroduced_unsafe_weapon()
+    local catalog = gamma_arena_test_custom_config.make_catalog()
+    local config = gamma_arena_test_custom_config.make_valid_config(catalog)
+    local context = gamma_arena_test_custom_config.make_context(catalog)
+    gamma_arena_test_assert.is_true(gamma_arena_custom_config.validate(config, context).ok, "fixture is valid before resource rejection")
+    local source = fixture()
+    catalog.weapon_safety = gamma_arena_weapon_safety.audit(source, { "wpn_good" }).value
+    catalog.weapon_safety.blocked.wpn_alpha = { reason = "missing_hud_model" }
+    local result = gamma_arena_custom_config.validate(config, context)
+    gamma_arena_test_assert.is_true(not result.ok, "saved custom selections cannot reintroduce rejected weapons")
+    gamma_arena_test_assert.equals(result.error.code, "GA_WEAPON_UNSAFE", "custom validation checks common policy")
+    result = gamma_arena_item_materializer.descriptors({ { section = "wpn_alpha", quantity = 1 } }, catalog)
+    gamma_arena_test_assert.equals(result.error.code, "GA_WEAPON_UNSAFE", "automatic blacklist checked at materialization too")
+end
+
+local function random_player_selection_uses_common_policy()
+    local source = fixture()
+    local report = gamma_arena_weapon_safety.audit(source, { "wpn_good", "wpn_good_scope" }).value
+    local catalog = {
+        weapon_safety = report,
+        layouts = { arena = { version = 1 } },
+        consumables = { bandage = { section = "bandage", cost = 1 } },
+        ammo = { ammo_test = { section = "ammo_test", cost = 1 } },
+        outfit_list = { { section = "outfit_test", cost = 1, armor_class = "light" } },
+        weapon_list = {}
+    }
+    for _, section in ipairs({ "wpn_good", "wpn_good_scope", "wpn_dtmdr" }) do
+        catalog.weapon_list[#catalog.weapon_list + 1] = {
+            section = section, kind = "w_rifle", cost = 1,
+            ammo = "ammo_test", ammo_box_min = 1, ammo_box_max = 1
+        }
+    end
+    local difficulty = {
+        player_gear_budget = 10,
+        player_weapon_weights = { w_pistol = 0, w_smg = 0, w_shotgun = 0, w_rifle = 100, w_sniper = 0 },
+        player_armor_weights = { light = 100, medium = 0, scientific = 0, heavy = 0, powered_exo = 0 }
+    }
+    for seed = 1, 64 do
+        local result = gamma_arena_random_generator.player_loadout({
+            mode_id = "skirmish", difficulty_id = "rookie", session_seed = seed, layout_id = "arena"
+        }, 1, catalog, difficulty)
+        gamma_arena_test_assert.is_true(result.ok, "safe player selection remains feasible")
+        gamma_arena_test_assert.equals(result.value.weapon, "wpn_good", "random player pool excludes automatic and manual blacklist")
+    end
+end
+
+local function report_order_missing_visuals_and_invalid_api_values()
+    local source, sections, files = fixture()
+    local first = gamma_arena_weapon_safety.audit(source, { "wpn_good_scope", "wpn_dtmdr" }).value
+    local second = gamma_arena_weapon_safety.audit(source, { "wpn_dtmdr", "wpn_good_scope" }).value
+    gamma_arena_test_assert.equals(first.rejected[1].section, second.rejected[1].section, "report order ignores enumeration order")
+    sections.good_hud.item_visual = nil
+    local result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_hud_visual", "missing item_visual rejected")
+    sections.wpn_good.hud = nil
+    result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.equals(result.value.blocked.wpn_good.reason, "missing_hud_section", "empty HUD reference rejected")
+    source.file_exists = function() return "not a file object" end
+    result = gamma_arena_weapon_safety.audit(source, { "wpn_good" })
+    gamma_arena_test_assert.is_true(not result.ok, "malformed file API result cannot approve all weapons")
+end
+
+local function runtime_filesystem_requires_mesh_alias_but_not_level()
+    local original = rawget(gamma_arena_weapon_safety, "getFS")
+    local queried_level, mesh_available = false, true
+    gamma_arena_weapon_safety.getFS = function()
+        return {
+            path_exist = function(_, alias) return mesh_available and alias == "$game_meshes$" end,
+            exist = function(_, alias, path)
+                if alias == "$level$" then queried_level = true; error("inactive level lookup") end
+                return path == "known.ogf" and { name = path } or nil
+            end
+        }
+    end
+    local called, reason = pcall(function()
+        gamma_arena_test_assert.equals(gamma_arena_weapon_safety.runtime_file_exists("$level$", "known.ogf"), nil, "menu has no mounted level")
+        gamma_arena_test_assert.is_true(gamma_arena_weapon_safety.runtime_file_exists("$game_meshes$", "known.ogf") ~= nil, "engine file object preserved")
+        gamma_arena_test_assert.is_true(not queried_level, "unavailable level alias is not dereferenced")
+        mesh_available = false
+        gamma_arena_test_assert.is_true(not pcall(gamma_arena_weapon_safety.runtime_file_exists, "$game_meshes$", "known.ogf"), "missing meshes alias is an API error")
+    end)
+    gamma_arena_weapon_safety.getFS = original
+    if not called then error(reason) end
+end
+
+local function rejection_report_has_actionable_provenance()
+    local source = fixture()
+    local report = gamma_arena_weapon_safety.audit(source, { "wpn_good_scope", "wpn_dtmdr" }).value
+    local original = rawget(gamma_arena_weapon_safety, "printf")
+    local lines = {}
+    gamma_arena_weapon_safety.printf = function(format, ...)
+        lines[#lines + 1] = string.format(format, ...)
+    end
+    local called, reason = pcall(gamma_arena_weapon_safety.log_report, report)
+    gamma_arena_weapon_safety.printf = original
+    if not called then error(reason) end
+    gamma_arena_test_assert.equals(#lines, 3, "one summary and one line per rejected weapon")
+    gamma_arena_test_assert.is_true(string.find(lines[1], "checked=2 rejected=2", 1, true) ~= nil, "summary includes counts")
+    gamma_arena_test_assert.is_true(string.find(lines[3], "section=wpn_good_scope reason=missing_hud_model hud=scope_hud path=models\\missing.ogf", 1, true) ~= nil, "rejection names exact weapon, HUD and model")
+end
+
+function run(run_case_fn)
+    local all_passed = true
+    for _, case in ipairs({
+        { name = "weapon_safety_missing_hud_exact_cached", fn = missing_hud_is_exact_and_shared_files_are_cached },
+        { name = "weapon_safety_native_resolution", fn = native_model_resolution_and_normalization },
+        { name = "weapon_safety_metadata_manual_blacklist", fn = missing_metadata_and_manual_blacklist },
+        { name = "weapon_safety_api_failures", fn = api_failures_are_not_blacklist_findings },
+        { name = "weapon_safety_materializer_guard", fn = materializer_rejects_blacklisted_weapon_before_creation }
+        , { name = "weapon_safety_custom_config_guard", fn = custom_config_rejects_reintroduced_unsafe_weapon }
+        , { name = "weapon_safety_random_player_guard", fn = random_player_selection_uses_common_policy }
+        , { name = "weapon_safety_report_metadata_api_values", fn = report_order_missing_visuals_and_invalid_api_values }
+        , { name = "weapon_safety_runtime_filesystem", fn = runtime_filesystem_requires_mesh_alias_but_not_level }
+        , { name = "weapon_safety_direct_suffix_rejected", fn = direct_suffixed_file_does_not_bypass_native_resolution }
+        , { name = "weapon_safety_missing_audit_denied", fn = missing_audit_blocks_materialization }
+        , { name = "weapon_safety_log_provenance", fn = rejection_report_has_actionable_provenance }
+        , { name = "weapon_safety_multidot_resolution", fn = multidot_model_names_follow_native_second_extension_check }
+    }) do
+        if not run_case_fn(case.name, case.fn) then all_passed = false end
+    end
+    return all_passed
+end

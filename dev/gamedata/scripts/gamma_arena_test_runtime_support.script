@@ -1,0 +1,40 @@
+function with_fields(target, replacements, callback)
+    local previous = {}
+    for key, value in pairs(replacements) do
+        previous[key] = rawget(target, key)
+        target[key] = value
+    end
+    local succeeded, result = pcall(callback)
+    for key in pairs(replacements) do target[key] = previous[key] end
+    if not succeeded then error(result, 0) end
+    return result
+end
+
+function upvalue(target, name)
+    gamma_arena_test_assert.is_true(type(debug) == "table" and type(debug.getupvalue) == "function",
+        "private default-source fixture requires Lua debug upvalue access")
+    for index = 1, 200 do
+        local key, value = debug.getupvalue(target, index)
+        if key == name then return index, value end
+        if key == nil then break end
+    end
+    error("Missing runtime test upvalue: " .. name)
+end
+
+function with_upvalue(target, name, value, callback)
+    local index, previous = upvalue(target, name)
+    debug.setupvalue(target, index, value)
+    local succeeded, result = pcall(callback)
+    debug.setupvalue(target, index, previous)
+    if not succeeded then error(result, 0) end
+    return result
+end
+
+function with_default_catalog_source(callback)
+    local _, implementation = upvalue(gamma_arena_catalog.load, "load_impl")
+    return with_upvalue(gamma_arena_catalog.load, "runtime_catalog_result", nil, function()
+        return with_upvalue(implementation, "runtime_factory", function()
+            return gamma_arena_test_generator.fixture_factory()
+        end, callback)
+    end)
+end
