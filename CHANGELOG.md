@@ -4,6 +4,8 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.3 - 2026-09-06
+
 - Fixed stale Lua test fixtures and namespace-scoped spies, split the runtime test suite to stay within Lua 5.1 compiler limits, and made executable Lua tests mandatory in local checks and release builds.
 - Fixed provisional device rollback indexing a boolean ownership result and NPC medicine scheduling/consumption looking for the obsolete consumable role instead of the materialized medicine category; added registry-to-controller healing coverage.
 - Fixed Random fights selecting absent faction pools from the wider Custom rank manifest and silently falling back to mixed-faction opponents.
