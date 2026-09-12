@@ -4,6 +4,10 @@ All notable changes to Gamma Arena are documented in this file.
 
 ## Unreleased
 
+## 0.5.4 - 2026-09-13
+
+- Fixed Russian localization rendering by storing every Russian string table as Windows-1251 text with direct Cyrillic characters, and localized the main-menu caption.
+
 ## 0.5.3 - 2026-09-06
 
 - Fixed stale Lua test fixtures and namespace-scoped spies, split the runtime test suite to stay within Lua 5.1 compiler limits, and made executable Lua tests mandatory in local checks and release builds.
