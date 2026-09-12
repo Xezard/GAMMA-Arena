@@ -684,7 +684,9 @@ if (Test-Path -LiteralPath $Task9CustomXmlPath) {
     }
 }
 foreach ($Locale in @('eng','rus')) {
-    $Task9Locale = Get-Content -LiteralPath (Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena.xml") -Raw
+    $Task9LocalePath = Join-Path $RepoRoot "src\gamedata\configs\text\$Locale\st_gamma_arena.xml"
+    $Task9LocaleEncoding = if ($Locale -eq 'rus') { [Text.Encoding]::GetEncoding(1251) } else { [Text.UTF8Encoding]::new($false, $true) }
+    $Task9Locale = $Task9LocaleEncoding.GetString([IO.File]::ReadAllBytes($Task9LocalePath))
     foreach ($StringId in @('st_gamma_arena_custom_mode','st_gamma_arena_custom_title','st_gamma_arena_custom_faction','st_gamma_arena_custom_count','st_gamma_arena_custom_seed','st_gamma_arena_custom_budget','st_gamma_arena_custom_spent','st_gamma_arena_custom_remaining','st_gamma_arena_custom_weight','st_gamma_arena_custom_weight_limit','st_gamma_arena_custom_random','st_gamma_arena_custom_category_grenade')) {
         Assert-True ($Task9Locale -match ('id="' + [regex]::Escape($StringId) + '"')) "Task 9 $Locale localization is missing $StringId"
     }
@@ -695,12 +697,13 @@ foreach ($Locale in @('eng','rus')) {
         Assert-True ($Task12Hint -match '(?i)decrements? (?:the )?quantity by one' -and $Task12Hint -match '(?i)removes?.*quantity (?:is|equals) one') 'Task 12 ENG selected-loadout hint must distinguish stack decrement from quantity-one removal.'
     }
     else {
-        $Task12HintMatch = [regex]::Match($Task9Locale, '(?s)<string id="st_gamma_arena_custom_selected_hint"><text>(.*?)</text></string>')
-        $Task12HintRaw = if ($Task12HintMatch.Success) { $Task12HintMatch.Groups[1].Value } else { '' }
-        $Task12Decrease = '&#x0443;&#x043C;&#x0435;&#x043D;&#x044C;&#x0448;&#x0430;&#x0435;&#x0442;'
-        $Task12Quantity = '&#x043A;&#x043E;&#x043B;&#x0438;&#x0447;&#x0435;&#x0441;&#x0442;&#x0432;&#x043E;'
-        $Task12Remove = '&#x0443;&#x0434;&#x0430;&#x043B;&#x044F;&#x0435;&#x0442;'
-        Assert-True ($Task12HintRaw.Contains($Task12Decrease) -and $Task12HintRaw.Contains($Task12Quantity) -and $Task12HintRaw.Contains($Task12Remove) -and $Task12HintRaw.Contains(' 1')) 'Task 12 RUS selected-loadout hint must distinguish stack decrement from quantity-one removal.'
+        [xml]$Task12LocaleDocument = $Task9Locale
+        $Task12HintNode = $Task12LocaleDocument.SelectSingleNode('//string[@id="st_gamma_arena_custom_selected_hint"]/text')
+        $Task12Hint = if ($null -eq $Task12HintNode) { '' } else { $Task12HintNode.InnerText }
+        $Task12Decrease = ConvertFrom-Json '"\u0443\u043c\u0435\u043d\u044c\u0448\u0430\u0435\u0442"'
+        $Task12Quantity = ConvertFrom-Json '"\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e"'
+        $Task12Remove = ConvertFrom-Json '"\u0443\u0434\u0430\u043b\u044f\u0435\u0442"'
+        Assert-True ($Task12Hint.Contains($Task12Decrease) -and $Task12Hint.Contains($Task12Quantity) -and $Task12Hint.Contains($Task12Remove) -and $Task12Hint.Contains(' 1')) 'Task 12 RUS selected-loadout hint must distinguish stack decrement from quantity-one removal.'
     }
 }
 $Task9CustomTests = Get-Content -LiteralPath (Join-Path $RepoRoot 'dev\gamedata\scripts\gamma_arena_test_custom_config.script') -Raw
@@ -1590,10 +1593,31 @@ foreach ($Locale in @('rus','eng')) {
         $LocaleEncoding = if ($Locale -eq 'rus') { [Text.Encoding]::GetEncoding(1251) } else { [Text.UTF8Encoding]::new($false, $true) }
         [xml]$LocaleXml = $LocaleEncoding.GetString([IO.File]::ReadAllBytes($LocalePath))
         $MenuNode = $LocaleXml.SelectSingleNode('//string[@id="st_gamma_arena_main_menu"]/text')
-        Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq 'ARENA') "$Locale main-menu caption must be exactly ARENA"
+        $ExpectedMenuCaption = if ($Locale -eq 'rus') { ConvertFrom-Json '"\u0410\u0440\u0435\u043d\u0430"' } else { 'Arena' }
+        Assert-True ($null -ne $MenuNode -and $MenuNode.InnerText -ceq $ExpectedMenuCaption) "$Locale main-menu caption must use localized title case"
     foreach ($Id in @('st_gamma_arena_title','st_gamma_arena_difficulty_rookie','st_gamma_arena_difficulty_stalker','st_gamma_arena_difficulty_veteran','st_gamma_arena_difficulty_master','st_gamma_arena_random_seed','st_gamma_arena_start','st_gamma_arena_back','st_gamma_arena_fatal_title','st_gamma_arena_fatal_error_line','st_gamma_arena_fatal_main_menu','st_gamma_arena_seed_invalid','st_gamma_arena_manual_save_disabled','st_gamma_arena_result_victory','st_gamma_arena_result_defeat','st_gamma_arena_result_main_menu','st_gamma_arena_result_next','st_gamma_arena_result_new_fight')) {
             Assert-True ($null -ne $LocaleXml.SelectSingleNode("//string[@id='$Id']/text")) "$Locale localization is missing $Id"
         }
+    }
+}
+
+$RussianLocalizationDirectory = Join-Path $RepoRoot 'src\gamedata\configs\text\rus'
+$RussianLocalizationFiles = @(Get-ChildItem -LiteralPath $RussianLocalizationDirectory -File -Filter '*.xml')
+Assert-True ($RussianLocalizationFiles.Count -gt 0) 'Russian localization tables must be packaged'
+foreach ($RussianLocalizationFile in $RussianLocalizationFiles) {
+    $RussianBytes = [IO.File]::ReadAllBytes($RussianLocalizationFile.FullName)
+    $RussianIsUtf8 = $true
+    try { $null = [Text.UTF8Encoding]::new($false, $true).GetString($RussianBytes) } catch { $RussianIsUtf8 = $false }
+    Assert-True (-not $RussianIsUtf8) "Russian localization must use Windows-1251 bytes: $($RussianLocalizationFile.Name)"
+    Assert-True (($RussianBytes | Where-Object { $_ -gt 127 }).Count -gt 0) "Russian localization must contain direct Windows-1251 text: $($RussianLocalizationFile.Name)"
+    $RussianText = [Text.Encoding]::GetEncoding(1251).GetString($RussianBytes)
+    Assert-True ($RussianText -match '^<\?xml version="1\.0" encoding="windows-1251"\?>') "Russian localization must declare Windows-1251: $($RussianLocalizationFile.Name)"
+    Assert-True ($RussianText -notmatch '&#') "Russian localization must not use numeric character references: $($RussianLocalizationFile.Name)"
+    try {
+        [xml]$null = $RussianText
+        Assert-True $true "Russian localization must parse as Windows-1251 XML: $($RussianLocalizationFile.Name)"
+    } catch {
+        Assert-True $false "Russian localization must parse as Windows-1251 XML: $($RussianLocalizationFile.Name): $($_.Exception.Message)"
     }
 }
 
@@ -1633,7 +1657,7 @@ if (Test-Path -LiteralPath $EnglishRestartPath) {
 }
 if (Test-Path -LiteralPath $RussianRestartPath) {
     $RussianRestartBytes = [IO.File]::ReadAllBytes($RussianRestartPath)
-    Assert-True (($RussianRestartBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Russian restart localization source must remain ASCII-safe Windows-1251 XML'
+    Assert-True (($RussianRestartBytes | Where-Object { $_ -gt 127 }).Count -gt 0) 'Russian restart localization must contain direct Windows-1251 text'
     [xml]$RussianRestartXml = [Text.Encoding]::GetEncoding(1251).GetString($RussianRestartBytes)
     $RussianRestart = $RussianRestartXml.SelectSingleNode('//string[@id="st_gamma_arena_restart"]/text')
     $RussianRestartExpected = ConvertFrom-Json '"\u041f\u0415\u0420\u0415\u0417\u0410\u041f\u0423\u0421\u0422\u0418\u0422\u042c \u0410\u0420\u0415\u041d\u0423"'
@@ -1643,7 +1667,7 @@ if (Test-Path -LiteralPath $RussianRestartPath) {
 $GitAttributesPath = Join-Path $RepoRoot '.gitattributes'
 if (Test-Path -LiteralPath $GitAttributesPath) {
     $GitAttributesContent = Get-Content -LiteralPath $GitAttributesPath -Raw
-    Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/st_gamma_arena\.xml\s+-text\s*$') 'Git must preserve Russian localization bytes without text conversion'
+    Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/\*\.xml\s+-text\s*$') 'Git must preserve every Russian localization table without text conversion'
 }
 
 $SessionSchemaPath = Join-Path $RepoRoot 'schemas\session-v1.md'
@@ -3633,7 +3657,7 @@ Assert-True (Test-Path -LiteralPath $McmRussianPath) 'Arena MCM Russian localiza
 if ((Test-Path -LiteralPath $McmEnglishPath) -and (Test-Path -LiteralPath $McmRussianPath)) {
     $McmEnglishContent = Get-Content -LiteralPath $McmEnglishPath -Raw -Encoding UTF8
     $McmRussianBytes = [IO.File]::ReadAllBytes($McmRussianPath)
-    Assert-True (($McmRussianBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Arena MCM Russian localization source must remain ASCII-safe Windows-1251 XML.'
+    Assert-True (($McmRussianBytes | Where-Object { $_ -gt 127 }).Count -gt 0) 'Arena MCM Russian localization must contain direct Windows-1251 text.'
     $McmRussianContent = [Text.Encoding]::GetEncoding(1251).GetString($McmRussianBytes)
     Assert-True ($McmRussianContent -match 'encoding="windows-1251"') 'Arena MCM Russian localization must declare the Anomaly/GAMMA Windows-1251 encoding.'
     [xml]$McmRussianXml = $McmRussianContent
@@ -3699,7 +3723,7 @@ if ($AudioPlayingPortStart -ge 0 -and $AudioPlayingPortEnd -gt $AudioPlayingPort
     Assert-True ($AudioPlayingPortBlock -match 'if\s+not\s+called\s+then\s*return\s+gamma_arena_result\.err') 'Arena audio playing-state failure must retain its owned handle for teardown.'
 }
 $GitAttributesContent = Get-Content -LiteralPath (Join-Path $RepoRoot '.gitattributes') -Raw
-Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/st_gamma_arena_mcm\.xml\s+-text\s*$') 'Git must preserve Arena MCM Russian localization bytes without text conversion.'
+Assert-True ($GitAttributesContent -match '(?m)^src/gamedata/configs/text/rus/\*\.xml\s+-text\s*$') 'Git must preserve Arena Russian localization bytes without text conversion.'
 foreach ($Marker in @('function Orchestrator:audio_event','"begin_fight"','"update"','"opponent_defeated"','"victory"','"defeat"','"stop_all"','GA_AUDIO_EVENT_FAILED')) {
     Assert-True ($ArenaOrchestratorContent -match [regex]::Escape($Marker)) "Orchestrator Arena audio lifecycle must cover: $Marker"
 }

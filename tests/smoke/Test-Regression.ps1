@@ -67,7 +67,7 @@ dev_test_autorun = true
     Write-FixtureFile $Root '.gitattributes' @'
 * text=auto eol=lf
 *.xml text eol=lf
-src/gamedata/configs/text/rus/st_gamma_arena.xml -text
+src/gamedata/configs/text/rus/*.xml -text
 '@
     Write-FixtureFile $Root 'dev\gamedata\scripts\gamma_arena_test_assert.script' @'
 function equals() end
@@ -744,7 +744,7 @@ function run() end
     $Locale = @'
 <?xml version="1.0" encoding="utf-8"?>
 <string_table>
-<string id="st_gamma_arena_main_menu"><text>ARENA</text></string>
+<string id="st_gamma_arena_main_menu"><text>Arena</text></string>
 <string id="st_gamma_arena_title"><text>Gamma Arena</text></string>
 <string id="st_gamma_arena_difficulty_rookie"><text>&#x041D;&#x043E;&#x0432;&#x0438;&#x0447;&#x043E;&#x043A;</text></string>
 <string id="st_gamma_arena_difficulty_stalker"><text>&#x0421;&#x0442;&#x0430;&#x043B;&#x043A;&#x0435;&#x0440;</text></string>
@@ -764,7 +764,10 @@ function run() end
 <string id="st_gamma_arena_result_next"><text>&#x0421;&#x043B;&#x0435;&#x0434;&#x0443;&#x044E;&#x0449;&#x0438;&#x0439; &#x0431;&#x043E;&#x0439;</text></string>
 </string_table>
 '@
-    $RussianLocale = [Net.WebUtility]::HtmlDecode(($Locale -replace '^<\?xml[^>]+>\r?\n', ''))
+    $RussianLocale = [Net.WebUtility]::HtmlDecode($Locale)
+    $RussianLocale = $RussianLocale.Replace('encoding="utf-8"', 'encoding="windows-1251"')
+    $RussianArenaCaption = ConvertFrom-Json '"\u0410\u0440\u0435\u043d\u0430"'
+    $RussianLocale = $RussianLocale.Replace('<string id="st_gamma_arena_main_menu"><text>Arena</text></string>', "<string id=`"st_gamma_arena_main_menu`"><text>$RussianArenaCaption</text></string>")
     Write-FixtureFileEncoded $Root 'src\gamedata\configs\text\rus\st_gamma_arena.xml' $RussianLocale ([Text.Encoding]::GetEncoding(1251))
     Write-FixtureFile $Root 'src\gamedata\configs\text\eng\st_gamma_arena.xml' $Locale
     Write-FixtureFile $Root 'tests\fixtures\settings-v0.ltx' "[gamma_arena]`nlast_difficulty_id = veteran`nlast_seed_mode = manual"
